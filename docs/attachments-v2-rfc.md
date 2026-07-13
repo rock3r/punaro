@@ -189,8 +189,15 @@ the first 12 bytes of BLAKE3-256 over ASCII
 `manifest_commitment`, and `i`.  The chunk AAD is CDE map
 `{1=version,2=transfer_id,3=manifest_commitment,4=chunk_index,5=chunk_count,6=plaintext_length}`.
 Every value must equal the Manifest; `plaintext_length` is the actual chunk
-length.  Implementations reserve this nonce tuple and the file-key commitment
-durably before encryption and never reuse either, including after crashes.
+length. Before encryption, implementations atomically reserve the file-key
+commitment, content-salt commitment, and every nonce tuple for the complete
+artifact. The file-key commitment is BLAKE3-256 of ASCII
+`punaro/attachment/file-key/v2`, one NUL byte, and the 32-byte file key. The
+content-salt commitment is BLAKE3-256 of ASCII
+`punaro/attachment/content-salt/v2`, one NUL byte, and the 32-byte content
+salt. The nonce tuple is `(transfer_id, manifest_commitment, chunk_index)`.
+These reservations must be in one durable transaction and are never reused,
+including after crashes, cancellation, or artifact-upload failure.
 
 The Manifest body is the following required map; its signature is field `99`.
 The signature preimage is ASCII `punaro/attachment/manifest/v2`, one NUL byte,
