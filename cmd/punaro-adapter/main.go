@@ -301,7 +301,7 @@ func loadConfig() (adapterConfig, error) {
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
-	// #nosec G304 -- the local operator explicitly selected this credential path
+	// #nosec G304,G703 -- the local operator explicitly selected this credential path
 	// through configuration; remote inputs never control it.
 	raw, err := os.ReadFile(path)
 	if err != nil {
