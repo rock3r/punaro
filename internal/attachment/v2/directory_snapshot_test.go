@@ -194,11 +194,47 @@ func TestDirectoryEntryHistoryMakesMembershipTombstonesAndOlderGenerationsInacti
 	membership := DirectoryMembership{ConversationID: bytes16(3), SenderDeviceID: bytes16(4), SenderGeneration: 1, RecipientDeviceID: bytes16(5), RecipientGeneration: 1, Commitment: directoryBytes32(7)}
 	tombstone := membership
 	tombstone.Revoked = true
-	devices, latest, memberships, err := validateDirectoryEntryHistory([]DirectoryEntry{{Device: &deviceV1}, {Membership: &membership}, {Membership: &tombstone}, {Device: &deviceV2}})
+	devices, latest, memberships, _, err := validateDirectoryEntryHistory([]DirectoryEntry{{Device: &deviceV1}, {Membership: &membership}, {Membership: &tombstone}, {Device: &deviceV2}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if latest[deviceV1.DeviceID] != 2 || devices[directoryDeviceKey{id: deviceV1.DeviceID, generation: 1}].Revoked || !memberships[directoryMembershipKey{conversation: membership.ConversationID, sender: membership.SenderDeviceID, senderGen: membership.SenderGeneration, recipient: membership.RecipientDeviceID, recipientGen: membership.RecipientGeneration, commitment: membership.Commitment}].Revoked {
 		t.Fatal("historic device generation or membership remained active")
+	}
+}
+
+func TestDirectorySnapshotResolverResolvesOnlyFreshActivePermitIssuers(t *testing.T) {
+	t.Parallel()
+	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	audience, rootID, issuerID := directoryBytes32(1), directoryBytes32(2), directoryBytes32(3)
+	entries := []DirectoryEntry{{Issuer: &DirectoryPermitIssuer{KeyID: issuerID, PublicKey: [32]byte(issuerPublic)}}}
+	leaves, err := DirectoryEntryHashes(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := signedDirectoryHead(t, rootPrivate, DirectoryHead{Audience: audience, RootKeyID: rootID, TreeSize: 1, TreeRoot: directoryMerkleRoot(leaves), Sequence: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second))})
+	raw, err := EncodeDirectoryHead(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewDirectorySnapshotResolver(raw, DirectoryTrust{Audience: audience, RootKeyID: rootID, RootPublicKey: rootPublic, Checkpoints: &memoryCheckpointStore{checkpoints: make(map[[32]byte]DirectoryCheckpoint)}}, clock, nil, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolver.CurrentPermitIssuerKey(issuerID)
+	if err != nil || string(resolved) != string(issuerPublic) {
+		t.Fatalf("issuer=%x err=%v", resolved, err)
+	}
+	resolver.now = func() time.Time { return clock.Add(21 * time.Second) }
+	if _, err := resolver.CurrentPermitIssuerKey(issuerID); err == nil {
+		t.Fatal("stale permit issuer was accepted")
 	}
 }

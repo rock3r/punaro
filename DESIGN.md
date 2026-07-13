@@ -248,10 +248,12 @@ recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
 that reserves file-key/content-salt/nonce uniqueness before encryption. It has
 no daemon import, runtime directory client, atomic source-ready state, relay
-storage, permit state machine, or transport integration. In particular, it
-does **not** make attachments usable, or satisfy the vector/fuzz/review release
-gates. Callers must only construct its verified-manifest input after fresh
-directory verification; the runtime needed to do that does not exist yet.
+storage, or transport integration. It also has canonical permit records and
+directory-authorized permit issuer keys, but no durable serial issuance or
+operation-redemption state machine. In particular, it does **not** make
+attachments usable, or satisfy the vector/fuzz/review release gates. Callers
+must only construct its verified-manifest input after fresh directory
+verification; the runtime needed to do that does not exist yet.
 
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally
