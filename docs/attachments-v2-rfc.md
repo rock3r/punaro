@@ -47,6 +47,26 @@ offline grace period.  Two valid heads for the same audience and sequence with
 different roots are equivocation: freeze that audience, retain the evidence,
 and issue or accept no permit until an operator-approved recovery head arrives.
 
+### Directory head and consistency proof encoding
+
+The directory-head record is CDE map `{1=version,2=audience,3=root_key_id,
+4=tree_size,5=tree_root,6=sequence,7=issued_at,8=expires_at,
+9=revocation_epoch,99=signature}`. `version` is exactly `2`; audience, both
+key IDs, and tree root are 32-byte strings; tree size and sequence are non-zero
+unsigned integers. Its signature preimage is ASCII
+`punaro/attachment/directory-head/v2`, one NUL byte, followed by CDE encoding
+of the same map without field `99`. The encoded head is at most 4 KiB.
+
+The initial bounded deployment uses a full consistency proof: an ordered array
+of exactly `tree_size` 32-byte leaf hashes, limited to 4096 leaves. The tree
+root is the sole leaf hash for a one-leaf tree. Each internal node is
+BLAKE3-256 of ASCII `punaro/attachment/directory-node/v2`, one NUL byte,
+followed by its left and right child hashes; an odd final node is promoted
+unchanged. To advance a checkpoint, a verifier recomputes both the old prefix
+root and new full root from this proof. A compact proof format may replace this
+only in a future version with equivalent vectors and review; accepting an
+underspecified compact proof is forbidden.
+
 Request signatures bind an immutable relay audience/instance ID, protocol
 version, method, canonical path, body commitment, device generation, request
 nonce, and request expiry.  Replay consumption is durable and shared by every
