@@ -26,3 +26,20 @@ func TestLoadRejectsInvalidLevel(t *testing.T) {
 		t.Fatal("Load succeeded for invalid log level")
 	}
 }
+
+func TestLoadRejectsEnabledAttachmentsWithoutEnrollment(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("Load succeeded with attachments enabled but no enrollment configuration")
+	}
+}
+
+func TestLoadRejectsNonLoopbackAttachmentListener(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
+	t.Setenv("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", `{}`)
+	t.Setenv("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", `[]`)
+	t.Setenv("PUNARO_LISTEN_ADDR", "0.0.0.0:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("Load accepted non-loopback listener for attachment bearer sessions")
+	}
+}

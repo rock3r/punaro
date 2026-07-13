@@ -4,13 +4,24 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
-type Config struct{ ListenAddr, DataDir, LogLevel string }
+// Config is the explicit environment-derived daemon configuration.
+type Config struct {
+	ListenAddr               string
+	DataDir                  string
+	LogLevel                 string
+	AttachmentsEnabled       bool
+	AttachmentDeviceKeysJSON string
+	AttachmentMembershipJSON string
+}
 
+// Load reads configuration and optionally loads an explicitly named dotenv file.
 func Load(explicitEnvFile string) (Config, error) {
 	envFile := explicitEnvFile
 	if envFile == "" {
@@ -33,7 +44,32 @@ func Load(explicitEnvFile string) (Config, error) {
 		}
 		dataDir = absolute
 	}
-	return Config{ListenAddr: value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080"), DataDir: dataDir, LogLevel: level}, nil
+	attachmentsEnabled, err := strconv.ParseBool(value("PUNARO_ATTACHMENTS_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENTS_ENABLED: %w", err)
+	}
+	deviceKeys := value("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", "")
+	membership := value("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", "")
+	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
+	if attachmentsEnabled && (deviceKeys == "" || membership == "") {
+		return Config{}, fmt.Errorf("attachments require PUNARO_ATTACHMENT_DEVICE_KEYS_JSON and PUNARO_ATTACHMENT_MEMBERSHIP_JSON")
+	}
+	if attachmentsEnabled && !isLoopbackListener(listenAddr) {
+		return Config{}, fmt.Errorf("attachments require a loopback PUNARO_LISTEN_ADDR; terminate TLS at a local authenticated proxy")
+	}
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership}, nil
+}
+
+func isLoopbackListener(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func value(name, fallback string) string {
@@ -54,11 +90,13 @@ func parseLogLevel(raw string) (string, error) {
 // loadDotEnv supports the deliberately small KEY=VALUE subset needed for local
 // development. Existing process variables win over dotenv values.
 func loadDotEnv(path string) error {
+	// #nosec G304,G703 -- the operator explicitly chooses this local dotenv
+	// path via CLI or PUNARO_ENV_FILE; it is never derived from remote input.
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("read dotenv file: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	for line := 1; scanner.Scan(); line++ {
 		raw := strings.TrimSpace(scanner.Text())

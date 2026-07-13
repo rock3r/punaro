@@ -25,6 +25,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "punarod configuration error: %v\n", err)
 		os.Exit(2)
 	}
+	if cfg.AttachmentsEnabled {
+		fmt.Fprintln(os.Stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
+		os.Exit(2)
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
