@@ -10,11 +10,10 @@ It is not a remote MCP server and does not share a local agent mailbox database
 over the network. A local adapter on each machine communicates with its own
 mailbox implementation and with the central Punaro relay.
 
-> Status: early infrastructure draft. The attachment protocol foundation is
-> tested but deliberately not mounted by the daemon: recipient envelopes,
-> fresh authority directories, revocation, and permit renewal remain release
-> gates. Durable queues, adapters, the Telegram gateway, and WebSocket
-> notifications remain specified but unbuilt.
+> Status: health-only infrastructure draft. The daemon serves local health
+> checks only. Messaging, adapters, Telegram, public ingress, WebSocket hints,
+> and attachments are specified but unavailable. Attachment enablement exits
+> before an HTTP listener starts.
 
 ## Architecture
 
@@ -27,8 +26,11 @@ local agent mailbox <-> adapter -- HTTPS + WebSocket hints --> Punaro relay
 HTTPS fetch/lease/ack is authoritative. WebSocket frames are lossy, payload-free
 wake-up hints containing an opaque conversation ID and sequence only.
 
-Read [the architecture and security design](DESIGN.md) and
-[the review record](REVIEWS.md).
+Read the [architecture and security design](DESIGN.md),
+[user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
+[attachment RFC](docs/attachments-v2-rfc.md),
+[security release gates](docs/security-release-gates.md), and
+[review record](REVIEWS.md).
 
 ## Quick start
 
@@ -40,14 +42,14 @@ go run ./cmd/punarod --env-file .env
 curl http://127.0.0.1:8080/healthz
 ```
 
-Or use the development container:
+The development container is a hardened build/run baseline:
 
 ```sh
 docker compose up --build
 ```
 
-The container maps its port to loopback. Production should keep the relay on a
-private listener and make Cloudflare Tunnel the only public ingress.
+It deliberately publishes no port and does not load `.env`.  It is not a
+public deployment. See the operator guide before using containers or systemd.
 
 ## Configuration and secrets
 
@@ -59,27 +61,28 @@ precedence over dotenv values.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PUNARO_LISTEN_ADDR` | `127.0.0.1:8080` | HTTP listener address. |
-| `PUNARO_DATA_DIR` | `./data` | Durable state location. |
-| `PUNARO_LOG_LEVEL` | `info` | Go structured log level. |
+| `PUNARO_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback-only HTTP listener address. |
+| `PUNARO_DATA_DIR` | `./data` | Reserved state location; the health daemon does not persist data yet. |
+| `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
 | `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
-| `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Strict JSON object of enrolled device IDs to base64 raw Ed25519 public keys. |
-| `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Strict JSON allow-only sender/conversation/recipient/action grants. |
+| `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
+| `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 
-Future gateways and authentication features use environment/file-provisioned
-secrets such as `PUNARO_TELEGRAM_BOT_TOKEN`, `PUNARO_CLOUDFLARE_ACCESS_AUD`,
-and a machine private-key path. Keep them in a secret manager, protected service
+Future gateways and authentication features will use narrowly scoped
+environment/file-provisioned secrets. They are not accepted by the current
+daemon. Keep all future credentials in a secret manager, protected service
 file, Docker/Kubernetes secret, or OS credential store — never source control,
 CLI arguments, agent prompts, logs, or message bodies.
 
 ## Security model
 
-Cloudflare Access is admission, not complete application authorization. A
-production relay must validate the Access JWT and require a separate enrolled,
-revocable per-machine cryptographic identity. Conversation membership is
-server-enforced and deny-by-default. All message content is inert untrusted
-data, not an instruction to alter routing, run a command, or fetch a URL.
+Cloudflare Access is planned admission, not complete application authorization.
+A future production relay must validate the Access JWT and require a separate
+enrolled, revocable per-machine cryptographic identity. Conversation membership
+will be server-enforced and deny-by-default. All message content must remain
+inert untrusted data, not an instruction to alter routing, run a command, or
+fetch a URL.
 
 See `DESIGN.md` for required origin isolation, delivery semantics, and
 adversarial test gates before remote exposure.

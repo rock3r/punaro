@@ -1,7 +1,8 @@
-# Punaro design review record
+# Punaro security review record
 
-Two independent reviews were run against the initial design before this record
-was written. Their P0 findings were incorporated into `DESIGN.md`.
+This record distinguishes early design review from implementation review.  It
+is not a release approval.  The release authority is
+[`docs/security-release-gates.md`](docs/security-release-gates.md).
 
 ## Adversarial review — incorporated requirements
 
@@ -34,6 +35,30 @@ was written. Their P0 findings were incorporated into `DESIGN.md`.
 - Required implementation gates include protocol/property tests, HTTP/WebSocket
   fuzzing, dependency/SBOM and secret scanning, cloudflared integration tests,
   a restore drill, and a device-revocation drill.
+
+## Fresh independent review — 2026-07-13
+
+Three independent, read-only reviews covered protocol, implementation, and
+operations.  Their shared conclusion was: no currently reachable attachment
+vulnerability because the daemon is fail-closed, but neither the attachment
+protocol nor the target production relay is release-ready.
+
+The reviews identified the following release blockers, now represented as
+explicit gates rather than implied future work:
+
+- a tracked canonical attachment RFC and conformance vectors;
+- recipient envelopes, signed directory freshness/rotation/revocation,
+  audience-bound request authentication, and permits/capabilities;
+- durable lifecycle/reaping, retry-safe acceptance, per-principal quotas, and
+  transport rate/in-flight/transcript/candidate controls;
+- a public runtime with direct-origin protections, narrowed secrets, pinned
+  build inputs, a scanned/attested release artifact, and tested recovery; and
+- an independent cryptography/protocol review after the above is implemented.
+
+The implementation in this revision resolves the immediate health-daemon and
+build-context exposures by failing closed on non-loopback addresses, testing
+the attachment startup gate, avoiding a broad Docker context and `.env`
+injection, hardening the container/unit baselines, and pinning CI inputs.
 
 ## Remaining implementation decisions
 

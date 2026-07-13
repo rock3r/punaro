@@ -9,6 +9,15 @@ The first production target is a dedicated Proxmox LXC on the NUC. The relay is
 written in Go. Go matches the existing `agent-mailbox` toolchain, produces a
 single static-ish service binary, and keeps the runtime small and auditable.
 
+## Implementation status
+
+This document describes the target architecture, not a released service.  The
+current `punarod` binary is a local, loopback-only health daemon.  It has no
+message, adapter, Telegram, public-ingress, WebSocket, or attachment runtime.
+The attachment package is a testable foundation only and attachment enablement
+fails closed before listening.  The authoritative security release conditions
+are in [`docs/security-release-gates.md`](docs/security-release-gates.md).
+
 ## Goals
 
 - Durable, ordered delivery to an enrolled machine, even when it sleeps.
@@ -43,7 +52,8 @@ Telegram gateway <-> Punaro relay <----> local adapter
                                    workstation B
 ```
 
-Run the following as separate, unprivileged systemd services in a dedicated
+The intended production deployment will run the following as separate,
+unprivileged systemd services in a dedicated
 Debian LXC:
 
 1. `punarod`: the Go HTTP API, WebSocket notifier, queue, and registry.
@@ -224,47 +234,22 @@ Attachment transfer uses a separate encrypted data plane; it never puts file
 bytes, file keys, or recipient redemption material in a normal Punaro message
 or WebSocket hint. The current code is a testable protocol foundation only;
 `punarod` deliberately refuses to mount its HTTP surface even when attachment
-configuration is present. It will remain fail-closed until recipient envelopes,
-fresh authority directories, revocation, and permit renewal are implemented.
-The foundation's relay model persists offers, fencing sessions, ciphertext
-frames, and verified completions in SQLite WAL; it never falls back to an
-unauthenticated or in-memory-only runtime mode.
+configuration is present. It will remain fail-closed until all gates in the
+[attachment RFC](docs/attachments-v2-rfc.md) and
+[security release checklist](docs/security-release-gates.md) are complete.
+The foundation tests local encrypted-frame, replay, fencing, and bounded-store
+helpers.  Those helpers are intentionally **non-normative**: they do not have
+canonical records, recipient envelopes, source readiness, durable key/salt
+reservation, a fresh authority directory, permits, lifecycle reaping, or an
+authenticated WebRTC state machine.  In particular, they must not be read as
+specifying cipher parameters, nonce/AAD construction, quotas, or a transport
+limit for a released protocol.  The complete implementation-to-RFC divergence
+is maintained in [`docs/attachment-foundation-gap-matrix.md`](docs/attachment-foundation-gap-matrix.md).
 
-Each logical attachment has a CSPRNG 32-byte content salt and a BLAKE3 content
-commitment over that salt and the domain-separated full-plaintext hash. A
-recipient-specific artifact uses a CSPRNG file key and artifact ID. XChaCha20-
-Poly1305 frames bind the transfer, artifact, chunk index, and plaintext length
-as AAD; deterministic nonces are safe only because `(transfer ID, artifact ID,
-chunk index)` is unique and durable. The relay blob store contains ciphertext
-only, accepts an identical retry, and rejects a replacement at an existing
-artifact/index.
-
-Recipient offers use fencing generations: accepting or resuming creates a new
-opaque session token and invalidates every prior token. Tokens have a bounded
-ten-minute relay lease. Offer creation requires a signed `Idempotency-Key`; the
-offer, sender/conversation context, and deduplication record commit atomically.
-Signed request nonces are also consumed in the same SQLite database so a daemon
-restart cannot replay a still-valid mutation. Authorization failures do not
-disclose whether an offer exists.
-
-The foundation fallback requires a sender-signed source declaration:
-one safe opaque artifact ID, chunk count, ciphertext byte ceiling, and expected
-plaintext hash. It accepts only the declared artifact and contiguous declared
-indexes, caps each frame at 256 KiB, caps each artifact at 64 MiB, caps the
-relay at 1 GiB of ciphertext, and does not mark completion until every declared
-frame exists and the recipient submits the declared plaintext hash. Opaque
-signaling is separately capped to 32 records/512 KiB per offer and 128 MiB
-relay-wide. These are fail-closed reservation limits, not a substitute for the
-future operator-configured quotas and retention reaper.
-
-Direct/TURN transport primitives are tested only in an isolated adapter-side
-package and are intentionally not wired into `punarod`. They remain disabled
-until the directory freshness, permit renewal, transcript binding, candidate
-authorization, and 1 MiB in-flight bound in the normative attachment issue are
-implemented. The relay accepts only bounded opaque signaling from the original
-sender or a recipient holding the current fenced session; it does not parse
-SDP/ICE, log candidates, or carry them through normal messages. The encrypted
-relay-blob transfer has no currently reachable daemon route.
+Direct/TURN primitives are isolated adapter test helpers and are intentionally
+not wired into `punarod`.  The encrypted relay-blob transfer has no reachable
+daemon route.  Only the RFC may define the released record formats, algorithms,
+and bounds.
 
 If the adapter stops, its endpoint lease expires and the central target picker
 no longer lists it. Existing conversations remain, but new sends are queued
@@ -272,6 +257,11 @@ only where the policy permits offline delivery; the Telegram UI clearly labels
 that state.
 
 ## Safety controls and operations
+
+This is a target operating model.  Current executable safeguards are limited
+to loopback binding, fail-closed attachments, a restricted container context,
+and static/container configuration checks.  The operator guide explicitly
+lists what is not yet a supported production operation.
 
 - TLS only; no HTTP listener exposed outside loopback/private LXC network.
 - Firewall the LXC so only `cloudflared` reaches the relay listener. Strip

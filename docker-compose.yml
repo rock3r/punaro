@@ -2,16 +2,18 @@ services:
   punarod:
     build: .
     init: true
-    env_file:
-      - path: .env
-        required: false
     environment:
-      PUNARO_LISTEN_ADDR: 0.0.0.0:8080
       PUNARO_DATA_DIR: /var/lib/punaro
-    ports:
-      - "127.0.0.1:8080:8080"
     volumes:
       - punaro-data:/var/lib/punaro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none
+    tmpfs:
+      - /tmp:mode=1777,noexec,nosuid,nodev
     restart: unless-stopped
 volumes:
   punaro-data:

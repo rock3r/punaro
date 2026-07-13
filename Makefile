@@ -29,9 +29,9 @@ fmt:
 	gofmt -w $$(find . -type f -name '*.go' -not -path './vendor/*')
 
 dockerfile-lint:
-	docker run --rm -i hadolint/hadolint < Dockerfile
+	docker run --rm -i hadolint/hadolint@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e < Dockerfile
 
 workflow-lint:
-	docker run --rm -v "$$(pwd):/repo" -w /repo rhysd/actionlint:1.7.7
+	docker run --rm -v "$$(pwd):/repo:ro" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
 
 ci: test test-race lint security
