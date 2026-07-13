@@ -49,11 +49,11 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("Telegram poll failed: %w", err)
+		return nil, fmt.Errorf("telegram poll failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Telegram poll returned HTTP %d", response.StatusCode)
+		return nil, fmt.Errorf("telegram poll returned HTTP %d", response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxBotResponseBytes+1))
 	if err != nil || len(body) > maxBotResponseBytes {
