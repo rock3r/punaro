@@ -311,6 +311,57 @@ attempt, or beyond its byte/chunk/operation quota.  Conformance vectors must
 cover issuance collision, valid retry, changed-body retry, cross-path replay,
 expired permit, and exhausted quota.
 
+### Permit and operation-record encoding
+
+Permit issuer keys are directory entries with CDE map
+`{1=3,2=issuer_key_id,3=issuer_public_key,4=revoked}`. Both fields are 32-byte
+strings. An issuer key first appears unrevoked; a later identical entry may
+only change `revoked` to true. A recipient verifies a permit only through a
+fresh directory snapshot containing the active issuer key. This deliberately
+separates root-authorized permit issuers from device signing keys.
+
+The permit signature preimage is ASCII `punaro/attachment/permit/v2`, one NUL
+byte, followed by the map below without field `99`; the signature is Ed25519
+and exactly 64 bytes. `holder_role` is `1=sender`, `2=recipient`, or
+`3=relay`; `operation` is `1=offer`, `2=accept`, `3=upload`, `4=download`,
+`5=signal`, or `6=complete`. There is no wildcard operation, role, recipient,
+or attempt.
+
+| Key | Field | Type / constraint |
+| --- | --- | --- |
+| 1 | version | unsigned; exactly `2` |
+| 2 | audience | bstr(32) |
+| 3 | serial | bstr(16) |
+| 4 | issuer_key_id | bstr(32) |
+| 5 | holder_device_id | bstr(16) |
+| 6 | holder_generation | unsigned, non-zero |
+| 7 | holder_role | unsigned, `1..3` |
+| 8 | transfer_id | bstr(16) |
+| 9 | conversation_id | bstr(16) |
+| 10 | recipient_device_id | bstr(16) |
+| 11 | recipient_generation | unsigned, non-zero |
+| 12 | attempt_generation | unsigned, non-zero |
+| 13 | operation | unsigned, `1..6` |
+| 14 | directory_head | bstr(32) |
+| 15 | membership_commitment | bstr(32) |
+| 16 | revocation_epoch | unsigned |
+| 17 | issued_at | unsigned |
+| 18 | expires_at | unsigned; at most 60 seconds after issue |
+| 19 | max_bytes | unsigned; at most 64 MiB |
+| 20 | max_chunks | unsigned; at most 4096 |
+| 21 | max_operations | unsigned, `1..4096` |
+| 99 | signature | bstr(64) |
+
+An operation record is CDE map `{1=2,2=permit_serial,3=operation_id,
+4=operation,5=method,6=path_commitment,7=target_commitment,
+8=body_commitment,9=idempotency_key,10=issued_at,11=expires_at,99=signature}`.
+All commitments and idempotency-key values are 32-byte strings; `method` is
+the fixed unsigned method identifier from the versioned HTTP schema. Its
+signature preimage is ASCII `punaro/attachment/operation/v2`, one NUL byte,
+plus the map without field `99`. The holder signature is required before any
+database lookup. A permit verifier must require every field to match the
+concrete HTTP operation and body before atomically redeeming it.
+
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes
 on revocation notification or permit expiry.  Because a permit cannot outlive
