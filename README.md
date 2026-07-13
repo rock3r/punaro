@@ -10,10 +10,11 @@ It is not a remote MCP server and does not share a local agent mailbox database
 over the network. A local adapter on each machine communicates with its own
 mailbox implementation and with the central Punaro relay.
 
-> Status: health-only infrastructure draft. The daemon serves local health
-> checks only. Messaging, adapters, Telegram, public ingress, WebSocket hints,
-> and attachments are specified but unavailable. Attachment enablement exits
-> before an HTTP listener starts.
+> Status: alpha text-relay foundation. Enrolled adapters can exchange durable
+> text through the loopback relay, with signed requests, payload-free wake
+> hints, and local `agent-mailbox` handoff. The Telegram policy/long-poll
+> foundation is present but no gateway service is released. Public rollout and
+> attachment transfer remain closed by the release gates.
 
 ## Architecture
 
@@ -28,6 +29,7 @@ wake-up hints containing an opaque conversation ID and sequence only.
 
 Read the [architecture and security design](DESIGN.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
+[alpha text-relay onboarding](docs/alpha-text-relay.md),
 [attachment RFC](docs/attachments-v2-rfc.md),
 [security release gates](docs/security-release-gates.md), and
 [review record](REVIEWS.md).
@@ -62,9 +64,11 @@ precedence over dotenv values.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PUNARO_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback-only HTTP listener address. |
-| `PUNARO_DATA_DIR` | `./data` | Reserved state location; the health daemon does not persist data yet. |
+| `PUNARO_DATA_DIR` | `./data` | Relay SQLite state location when `PUNARO_RELAY_ENABLED=true`. |
 | `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
+| `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
+| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records for the alpha relay. |
 | `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |

@@ -11,12 +11,15 @@ single static-ish service binary, and keeps the runtime small and auditable.
 
 ## Implementation status
 
-This document describes the target architecture, not a released service.  The
-current `punarod` binary is a local, loopback-only health daemon.  It has no
-message, adapter, Telegram, public-ingress, WebSocket, or attachment runtime.
-The attachment package is a testable foundation only and attachment enablement
-fails closed before listening.  The authoritative security release conditions
-are in [`docs/security-release-gates.md`](docs/security-release-gates.md).
+This document describes the target architecture, not a released service. The
+current `punarod` binary provides a loopback-only alpha text relay: explicit
+machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
+advertising, and payload-free WebSocket wake hints. A local adapter bridges
+this to `agent-mailbox`. The Telegram policy, durable route state, and Bot API
+polling primitives exist but no deployable gateway service is released. The
+attachment package remains a testable foundation only and enablement fails
+closed before listening. The authoritative release conditions are in
+[`docs/security-release-gates.md`](docs/security-release-gates.md).
 
 ## Goals
 

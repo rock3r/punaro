@@ -1,7 +1,8 @@
 # Operator guide
 
-Punaro is currently a local, health-only infrastructure draft.  It does not
-accept mailbox traffic, Telegram traffic, public relay traffic, or attachments.
+Punaro currently provides a loopback alpha text relay for enrolled adapters.
+It is not a released public service and does not support attachment transfer.
+The Telegram gateway policy exists but its process deployment is not released.
 Do not use it to carry sensitive production work yet.
 
 ## Run locally
@@ -18,9 +19,11 @@ The listener is deliberately restricted to a **literal** loopback IP.
 as `localhost` are rejected until the daemon can verify their resolved address.
 A non-loopback address is a configuration error, even for health checks.
 
-`PUNARO_DATA_DIR` and `PUNARO_LOG_LEVEL` are reserved for later stateful
-runtime work.  The latter is validated as `debug`, `info`, `warn`, or `error`,
-but does not filter the health daemon's standard logger yet.  An explicitly
+Set `PUNARO_RELAY_ENABLED=true` plus a public
+`PUNARO_RELAY_MACHINES_JSON` enrollment set to enable the alpha relay; see the
+[onboarding guide](alpha-text-relay.md). `PUNARO_DATA_DIR` holds its SQLite
+WAL state. `PUNARO_LOG_LEVEL` is validated as `debug`, `info`, `warn`, or
+`error`, but does not yet filter the standard logger. An explicitly
 named dotenv file is for local development only:
 
 ```sh
