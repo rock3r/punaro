@@ -39,9 +39,10 @@ root key ID, tree size, tree root, sequence, issued time, expiry, and revocation
 epoch.  Its maximum validity is 30 seconds.  Each adapter persists its last
 accepted `(sequence, tree root, revocation epoch)` in anti-rollback storage;
 every newer head needs a consistency proof from that checkpoint.  The adapter
-rejects a head that is expired, issued more than 120 seconds from trusted local
-time, decreases sequence or epoch, lacks a valid consistency/inclusion proof,
-or has the wrong audience.  A missing fresh head is a hard failure, not an
+rejects a head that is expired, has `expires_at > issued_at + 30 seconds`, is
+issued more than 120 seconds from trusted local time, is not yet effective
+(`issued_at > local_time`), decreases sequence or epoch, lacks a valid
+consistency/inclusion proof, or has the wrong audience.  A missing fresh head is a hard failure, not an
 offline grace period.  Two valid heads for the same audience and sequence with
 different roots are equivocation: freeze that audience, retain the evidence,
 and issue or accept no permit until an operator-approved recovery head arrives.
@@ -53,25 +54,164 @@ replica for the audience.  Device keys are never reused across audiences.
 
 ## Immutable records
 
-All signed records use deterministic CBOR.  Every record includes `version`,
+All signed records use deterministic CBOR.  A Manifest includes `version`,
 `audience`, `transfer_id`, `conversation_id`, sender device and generation,
 recipient device and generation, directory-head commitment, membership
 commitment, revocation epoch, issued/expiry times, and a domain-separated
-Ed25519 signature.  Unknown fields, duplicate map keys, non-canonical CBOR,
-or an unsupported version are rejected.
+Ed25519 signature.  A recipient Envelope binds the complete signed Manifest by
+its commitment and repeats the audience, transfer, conversation, sender, and
+recipient snapshot; it cannot be accepted without a fresh verification of that
+Manifest.  Unknown fields, duplicate map keys, non-canonical CBOR, or an
+unsupported version are rejected.
 
 The source creates one CSPRNG 32-byte content salt and file key, reserves their
-uniqueness durably before encryption, and creates an immutable manifest.
-Per-recipient keys are delivered only in an HPKE recipient envelope whose AAD
+uniqueness durably before encryption, and creates an immutable manifest.  The
+content salt is a public, authenticated manifest field; it is not secret
+material.  Per-recipient keys are delivered only in an HPKE recipient envelope whose AAD
 binds the manifest commitment, transfer, conversation, recipient generation,
-and audience.  Chunks use an AEAD with a unique nonce derived from the durable
-transfer/artifact/index tuple and AAD binding the complete manifest commitment,
-chunk index/count, and plaintext length.  The relay stores only ciphertext,
-ciphertext commitment, and recipient-specific encrypted envelope.
+and audience.  The artifact ID is exactly `manifest_commitment`; it is never a
+separate caller-selected identifier.  Chunks use an AEAD with a unique nonce
+derived from the durable `(transfer_id, manifest_commitment, chunk_index)`
+tuple and AAD binding the complete manifest commitment, chunk index/count, and
+plaintext length.  The relay stores only ciphertext, ciphertext commitment,
+and recipient-specific encrypted envelope.
 
-Before a runtime is implemented, this section must be expanded with algorithm
-identifiers, exact CBOR maps, and cross-language positive and negative test
-vectors.  No implementation may invent those details independently.
+### V2 algorithm registry
+
+V2 uses only the following identifiers.  There is no algorithm negotiation or
+fallback: any other value is rejected before signature verification or HPKE
+processing.
+
+| Purpose | Algorithm | Identifier |
+| --- | --- | --- |
+| Record signature | Ed25519 | `1` |
+| Record commitment | BLAKE3-256 | `1` |
+| HPKE KEM | DHKEM(X25519, HKDF-SHA256) | `0x0020` |
+| HPKE KDF | HKDF-SHA256 | `0x0001` |
+| HPKE AEAD | ChaCha20-Poly1305 | `0x0003` |
+
+HPKE is RFC 9180 base mode only.  It authenticates the envelope context but
+not the sender; the independently verified Ed25519 manifest and envelope
+signatures provide sender authentication.  Signing, HPKE, and directory keys
+are distinct key usages and key IDs.
+
+### Canonical records and signatures
+
+All V2 records use RFC 8949 **core deterministic encoding** (CDE), with an
+integer-key map.  Receivers reject non-shortest encodings, indefinite lengths,
+tags, floats, null/undefined, duplicate or unknown keys, invalid UTF-8,
+trailing data, and any byte string exceeding its declared limit.  A receiver
+must decode, validate, CDE re-encode, and require byte-for-byte equality before
+using a record or verifying its signature.
+
+`device_id`, `transfer_id`, and `conversation_id` are exactly 16-byte opaque
+values.  `audience`, key IDs, commitments, and hashes are exactly 32 bytes.
+Generations, epochs, timestamps, counts, and sizes are unsigned integers.
+`issued_at` and `expires_at` are Unix seconds; expiry must be later than issue.
+The manifest's maximum encoded size is 4 KiB and an envelope's is 16 KiB.
+`manifest_commitment` is BLAKE3-256 over the complete canonical signed Manifest
+encoding, including field `99`; a Manifest is not eligible for commitment until
+its signature has been verified against the fresh directory key-ID binding.
+Manifests have a maximum 30-second lifetime, may not be issued more than 120
+seconds in the future, are not accepted before `issued_at <= local_time`, and
+are accepted only when a fresh directory head proves
+the sender/recipient inclusions, the exact membership commitment, and the exact
+revocation epoch recorded by the Manifest.  A newer head or epoch, a changed
+membership commitment, an expired Manifest, or an unprovable historic head is
+a hard failure; no stale-head grace applies.
+For a non-empty artifact, all chunks before the last are full: its plaintext
+size is greater than `(chunk_count - 1) * chunk_size` and no greater than
+`chunk_count * chunk_size`.  A zero-byte artifact is represented by exactly one
+empty authenticated chunk (`chunk_count=1`, `plaintext_size=0`).
+
+`plaintext_commitment` is exactly BLAKE3-256 of ASCII
+`punaro/attachment/plaintext/v2`, one NUL byte, `content_salt`, the eight-byte
+big-endian `plaintext_size`, then the plaintext bytes in order.  An AEAD chunk
+key is HKDF-SHA256 with `IKM=file_key`, `salt=content_salt`, ASCII info
+`punaro/attachment/chunk-key/v2` followed by one NUL byte and
+`manifest_commitment`, and length 32.  For chunk index `i`, encoded as an
+eight-byte big-endian unsigned integer, the 12-byte ChaCha20-Poly1305 nonce is
+the first 12 bytes of BLAKE3-256 over ASCII
+`punaro/attachment/chunk-nonce/v2`, one NUL byte, `transfer_id`,
+`manifest_commitment`, and `i`.  The chunk AAD is CDE map
+`{1=version,2=transfer_id,3=manifest_commitment,4=chunk_index,5=chunk_count,6=plaintext_length}`.
+Every value must equal the Manifest; `plaintext_length` is the actual chunk
+length.  Implementations reserve this nonce tuple and the file-key commitment
+durably before encryption and never reuse either, including after crashes.
+
+The Manifest body is the following required map; its signature is field `99`.
+The signature preimage is ASCII `punaro/attachment/manifest/v2`, one NUL byte,
+then the CDE encoding of the same map with field `99` omitted.  Its signature
+is exactly 64 bytes.
+
+| Key | Field | Type / constraint |
+| --- | --- | --- |
+| 1 | version | unsigned; exactly `2` |
+| 2 | audience | bstr(32) |
+| 3 | transfer_id | bstr(16) |
+| 4 | conversation_id | bstr(16) |
+| 5 | sender_device_id | bstr(16) |
+| 6 | sender_generation | unsigned, non-zero |
+| 7 | recipient_device_id | bstr(16) |
+| 8 | recipient_generation | unsigned, non-zero |
+| 9 | directory_head | bstr(32) |
+| 10 | membership_commitment | bstr(32) |
+| 11 | revocation_epoch | unsigned |
+| 12 | issued_at | unsigned |
+| 13 | expires_at | unsigned |
+| 14 | content_salt | bstr(32) |
+| 15 | plaintext_commitment | bstr(32) |
+| 16 | chunk_size | unsigned, `1..262144` |
+| 17 | chunk_count | unsigned, `1..4096` |
+| 18 | plaintext_size | unsigned, at most 64 MiB |
+| 19 | signer_key_id | bstr(32) |
+| 20 | signature_algorithm | unsigned; exactly `1` |
+| 99 | signature | bstr(64) |
+
+The recipient Envelope is independently signed by the sender using the same
+manifest signing key.  It carries an RFC 9180 encapsulated key and ciphertext;
+only the file key is inside that ciphertext.  The envelope
+signature preimage is ASCII `punaro/attachment/envelope/v2`, one NUL byte,
+then the CDE encoding of the map with field `99` omitted.
+
+| Key | Field | Type / constraint |
+| --- | --- | --- |
+| 1 | version | unsigned; exactly `2` |
+| 2 | audience | bstr(32) |
+| 3 | transfer_id | bstr(16) |
+| 4 | conversation_id | bstr(16) |
+| 5 | sender_device_id | bstr(16) |
+| 6 | sender_generation | unsigned, non-zero |
+| 7 | recipient_device_id | bstr(16) |
+| 8 | recipient_generation | unsigned, non-zero |
+| 9 | recipient_hpke_key_id | bstr(32) |
+| 10 | manifest_commitment | bstr(32) |
+| 11 | kem_id | unsigned; exactly `0x0020` |
+| 12 | kdf_id | unsigned; exactly `0x0001` |
+| 13 | aead_id | unsigned; exactly `0x0003` |
+| 14 | encapsulated_key | bstr(32) |
+| 15 | ciphertext | bstr, `16..256` bytes |
+| 16 | signer_key_id | bstr(32) |
+| 17 | signature_algorithm | unsigned; exactly `1` |
+| 99 | signature | bstr(64) |
+
+For HPKE, `info` is the exact ASCII bytes
+`punaro/attachment-envelope/v2/base`.  The AAD is the CDE encoding of a map
+with keys `1=version`, `2=audience`, `3=transfer_id`, `4=conversation_id`,
+`5=recipient_device_id`, `6=recipient_generation`, `7=manifest_commitment`,
+`8=kem_id`, `9=kdf_id`, and `10=aead_id`; its values exactly equal the envelope
+fields.  The encrypted plaintext is CDE map `{1=file_key:bstr(32),
+2=manifest_commitment:bstr(32), 3=recipient_hpke_key_id:bstr(32),
+4=recipient_generation:uint}` and must be
+at most 160 bytes before encryption.  Before unsealing, an adapter verifies the
+fresh directory record, manifest signature, envelope signature, recipient
+generation, all outer bindings, and the recipient HPKE key ID.  After unsealing
+it validates and compares every inner binding; no caller-provided outer field
+is authority.
+
+The test corpus must include fixed positive and negative CDE and RFC 9180
+vectors.  The corpus manifest names its upstream source and SHA-256, and every
+dependency/toolchain update must pass it plus decoder fuzzing.
 
 ## State machine and authorization
 
@@ -86,7 +226,8 @@ A permit record contains version, audience, permit serial, issuer key ID,
 holder device/generation/role, transfer and conversation IDs, recipient,
 attempt generation, allowed operation, directory-head commitment, membership
 commitment, revocation epoch, issued time, expiry, and signature.  Permit
-validity is at most 60 seconds.  The issuer verifies a fresh directory head and
+validity is at most 60 seconds and never later than the bound directory head's
+expiry.  The issuer verifies a fresh directory head and
 atomically records the serial before issuing; a verifier checks the issuer
 certificate, all bindings, time, directory checkpoint, and revocation epoch.
 Serial reuse, renewal after expiry, and use for another operation/attempt are
@@ -112,8 +253,10 @@ expired permit, and exhausted quota.
 
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes
-on revocation notification or permit expiry.  The documented residual exposure
-is at most the permit lifetime for bytes already in flight.
+on revocation notification or permit expiry.  Because a permit cannot outlive
+its 30-second directory head, the documented residual exposure is at most 30
+seconds after publication of a correctly authenticated revoking head for bytes
+already in flight; delivered plaintext is never recalled.
 
 ## Transport and resource safety
 
@@ -133,9 +276,12 @@ peer cannot negotiate a larger value.
 
 Every offer, artifact, signal, nonce, and attempt has expiry.  Limits are
 enforced per sender, recipient, conversation, and relay.  A durable reaper
-releases expired reservations, ciphertext, signals, idempotency records, and
-nonce records.  Cleanup is crash-safe and auditable.  A full relay never
-accepts an operation merely because a global counter is below its limit.
+releases only expired *capacity* reservations, ciphertext, signals, and
+idempotency records.  It never releases or reassigns cryptographic
+file-key/salt/nonce-tuple commitments: those remain collision-blocking for the
+full cryptographic retention period.  Cleanup is crash-safe and auditable.  A
+full relay never accepts an operation merely because a global counter is below
+its limit.
 
 ## Acceptance evidence
 

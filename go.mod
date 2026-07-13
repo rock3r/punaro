@@ -5,6 +5,7 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/pion/ice/v4 v4.0.10
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport/v3 v3.0.8
@@ -34,6 +35,7 @@ require (
 	github.com/pion/turn/v4 v4.1.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/exp v0.0.0-20230315142452-642cacee5cc0 // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect

@@ -1,9 +1,12 @@
 # Release evidence records
 
-Every released capability receives its own immutable Markdown record in this
+Every released capability receives its own reviewable Markdown record in this
 directory.  Do not use a template, branch name, or mutable URL as evidence.
 The record is committed after the candidate commit and CI artifacts exist, and
-is reviewed in a final release-only change.
+is reviewed in a final release-only change.  Its authority depends on the
+protected-branch, required-CI, signed-tag, and release-environment approval
+process described in the security release gates; a Git Markdown file alone is
+not immutable evidence.
 
 Required fields:
 

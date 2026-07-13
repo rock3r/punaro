@@ -39,9 +39,12 @@ filesystem leaves `/var/lib/punaro` as the only persistent writable location.
 
 The supplied systemd unit is likewise a baseline.  Before using it on Linux,
 run a smoke test under the target distribution, verify SQLite WAL behavior,
-and inspect `systemd-analyze security punarod.service`.  Keep the listener on
-loopback and use a separately reviewed ingress only after the public-runtime
-release gate is complete.
+and record `systemd-analyze security punarod.service` together with the exact
+systemd version in release evidence.  Every reported exposure must be either
+eliminated or have a named, time-bounded security exception; an unreviewed
+score or an "inspect" result is not acceptance.  Keep the listener on loopback
+and use a separately reviewed ingress only after the public-runtime release
+gate is complete.
 
 ## Operations and incident response
 

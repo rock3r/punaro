@@ -237,14 +237,23 @@ or WebSocket hint. The current code is a testable protocol foundation only;
 configuration is present. It will remain fail-closed until all gates in the
 [attachment RFC](docs/attachments-v2-rfc.md) and
 [security release checklist](docs/security-release-gates.md) are complete.
-The foundation tests local encrypted-frame, replay, fencing, and bounded-store
-helpers.  Those helpers are intentionally **non-normative**: they do not have
-canonical records, recipient envelopes, source readiness, durable key/salt
-reservation, a fresh authority directory, permits, lifecycle reaping, or an
-authenticated WebRTC state machine.  In particular, they must not be read as
-specifying cipher parameters, nonce/AAD construction, quotas, or a transport
-limit for a released protocol.  The complete implementation-to-RFC divergence
-is maintained in [`docs/attachment-foundation-gap-matrix.md`](docs/attachment-foundation-gap-matrix.md).
+
+`internal/attachment/v2` currently provides an offline-only, strict canonical
+CBOR record core: verified signed manifests, manifest commitments, and
+recipient-bound HPKE envelopes.  It has no daemon import, persistence, HTTP
+parser, relay storage, directory client, or transport integration.  In
+particular, it does **not** make attachments usable, establish a fresh
+directory key binding itself, reserve key/salt uniqueness durably, or satisfy
+the vector/fuzz/review release gates.  Callers must only construct its verified
+manifest input after fresh directory verification; the runtime needed to do
+that does not exist yet.
+
+The legacy `internal/attachment` foundation tests local encrypted-frame,
+replay, fencing, and bounded-store helpers.  Those helpers are intentionally
+**non-normative**: they do not specify cipher parameters, nonce/AAD
+construction, quotas, or a transport limit for a released protocol.  The
+complete implementation-to-RFC divergence is maintained in
+[`docs/attachment-foundation-gap-matrix.md`](docs/attachment-foundation-gap-matrix.md).
 
 Direct/TURN primitives are isolated adapter test helpers and are intentionally
 not wired into `punarod`.  The encrypted relay-blob transfer has no reachable

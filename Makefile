@@ -1,4 +1,4 @@
-.PHONY: test test-race vet staticcheck vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint
+.PHONY: test test-race vet staticcheck vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint release-gates fuzz
 
 test:
 	go test -covermode=atomic ./...
@@ -25,6 +25,13 @@ lint: vet staticcheck
 
 security: vuln gosec secrets
 
+release-gates:
+	./scripts/verify-release-gates.sh
+
+fuzz:
+	go test -run '^$$' -fuzz=FuzzDecodeManifest -fuzztime=2s -parallel=1 ./internal/attachment/v2
+	go test -run '^$$' -fuzz=FuzzDecodeEnvelope -fuzztime=2s -parallel=1 ./internal/attachment/v2
+
 fmt:
 	gofmt -w $$(find . -type f -name '*.go' -not -path './vendor/*')
 
@@ -34,4 +41,4 @@ dockerfile-lint:
 workflow-lint:
 	docker run --rm -v "$$(pwd):/repo:ro" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
 
-ci: test test-race lint security
+ci: test test-race lint security fuzz release-gates
