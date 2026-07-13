@@ -489,6 +489,32 @@ func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, er
 	return machines, nil
 }
 
+// ConversationsForMachine exposes only rooms containing an endpoint currently
+// attached to the authenticated machine. It deliberately returns opaque IDs;
+// membership and message access remain separately enforced.
+func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT c.id FROM conversations c
+		JOIN memberships m ON m.conversation_id = c.id
+		JOIN endpoints e ON e.endpoint = m.endpoint
+		WHERE e.machine_id = ? AND e.lease_until > ? ORDER BY c.created_at ASC`, machineID, now.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("list machine conversations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var conversations []Conversation
+	for rows.Next() {
+		var conversation Conversation
+		if err := rows.Scan(&conversation.ID); err != nil {
+			return nil, err
+		}
+		conversations = append(conversations, conversation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return conversations, nil
+}
+
 func endpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
 	var until int64
 	err := tx.QueryRow("SELECT lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&until)

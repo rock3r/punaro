@@ -70,6 +70,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.now().UTC()
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/conversations":
+		h.listConversations(w, machineID, now)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/notifications":
 		h.notifications(w, r, machineID)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
@@ -95,6 +97,15 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
 	}
+}
+
+func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {
+	conversations, err := h.store.ConversationsForMachine(machineID, now)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
 }
 
 func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineID string) {
