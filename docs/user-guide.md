@@ -30,5 +30,9 @@ in size and lifetime, and subject to revocation.  They will not use Telegram
 as a file relay or create public download links.  The exact release conditions
 are in the [security release gates](security-release-gates.md).
 
+Revocation will stop new authorized transfer activity; it cannot recall bytes
+already delivered to a recipient.  The remaining in-flight exposure will be
+explicitly bounded in the released protocol and release evidence.
+
 Until then, use the established mailbox and Telegram workflows for text-only
 coordination and keep files in an approved storage system.

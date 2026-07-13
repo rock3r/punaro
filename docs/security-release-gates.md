@@ -1,12 +1,16 @@
 # Security release gates
 
-This checklist is the release authority for Punaro.  A checked box requires an
-immutable evidence record under `docs/release-evidence/` that names the source
-commit, target platform, exact commands and artifacts, CI run or attestation,
-and security approver.  An unchecked box means the corresponding feature
-remains unavailable.  No runtime-exposure change may merge without a reviewed
-evidence record and an explicit release decision.  The current attachment gate
-is intentionally **closed**.
+This checklist is the release authority for Punaro.  A checked box requires a
+reviewable, committed evidence record under `docs/release-evidence/` that names
+the source commit, target platform, exact commands and artifacts, CI run or
+attestation, and security approver.  An unchecked box means the corresponding
+feature remains unavailable.  CI verifies the current withheld state and gate
+syntax; it cannot make a Git commit immutable or establish independent human
+approval.  Before any release, protected branches, required CI, a signed
+release tag, and a release environment with independent security and operations
+approvals are mandatory.  No runtime-exposure change may merge without that
+process, a reviewed evidence record, and an explicit release decision.  The
+current attachment gate is intentionally **closed**.
 
 ## Current source assertions (not release evidence)
 
