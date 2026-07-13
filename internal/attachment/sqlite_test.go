@@ -121,6 +121,44 @@ func TestSQLiteServiceResumesOfferAuthorizationAfterRestart(t *testing.T) {
 	}
 }
 
+func TestSQLiteServiceWithOfferRepositoryKeepsCiphertextDurable(t *testing.T) {
+	path := t.TempDir() + "/attachments.db"
+	policy := PolicyFunc(func(_, _, _ string, _ Action) bool { return true })
+	store, err := OpenSQLiteOfferStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewServiceWithOfferRepository(policy, store)
+	var plaintextHash [hashSize]byte
+	spec := OfferSpec{ArtifactID: "artifact", ChunkCount: 1, MaxCiphertextBytes: 32, PlaintextHash: plaintextHash}
+	offer, err := service.CreateOfferWithIdempotency(Principal{DeviceID: "sender"}, "conversation", "recipient", "transfer", "request", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frame := Chunk{Index: 0, Ciphertext: []byte("ciphertext")}
+	frame.Hash = hash("punaro/attachment/ciphertext/v2\x00", frame.Ciphertext)
+	if err := service.PutChunk(Principal{DeviceID: "sender"}, offer, "artifact", frame); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restartedStore, err := OpenSQLiteOfferStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = restartedStore.Close() }()
+	restarted := NewServiceWithOfferRepository(policy, restartedStore)
+	session, err := restarted.AcceptOffer(Principal{DeviceID: "recipient"}, offer.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := restarted.GetChunkByOfferID(Principal{DeviceID: "recipient"}, offer.ID, session, "artifact", 0)
+	if err != nil || string(got.Ciphertext) != "ciphertext" {
+		t.Fatalf("durable chunk = %#v, %v", got, err)
+	}
+}
+
 func TestSQLiteBlobFramesAreImmutableAcrossRestart(t *testing.T) {
 	path := t.TempDir() + "/attachments.db"
 	store, err := OpenSQLiteOfferStore(path)

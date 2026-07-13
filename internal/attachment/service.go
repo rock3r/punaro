@@ -128,7 +128,11 @@ func NewService(policy Policy) *Service {
 
 // NewServiceWithOfferRepository injects durable fencing state into the service.
 func NewServiceWithOfferRepository(policy Policy, offers OfferRepository) *Service {
-	return NewServiceWithRepositories(policy, offers, NewBlobStore())
+	blobs := BlobRepository(NewBlobStore())
+	if durableBlobs, ok := offers.(BlobRepository); ok {
+		blobs = durableBlobs
+	}
+	return NewServiceWithRepositories(policy, offers, blobs)
 }
 
 // NewServiceWithRepositories injects durable offer and blob implementations.
