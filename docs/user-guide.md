@@ -1,22 +1,32 @@
 # Punaro user guide
 
-Punaro is the proposed local relay layer for agents and people.  Today it is
-an early infrastructure draft: it can prove that a local daemon is alive, but
-it cannot yet relay messages, expose a public endpoint, or transfer files.
+Punaro is the proposed local relay layer for agents and people. It now has an
+**alpha, loopback-hosted text relay**: enrolled machines can advertise local
+`agent-mailbox` attachments, send durable text, and receive it through a local
+adapter. It is not yet a released remote service or an attachment system.
 
 ## What you can do today
 
-Developers can run the local health check described in the
-[operator guide](operator-guide.md).  This is useful for validating the build,
-configuration parser, and local service wrapper.
+Developers can run the local health check and alpha relay described in the
+[operator guide](operator-guide.md). The adapter resolves currently attached
+sessions from an `agent-mailbox` `group/...` address; detached members are not
+advertised. Inbound text is delivered to the local mailbox as an inert JSON
+envelope containing the relay message and conversation IDs.
 
 ## What is intentionally unavailable
 
-- Sending or receiving mailbox messages
 - Telegram commands or bot traffic
-- Internet or Cloudflare access
+- WebSocket wake-up hints (polling is authoritative)
 - File and attachment transfer
 - Browser clients, public sharing links, and anonymous downloads
+
+The alpha daemon still binds only to a literal loopback address. Before any
+remote rollout, configure Cloudflare Access to require its JWT at the tunnel
+origin and set all three verifier variables (`PUNARO_ACCESS_ISSUER`,
+`PUNARO_ACCESS_AUDIENCE`, and `PUNARO_ACCESS_JWKS_URL`). The relay then checks
+the Access JWT as well as every machine's signed request. This implementation
+work is not, by itself, a completed public-release decision; follow the
+[security release gates](security-release-gates.md).
 
 Setting `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail.  This protects
 you from mistaking the tested attachment foundation for a released file-transfer

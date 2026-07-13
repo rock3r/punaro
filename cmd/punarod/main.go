@@ -11,10 +11,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/rock3r/punaro/internal/access"
 	"github.com/rock3r/punaro/internal/config"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 func main() {
@@ -38,10 +41,21 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
 		return 2
 	}
+	relayHandler, relayStore, err := buildRelayHandler(cfg)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punarod relay configuration error: %v\n", err)
+		return 2
+	}
+	if relayStore != nil {
+		defer func() { _ = relayStore.Close() }()
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ready"}\n`)) })
+	if relayHandler != nil {
+		mux.Handle("/v1/", relayHandler)
+	}
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.ListenAndServe() }()
@@ -65,6 +79,35 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
+	if !cfg.RelayEnabled {
+		return nil, nil, nil
+	}
+	machines, err := relay.ParseMachineEnrollments(cfg.RelayMachinesJSON)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := relay.Open(filepath.Join(cfg.DataDir, "relay.db"))
+	if err != nil {
+		return nil, nil, err
+	}
+	authenticator, err := relay.NewAuthenticator(store, machines)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, err
+	}
+	var handler http.Handler = relay.NewHandler(store, authenticator, relay.HandlerOptions{})
+	if cfg.AccessIssuer != "" {
+		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
+		if err != nil {
+			_ = store.Close()
+			return nil, nil, err
+		}
+		handler = verifier.Middleware(handler)
+	}
+	return handler, store, nil
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -19,6 +19,11 @@ type Config struct {
 	AttachmentsEnabled       bool
 	AttachmentDeviceKeysJSON string
 	AttachmentMembershipJSON string
+	RelayEnabled             bool
+	RelayMachinesJSON        string
+	AccessIssuer             string
+	AccessAudience           string
+	AccessJWKSURL            string
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -48,8 +53,16 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENTS_ENABLED: %w", err)
 	}
+	relayEnabled, err := strconv.ParseBool(value("PUNARO_RELAY_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_RELAY_ENABLED: %w", err)
+	}
 	deviceKeys := value("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", "")
 	membership := value("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", "")
+	relayMachines := value("PUNARO_RELAY_MACHINES_JSON", "")
+	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
+	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
+	accessJWKSURL := value("PUNARO_ACCESS_JWKS_URL", "")
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	// The authenticated public relay runtime does not exist yet. Keeping even
 	// the health-only draft on loopback prevents an operator from accidentally
@@ -60,7 +73,13 @@ func Load(explicitEnvFile string) (Config, error) {
 	if attachmentsEnabled && (deviceKeys == "" || membership == "") {
 		return Config{}, fmt.Errorf("attachments require PUNARO_ATTACHMENT_DEVICE_KEYS_JSON and PUNARO_ATTACHMENT_MEMBERSHIP_JSON")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership}, nil
+	if relayEnabled && relayMachines == "" {
+		return Config{}, fmt.Errorf("enabled relay requires PUNARO_RELAY_MACHINES_JSON")
+	}
+	if (accessIssuer == "") != (accessAudience == "") || (accessIssuer == "") != (accessJWKSURL == "") {
+		return Config{}, fmt.Errorf("PUNARO_ACCESS_ISSUER, PUNARO_ACCESS_AUDIENCE, and PUNARO_ACCESS_JWKS_URL must be set together")
+	}
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
 }
 
 func isLoopbackListener(address string) bool {
