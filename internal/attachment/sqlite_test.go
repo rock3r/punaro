@@ -279,9 +279,11 @@ func TestSQLiteSignalsSerializeConcurrentAppends(t *testing.T) {
 	if len(signals) != writes {
 		t.Fatalf("signal count = %d, want %d", len(signals), writes)
 	}
+	expectedSequence := uint64(1)
 	for index, signal := range signals {
-		if signal.Sequence != uint64(index+1) {
+		if signal.Sequence != expectedSequence {
 			t.Fatalf("signal[%d].sequence = %d", index, signal.Sequence)
 		}
+		expectedSequence++
 	}
 }

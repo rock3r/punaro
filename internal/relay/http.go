@@ -113,7 +113,7 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineI
 	if err != nil {
 		return
 	}
-	defer connection.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
 	client := h.notifier.Register(machineID)
 	defer client.Close()
 	ctx, cancel := context.WithCancel(r.Context())

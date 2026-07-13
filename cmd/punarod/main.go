@@ -98,7 +98,7 @@ func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
 		_ = store.Close()
 		return nil, nil, err
 	}
-	var handler http.Handler = relay.NewHandler(store, authenticator, relay.HandlerOptions{})
+	handler := relay.NewHandler(store, authenticator, relay.HandlerOptions{})
 	if cfg.AccessIssuer != "" {
 		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
 		if err != nil {

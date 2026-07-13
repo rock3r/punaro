@@ -113,7 +113,7 @@ func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	if forbidden.Code != http.StatusForbidden {
 		t.Fatalf("wrong namespace status=%d body=%s", forbidden.Code, forbidden.Body.String())
 	}
-	unsigned := httptest.NewRequest(http.MethodPut, "/v1/machines/me/endpoints", bytes.NewBufferString(`{"endpoints":["agent/a/reviewer"]}`))
+	unsigned := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/machines/me/endpoints", bytes.NewBufferString(`{"endpoints":["agent/a/reviewer"]}`))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, unsigned)
 	if response.Code != http.StatusUnauthorized {
@@ -148,10 +148,13 @@ func TestHTTPNotificationsAuthenticatesAndEmitsOnlyWakeMetadata(t *testing.T) {
 	headers.Set("X-Punaro-Nonce", signed.Nonce)
 	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
 	connection, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+path, &websocket.DialOptions{HTTPHeader: headers})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err != nil {
 		t.Fatalf("dial notifications status=%v err=%v", response, err)
 	}
-	defer connection.Close(websocket.StatusNormalClosure, "done")
+	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "done") }()
 	notifier.Publish("machine-a", "conversation-1", 9)
 	_, data, err := connection.Read(context.Background())
 	if err != nil {
@@ -166,7 +169,7 @@ func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey,
 	t.Helper()
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	signed := signRequest(private, machineID, method, path, []byte(body), clock, nonce)
-	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	request := httptest.NewRequestWithContext(context.Background(), method, path, bytes.NewBufferString(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("X-Punaro-Machine", signed.MachineID)
 	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))

@@ -17,10 +17,12 @@ type Notifier struct {
 	clients map[string]map[*NotificationClient]struct{}
 }
 
+// NewNotifier creates a bounded, best-effort wake dispatcher.
 func NewNotifier() *Notifier {
 	return &Notifier{clients: make(map[string]map[*NotificationClient]struct{})}
 }
 
+// Register creates one wake-only subscription scoped to machineID.
 func (n *Notifier) Register(machineID string) *NotificationClient {
 	client := &NotificationClient{machineID: machineID, notifier: n, events: make(chan WakeEvent, 16)}
 	n.mu.Lock()
@@ -32,6 +34,7 @@ func (n *Notifier) Register(machineID string) *NotificationClient {
 	return client
 }
 
+// Publish delivers a content-free wake hint to current subscribers.
 func (n *Notifier) Publish(machineID, topicID string, sequence int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -43,6 +46,7 @@ func (n *Notifier) Publish(machineID, topicID string, sequence int64) {
 	}
 }
 
+// NotificationClient is a machine-scoped best-effort wake subscription.
 type NotificationClient struct {
 	machineID string
 	notifier  *Notifier
@@ -50,8 +54,10 @@ type NotificationClient struct {
 	once      sync.Once
 }
 
+// Events provides the bounded wake-hint stream.
 func (c *NotificationClient) Events() <-chan WakeEvent { return c.events }
 
+// Close unregisters the subscription. It is safe to call repeatedly.
 func (c *NotificationClient) Close() {
 	c.once.Do(func() {
 		c.notifier.mu.Lock()

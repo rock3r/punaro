@@ -22,6 +22,8 @@ type Client struct {
 	http  *http.Client
 }
 
+// NewClient validates a Bot API base URL and retains the supplied token only
+// in memory for the lifetime of the client.
 func NewClient(rawURL, token string, client *http.Client) (*Client, error) {
 	base, err := url.Parse(rawURL)
 	if err != nil || base.Scheme != "https" && base.Scheme != "http" || base.Host == "" || strings.TrimSpace(token) == "" {

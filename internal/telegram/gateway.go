@@ -24,6 +24,8 @@ type Submission struct {
 	ThreadID       int64
 }
 
+// Gateway applies authorization, replay, and exact-topic routing policy to
+// Telegram updates before submitting opaque text to the relay.
 type Gateway struct {
 	AllowedUserID int64
 	State         *State

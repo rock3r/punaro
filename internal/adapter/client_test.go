@@ -95,7 +95,7 @@ func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer connection.Close(websocket.StatusNormalClosure, "")
+		defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
 		if err := connection.Write(r.Context(), websocket.MessageText, []byte(`{"type":"wake","topic_id":"conversation-1","sequence":7}`)); err != nil {
 			t.Fatal(err)
 		}

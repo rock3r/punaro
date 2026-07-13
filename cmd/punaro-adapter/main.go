@@ -36,14 +36,15 @@ type adapterConfig struct {
 
 func main() {
 	var err error
-	if len(os.Args) > 1 && os.Args[1] == "send" {
-		err = runSend(os.Args[2:])
-	} else if len(os.Args) > 1 && os.Args[1] == "create" {
-		err = runCreate(os.Args[2:])
-	} else if len(os.Args) > 1 {
-		err = fmt.Errorf("unknown command %q (supported: send, create)", os.Args[1])
-	} else {
+	switch {
+	case len(os.Args) == 1:
 		err = run()
+	case os.Args[1] == "send":
+		err = runSend(os.Args[2:])
+	case os.Args[1] == "create":
+		err = runCreate(os.Args[2:])
+	default:
+		err = fmt.Errorf("unknown command %q (supported: send, create)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
@@ -237,7 +238,7 @@ func run() error {
 func runNotifications(ctx context.Context, client *adapter.HTTPRelayClient, wake chan<- struct{}) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		_ = client.ReadNotifications(ctx, func(adapterWake relay.WakeEvent) {
+		_ = client.ReadNotifications(ctx, func(_ relay.WakeEvent) {
 			select {
 			case wake <- struct{}{}:
 			default:

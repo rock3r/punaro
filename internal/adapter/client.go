@@ -19,11 +19,14 @@ import (
 	"github.com/rock3r/punaro/internal/relay"
 )
 
+// AccessServiceToken holds the two headers required for Cloudflare Access
+// service-token authentication. Callers must provide both fields or neither.
 type AccessServiceToken struct {
 	ClientID     string
 	ClientSecret string
 }
 
+// HTTPRelayClient is the signed HTTPS client used by one enrolled adapter.
 type HTTPRelayClient struct {
 	baseURL     *url.URL
 	machineID   string
@@ -32,12 +35,13 @@ type HTTPRelayClient struct {
 	accessToken AccessServiceToken
 }
 
+// NewHTTPRelayClient validates and creates a signed client for one machine.
 func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken) (*HTTPRelayClient, error) {
 	baseURL, err := url.Parse(rawURL)
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		return nil, fmt.Errorf("invalid relay URL")
 	}
-	if baseURL.Scheme != "https" && !(baseURL.Scheme == "http" && loopbackHost(baseURL.Hostname())) {
+	if baseURL.Scheme != "https" && (baseURL.Scheme != "http" || !loopbackHost(baseURL.Hostname())) {
 		return nil, fmt.Errorf("relay URL must use HTTPS except for a loopback development listener")
 	}
 	if strings.TrimSpace(machineID) == "" || len(privateKey) != ed25519.PrivateKeySize {
@@ -52,11 +56,13 @@ func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey,
 	return &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: client, accessToken: accessToken}, nil
 }
 
+// Advertise replaces the machine's current local endpoint attachment set.
 func (c *HTTPRelayClient) Advertise(ctx context.Context, endpoints []string) error {
 	_, err := c.doJSON(ctx, http.MethodPut, "/v1/machines/me/endpoints", map[string]any{"endpoints": endpoints}, nil)
 	return err
 }
 
+// Lease obtains the current endpoint's bounded, durable delivery page.
 func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.Delivery, error) {
 	var response struct {
 		Deliveries []relay.Delivery `json:"deliveries"`
@@ -106,11 +112,14 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 	return message, err
 }
 
+// Ack acknowledges a locally committed delivery using its live lease fence.
 func (c *HTTPRelayClient) Ack(ctx context.Context, delivery relay.Delivery) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/"+url.PathEscape(delivery.ID)+"/ack", map[string]any{"endpoint": delivery.RecipientEndpoint, "lease_token": delivery.LeaseToken, "lease_generation": delivery.LeaseGeneration}, nil)
 	return err
 }
 
+// ReadNotifications consumes a signed, content-free wake stream until ctx or
+// the connection ends. Durable polling remains authoritative.
 func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(relay.WakeEvent)) error {
 	path := "/v1/notifications"
 	nonce, err := randomNonce()
@@ -136,11 +145,14 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
 	}
-	connection, _, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	connection, response, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
 	if err != nil {
 		return fmt.Errorf("connect relay notifications: %w", err)
 	}
-	defer connection.Close(websocket.StatusNormalClosure, "")
+	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
 	for {
 		_, data, err := connection.Read(ctx)
 		if err != nil {

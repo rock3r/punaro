@@ -5,6 +5,7 @@ import (
 	"fmt"
 )
 
+// Poller retrieves a bounded ordered page of Telegram updates.
 type Poller interface {
 	Updates(context.Context, int64) ([]Update, error)
 }
@@ -17,6 +18,7 @@ type Runner struct {
 	Gateway Gateway
 }
 
+// RunOnce handles one update page and returns the next advisory offset.
 func (r Runner) RunOnce(ctx context.Context, offset int64) (int64, error) {
 	if r.Poller == nil {
 		return offset, fmt.Errorf("telegram poller is required")

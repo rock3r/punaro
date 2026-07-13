@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
+	// sqlite is the local durable adapter journal driver.
 	_ "modernc.org/sqlite"
 )
 
@@ -90,7 +91,7 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 }
 
 func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, delivery relay.Delivery, now time.Time) error {
-	state, err := s.Journal.EnsureReceived(delivery.ID, delivery.Message.ID, now)
+	state, err := s.Journal.ensureReceived(delivery.ID, delivery.Message.ID, now)
 	if err != nil {
 		return fmt.Errorf("record received delivery %q: %w", delivery.ID, err)
 	}
@@ -170,7 +171,7 @@ func OpenJournal(database string) (*Journal, error) {
 			updated_at INTEGER NOT NULL
 		)`,
 	} {
-		if _, err := db.Exec(statement); err != nil {
+		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("initialize adapter journal: %w", err)
 		}
@@ -181,17 +182,17 @@ func OpenJournal(database string) (*Journal, error) {
 // Close closes the local journal.
 func (j *Journal) Close() error { return j.db.Close() }
 
-func (j *Journal) EnsureReceived(deliveryID, messageID string, now time.Time) (deliveryState, error) {
+func (j *Journal) ensureReceived(deliveryID, messageID string, now time.Time) (deliveryState, error) {
 	if strings.TrimSpace(deliveryID) == "" || strings.TrimSpace(messageID) == "" {
 		return "", fmt.Errorf("delivery and message IDs are required")
 	}
-	_, err := j.db.Exec("INSERT INTO inbound_deliveries(delivery_id, message_id, state, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(delivery_id) DO NOTHING", deliveryID, messageID, deliveryReceived, now.UnixMilli())
+	_, err := j.db.ExecContext(context.Background(), "INSERT INTO inbound_deliveries(delivery_id, message_id, state, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(delivery_id) DO NOTHING", deliveryID, messageID, deliveryReceived, now.UnixMilli())
 	if err != nil {
 		return "", err
 	}
 	var storedMessageID string
 	var state deliveryState
-	err = j.db.QueryRow("SELECT message_id, state FROM inbound_deliveries WHERE delivery_id = ?", deliveryID).Scan(&storedMessageID, &state)
+	err = j.db.QueryRowContext(context.Background(), "SELECT message_id, state FROM inbound_deliveries WHERE delivery_id = ?", deliveryID).Scan(&storedMessageID, &state)
 	if err != nil {
 		return "", err
 	}
@@ -203,13 +204,15 @@ func (j *Journal) EnsureReceived(deliveryID, messageID string, now time.Time) (d
 
 // MarkForwarded records successful local mailbox acceptance before relay ack.
 func (j *Journal) MarkForwarded(deliveryID, messageID string, now time.Time) error {
-	_, err := j.db.Exec(`INSERT INTO inbound_deliveries(delivery_id, message_id, state, updated_at) VALUES (?, ?, ?, ?)
+	_, err := j.db.ExecContext(context.Background(), `INSERT INTO inbound_deliveries(delivery_id, message_id, state, updated_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT(delivery_id) DO UPDATE SET state = CASE WHEN inbound_deliveries.state = 'acknowledged' THEN 'acknowledged' ELSE 'forwarded' END, updated_at = excluded.updated_at`, deliveryID, messageID, deliveryForwarded, now.UnixMilli())
 	return err
 }
 
+// MarkAcknowledged records a successful remote acknowledgement after a local
+// mailbox handoff has been journaled.
 func (j *Journal) MarkAcknowledged(deliveryID string, now time.Time) error {
-	result, err := j.db.Exec("UPDATE inbound_deliveries SET state = ?, updated_at = ? WHERE delivery_id = ?", deliveryAcknowledged, now.UnixMilli(), deliveryID)
+	result, err := j.db.ExecContext(context.Background(), "UPDATE inbound_deliveries SET state = ?, updated_at = ? WHERE delivery_id = ?", deliveryAcknowledged, now.UnixMilli(), deliveryID)
 	if err != nil {
 		return err
 	}

@@ -110,10 +110,10 @@ func (a *Authenticator) Verify(request SignedRequest, now time.Time) error {
 		return fmt.Errorf("begin request replay transaction: %w", err)
 	}
 	defer rollback(tx)
-	if _, err := tx.Exec("DELETE FROM request_nonces WHERE expires_at <= ?", now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "DELETE FROM request_nonces WHERE expires_at <= ?", now.UnixMilli()); err != nil {
 		return fmt.Errorf("prune request nonces: %w", err)
 	}
-	_, err = tx.Exec("INSERT INTO request_nonces(machine_id, nonce, expires_at) VALUES (?, ?, ?)", request.MachineID, request.Nonce, request.Timestamp.UTC().Add(maxRequestAge).UnixMilli())
+	_, err = tx.ExecContext(context.Background(), "INSERT INTO request_nonces(machine_id, nonce, expires_at) VALUES (?, ?, ?)", request.MachineID, request.Nonce, request.Timestamp.UTC().Add(maxRequestAge).UnixMilli())
 	if err != nil {
 		return ErrForbidden
 	}

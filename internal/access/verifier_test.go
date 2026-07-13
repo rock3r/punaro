@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -44,7 +45,7 @@ func TestMiddlewareRejectsMissingAccessAssertion(t *testing.T) {
 	verifier := &Verifier{}
 	handler := verifier.Middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/deliveries", nil))
+	handler.ServeHTTP(response, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/deliveries", nil))
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want forbidden", response.Code)
 	}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	// sqlite is the durable embedded relay store driver.
 	_ "modernc.org/sqlite"
 )
 
@@ -37,8 +38,11 @@ var (
 type Capability uint8
 
 const (
+	// CapSend permits an endpoint to append messages to the conversation.
 	CapSend Capability = 1 << iota
+	// CapReceive permits an endpoint to receive durable deliveries.
 	CapReceive
+	// CapAdmin reserves room-administration authority for a live endpoint.
 	CapAdmin
 )
 
@@ -201,12 +205,12 @@ func (s *Store) AdvertiseEndpoints(machineID string, endpoints []string, now tim
 		return err
 	}
 	defer rollback(tx)
-	if _, err := tx.Exec("DELETE FROM endpoints WHERE machine_id = ?", machineID); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "DELETE FROM endpoints WHERE machine_id = ?", machineID); err != nil {
 		return fmt.Errorf("detach endpoints: %w", err)
 	}
 	until := now.Add(ttl).UnixMilli()
 	for endpoint := range seen {
-		if _, err := tx.Exec(`INSERT INTO endpoints(endpoint, machine_id, lease_until) VALUES (?, ?, ?)
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO endpoints(endpoint, machine_id, lease_until) VALUES (?, ?, ?)
 			ON CONFLICT(endpoint) DO UPDATE SET machine_id = excluded.machine_id, lease_until = excluded.lease_until`, endpoint, machineID, until); err != nil {
 			return fmt.Errorf("advertise endpoint: %w", err)
 		}
@@ -264,11 +268,11 @@ func (s *Store) CreateConversation(creatorEndpoint string, members []Member, now
 		}
 	}
 	conversation := Conversation{ID: uuid.NewString()}
-	if _, err := tx.Exec("INSERT INTO conversations(id, created_at) VALUES (?, ?)", conversation.ID, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversations(id, created_at) VALUES (?, ?)", conversation.ID, now.UnixMilli()); err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
 	for _, member := range members {
-		if _, err := tx.Exec("INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, member.Endpoint, member.Capabilities); err != nil {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, member.Endpoint, member.Capabilities); err != nil {
 			return Conversation{}, fmt.Errorf("add conversation member: %w", err)
 		}
 	}
@@ -294,7 +298,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	defer rollback(tx)
 	var existingID, existingHash string
-	err = tx.QueryRow("SELECT message_id, request_hash FROM idempotency WHERE machine_id = ? AND key = ?", input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	err = tx.QueryRowContext(context.Background(), "SELECT message_id, request_hash FROM idempotency WHERE machine_id = ? AND key = ?", input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
 		if existingHash != requestHash {
 			return Message{}, false, ErrConflict
@@ -315,7 +319,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	var capabilities Capability
-	err = tx.QueryRow("SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", input.ConversationID, input.FromEndpoint).Scan(&capabilities)
+	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", input.ConversationID, input.FromEndpoint).Scan(&capabilities)
 	if errors.Is(err, sql.ErrNoRows) || capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
 	}
@@ -323,15 +327,15 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, fmt.Errorf("authorize message sender: %w", err)
 	}
 	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC()}
-	if err := tx.QueryRow("UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
 	} else if err != nil {
 		return Message{}, false, fmt.Errorf("allocate message sequence: %w", err)
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("append message: %w", err)
 	}
-	rows, err := tx.Query("SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
+	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find recipients: %w", err)
 	}
@@ -348,11 +352,11 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	for _, endpoint := range recipients {
-		if _, err := tx.Exec("INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
 			return Message{}, false, fmt.Errorf("create delivery: %w", err)
 		}
 	}
-	if _, err := tx.Exec("INSERT INTO idempotency(machine_id, key, request_hash, message_id, created_at) VALUES (?, ?, ?, ?, ?)", input.SenderMachineID, input.IdempotencyKey, requestHash, message.ID, input.Now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO idempotency(machine_id, key, request_hash, message_id, created_at) VALUES (?, ?, ?, ?, ?)", input.SenderMachineID, input.IdempotencyKey, requestHash, message.ID, input.Now.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("record idempotency key: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -388,7 +392,7 @@ func (s *Store) LeaseDeliveries(machineID, endpoint, conversationID string, now 
 	}
 	query += " ORDER BY m.sequence ASC LIMIT ?"
 	args = append(args, limit)
-	rows, err := tx.Query(query, args...)
+	rows, err := tx.QueryContext(context.Background(), query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("find deliveries: %w", err)
 	}
@@ -415,7 +419,7 @@ func (s *Store) LeaseDeliveries(machineID, endpoint, conversationID string, now 
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = token
 			delivery.LeaseUntil = now.Add(ttl).UTC()
-			if _, err := tx.Exec(`UPDATE deliveries SET lease_machine_id = ?, lease_token = ?, lease_generation = ?, lease_until = ? WHERE id = ?`, machineID, token, delivery.LeaseGeneration, delivery.LeaseUntil.UnixMilli(), delivery.ID); err != nil {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE deliveries SET lease_machine_id = ?, lease_token = ?, lease_generation = ?, lease_until = ? WHERE id = ?`, machineID, token, delivery.LeaseGeneration, delivery.LeaseUntil.UnixMilli(), delivery.ID); err != nil {
 				return nil, fmt.Errorf("lease delivery: %w", err)
 			}
 		}
@@ -445,7 +449,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	var recipient, leaseMachine, leaseToken sql.NullString
 	var leaseGeneration int64
 	var leaseUntil, acknowledged sql.NullInt64
-	err = tx.QueryRow("SELECT recipient_endpoint, lease_machine_id, lease_token, lease_generation, lease_until, acked_at FROM deliveries WHERE id = ?", deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseUntil, &acknowledged)
+	err = tx.QueryRowContext(context.Background(), "SELECT recipient_endpoint, lease_machine_id, lease_token, lease_generation, lease_until, acked_at FROM deliveries WHERE id = ?", deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseUntil, &acknowledged)
 	if errors.Is(err, sql.ErrNoRows) || !recipient.Valid || recipient.String != endpoint {
 		return ErrForbidden
 	}
@@ -458,7 +462,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	if !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || token != leaseToken.String || leaseGeneration != generation || !leaseUntil.Valid || leaseUntil.Int64 <= now.UnixMilli() {
 		return ErrForbidden
 	}
-	if _, err := tx.Exec("UPDATE deliveries SET acked_at = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), deliveryID); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), deliveryID); err != nil {
 		return fmt.Errorf("acknowledge delivery: %w", err)
 	}
 	return tx.Commit()
@@ -468,7 +472,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 // deliveries. It is used only for best-effort wake hints; durable recipients
 // are still represented by delivery rows even while detached.
 func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT e.machine_id FROM deliveries d
+	rows, err := s.db.QueryContext(context.Background(), `SELECT DISTINCT e.machine_id FROM deliveries d
 		JOIN endpoints e ON e.endpoint = d.recipient_endpoint
 		WHERE d.message_id = ? AND e.lease_until > ?`, messageID, now.UnixMilli())
 	if err != nil {
@@ -493,7 +497,7 @@ func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, er
 // attached to the authenticated machine. It deliberately returns opaque IDs;
 // membership and message access remain separately enforced.
 func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT c.id FROM conversations c
+	rows, err := s.db.QueryContext(context.Background(), `SELECT DISTINCT c.id FROM conversations c
 		JOIN memberships m ON m.conversation_id = c.id
 		JOIN endpoints e ON e.endpoint = m.endpoint
 		WHERE e.machine_id = ? AND e.lease_until > ? ORDER BY c.created_at ASC`, machineID, now.UnixMilli())
@@ -517,7 +521,7 @@ func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conv
 
 func endpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
 	var until int64
-	err := tx.QueryRow("SELECT lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&until)
+	err := tx.QueryRowContext(context.Background(), "SELECT lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&until)
 	if errors.Is(err, sql.ErrNoRows) || until <= now.UnixMilli() {
 		return ErrForbidden
 	}
@@ -530,7 +534,7 @@ func endpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
 func endpointOwnedBy(tx *sql.Tx, endpoint, machineID string, now time.Time) error {
 	var owner string
 	var until int64
-	err := tx.QueryRow("SELECT machine_id, lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&owner, &until)
+	err := tx.QueryRowContext(context.Background(), "SELECT machine_id, lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&owner, &until)
 	if errors.Is(err, sql.ErrNoRows) || owner != machineID || until <= now.UnixMilli() {
 		return ErrForbidden
 	}
@@ -543,7 +547,7 @@ func endpointOwnedBy(tx *sql.Tx, endpoint, machineID string, now time.Time) erro
 func messageByID(tx *sql.Tx, messageID string) (Message, error) {
 	var message Message
 	var createdAt int64
-	err := tx.QueryRow("SELECT id, conversation_id, sequence, from_endpoint, body, created_at FROM messages WHERE id = ?", messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &createdAt)
+	err := tx.QueryRowContext(context.Background(), "SELECT id, conversation_id, sequence, from_endpoint, body, created_at FROM messages WHERE id = ?", messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &createdAt)
 	if err != nil {
 		return Message{}, fmt.Errorf("read idempotent message: %w", err)
 	}
