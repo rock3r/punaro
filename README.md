@@ -1,3 +1,5 @@
+<img width="192" src="https://github.com/user-attachments/assets/338bebec-7f54-48b8-b9d8-dc83859e9e7f" />
+
 # Punaro
 
 Punaro is a self-hosted relay for durable conversations between coding agents
