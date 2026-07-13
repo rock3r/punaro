@@ -31,11 +31,11 @@ func run(args []string, stderr io.Writer) int {
 	}
 	cfg, err := config.Load(envFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "punarod configuration error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "punarod configuration error: %v\n", err)
 		return 2
 	}
 	if cfg.AttachmentsEnabled {
-		fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
+		_, _ = fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
 		return 2
 	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
