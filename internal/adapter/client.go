@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/rock3r/punaro/internal/relay"
-	"nhooyr.io/websocket"
 )
 
 type AccessServiceToken struct {

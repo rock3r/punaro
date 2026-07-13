@@ -5,7 +5,10 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/uuid v1.6.0
 	github.com/pion/ice/v4 v4.0.10
 	github.com/pion/logging v0.2.4
 	github.com/pion/transport/v3 v3.0.8
@@ -17,8 +20,6 @@ require (
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.12 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
@@ -43,5 +44,4 @@ require (
 	modernc.org/libc v1.61.13 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.8.2 // indirect
-	nhooyr.io/websocket v1.8.17 // indirect
 )
