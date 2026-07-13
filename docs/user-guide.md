@@ -2,8 +2,9 @@
 
 Punaro is the proposed local relay layer for agents and people. It now has an
 **alpha, loopback-hosted text relay**: enrolled machines can advertise local
-`agent-mailbox` attachments, send durable text, and receive it through a local
-adapter. It is not yet a released remote service or an attachment system.
+`agent-mailbox` attachments, send durable text, receive it through a local
+adapter, and optionally bridge explicitly mapped Telegram topics. It is not
+yet a released remote service or an attachment system.
 
 ## What you can do today
 
@@ -15,7 +16,7 @@ envelope containing the relay message and conversation IDs.
 
 ## What is intentionally unavailable
 
-- Telegram commands or bot traffic
+- Automatic Telegram topic discovery or main-chat fallback
 - WebSocket wake-up hints (polling is authoritative)
 - File and attachment transfer
 - Browser clients, public sharing links, and anonymous downloads
@@ -27,6 +28,12 @@ origin and set all three verifier variables (`PUNARO_ACCESS_ISSUER`,
 the Access JWT as well as every machine's signed request. This implementation
 work is not, by itself, a completed public-release decision; follow the
 [security release gates](security-release-gates.md).
+
+The optional Telegram process is separately enrolled and binds one exact bot
+topic to one conversation. It validates the allowed user ID even if BotFather
+or chat settings already restrict access. See the [Telegram gateway guide](telegram-gateway.md)
+for safe setup, durable retry behavior, and its at-least-once external-send
+boundary.
 
 Setting `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail.  This protects
 you from mistaking the tested attachment foundation for a released file-transfer

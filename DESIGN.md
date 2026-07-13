@@ -5,7 +5,7 @@ agents on several computers and a human operator through Telegram. It does **not
 or share a machine's local `agent_mailbox` state. Each computer retains its
 local mailbox; a local adapter translates between that mailbox and Punaro.
 
-The first production target is a dedicated Proxmox LXC on the NUC. The relay is
+The first production target is a dedicated unprivileged Linux LXC. The relay is
 written in Go. Go matches the existing `agent-mailbox` toolchain, produces a
 single static-ish service binary, and keeps the runtime small and auditable.
 
@@ -15,8 +15,8 @@ This document describes the target architecture, not a released service. The
 current `punarod` binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
-this to `agent-mailbox`. The Telegram policy, durable route state, and Bot API
-polling primitives exist but no deployable gateway service is released. The
+this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
+adds explicit Telegram topic routing and a restricted Bot API client. The
 attachment package remains a testable foundation only and enablement fails
 closed before listening. The authoritative release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
@@ -179,17 +179,18 @@ WebSocket reconnect never alters delivery cursors.
 
 ## Minimal HTTP surface
 
-All requests use HTTPS and require both Cloudflare Access validation and Punaro
-machine authentication, except the Telegram gateway's loopback-only endpoint.
+All remote requests use HTTPS and require Punaro machine authentication.
+Cloudflare Access JWT validation is additionally enabled when all three Access
+verifier configuration values are set. The Telegram process is an outbound Bot
+API client and reaches the relay using its own enrolled machine credential.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/machines/heartbeat` | Renew machine and endpoint leases. |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
 | `POST` | `/v1/conversations` | Create a conversation with explicit members. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
-| `GET` | `/v1/deliveries` | Lease durable deliveries, optionally for one topic. |
+| `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
 | `GET` | `/v1/notifications` | Best-effort WebSocket wake-up stream. |
 
@@ -200,19 +201,19 @@ cover client retry windows.
 
 ## Telegram integration
 
-The Telegram gateway converts an explicitly selected allowed private-chat topic
-into one Punaro conversation. It verifies every configured allowed Telegram
-user ID on each update, records `update_id` idempotently, prevents concurrent pollers, and
-stores short-lived opaque callback references server-side rather than exposing
-endpoint addresses in callback data. A topic's target picker lists only active,
-authorized endpoints. Selecting a target creates or updates explicit
-conversation membership rather than a hidden global route.
+The Telegram gateway converts one explicitly configured topic into one Punaro
+conversation. It verifies the configured allowed Telegram user ID on every
+update. It persists `update_id` only after the relay append succeeds; retrying
+an unrecorded update uses the same relay idempotency key, so crashes or
+transient relay failures do not silently lose user input.
 
-For inbound Telegram messages, the gateway appends a normal Punaro message to
-the selected conversation. For outbound messages, it consumes a durable gateway
-delivery and posts using Telegram's `message_thread_id`. Store the Telegram
-chat ID, topic ID, and reply-to message ID as gateway metadata; do not infer a
-topic and never silently fall back to the main chat.
+For outbound messages, it leases a durable gateway delivery and posts it using
+the exact stored `message_thread_id`. One durable unique route prevents a
+conversation from fanning out to multiple topics. There is no topic picker,
+callback data, or main-chat fallback. The Bot API does not expose a send
+idempotency key, so a crash after an accepted Telegram send and before relay
+acknowledgement is deliberately at-least-once. Agent text is rendered as
+escaped rich HTML with entity detection disabled and content protection set.
 
 An optional major-update adapter action resolves the registered
 conversation/topic and submits a concise milestone or blocker message. It must
@@ -309,7 +310,7 @@ lists what is not yet a supported production operation.
    it alongside the current bridge without changing production routing.
 3. Add Telegram gateway as a separate process and migrate one topic.
 4. Add the best-effort WebSocket notifier and reconnect/poll instrumentation.
-5. Deploy to the NUC LXC, configure Cloudflare Access/Tunnel, and run a
+5. Deploy to a dedicated LXC, configure Cloudflare Access/Tunnel, and run a
    restore, direct-origin-bypass, and credential-revocation drill before
    exposing it remotely.
 

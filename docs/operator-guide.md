@@ -1,9 +1,9 @@
 # Operator guide
 
-Punaro currently provides a loopback alpha text relay for enrolled adapters.
-It is not a released public service and does not support attachment transfer.
-The Telegram gateway policy exists but its process deployment is not released.
-Do not use it to carry sensitive production work yet.
+Punaro currently provides a loopback alpha text relay for enrolled adapters and
+a separately deployable Telegram bridge. It is not a released public service
+and does not support attachment transfer. Do not use it to carry sensitive
+production work yet.
 
 ## Run locally
 

@@ -90,12 +90,18 @@ The owner of each endpoint must currently advertise it, and the creator must
 be an attached endpoint on the credentialed machine. Keep the idempotency key
 for retrying this exact creation request.
 
+## Telegram gateway
+
+The separately enrolled `punaro-telegram` process is described in the
+[Telegram gateway guide](telegram-gateway.md). Its gateway endpoint must be a
+member of each bridged conversation with `send,receive` rights. It is never a
+fallback route for the main chat.
+
 ## Current boundaries
 
-- No Telegram target picker/gateway is implemented yet.
-- Conversation creation and membership administration have an authenticated API
-  but no operator CLI yet.
-- WebSocket hints are deliberately absent; polling remains correct when a
-  machine sleeps or reconnects.
+- Topic routes are explicit operator state; no automatic picker or target
+  discovery is implemented.
+- WebSocket hints are best-effort; polling remains correct when a machine
+  sleeps or reconnects.
 - Attachments remain disabled until every v2 gate is complete, including the
   independent cryptography review and restore/revocation exercise.

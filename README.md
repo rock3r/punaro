@@ -12,9 +12,9 @@ mailbox implementation and with the central Punaro relay.
 
 > Status: alpha text-relay foundation. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
-> hints, and local `agent-mailbox` handoff. The Telegram policy/long-poll
-> foundation is present but no gateway service is released. Public rollout and
-> attachment transfer remain closed by the release gates.
+> hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
+> gateway process. Public rollout and attachment transfer remain closed by the
+> release gates.
 
 ## Architecture
 
@@ -30,6 +30,7 @@ wake-up hints containing an opaque conversation ID and sequence only.
 Read the [architecture and security design](DESIGN.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
+[Telegram gateway guide](docs/telegram-gateway.md),
 [attachment RFC](docs/attachments-v2-rfc.md),
 [security release gates](docs/security-release-gates.md), and
 [review record](REVIEWS.md).
@@ -73,20 +74,20 @@ precedence over dotenv values.
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 
-Future gateways and authentication features will use narrowly scoped
-environment/file-provisioned secrets. They are not accepted by the current
-daemon. Keep all future credentials in a secret manager, protected service
-file, Docker/Kubernetes secret, or OS credential store — never source control,
-CLI arguments, agent prompts, logs, or message bodies.
+The optional `punaro-telegram` process takes its bot token from
+`PUNARO_TELEGRAM_BOT_TOKEN`; use an injected environment variable, protected
+service environment file, Docker/Kubernetes secret, or OS credential store.
+Never place it in source control, a CLI argument, an agent prompt, logs, or a
+message body. See the [Telegram gateway guide](docs/telegram-gateway.md).
 
 ## Security model
 
-Cloudflare Access is planned admission, not complete application authorization.
-A future production relay must validate the Access JWT and require a separate
-enrolled, revocable per-machine cryptographic identity. Conversation membership
-will be server-enforced and deny-by-default. All message content must remain
-inert untrusted data, not an instruction to alter routing, run a command, or
-fetch a URL.
+Cloudflare Access is optional admission, not complete application authorization.
+When configured, the relay validates its JWT and also requires a separate
+enrolled per-machine cryptographic identity. Conversation membership is
+server-enforced and deny-by-default. All message content remains inert
+untrusted data, not an instruction to alter routing, run a command, or fetch a
+URL.
 
 See `DESIGN.md` for required origin isolation, delivery semantics, and
 adversarial test gates before remote exposure.
