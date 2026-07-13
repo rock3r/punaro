@@ -19,7 +19,7 @@ import (
 )
 
 func TestRFC9180CorpusProvenanceAndSelectedSuite(t *testing.T) {
-	goRoot, err := exec.Command("go", "env", "GOROOT").Output()
+	goRoot, err := exec.CommandContext(t.Context(), "go", "env", "GOROOT").Output()
 	if err != nil {
 		t.Fatal(err)
 	}

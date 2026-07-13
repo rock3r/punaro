@@ -125,6 +125,7 @@ func validateManifest(m Manifest) error {
 func isZero16(value [16]byte) bool { return value == [16]byte{} }
 func isZero32(value [32]byte) bool { return value == [32]byte{} }
 
+// SignManifest validates and signs an immutable manifest with an Ed25519 key.
 func SignManifest(m *Manifest, private ed25519.PrivateKey) error {
 	if m == nil || len(private) != ed25519.PrivateKeySize {
 		return errors.New("invalid manifest signer")
@@ -139,6 +140,8 @@ func SignManifest(m *Manifest, private ed25519.PrivateKey) error {
 	copy(m.Signature[:], ed25519.Sign(private, payload))
 	return nil
 }
+
+// VerifyManifest checks an Ed25519 signature after validating manifest bounds.
 func VerifyManifest(m Manifest, public ed25519.PublicKey) bool {
 	if len(public) != ed25519.PublicKeySize || validateManifest(m) != nil {
 		return false
@@ -146,12 +149,16 @@ func VerifyManifest(m Manifest, public ed25519.PublicKey) bool {
 	payload, err := m.signedBytes()
 	return err == nil && ed25519.Verify(public, payload, m.Signature[:])
 }
+
+// EncodeManifest serializes a complete manifest with canonical CBOR.
 func EncodeManifest(m Manifest) ([]byte, error) {
 	if err := validateManifest(m); err != nil {
 		return nil, err
 	}
 	return canonicalEncoding.Marshal(m.wire())
 }
+
+// DecodeManifest accepts only a complete, strict, canonical manifest record.
 func DecodeManifest(raw []byte) (Manifest, error) {
 	if len(raw) == 0 || len(raw) > maxManifestEncodedBytes {
 		return Manifest{}, errors.New("invalid manifest size")

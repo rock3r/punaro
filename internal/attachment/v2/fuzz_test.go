@@ -10,7 +10,7 @@ func FuzzDecodeManifest(f *testing.F) {
 	}
 	f.Add(raw)
 	f.Add([]byte{0xa0})
-	f.Fuzz(func(t *testing.T, input []byte) {
+	f.Fuzz(func(_ *testing.T, input []byte) {
 		_, _ = DecodeManifest(input)
 	})
 }
@@ -18,7 +18,7 @@ func FuzzDecodeManifest(f *testing.F) {
 func FuzzDecodeEnvelope(f *testing.F) {
 	f.Add([]byte{0xa0})
 	f.Add(make([]byte, maxEnvelopeEncodedBytes+1))
-	f.Fuzz(func(t *testing.T, input []byte) {
+	f.Fuzz(func(_ *testing.T, input []byte) {
 		_, _ = DecodeEnvelope(input)
 	})
 }
