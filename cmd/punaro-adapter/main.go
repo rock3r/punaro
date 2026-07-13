@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 type adapterConfig struct {
@@ -139,6 +140,8 @@ func run() error {
 	syncer := adapter.Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	wake := make(chan struct{}, 1)
+	go runNotifications(ctx, relayClient, wake)
 	for {
 		if err := syncer.SyncOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			// Errors deliberately omit remote and mailbox output bodies.
@@ -149,7 +152,39 @@ func run() error {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil
+		case <-wake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		case <-timer.C:
+		}
+	}
+}
+
+func runNotifications(ctx context.Context, client *adapter.HTTPRelayClient, wake chan<- struct{}) {
+	backoff := time.Second
+	for ctx.Err() == nil {
+		_ = client.ReadNotifications(ctx, func(adapterWake relay.WakeEvent) {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		})
+		if ctx.Err() != nil {
+			return
+		}
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
 		}
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
+	"nhooyr.io/websocket"
 )
 
 func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
@@ -62,6 +63,51 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	message, err := client.Send(context.Background(), "conversation-1", "agent/a", "reply", "send-1")
 	if err != nil || message.ID != "message-1" {
 		t.Fatalf("send = %#v, %v", message, err)
+	}
+}
+
+func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/notifications" {
+			t.Fatal("unexpected route")
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("unsigned wake handshake")
+		}
+		connection, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer connection.Close(websocket.StatusNormalClosure, "")
+		if err := connection.Write(r.Context(), websocket.MessageText, []byte(`{"type":"wake","topic_id":"conversation-1","sequence":7}`)); err != nil {
+			t.Fatal(err)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make(chan relay.WakeEvent, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.ReadNotifications(ctx, func(event relay.WakeEvent) { events <- event }); err != nil && ctx.Err() == nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-events:
+		if event.Type != "wake" || event.TopicID != "conversation-1" || event.Sequence != 7 {
+			t.Fatalf("event=%#v", event)
+		}
+	default:
+		t.Fatal("wake was not delivered")
 	}
 }
 

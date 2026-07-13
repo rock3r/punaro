@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
+	"nhooyr.io/websocket"
 )
 
 type AccessServiceToken struct {
@@ -79,6 +80,52 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 func (c *HTTPRelayClient) Ack(ctx context.Context, delivery relay.Delivery) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/"+url.PathEscape(delivery.ID)+"/ack", map[string]any{"endpoint": delivery.RecipientEndpoint, "lease_token": delivery.LeaseToken, "lease_generation": delivery.LeaseGeneration}, nil)
 	return err
+}
+
+func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(relay.WakeEvent)) error {
+	path := "/v1/notifications"
+	nonce, err := randomNonce()
+	if err != nil {
+		return err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: path, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := *c.baseURL
+	if target.Scheme == "https" {
+		target.Scheme = "wss"
+	} else {
+		target.Scheme = "ws"
+	}
+	target.Path = path
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if c.accessToken.ClientID != "" {
+		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	connection, _, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		return fmt.Errorf("connect relay notifications: %w", err)
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "")
+	for {
+		_, data, err := connection.Read(ctx)
+		if err != nil {
+			if websocket.CloseStatus(err) == websocket.StatusNormalClosure || ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("read relay notification: %w", err)
+		}
+		var event relay.WakeEvent
+		if err := json.Unmarshal(data, &event); err != nil || event.Type != "wake" || event.TopicID == "" || event.Sequence < 1 {
+			return fmt.Errorf("invalid relay notification")
+		}
+		receive(event)
+	}
 }
 
 func (c *HTTPRelayClient) doJSON(ctx context.Context, method, path string, requestValue, responseValue any) (int, error) {
