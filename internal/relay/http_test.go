@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -9,8 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
@@ -114,6 +118,47 @@ func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	handler.ServeHTTP(response, unsigned)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unsigned status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPNotificationsAuthenticatesAndEmitsOnlyWakeMetadata(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	notifier := NewNotifier()
+	server := httptest.NewServer(NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, Notifier: notifier}))
+	defer server.Close()
+	path := "/v1/notifications"
+	signed := signRequest(private, "machine-a", http.MethodGet, path, nil, clock, "notifications")
+	headers := http.Header{}
+	headers.Set("X-Punaro-Machine", signed.MachineID)
+	headers.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	headers.Set("X-Punaro-Nonce", signed.Nonce)
+	headers.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	connection, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+path, &websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		t.Fatalf("dial notifications status=%v err=%v", response, err)
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "done")
+	notifier.Publish("machine-a", "conversation-1", 9)
+	_, data, err := connection.Read(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != `{"type":"wake","topic_id":"conversation-1","sequence":9}` {
+		t.Fatalf("wake payload=%s", data)
 	}
 }
 

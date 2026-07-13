@@ -464,6 +464,31 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	return tx.Commit()
 }
 
+// RecipientMachines returns active machine owners for a message's recipient
+// deliveries. It is used only for best-effort wake hints; durable recipients
+// are still represented by delivery rows even while detached.
+func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT e.machine_id FROM deliveries d
+		JOIN endpoints e ON e.endpoint = d.recipient_endpoint
+		WHERE d.message_id = ? AND e.lease_until > ?`, messageID, now.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("find message recipient machines: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var machines []string
+	for rows.Next() {
+		var machineID string
+		if err := rows.Scan(&machineID); err != nil {
+			return nil, err
+		}
+		machines = append(machines, machineID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return machines, nil
+}
+
 func endpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
 	var until int64
 	err := tx.QueryRow("SELECT lease_until FROM endpoints WHERE endpoint = ?", endpoint).Scan(&until)

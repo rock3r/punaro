@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"nhooyr.io/websocket"
 )
 
 const maxRequestBodyBytes = 64 << 10
@@ -19,6 +22,7 @@ type HandlerOptions struct {
 	Now              func() time.Time
 	EndpointLeaseTTL time.Duration
 	DeliveryLeaseTTL time.Duration
+	Notifier         *Notifier
 }
 
 // NewHandler returns the authenticated relay API. It intentionally does not
@@ -33,13 +37,17 @@ func NewHandler(store *Store, auth *Authenticator, options HandlerOptions) http.
 	if options.DeliveryLeaseTTL <= 0 {
 		options.DeliveryLeaseTTL = time.Minute
 	}
-	h := &handler{store: store, auth: auth, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL}
+	if options.Notifier == nil {
+		options.Notifier = NewNotifier()
+	}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL}
 	return http.HandlerFunc(h.serveHTTP)
 }
 
 type handler struct {
 	store            *Store
 	auth             *Authenticator
+	notifier         *Notifier
 	now              func() time.Time
 	endpointLeaseTTL time.Duration
 	deliveryLeaseTTL time.Duration
@@ -62,6 +70,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	now := h.now().UTC()
 	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/notifications":
+		h.notifications(w, r, machineID)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
 		h.advertiseEndpoints(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
@@ -84,6 +94,40 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.ackDelivery(w, body, machineID, deliveryID, now)
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
+	}
+}
+
+func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineID string) {
+	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
+	if err != nil {
+		return
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "")
+	client := h.notifier.Register(machineID)
+	defer client.Close()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	go func() {
+		defer cancel()
+		for {
+			if _, _, err := connection.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-client.Events():
+			payload, err := json.Marshal(event)
+			if err != nil {
+				return
+			}
+			if err := connection.Write(ctx, websocket.MessageText, payload); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -186,6 +230,16 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID, c
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if !duplicate {
+		machines, err := h.store.RecipientMachines(message.ID, now)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, recipientMachine := range machines {
+			h.notifier.Publish(recipientMachine, message.ConversationID, message.Sequence)
+		}
 	}
 	status := http.StatusCreated
 	if duplicate {

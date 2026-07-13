@@ -58,6 +58,13 @@ func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	if !duplicate || again.ID != first.ID || again.Sequence != first.Sequence {
 		t.Fatalf("idempotent append = %#v duplicate=%v, want original %#v", again, duplicate, first)
 	}
+	recipients, err := store.RecipientMachines(first.ID, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 1 || recipients[0] != "machine-b" {
+		t.Fatalf("recipient machines = %#v", recipients)
+	}
 
 	leased, err := store.LeaseDeliveries("machine-b", "agent/b", "", clock, time.Minute, 10)
 	if err != nil {
