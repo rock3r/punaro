@@ -83,7 +83,7 @@ func (a *Ed25519Authenticator) Authenticate(_ context.Context, request *http.Req
 		return Principal{}, ErrUnauthorized
 	}
 	now := a.now()
-	if !a.nonceStore.ConsumeNonce(device, nonce, now, now.Add(authWindow)) {
+	if !a.nonceStore.ConsumeNonce(device, nonce, now, time.Unix(unix, 0).Add(authWindow)) {
 		return Principal{}, ErrUnauthorized
 	}
 	return Principal{DeviceID: device}, nil
