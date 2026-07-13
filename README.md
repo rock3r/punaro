@@ -80,11 +80,16 @@ adversarial test gates before remote exposure.
 
 ## Development
 
+Punaro follows a strict test-first discipline. See [AGENTS.md](AGENTS.md) for
+the required red-green-refactor workflow, security invariants, and handoff
+rules.
+
 ```sh
-go test ./...
-go vet ./...
-go build ./cmd/punarod
+make ci
 ```
+
+The Makefile also exposes individual `test`, `test-race`, `staticcheck`,
+`security`, `dockerfile-lint`, and `workflow-lint` targets.
 
 ## License
 

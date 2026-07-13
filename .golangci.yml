@@ -1,0 +1,29 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - noctx
+    - predeclared
+    - revive
+    - staticcheck
+    - unconvert
+    - unused
+    - usestdlibvars
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
