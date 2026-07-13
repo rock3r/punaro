@@ -44,6 +44,12 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"reply","created_at":"2026-07-13T12:00:00Z"}`))
+		case "/v1/conversations":
+			if r.Header.Get("Idempotency-Key") != "create-1" {
+				t.Fatal("missing create idempotency key")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"conversation-created"}`))
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
@@ -63,6 +69,10 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	message, err := client.Send(context.Background(), "conversation-1", "agent/a", "reply", "send-1")
 	if err != nil || message.ID != "message-1" {
 		t.Fatalf("send = %#v, %v", message, err)
+	}
+	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")
+	if err != nil || conversation.ID != "conversation-created" {
+		t.Fatalf("create=%#v err=%v", conversation, err)
 	}
 }
 

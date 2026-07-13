@@ -65,6 +65,35 @@ func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.D
 	return response.Deliveries, err
 }
 
+// CreateConversation bootstraps an explicit, membership-scoped room from an
+// attached local endpoint. The relay still verifies endpoint ownership.
+func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, idempotencyKey string) (relay.Conversation, error) {
+	if strings.TrimSpace(creator) == "" || len(members) == 0 || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.Conversation{}, fmt.Errorf("creator, members, and idempotency key are required")
+	}
+	encoded := make([]map[string]any, 0, len(members))
+	for _, member := range members {
+		encoded = append(encoded, map[string]any{"endpoint": member.Endpoint, "capabilities": capabilityNames(member.Capabilities)})
+	}
+	var conversation relay.Conversation
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "members": encoded}, idempotencyKey, &conversation)
+	return conversation, err
+}
+
+func capabilityNames(capabilities relay.Capability) []string {
+	result := make([]string, 0, 3)
+	if capabilities&relay.CapSend != 0 {
+		result = append(result, "send")
+	}
+	if capabilities&relay.CapReceive != 0 {
+		result = append(result, "receive")
+	}
+	if capabilities&relay.CapAdmin != 0 {
+		result = append(result, "admin")
+	}
+	return result
+}
+
 // Send appends an opaque local-agent reply to an existing conversation. The
 // idempotency key belongs to the caller's retry domain and is never derived
 // from the body or a machine credential.
