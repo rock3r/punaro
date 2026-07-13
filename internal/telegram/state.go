@@ -33,6 +33,7 @@ func Open(database string) (*State, error) {
 		"PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000",
 		"CREATE TABLE IF NOT EXISTS processed_updates (update_id INTEGER PRIMARY KEY)",
 		"CREATE TABLE IF NOT EXISTS topic_routes (chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, PRIMARY KEY(chat_id, thread_id))",
+		"CREATE UNIQUE INDEX IF NOT EXISTS topic_routes_conversation ON topic_routes(conversation_id)",
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -45,14 +46,27 @@ func Open(database string) (*State, error) {
 // Close closes the durable Telegram state database.
 func (s *State) Close() error { return s.db.Close() }
 
-// ClaimUpdate returns false for a replayed Telegram update ID.
-func (s *State) ClaimUpdate(updateID int64) (bool, error) {
-	result, err := s.db.ExecContext(context.Background(), "INSERT INTO processed_updates(update_id) VALUES (?) ON CONFLICT(update_id) DO NOTHING", updateID)
+// Processed reports whether a Telegram update completed durable relay
+// submission. A false result must not be recorded until that submission has
+// succeeded, otherwise a transient relay failure would lose the update.
+func (s *State) Processed(updateID int64) (bool, error) {
+	var found int64
+	err := s.db.QueryRowContext(context.Background(), "SELECT update_id FROM processed_updates WHERE update_id = ?", updateID).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	changed, err := result.RowsAffected()
-	return changed == 1, err
+	return true, nil
+}
+
+// MarkProcessed records a successful relay submission. A crash after the
+// submission but before this write is safe because the relay deduplicates the
+// retry using the same Telegram update identity.
+func (s *State) MarkProcessed(updateID int64) error {
+	_, err := s.db.ExecContext(context.Background(), "INSERT INTO processed_updates(update_id) VALUES (?) ON CONFLICT(update_id) DO NOTHING", updateID)
+	return err
 }
 
 // SetRoute binds one exact Telegram topic to one relay conversation. There is
@@ -77,4 +91,19 @@ func (s *State) Route(chatID, threadID int64) (string, bool, error) {
 		return "", false, err
 	}
 	return conversation, true, nil
+}
+
+// RouteForConversation returns the sole Telegram topic bound to a relay
+// conversation. The unique durable index prevents an agent reply being fanned
+// out into more than one user topic by accident.
+func (s *State) RouteForConversation(conversationID string) (int64, int64, bool, error) {
+	var chatID, threadID int64
+	err := s.db.QueryRowContext(context.Background(), "SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?", conversationID).Scan(&chatID, &threadID)
+	if err == sql.ErrNoRows {
+		return 0, 0, false, nil
+	}
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return chatID, threadID, true, nil
 }

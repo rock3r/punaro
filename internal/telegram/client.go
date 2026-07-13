@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 )
 
 const maxBotResponseBytes = 1 << 20
+const maxRichMessageBytes = 32 << 10
 
 // Client is a narrow Telegram Bot API long-poll client. Its token is retained
 // only in memory and is never included in returned errors.
@@ -87,4 +89,55 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 		}
 	}
 	return updates, nil
+}
+
+// SendRichMessage sends trusted, already-rendered HTML to one exact Telegram
+// topic. It disables entity detection and protects content so opaque agent
+// text cannot create accidental mentions, links, or forwarding paths.
+func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, html string) error {
+	if chatID == 0 || threadID <= 0 || strings.TrimSpace(html) == "" || len(html) > maxRichMessageBytes {
+		return fmt.Errorf("invalid Telegram rich message")
+	}
+	body, err := json.Marshal(struct {
+		ChatID          int64 `json:"chat_id"`
+		MessageThreadID int64 `json:"message_thread_id"`
+		RichMessage     struct {
+			HTML                string `json:"html"`
+			SkipEntityDetection bool   `json:"skip_entity_detection"`
+		} `json:"rich_message"`
+		ProtectContent bool `json:"protect_content"`
+	}{
+		ChatID:          chatID,
+		MessageThreadID: threadID,
+		RichMessage: struct {
+			HTML                string `json:"html"`
+			SkipEntityDetection bool   `json:"skip_entity_detection"`
+		}{HTML: html, SkipEntityDetection: true},
+		ProtectContent: true,
+	})
+	if err != nil {
+		return fmt.Errorf("encode Telegram rich message: %w", err)
+	}
+	target := *c.base
+	target.Path = strings.TrimRight(target.Path, "/") + "/bot" + c.token + "/sendRichMessage"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build Telegram rich message: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("telegram rich message failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram rich message returned HTTP %d", response.StatusCode)
+	}
+	var decoded struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(&decoded); err != nil || !decoded.OK {
+		return fmt.Errorf("invalid Telegram rich message response")
+	}
+	return nil
 }
