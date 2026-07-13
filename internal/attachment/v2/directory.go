@@ -57,9 +57,12 @@ type DirectoryCheckpoint struct {
 // equivocation. Implementations must make each operation durable before
 // returning success.
 type CheckpointStore interface {
+	// Advance atomically checks the current checkpoint, validates the supplied
+	// append-only proof against it, persists a newer checkpoint, or durably
+	// freezes an equivocated audience before returning. Implementations must
+	// serialize this operation for one audience.
+	Advance(audience [32]byte, next DirectoryCheckpoint, evidence []byte, proof *FullConsistencyProof) error
 	LoadCheckpoint(audience [32]byte) (DirectoryCheckpoint, bool, error)
-	SaveCheckpoint(audience [32]byte, checkpoint DirectoryCheckpoint) error
-	FreezeAudience(audience [32]byte, evidence []byte) error
 	AudienceFrozen(audience [32]byte) (bool, error)
 }
 
@@ -136,10 +139,10 @@ func decodeDirectoryHead(raw []byte) (DirectoryHead, error) {
 	return head, nil
 }
 
-// VerifyAndAdvanceDirectoryHead verifies a fresh root-signed head and advances
-// the durable checkpoint only after an append-only consistency proof succeeds.
-// Same-sequence conflict freezes the audience before returning an error.
-func VerifyAndAdvanceDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time, proof *FullConsistencyProof) (DirectoryHead, error) {
+// verifyAndAdvanceDirectoryHead is retained only for package-level tests of
+// head verification. Production code must use NewDirectorySnapshotResolver so
+// an unsigned or withheld snapshot can never advance a checkpoint.
+func verifyAndAdvanceDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time, proof *FullConsistencyProof) (DirectoryHead, error) {
 	head, err := verifyDirectoryHead(raw, trust, now)
 	if err != nil {
 		return DirectoryHead{}, err
@@ -171,39 +174,33 @@ func verifyDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time) (Direc
 }
 
 func advanceVerifiedDirectoryHead(raw []byte, head DirectoryHead, trust DirectoryTrust, proof *FullConsistencyProof) (DirectoryHead, error) {
-	frozen, err := trust.Checkpoints.AudienceFrozen(trust.Audience)
-	if err != nil || frozen {
-		return DirectoryHead{}, errors.New("directory audience is frozen")
-	}
-	previous, found, err := trust.Checkpoints.LoadCheckpoint(trust.Audience)
-	if err != nil {
-		return DirectoryHead{}, err
-	}
-	if !found {
-		if err := trust.Checkpoints.SaveCheckpoint(trust.Audience, checkpointFor(head)); err != nil {
-			return DirectoryHead{}, err
-		}
-		return head, nil
-	}
-	if head.Sequence < previous.Sequence || head.RevocationEpoch < previous.RevocationEpoch {
-		return DirectoryHead{}, errors.New("directory rollback")
-	}
-	if head.Sequence == previous.Sequence {
-		if head.TreeSize != previous.TreeSize || head.TreeRoot != previous.TreeRoot || head.RevocationEpoch != previous.RevocationEpoch {
-			if err := trust.Checkpoints.FreezeAudience(trust.Audience, append([]byte(nil), raw...)); err != nil {
-				return DirectoryHead{}, fmt.Errorf("freeze directory equivocation: %w", err)
-			}
-			return DirectoryHead{}, errors.New("directory equivocation")
-		}
-		return head, nil
-	}
-	if proof == nil || !proof.valid(previous, head) {
-		return DirectoryHead{}, errors.New("invalid directory consistency proof")
-	}
-	if err := trust.Checkpoints.SaveCheckpoint(trust.Audience, checkpointFor(head)); err != nil {
+	if err := trust.Checkpoints.Advance(trust.Audience, checkpointFor(head), append([]byte(nil), raw...), proof); err != nil {
 		return DirectoryHead{}, err
 	}
 	return head, nil
+}
+
+func advanceCheckpoint(previous DirectoryCheckpoint, found bool, frozen bool, next DirectoryCheckpoint, proof *FullConsistencyProof) (save, freeze bool, result error) {
+	if frozen {
+		return false, false, errors.New("directory audience is frozen")
+	}
+	if !found {
+		return true, false, nil
+	}
+	if next.Sequence < previous.Sequence || next.RevocationEpoch < previous.RevocationEpoch {
+		return false, false, errors.New("directory rollback")
+	}
+	if next.Sequence == previous.Sequence {
+		if next.TreeSize != previous.TreeSize || next.TreeRoot != previous.TreeRoot || next.RevocationEpoch != previous.RevocationEpoch {
+			return false, true, errors.New("directory equivocation")
+		}
+		return false, false, nil
+	}
+	head := DirectoryHead{TreeSize: next.TreeSize, TreeRoot: next.TreeRoot}
+	if proof == nil || !proof.valid(previous, head) {
+		return false, false, errors.New("invalid directory consistency proof")
+	}
+	return true, false, nil
 }
 
 func checkpointFor(head DirectoryHead) DirectoryCheckpoint {

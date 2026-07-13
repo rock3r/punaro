@@ -91,14 +91,19 @@ may never revive the generation.
 
 A membership entry is CDE map `{1=2,2=conversation_id,3=sender_device_id,
 4=sender_generation,5=recipient_device_id,6=recipient_generation,
-7=membership_commitment}`. Conversation and device IDs are 16-byte strings;
+7=membership_commitment,8=revoked}`. Conversation and device IDs are 16-byte strings;
 generations are non-zero unsigned integers; and the commitment is 32 bytes.
-The `(conversation, sender device/generation, recipient device/generation)`
-tuple is immutable and must appear no more than once in one snapshot. A
-manifest is authorized only when its audience, directory-head commitment,
-revocation epoch, signer key ID, sender generation, recipient generation, and
-membership commitment all match this fresh, exact snapshot. The recipient's
-HPKE key is resolved from that same non-revoked device record.
+The `(conversation, sender device/generation, recipient device/generation,
+membership commitment)` tuple first appears unrevoked. A later identical entry
+may only change `revoked` from false to true. This tombstone is required when a
+membership is removed or replaced; an unrevoked historic grant is not active
+after its tombstone. A manifest is authorized only when its audience,
+directory-head commitment, revocation epoch, signer key ID, sender generation,
+recipient generation, and membership commitment all match this fresh, active
+snapshot. For each device ID, only the highest directory generation is active;
+older generations are superseded even before an explicit tombstone. The
+recipient's HPKE key is resolved from that same current, non-revoked device
+record.
 
 ## Immutable records
 

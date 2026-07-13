@@ -33,6 +33,7 @@ type DirectoryMembership struct {
 	RecipientDeviceID   [16]byte
 	RecipientGeneration uint64
 	Commitment          [32]byte
+	Revoked             bool
 }
 
 // DirectoryEntry is one ordered transparency-log leaf. Exactly one field must
@@ -40,6 +41,20 @@ type DirectoryMembership struct {
 type DirectoryEntry struct {
 	Device     *DirectoryDevice
 	Membership *DirectoryMembership
+}
+
+type directoryDeviceKey struct {
+	id         [16]byte
+	generation uint64
+}
+
+type directoryMembershipKey struct {
+	conversation [16]byte
+	sender       [16]byte
+	senderGen    uint64
+	recipient    [16]byte
+	recipientGen uint64
+	commitment   [32]byte
 }
 
 // DirectoryEntryHashes returns the ordered leaf commitments for entries.
@@ -73,14 +88,18 @@ func (entry DirectoryEntry) canonicalBytes() ([]byte, error) {
 	if isZero16(value.ConversationID) || isZero16(value.SenderDeviceID) || value.SenderGeneration == 0 || isZero16(value.RecipientDeviceID) || value.RecipientGeneration == 0 || isZero32(value.Commitment) {
 		return nil, errors.New("invalid directory membership")
 	}
-	return canonicalEncoding.Marshal(map[uint64]any{1: uint64(2), 2: value.ConversationID, 3: value.SenderDeviceID, 4: value.SenderGeneration, 5: value.RecipientDeviceID, 6: value.RecipientGeneration, 7: value.Commitment})
+	return canonicalEncoding.Marshal(map[uint64]any{1: uint64(2), 2: value.ConversationID, 3: value.SenderDeviceID, 4: value.SenderGeneration, 5: value.RecipientDeviceID, 6: value.RecipientGeneration, 7: value.Commitment, 8: value.Revoked})
 }
 
 // DirectorySnapshotResolver resolves manifest and envelope key authority only
 // from a freshly verified root-signed snapshot.
 type DirectorySnapshotResolver struct {
-	head    DirectoryHead
-	entries []DirectoryEntry
+	head             DirectoryHead
+	devices          map[directoryDeviceKey]DirectoryDevice
+	latestGeneration map[[16]byte]uint64
+	memberships      map[directoryMembershipKey]DirectoryMembership
+	checkpoints      CheckpointStore
+	now              func() time.Time
 }
 
 // NewDirectorySnapshotResolver verifies the exact supplied ordered directory
@@ -92,6 +111,7 @@ func NewDirectorySnapshotResolver(rawHead []byte, trust DirectoryTrust, now time
 	if err != nil {
 		return nil, err
 	}
+	entries = cloneDirectoryEntries(entries)
 	hashes, err := DirectoryEntryHashes(entries)
 	if err != nil || uint64(len(hashes)) != head.TreeSize || directoryMerkleRoot(hashes) != head.TreeRoot {
 		return nil, errors.New("directory snapshot does not match head")
@@ -99,59 +119,79 @@ func NewDirectorySnapshotResolver(rawHead []byte, trust DirectoryTrust, now time
 	if proof != nil && !sameHashes(proof.LeafHashes, hashes) {
 		return nil, errors.New("directory snapshot differs from consistency proof")
 	}
-	if err := validateDirectoryEntryHistory(entries); err != nil {
+	devices, latestGeneration, memberships, err := validateDirectoryEntryHistory(entries)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := advanceVerifiedDirectoryHead(rawHead, head, trust, proof); err != nil {
 		return nil, err
 	}
-	return &DirectorySnapshotResolver{head: head, entries: append([]DirectoryEntry(nil), entries...)}, nil
+	return &DirectorySnapshotResolver{head: head, devices: devices, latestGeneration: latestGeneration, memberships: memberships, checkpoints: trust.Checkpoints, now: time.Now}, nil
+}
+
+func cloneDirectoryEntries(entries []DirectoryEntry) []DirectoryEntry {
+	cloned := make([]DirectoryEntry, len(entries))
+	for index, entry := range entries {
+		if entry.Device != nil {
+			device := *entry.Device
+			cloned[index].Device = &device
+		}
+		if entry.Membership != nil {
+			membership := *entry.Membership
+			cloned[index].Membership = &membership
+		}
+	}
+	return cloned
 }
 
 // validateDirectoryEntryHistory makes a device generation immutable. Its only
 // permitted subsequent state change is revocation, and membership snapshots
 // are immutable too. This prevents a validly signed tree from accidentally
 // reviving a device or rebinding its established identity.
-func validateDirectoryEntryHistory(entries []DirectoryEntry) error {
-	type deviceGeneration struct {
-		id         [16]byte
-		generation uint64
-	}
-	type membershipIdentity struct {
-		conversation [16]byte
-		sender       [16]byte
-		senderGen    uint64
-		recipient    [16]byte
-		recipientGen uint64
-	}
-	devices := make(map[deviceGeneration]DirectoryDevice)
-	memberships := make(map[membershipIdentity]struct{})
+func validateDirectoryEntryHistory(entries []DirectoryEntry) (map[directoryDeviceKey]DirectoryDevice, map[[16]byte]uint64, map[directoryMembershipKey]DirectoryMembership, error) {
+	devices := make(map[directoryDeviceKey]DirectoryDevice)
+	latestGeneration := make(map[[16]byte]uint64)
+	memberships := make(map[directoryMembershipKey]DirectoryMembership)
 	for _, entry := range entries {
 		if entry.Device != nil {
 			current := *entry.Device
-			key := deviceGeneration{id: current.DeviceID, generation: current.Generation}
+			key := directoryDeviceKey{id: current.DeviceID, generation: current.Generation}
 			previous, seen := devices[key]
 			if !seen {
 				if current.Revoked {
-					return errors.New("directory device cannot begin revoked")
+					return nil, nil, nil, errors.New("directory device cannot begin revoked")
+				}
+				if current.SigningKeyID == current.HPKEKeyID {
+					return nil, nil, nil, errors.New("directory device key identifiers must differ")
 				}
 				devices[key] = current
+				if current.Generation > latestGeneration[current.DeviceID] {
+					latestGeneration[current.DeviceID] = current.Generation
+				}
 				continue
 			}
 			if previous.DeviceID != current.DeviceID || previous.Generation != current.Generation || previous.SigningKeyID != current.SigningKeyID || previous.SigningPublicKey != current.SigningPublicKey || previous.HPKEKeyID != current.HPKEKeyID || previous.HPKEPublicKey != current.HPKEPublicKey || previous.Revoked || !current.Revoked {
-				return errors.New("invalid directory device history")
+				return nil, nil, nil, errors.New("invalid directory device history")
 			}
 			devices[key] = current
 			continue
 		}
 		current := *entry.Membership
-		key := membershipIdentity{conversation: current.ConversationID, sender: current.SenderDeviceID, senderGen: current.SenderGeneration, recipient: current.RecipientDeviceID, recipientGen: current.RecipientGeneration}
-		if _, exists := memberships[key]; exists {
-			return errors.New("duplicate directory membership")
+		key := directoryMembershipKey{conversation: current.ConversationID, sender: current.SenderDeviceID, senderGen: current.SenderGeneration, recipient: current.RecipientDeviceID, recipientGen: current.RecipientGeneration, commitment: current.Commitment}
+		previous, seen := memberships[key]
+		if !seen {
+			if current.Revoked {
+				return nil, nil, nil, errors.New("directory membership cannot begin revoked")
+			}
+			memberships[key] = current
+			continue
 		}
-		memberships[key] = struct{}{}
+		if previous.ConversationID != current.ConversationID || previous.SenderDeviceID != current.SenderDeviceID || previous.SenderGeneration != current.SenderGeneration || previous.RecipientDeviceID != current.RecipientDeviceID || previous.RecipientGeneration != current.RecipientGeneration || previous.Commitment != current.Commitment || previous.Revoked || !current.Revoked {
+			return nil, nil, nil, errors.New("invalid directory membership history")
+		}
+		memberships[key] = current
 	}
-	return nil
+	return devices, latestGeneration, memberships, nil
 }
 
 func sameHashes(left, right [][32]byte) bool {
@@ -169,7 +209,7 @@ func sameHashes(left, right [][32]byte) bool {
 // ValidateManifestAuthority implements DirectoryKeyResolver and checks every
 // manifest device, key, membership, directory-head, and revocation binding.
 func (r *DirectorySnapshotResolver) ValidateManifestAuthority(manifest Manifest, now time.Time) (ed25519.PublicKey, error) {
-	if r == nil || !r.fresh(now) {
+	if r == nil || !r.fresh(now) || !r.current() {
 		return nil, errors.New("invalid manifest directory authority")
 	}
 	nowUnix := now.UTC().Unix()
@@ -181,7 +221,8 @@ func (r *DirectorySnapshotResolver) ValidateManifestAuthority(manifest Manifest,
 		return nil, errors.New("invalid manifest directory authority")
 	}
 	sender, found := r.device(manifest.SenderDeviceID, manifest.SenderGeneration)
-	if !found || sender.Revoked || sender.SigningKeyID != manifest.SignerKeyID || !r.membership(manifest) {
+	_, recipientFound := r.device(manifest.RecipientDeviceID, manifest.RecipientGeneration)
+	if !found || !recipientFound || sender.SigningKeyID != manifest.SignerKeyID || !r.membership(manifest) {
 		return nil, errors.New("invalid manifest directory authority")
 	}
 	return ed25519.PublicKey(append([]byte(nil), sender.SigningPublicKey[:]...)), nil
@@ -189,8 +230,11 @@ func (r *DirectorySnapshotResolver) ValidateManifestAuthority(manifest Manifest,
 
 // CurrentRecipientHPKEKey resolves the current non-revoked recipient HPKE key.
 func (r *DirectorySnapshotResolver) CurrentRecipientHPKEKey(deviceID [16]byte, generation uint64) ([32]byte, *ecdh.PublicKey, error) {
+	if r == nil || !r.fresh(r.now()) || !r.current() {
+		return [32]byte{}, nil, errors.New("stale recipient directory authority")
+	}
 	device, found := r.device(deviceID, generation)
-	if !found || device.Revoked {
+	if !found {
 		return [32]byte{}, nil, errors.New("unknown recipient directory key")
 	}
 	key, err := ecdh.X25519().NewPublicKey(device.HPKEPublicKey[:])
@@ -219,22 +263,29 @@ func (r *DirectorySnapshotResolver) fresh(now time.Time) bool {
 	return r.head.IssuedAt <= nowUnix && r.head.ExpiresAt > nowUnix
 }
 
-func (r *DirectorySnapshotResolver) device(deviceID [16]byte, generation uint64) (DirectoryDevice, bool) {
-	for index := len(r.entries) - 1; index >= 0; index-- {
-		if record := r.entries[index].Device; record != nil && record.DeviceID == deviceID && record.Generation == generation {
-			return *record, true
-		}
+func (r *DirectorySnapshotResolver) current() bool {
+	if r.checkpoints == nil {
+		return false
 	}
-	return DirectoryDevice{}, false
+	frozen, err := r.checkpoints.AudienceFrozen(r.head.Audience)
+	if err != nil || frozen {
+		return false
+	}
+	checkpoint, found, err := r.checkpoints.LoadCheckpoint(r.head.Audience)
+	return err == nil && found && checkpoint == checkpointFor(r.head)
+}
+
+func (r *DirectorySnapshotResolver) device(deviceID [16]byte, generation uint64) (DirectoryDevice, bool) {
+	if r.latestGeneration[deviceID] != generation {
+		return DirectoryDevice{}, false
+	}
+	record, found := r.devices[directoryDeviceKey{id: deviceID, generation: generation}]
+	return record, found && !record.Revoked
 }
 
 func (r *DirectorySnapshotResolver) membership(manifest Manifest) bool {
-	for index := len(r.entries) - 1; index >= 0; index-- {
-		if record := r.entries[index].Membership; record != nil && record.ConversationID == manifest.ConversationID && record.SenderDeviceID == manifest.SenderDeviceID && record.SenderGeneration == manifest.SenderGeneration && record.RecipientDeviceID == manifest.RecipientDeviceID && record.RecipientGeneration == manifest.RecipientGeneration && record.Commitment == manifest.MembershipCommitment {
-			return true
-		}
-	}
-	return false
+	record, found := r.memberships[directoryMembershipKey{conversation: manifest.ConversationID, sender: manifest.SenderDeviceID, senderGen: manifest.SenderGeneration, recipient: manifest.RecipientDeviceID, recipientGen: manifest.RecipientGeneration, commitment: manifest.MembershipCommitment}]
+	return found && !record.Revoked
 }
 
 func directoryHeadCommitment(head DirectoryHead) ([32]byte, error) {
