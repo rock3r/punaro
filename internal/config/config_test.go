@@ -43,3 +43,17 @@ func TestLoadRejectsNonLoopbackAttachmentListener(t *testing.T) {
 		t.Fatal("Load accepted non-loopback listener for attachment bearer sessions")
 	}
 }
+
+func TestLoadRejectsNonLoopbackListenerWhilePublicRuntimeIsUnavailable(t *testing.T) {
+	t.Setenv("PUNARO_LISTEN_ADDR", "0.0.0.0:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("Load accepted a public listener before the authenticated public runtime exists")
+	}
+}
+
+func TestLoadRejectsLocalhostNameUntilResolvedBindingIsImplemented(t *testing.T) {
+	t.Setenv("PUNARO_LISTEN_ADDR", "localhost:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("Load accepted localhost without proving its resolved address is loopback")
+	}
+}

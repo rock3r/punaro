@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -17,37 +18,52 @@ import (
 )
 
 func main() {
+	os.Exit(run(os.Args[1:], os.Stderr))
+}
+
+func run(args []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("punarod", flag.ContinueOnError)
+	flags.SetOutput(stderr)
 	var envFile string
-	flag.StringVar(&envFile, "env-file", "", "optional path to a dotenv file")
-	flag.Parse()
+	flags.StringVar(&envFile, "env-file", "", "optional path to a dotenv file")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
 	cfg, err := config.Load(envFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "punarod configuration error: %v\n", err)
-		os.Exit(2)
+		fmt.Fprintf(stderr, "punarod configuration error: %v\n", err)
+		return 2
 	}
 	if cfg.AttachmentsEnabled {
-		fmt.Fprintln(os.Stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
-		os.Exit(2)
+		fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
+		return 2
 	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ready"}\n`)) })
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	go func() {
-		logger.Printf("listening address=%s data_dir=%s log_level=%s", cfg.ListenAddr, cfg.DataDir, cfg.LogLevel)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Printf("server stopped error=%v", err)
-			os.Exit(1)
-		}
-	}()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- server.ListenAndServe() }()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	<-signals
-	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := server.Shutdown(shutdown); err != nil {
-		logger.Printf("graceful shutdown failed error=%v", err)
+	defer signal.Stop(signals)
+	logger.Printf("listening address=%s data_dir=%s log_level=%s", cfg.ListenAddr, cfg.DataDir, cfg.LogLevel)
+	select {
+	case err := <-serverErrors:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Printf("server stopped error=%v", err)
+			return 1
+		}
+		return 0
+	case <-signals:
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdown); err != nil {
+			logger.Printf("graceful shutdown failed error=%v", err)
+			return 1
+		}
+		return 0
 	}
 }
 

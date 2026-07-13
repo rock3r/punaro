@@ -51,11 +51,14 @@ func Load(explicitEnvFile string) (Config, error) {
 	deviceKeys := value("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", "")
 	membership := value("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", "")
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
+	// The authenticated public relay runtime does not exist yet. Keeping even
+	// the health-only draft on loopback prevents an operator from accidentally
+	// creating a direct-origin path that future routes could inherit.
+	if !isLoopbackListener(listenAddr) {
+		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
+	}
 	if attachmentsEnabled && (deviceKeys == "" || membership == "") {
 		return Config{}, fmt.Errorf("attachments require PUNARO_ATTACHMENT_DEVICE_KEYS_JSON and PUNARO_ATTACHMENT_MEMBERSHIP_JSON")
-	}
-	if attachmentsEnabled && !isLoopbackListener(listenAddr) {
-		return Config{}, fmt.Errorf("attachments require a loopback PUNARO_LISTEN_ADDR; terminate TLS at a local authenticated proxy")
 	}
 	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership}, nil
 }
@@ -64,9 +67,6 @@ func isLoopbackListener(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return false
-	}
-	if host == "localhost" {
-		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()

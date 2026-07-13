@@ -1,0 +1,9 @@
+# Build only the reviewed source needed by the Dockerfile. Never send local
+# credentials, state, VCS history, or editor artefacts to a build daemon.
+*
+!go.mod
+!go.sum
+!cmd/
+!cmd/**
+!internal/
+!internal/**
