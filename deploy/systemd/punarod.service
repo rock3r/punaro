@@ -1,0 +1,23 @@
+[Unit]
+Description=Punaro agent relay
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=exec
+User=punaro
+Group=punaro
+StateDirectory=punaro
+Environment=PUNARO_LISTEN_ADDR=127.0.0.1:8080
+Environment=PUNARO_DATA_DIR=/var/lib/punaro
+EnvironmentFile=-/etc/punaro/punaro.env
+ExecStart=/usr/local/bin/punarod
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/punaro
+UMask=0077
+[Install]
+WantedBy=multi-user.target

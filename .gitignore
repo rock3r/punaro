@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+data/
+bin/
+/punarod
+coverage.out
+*.pem
+*.key
+*.db
