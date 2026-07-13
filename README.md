@@ -8,10 +8,11 @@ It is not a remote MCP server and does not share a local agent mailbox database
 over the network. A local adapter on each machine communicates with its own
 mailbox implementation and with the central Punaro relay.
 
-> Status: early infrastructure draft. The current binary provides hardened
-> process/configuration scaffolding and health endpoints. Durable queues,
-> enrollment, adapters, the Telegram gateway, and WebSocket notifications are
-> specified in the design but are not implemented yet.
+> Status: early infrastructure draft. The attachment protocol foundation is
+> tested but deliberately not mounted by the daemon: recipient envelopes,
+> fresh authority directories, revocation, and permit renewal remain release
+> gates. Durable queues, adapters, the Telegram gateway, and WebSocket
+> notifications remain specified but unbuilt.
 
 ## Architecture
 
@@ -60,6 +61,9 @@ precedence over dotenv values.
 | `PUNARO_DATA_DIR` | `./data` | Durable state location. |
 | `PUNARO_LOG_LEVEL` | `info` | Go structured log level. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
+| `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
+| `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Strict JSON object of enrolled device IDs to base64 raw Ed25519 public keys. |
+| `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Strict JSON allow-only sender/conversation/recipient/action grants. |
 
 Future gateways and authentication features use environment/file-provisioned
 secrets such as `PUNARO_TELEGRAM_BOT_TOKEN`, `PUNARO_CLOUDFLARE_ACCESS_AUD`,
