@@ -140,6 +140,18 @@ func decodeDirectoryHead(raw []byte) (DirectoryHead, error) {
 // the durable checkpoint only after an append-only consistency proof succeeds.
 // Same-sequence conflict freezes the audience before returning an error.
 func VerifyAndAdvanceDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time, proof *FullConsistencyProof) (DirectoryHead, error) {
+	head, err := verifyDirectoryHead(raw, trust, now)
+	if err != nil {
+		return DirectoryHead{}, err
+	}
+	return advanceVerifiedDirectoryHead(raw, head, trust, proof)
+}
+
+// verifyDirectoryHead performs the pure, cryptographic and freshness checks
+// for a directory head. Callers that also validate a full snapshot must do so
+// before calling advanceVerifiedDirectoryHead, otherwise a withheld or invalid
+// snapshot could advance the durable checkpoint and cause a local DoS.
+func verifyDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time) (DirectoryHead, error) {
 	if isZero32(trust.Audience) || isZero32(trust.RootKeyID) || len(trust.RootPublicKey) != ed25519.PublicKeySize || trust.Checkpoints == nil {
 		return DirectoryHead{}, errors.New("invalid directory trust")
 	}
@@ -155,6 +167,10 @@ func VerifyAndAdvanceDirectoryHead(raw []byte, trust DirectoryTrust, now time.Ti
 	if nowUnix < 0 || head.IssuedAt > uint64(nowUnix) || head.IssuedAt > uint64(nowUnix)+120 || head.ExpiresAt <= uint64(nowUnix) {
 		return DirectoryHead{}, errors.New("stale directory head")
 	}
+	return head, nil
+}
+
+func advanceVerifiedDirectoryHead(raw []byte, head DirectoryHead, trust DirectoryTrust, proof *FullConsistencyProof) (DirectoryHead, error) {
 	frozen, err := trust.Checkpoints.AudienceFrozen(trust.Audience)
 	if err != nil || frozen {
 		return DirectoryHead{}, errors.New("directory audience is frozen")
@@ -174,7 +190,9 @@ func VerifyAndAdvanceDirectoryHead(raw []byte, trust DirectoryTrust, now time.Ti
 	}
 	if head.Sequence == previous.Sequence {
 		if head.TreeSize != previous.TreeSize || head.TreeRoot != previous.TreeRoot || head.RevocationEpoch != previous.RevocationEpoch {
-			_ = trust.Checkpoints.FreezeAudience(trust.Audience, append([]byte(nil), raw...))
+			if err := trust.Checkpoints.FreezeAudience(trust.Audience, append([]byte(nil), raw...)); err != nil {
+				return DirectoryHead{}, fmt.Errorf("freeze directory equivocation: %w", err)
+			}
 			return DirectoryHead{}, errors.New("directory equivocation")
 		}
 		return head, nil

@@ -72,6 +72,34 @@ version, method, canonical path, body commitment, device generation, request
 nonce, and request expiry.  Replay consumption is durable and shared by every
 replica for the audience.  Device keys are never reused across audiences.
 
+### Directory snapshot entries
+
+Every snapshot is an ordered list whose leaf hash is BLAKE3-256 of ASCII
+`punaro/attachment/directory-leaf/v2`, one NUL byte, followed by its CDE entry.
+The verifier recomputes the entire ordered tree from these leaves and requires
+an exact match with the signed head before it writes any anti-rollback
+checkpoint. A signed head without its matching snapshot is therefore unusable
+and cannot poison a local checkpoint.
+
+A device entry is CDE map `{1=1,2=device_id,3=generation,4=signing_key_id,
+5=signing_public_key,6=hpke_key_id,7=hpke_public_key,8=revoked}`. Device IDs
+are 16-byte strings; both public keys and key IDs are 32-byte strings; and the
+generation is a non-zero unsigned integer. A device generation first appears
+unrevoked. A later entry for that exact device generation may only change
+`revoked` from false to true: it must reproduce every key field verbatim and
+may never revive the generation.
+
+A membership entry is CDE map `{1=2,2=conversation_id,3=sender_device_id,
+4=sender_generation,5=recipient_device_id,6=recipient_generation,
+7=membership_commitment}`. Conversation and device IDs are 16-byte strings;
+generations are non-zero unsigned integers; and the commitment is 32 bytes.
+The `(conversation, sender device/generation, recipient device/generation)`
+tuple is immutable and must appear no more than once in one snapshot. A
+manifest is authorized only when its audience, directory-head commitment,
+revocation epoch, signer key ID, sender generation, recipient generation, and
+membership commitment all match this fresh, exact snapshot. The recipient's
+HPKE key is resolved from that same non-revoked device record.
+
 ## Immutable records
 
 All signed records use deterministic CBOR.  A Manifest includes `version`,

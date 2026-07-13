@@ -130,6 +130,10 @@ func TestVerifyAndAdvanceDirectoryHeadRejectsEquivocationAndMissingProof(t *test
 	if _, err := VerifyAndAdvanceDirectoryHead(raw, trust, clock, nil); err == nil {
 		t.Fatal("same-sequence equivocation was accepted")
 	}
+	frozen, err := store.AudienceFrozen(audience)
+	if err != nil || !frozen {
+		t.Fatalf("equivocation did not durably freeze audience: frozen=%v err=%v", frozen, err)
+	}
 }
 
 func signedDirectoryHead(t *testing.T, private ed25519.PrivateKey, head DirectoryHead) DirectoryHead {
