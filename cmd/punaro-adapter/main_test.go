@@ -19,6 +19,16 @@ func TestParseSendArgsRequiresExplicitIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
+	request, err := parseCreateArgs([]string{"--creator", "agent/a", "--member", "agent/a:send,receive,admin", "--member", "agent/b:receive", "--idempotency-key", "create-1"})
+	if err != nil || len(request.members) != 2 || request.idempotencyKey != "create-1" {
+		t.Fatalf("create request did not parse")
+	}
+	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--idempotency-key", "create-1"}); err == nil {
+		t.Fatal("create without members accepted")
+	}
+}
+
 func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
 	t.Setenv("PUNARO_MACHINE_ID", "machine-a")

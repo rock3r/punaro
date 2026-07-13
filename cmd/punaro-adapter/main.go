@@ -38,8 +38,10 @@ func main() {
 	var err error
 	if len(os.Args) > 1 && os.Args[1] == "send" {
 		err = runSend(os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "create" {
+		err = runCreate(os.Args[2:])
 	} else if len(os.Args) > 1 {
-		err = fmt.Errorf("unknown command %q (supported: send)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create)", os.Args[1])
 	} else {
 		err = run()
 	}
@@ -47,6 +49,74 @@ func main() {
 		log.Printf("punaro-adapter stopped: %v", err)
 		os.Exit(1)
 	}
+}
+
+type createRequest struct {
+	creator        string
+	members        []relay.Member
+	idempotencyKey string
+}
+type memberFlags []string
+
+func (m *memberFlags) String() string         { return strings.Join(*m, ",") }
+func (m *memberFlags) Set(value string) error { *m = append(*m, value); return nil }
+
+func parseCreateArgs(args []string) (createRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter create", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request createRequest
+	var members memberFlags
+	flags.StringVar(&request.creator, "creator", "", "attached creator endpoint")
+	flags.Var(&members, "member", "endpoint:send,receive,admin (repeatable)")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.creator == "" || request.idempotencyKey == "" || len(members) == 0 {
+		return createRequest{}, fmt.Errorf("--creator, at least one --member, and --idempotency-key are required")
+	}
+	for _, raw := range members {
+		endpoint, permissions, found := strings.Cut(raw, ":")
+		if !found || endpoint == "" || permissions == "" {
+			return createRequest{}, fmt.Errorf("invalid --member")
+		}
+		var capability relay.Capability
+		for _, item := range strings.Split(permissions, ",") {
+			switch item {
+			case "send":
+				capability |= relay.CapSend
+			case "receive":
+				capability |= relay.CapReceive
+			case "admin":
+				capability |= relay.CapAdmin
+			default:
+				return createRequest{}, fmt.Errorf("invalid member capability")
+			}
+		}
+		if capability == 0 {
+			return createRequest{}, fmt.Errorf("invalid member capability")
+		}
+		request.members = append(request.members, relay.Member{Endpoint: endpoint, Capabilities: capability})
+	}
+	return request, nil
+}
+
+func runCreate(args []string) error {
+	request, err := parseCreateArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClient(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken)
+	if err != nil {
+		return err
+	}
+	conversation, err := client.CreateConversation(context.Background(), request.creator, request.members, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q}\n", conversation.ID)
+	return err
 }
 
 type sendRequest struct {

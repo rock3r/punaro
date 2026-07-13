@@ -75,6 +75,21 @@ punaro-adapter send \
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
 
+Create a new explicit conversation from an attached creator endpoint with one
+or more declared members:
+
+```sh
+punaro-adapter create \
+  --creator agent/workstation-review/session-name \
+  --member agent/workstation-review/session-name:send,receive,admin \
+  --member agent/other-machine/session-name:receive \
+  --idempotency-key initial-route-1
+```
+
+The owner of each endpoint must currently advertise it, and the creator must
+be an attached endpoint on the credentialed machine. Keep the idempotency key
+for retrying this exact creation request.
+
 ## Current boundaries
 
 - No Telegram target picker/gateway is implemented yet.
