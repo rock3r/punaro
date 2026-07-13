@@ -130,6 +130,19 @@ func (r *DirectorySnapshotResolver) CurrentPermitIssuerKey(keyID [32]byte) (ed25
 	return ed25519.PublicKey(append([]byte(nil), issuer.PublicKey[:]...)), nil
 }
 
+// CurrentDeviceSigningKey resolves one active device signing key for a
+// permit-holder operation record.
+func (r *DirectorySnapshotResolver) CurrentDeviceSigningKey(deviceID [16]byte, generation uint64) (ed25519.PublicKey, error) {
+	if r == nil || !r.fresh(r.now()) || !r.current() {
+		return nil, errors.New("stale device directory authority")
+	}
+	device, found := r.device(deviceID, generation)
+	if !found {
+		return nil, errors.New("unknown device signing key")
+	}
+	return ed25519.PublicKey(append([]byte(nil), device.SigningPublicKey[:]...)), nil
+}
+
 // DirectorySnapshotResolver resolves manifest and envelope key authority only
 // from a freshly verified root-signed snapshot.
 type DirectorySnapshotResolver struct {
