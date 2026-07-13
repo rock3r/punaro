@@ -88,6 +88,25 @@ func TestEd25519AuthenticatorRetainsNonceUntilFutureSignatureExpires(t *testing.
 	}
 }
 
+func TestEd25519AuthenticatorRetainsNonceAtPastSignatureExpiryBoundary(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Unix(1_700_000_000, 0)
+	auth := NewEd25519Authenticator(map[string]ed25519.PublicKey{"device": public}, func() time.Time { return clock })
+	signedAt := clock.Add(-authWindow + time.Second)
+	request := signedRequest(t, private, signedAt, "past-nonce", []byte("ciphertext"))
+	if _, err := auth.Authenticate(request.Context(), request); err != nil {
+		t.Fatalf("past-dated request rejected: %v", err)
+	}
+	clock = signedAt.Add(authWindow)
+	replay := signedRequest(t, private, signedAt, "past-nonce", []byte("ciphertext"))
+	if _, err := auth.Authenticate(replay.Context(), replay); err == nil {
+		t.Fatal("replay was accepted at the past-dated signature expiry boundary")
+	}
+}
+
 func signedRequest(t *testing.T, private ed25519.PrivateKey, now time.Time, nonce string, body []byte) *http.Request {
 	t.Helper()
 	req := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/attachment-offers/offer/artifacts/artifact/chunks/0", bytes.NewReader(body))
