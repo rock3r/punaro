@@ -259,7 +259,8 @@ unmounted because it has no daemon import, runtime directory client, permit
 issuance service, or adapter transport integration. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
-transitions in the same transaction as durable permit redemption. It is not
+transitions in the same transaction as durable permit redemption and refuses
+obsolete table layouts rather than attempting a lossy migration. It is not
 mounted yet. Its strict route parser derives operation bindings only from the
 fixed versioned HTTP schema and prevents a permit from crossing into another
 transfer route. Offers contain a one-time recipient acceptance nonce that is

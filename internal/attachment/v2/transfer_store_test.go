@@ -107,3 +107,24 @@ func TestSQLiteTransferStoreRejectsRouteForAnotherTransfer(t *testing.T) {
 		t.Fatal("permit was accepted on another transfer route")
 	}
 }
+
+func TestOpenSQLiteTransferStoreRejectsObsoleteOfferSchema(t *testing.T) {
+	t.Parallel()
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := OpenSQLitePermitLedger(filepath.Join(parent, "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	if _, err := ledger.db.ExecContext(context.Background(), `CREATE TABLE attachment_offers (
+		transfer_id BLOB PRIMARY KEY, manifest BLOB NOT NULL, envelope BLOB NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenSQLiteTransferStore(ledger); err == nil {
+		t.Fatal("obsolete offer schema was accepted")
+	}
+}

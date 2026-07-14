@@ -36,7 +36,54 @@ func OpenSQLiteTransferStore(ledger *SQLitePermitLedger) (*SQLiteTransferStore, 
 	)`); err != nil {
 		return nil, err
 	}
+	if err := verifyTransferStoreSchema(ledger.db); err != nil {
+		return nil, err
+	}
 	return &SQLiteTransferStore{ledger: ledger}, nil
+}
+
+// verifyTransferStoreSchema refuses pre-release transfer tables rather than
+// silently running a newer authorization state machine on missing nonce or
+// ciphertext-integrity fields.
+func verifyTransferStoreSchema(db *sql.DB) error {
+	for _, table := range []struct {
+		name     string
+		required []string
+	}{
+		{name: "attachment_transfers", required: []string{"transfer_id", "manifest_commitment", "status", "attempt_generation", "expires_at"}},
+		{name: "attachment_offers", required: []string{"transfer_id", "manifest", "envelope", "acceptance_nonce", "acceptance_consumed"}},
+		{name: "attachment_chunks", required: []string{"transfer_id", "chunk_index", "ciphertext", "ciphertext_commitment"}},
+	} {
+		rows, err := db.QueryContext(context.Background(), "PRAGMA table_info("+table.name+")") // #nosec G202 -- table names are fixed internal constants.
+		if err != nil {
+			return err
+		}
+		columns := make(map[string]bool)
+		for rows.Next() {
+			var index int
+			var name, kind string
+			var notNull, primaryKey int
+			var defaultValue any
+			if err := rows.Scan(&index, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			columns[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, column := range table.required {
+			if !columns[column] {
+				return errors.New("attachment transfer schema is obsolete; create a new attachment v2 ledger")
+			}
+		}
+	}
+	return nil
 }
 
 // CreateSourceReady durably records a source artifact that has already been
