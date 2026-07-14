@@ -62,7 +62,11 @@ service above and all of the following explicit inputs:
   raw-base64url 64-byte Ed25519 private key.
 - `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` (1–60),
   `PUNARO_PERMIT_MAX_BYTES` (1–67108864), `PUNARO_PERMIT_MAX_CHUNKS`
-  (1–4096), and `PUNARO_PERMIT_MAX_OPERATIONS` (1–4096). There are no defaults.
+  (1–4096), `PUNARO_PERMIT_MAX_OPERATIONS` (1–4096), and
+  `PUNARO_PERMIT_MAX_ACTIVE` (1–4096). There are no defaults. The last bound
+  is a global capacity limit for concurrently live permits; expiry cleanup is
+  transactional and removes the permit plus its issuance and redemption rows.
+  An exact retry of a still-live request does not consume another slot.
 - At least one `PUNARO_RELAY_MACHINES_JSON` record with an
   `attachment_device_id`, encoded as canonical raw-base64url 16-byte data.
   Each device ID may be bound to only one machine. The permit route rejects a

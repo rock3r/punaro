@@ -150,7 +150,7 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	cfg := config.Config{DataDir: dataDir, PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, RelayMachinesJSON: machines}
+	cfg := config.Config{DataDir: dataDir, PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
 	handler, closePermit, readiness, err := buildPermitHandler(cfg, store)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +231,7 @@ func permitHandlerConfig(t *testing.T, privateDir, keyPath string) config.Config
 	if err != nil {
 		t.Fatal(err)
 	}
-	return config.Config{DataDir: t.TempDir(), PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: filepath.Join(privateDir, "directory.cbor"), DirectoryAudience: [32]byte{1}, DirectoryRootKeyID: [32]byte{2}, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: [32]byte{3}, PermitIssuerPrivateKeyFile: keyPath, PermitMaxLifetimeSeconds: 30, PermitMaxBytes: 1 << 20, PermitMaxChunks: 4, PermitMaxOperations: 2, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}
+	return config.Config{DataDir: t.TempDir(), PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: filepath.Join(privateDir, "directory.cbor"), DirectoryAudience: [32]byte{1}, DirectoryRootKeyID: [32]byte{2}, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: [32]byte{3}, PermitIssuerPrivateKeyFile: keyPath, PermitMaxLifetimeSeconds: 30, PermitMaxBytes: 1 << 20, PermitMaxChunks: 4, PermitMaxOperations: 2, PermitMaxActive: 4, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}
 }
 
 func TestBuildDirectoryHandlerRequiresValidPrivateSnapshot(t *testing.T) {

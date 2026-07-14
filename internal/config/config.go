@@ -33,6 +33,7 @@ type Config struct {
 	PermitMaxBytes             uint64
 	PermitMaxChunks            uint64
 	PermitMaxOperations        uint64
+	PermitMaxActive            uint64
 	RelayEnabled               bool
 	RelayMachinesJSON          string
 	AccessIssuer               string
@@ -92,6 +93,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	permitMaxBytes := value("PUNARO_PERMIT_MAX_BYTES", "")
 	permitMaxChunks := value("PUNARO_PERMIT_MAX_CHUNKS", "")
 	permitMaxOperations := value("PUNARO_PERMIT_MAX_OPERATIONS", "")
+	permitMaxActive := value("PUNARO_PERMIT_MAX_ACTIVE", "")
 	relayMachines := value("PUNARO_RELAY_MACHINES_JSON", "")
 	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
@@ -118,7 +120,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	var audience, rootKeyID, issuerKeyID [32]byte
 	var rootPublicKey ed25519.PublicKey
-	var maxLifetime, maxBytes, maxChunks, maxOperations uint64
+	var maxLifetime, maxBytes, maxChunks, maxOperations, maxActive uint64
 	if permitIssuanceEnabled {
 		if !directoryEnabled {
 			return Config{}, fmt.Errorf("permit issuance requires PUNARO_DIRECTORY_ENABLED")
@@ -153,6 +155,9 @@ func Load(explicitEnvFile string) (Config, error) {
 		if maxOperations, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_OPERATIONS", permitMaxOperations, 4096); decodeErr != nil {
 			return Config{}, decodeErr
 		}
+		if maxActive, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_ACTIVE", permitMaxActive, 4096); decodeErr != nil {
+			return Config{}, decodeErr
+		}
 	}
 	attachmentRelayEnabled, err := strconv.ParseBool(value("PUNARO_ATTACHMENT_RELAY_ENABLED", "false"))
 	if err != nil {
@@ -167,7 +172,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if accessJWKSFile != "" && !filepath.IsAbs(accessJWKSFile) {
 		return Config{}, fmt.Errorf("PUNARO_ACCESS_JWKS_FILE must be absolute")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

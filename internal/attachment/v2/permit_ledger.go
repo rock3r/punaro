@@ -49,10 +49,15 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 	}
 	for _, statement := range []string{
 		"PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000",
-		`CREATE TABLE IF NOT EXISTS issued_permits (serial BLOB PRIMARY KEY, permit BLOB NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS issued_permit_requests (
-			request_id BLOB PRIMARY KEY, request BLOB NOT NULL, permit BLOB NOT NULL
+		`CREATE TABLE IF NOT EXISTS issued_permits (
+			serial BLOB PRIMARY KEY, permit BLOB NOT NULL, expires_at BLOB NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS issued_permit_requests (
+			request_id BLOB PRIMARY KEY, request BLOB NOT NULL, permit BLOB NOT NULL,
+			permit_serial BLOB NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS issued_permits_expires_at ON issued_permits(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS issued_permit_requests_permit_serial ON issued_permit_requests(permit_serial)`,
 		`CREATE TABLE IF NOT EXISTS redeemed_operations (
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL,
 			path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL,
@@ -113,6 +118,34 @@ func verifyPermitLedgerSchema(db *sql.DB) error {
 	if !columns["ciphertext_bytes"] || !columns["ciphertext_chunks"] {
 		return errors.New("permit ledger schema is obsolete; create a new attachment v2 ledger")
 	}
+	for table, required := range map[string][]string{
+		"issued_permits":         {"serial", "permit", "expires_at"},
+		"issued_permit_requests": {"request_id", "request", "permit", "permit_serial"},
+	} {
+		rows, err := db.QueryContext(context.Background(), "PRAGMA table_info("+table+")")
+		if err != nil {
+			return err
+		}
+		columns := make(map[string]bool)
+		for rows.Next() {
+			var index, notNull, primaryKey int
+			var name, kind string
+			var defaultValue any
+			if err := rows.Scan(&index, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			columns[name] = true
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		for _, column := range required {
+			if !columns[column] {
+				return errors.New("permit ledger schema is obsolete; create a new attachment v2 ledger")
+			}
+		}
+	}
 	return nil
 }
 
@@ -131,7 +164,7 @@ func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitAuthorityResolve
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(context.Background(), "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", permit.Serial[:], raw); err != nil {
+	if _, err := s.db.ExecContext(context.Background(), "INSERT INTO issued_permits(serial, permit, expires_at) VALUES (?, ?, ?)", permit.Serial[:], raw, uint64Bytes(permit.ExpiresAt)); err != nil {
 		return errPermitSerialCollision
 	}
 	return nil
@@ -141,8 +174,23 @@ func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitAuthorityResolve
 // permit. An identical retry returns the original capability; a changed request
 // with the same request ID is rejected, never silently reissued.
 func (s *SQLitePermitLedger) IssueForRequest(ctx context.Context, request PermitRequest, permit Permit) (Permit, bool, error) {
+	return s.IssueForRequestBounded(ctx, request, permit, 4096, time.Now().UTC())
+}
+
+// IssueForRequestBounded atomically reaps expired capability state, preserves
+// an exact prior request retry, and refuses a new capability when the explicit
+// active-permit ceiling is reached. The caller supplies now so expiry is a
+// testable security boundary rather than an implicit database-clock policy.
+func (s *SQLitePermitLedger) IssueForRequestBounded(ctx context.Context, request PermitRequest, permit Permit, maxActive uint64, now time.Time) (Permit, bool, error) {
 	if s == nil || validatePermitRequest(request) != nil {
 		return Permit{}, false, errors.New("invalid permit issuance request")
+	}
+	if maxActive == 0 || maxActive > 4096 {
+		return Permit{}, false, errors.New("invalid active permit limit")
+	}
+	cutoff, err := nonNegativeUnixSeconds(now)
+	if err != nil {
+		return Permit{}, false, err
 	}
 	rawRequest, err := EncodePermitRequest(request)
 	if err != nil {
@@ -157,6 +205,9 @@ func (s *SQLitePermitLedger) IssueForRequest(ctx context.Context, request Permit
 		return Permit{}, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := reapExpiredPermitsTx(ctx, tx, cutoff, 4096); err != nil {
+		return Permit{}, false, err
+	}
 	var storedRequest, storedPermit []byte
 	err = tx.QueryRowContext(ctx, "SELECT request, permit FROM issued_permit_requests WHERE request_id = ?", request.RequestID[:]).Scan(&storedRequest, &storedPermit)
 	if err == nil {
@@ -169,16 +220,92 @@ func (s *SQLitePermitLedger) IssueForRequest(ctx context.Context, request Permit
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Permit{}, false, err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", permit.Serial[:], rawPermit); err != nil {
+	var active uint64
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM issued_permits").Scan(&active); err != nil {
+		return Permit{}, false, err
+	}
+	if active >= maxActive {
+		return Permit{}, false, errors.New("active permit quota exhausted")
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit, expires_at) VALUES (?, ?, ?)", permit.Serial[:], rawPermit, uint64Bytes(permit.ExpiresAt)); err != nil {
 		return Permit{}, false, errPermitSerialCollision
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permit_requests(request_id, request, permit) VALUES (?, ?, ?)", request.RequestID[:], rawRequest, rawPermit); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permit_requests(request_id, request, permit, permit_serial) VALUES (?, ?, ?, ?)", request.RequestID[:], rawRequest, rawPermit, permit.Serial[:]); err != nil {
 		return Permit{}, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Permit{}, false, err
 	}
 	return permit, false, nil
+}
+
+// ReapExpired deletes at most limit expired permits and every durable row that
+// derives authority or idempotency from them. It never removes a live permit.
+func (s *SQLitePermitLedger) ReapExpired(ctx context.Context, now time.Time, limit uint64) (uint64, error) {
+	if s == nil || limit == 0 || limit > 4096 {
+		return 0, errors.New("invalid permit expiry reap")
+	}
+	cutoff, err := nonNegativeUnixSeconds(now)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	removed, err := reapExpiredPermitsTx(ctx, tx, cutoff, limit)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func nonNegativeUnixSeconds(now time.Time) (uint64, error) {
+	seconds := now.UTC().Unix()
+	if seconds < 0 {
+		return 0, errors.New("invalid permit expiry time")
+	}
+	return uint64(seconds), nil // #nosec G115 -- negative values are rejected immediately above.
+}
+
+func reapExpiredPermitsTx(ctx context.Context, tx *sql.Tx, cutoff, limit uint64) (uint64, error) {
+	rows, err := tx.QueryContext(ctx, "SELECT serial FROM issued_permits WHERE expires_at <= ? ORDER BY expires_at, serial LIMIT ?", uint64Bytes(cutoff), limit)
+	if err != nil {
+		return 0, err
+	}
+	var serials [][]byte
+	for rows.Next() {
+		var serial []byte
+		if err := rows.Scan(&serial); err != nil || len(serial) != 16 {
+			_ = rows.Close()
+			return 0, errors.New("invalid issued permit ledger")
+		}
+		serials = append(serials, append([]byte(nil), serial...))
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, serial := range serials {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM redeemed_operations WHERE permit_serial = ?", serial); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM issued_permit_requests WHERE permit_serial = ?", serial); err != nil {
+			return 0, err
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM issued_permits WHERE serial = ? AND expires_at <= ?", serial, uint64Bytes(cutoff))
+		if err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil || count != 1 {
+			return 0, errors.New("permit expiry reap fencing failed")
+		}
+	}
+	return uint64(len(serials)), nil
 }
 
 // LoadIssuedForRequest returns a durable prior issuance after a concurrent
@@ -246,16 +373,19 @@ func (s *SQLitePermitLedger) RefreshIssuedForRequest(ctx context.Context, reques
 	if !bytes.Equal(storedPermit, rawPrevious) {
 		return false, nil
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", replacement.Serial[:], rawReplacement); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit, expires_at) VALUES (?, ?, ?)", replacement.Serial[:], rawReplacement, uint64Bytes(replacement.ExpiresAt)); err != nil {
 		return false, errPermitSerialCollision
 	}
-	result, err := tx.ExecContext(ctx, "UPDATE issued_permit_requests SET permit = ? WHERE request_id = ? AND request = ? AND permit = ?", rawReplacement, request.RequestID[:], rawRequest, rawPrevious)
+	result, err := tx.ExecContext(ctx, "UPDATE issued_permit_requests SET permit = ?, permit_serial = ? WHERE request_id = ? AND request = ? AND permit = ?", rawReplacement, replacement.Serial[:], request.RequestID[:], rawRequest, rawPrevious)
 	if err != nil {
 		return false, err
 	}
 	updated, err := result.RowsAffected()
 	if err != nil || updated != 1 {
 		return false, errors.New("permit issuance refresh fencing failed")
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM issued_permits WHERE serial = ? AND permit = ?", previous.Serial[:], rawPrevious); err != nil {
+		return false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err

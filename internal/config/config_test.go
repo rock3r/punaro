@@ -102,10 +102,16 @@ func TestLoadRequiresCompletePermitIssuanceTrustAndExplicitLimits(t *testing.T) 
 	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
 	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
 	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
 	cfg, err := Load("")
-	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 {
+	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 || cfg.PermitMaxActive != 8 {
 		t.Fatalf("config=%#v err=%v", cfg, err)
 	}
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "4097")
+	if _, err := Load(""); err == nil {
+		t.Fatal("permit issuance accepted an unbounded active permit ceiling")
+	}
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
 	t.Setenv("PUNARO_ATTACHMENT_RELAY_ENABLED", "true")
 	if _, err := Load(""); err == nil {
 		t.Fatal("withheld attachment relay was accepted")
@@ -138,6 +144,7 @@ func TestLoadRejectsMalformedPinnedPermitTrust(t *testing.T) {
 	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
 	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
 	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
 	if _, err := Load(""); err == nil {
 		t.Fatal("permit issuance accepted malformed pinned root material")
 	}

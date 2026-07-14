@@ -197,7 +197,7 @@ func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, fu
 		closeStores()
 		return nil, nil, nil, err
 	}
-	issuer, err := attachmentv2.NewPermitIssuer(attachmentv2.PermitIssuerOptions{Ledger: ledger, IssuerKeyID: cfg.PermitIssuerKeyID, PrivateKey: privateKey, MaxLifetime: lifetime, MaxBytes: cfg.PermitMaxBytes, MaxChunks: cfg.PermitMaxChunks, MaxOperations: cfg.PermitMaxOperations})
+	issuer, err := attachmentv2.NewPermitIssuer(attachmentv2.PermitIssuerOptions{Ledger: ledger, IssuerKeyID: cfg.PermitIssuerKeyID, PrivateKey: privateKey, MaxLifetime: lifetime, MaxBytes: cfg.PermitMaxBytes, MaxChunks: cfg.PermitMaxChunks, MaxOperations: cfg.PermitMaxOperations, MaxActive: cfg.PermitMaxActive})
 	if err != nil {
 		closeStores()
 		return nil, nil, nil, err

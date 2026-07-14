@@ -55,7 +55,7 @@ func TestPermitHTTPHandlerMintsOnlyCanonicalHolderSignedRequest(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
 	authority := permitIssuanceAuthorityStub{issuerID: bytes32(3), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: bytes32(1), DirectoryHead: bytes32(8), RevocationEpoch: 4, ExpiresAt: testUnix(t, clock.Add(20*time.Second))}}
-	issuer, err := NewPermitIssuer(PermitIssuerOptions{Ledger: ledger, IssuerKeyID: bytes32(3), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, Now: func() time.Time { return clock }})
+	issuer, err := NewPermitIssuer(PermitIssuerOptions{Ledger: ledger, IssuerKeyID: bytes32(3), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestPermitHTTPHandlerRejectsRequestWithoutRouteAdmission(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
 	authority := permitIssuanceAuthorityStub{issuerID: bytes32(3), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: bytes32(1), DirectoryHead: bytes32(8), RevocationEpoch: 4, ExpiresAt: testUnix(t, clock.Add(20*time.Second))}}
-	issuer, err := NewPermitIssuer(PermitIssuerOptions{Ledger: ledger, IssuerKeyID: bytes32(3), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, Now: func() time.Time { return clock }})
+	issuer, err := NewPermitIssuer(PermitIssuerOptions{Ledger: ledger, IssuerKeyID: bytes32(3), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -168,10 +168,11 @@ func (s *SQLiteTransferStore) ReapExpired(ctx context.Context, now time.Time, li
 		return 0, err
 	}
 	for _, transferID := range transferIDs {
-		for _, table := range []string{"attachment_offers", "attachment_chunks"} {
-			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE transfer_id = ?", transferID[:]); err != nil { // #nosec G202 -- fixed internal table names.
-				return 0, err
-			}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM attachment_offers WHERE transfer_id = ?", transferID[:]); err != nil {
+			return 0, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM attachment_chunks WHERE transfer_id = ?", transferID[:]); err != nil {
+			return 0, err
 		}
 		result, err := tx.ExecContext(ctx, "DELETE FROM attachment_transfers WHERE transfer_id = ? AND expires_at <= ?", transferID[:], uint64Bytes(cutoff))
 		if err != nil {

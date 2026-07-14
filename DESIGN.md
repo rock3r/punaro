@@ -275,7 +275,11 @@ uses the same fresh provider, but only after an enrolled machine's
 replay-protected request is explicitly bound to the request holder's 16-byte
 directory device ID; a directory device cannot be bound to multiple machine
 credentials. Its issuer key comes only from a private, non-symlinked,
-canonical-key file and its lifetime and quotas are explicit configuration.
+canonical-key file and its lifetime and quotas are explicit configuration,
+with an explicit global live-permit ceiling. The ledger transactionally reaps
+expired permits together with their issuance and redemption rows before
+admitting a new permit, while an exact live request retry remains idempotent at
+that ceiling.
 The authority provider fetches a complete
 signed snapshot for every attachment request and never falls back to a stale
 accepted view; root pinning and the private checkpoint store remain the only

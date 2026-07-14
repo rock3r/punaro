@@ -113,6 +113,7 @@ type PermitIssuerOptions struct {
 	MaxBytes      uint64
 	MaxChunks     uint64
 	MaxOperations uint64
+	MaxActive     uint64
 	Now           func() time.Time
 	Random        io.Reader
 }
@@ -128,6 +129,7 @@ type PermitIssuer struct {
 	maxBytes      uint64
 	maxChunks     uint64
 	maxOperations uint64
+	maxActive     uint64
 	now           func() time.Time
 	random        io.Reader
 }
@@ -135,7 +137,7 @@ type PermitIssuer struct {
 // NewPermitIssuer creates an issuer that never grants an implicit default
 // quota. Operators must choose every bound explicitly.
 func NewPermitIssuer(options PermitIssuerOptions) (*PermitIssuer, error) {
-	if options.Ledger == nil || isZero32(options.IssuerKeyID) || len(options.PrivateKey) != ed25519.PrivateKeySize || options.MaxLifetime <= 0 || options.MaxLifetime > 60*time.Second || options.MaxBytes == 0 || options.MaxBytes > 64<<20 || options.MaxChunks == 0 || options.MaxChunks > 4096 || options.MaxOperations == 0 || options.MaxOperations > 4096 {
+	if options.Ledger == nil || isZero32(options.IssuerKeyID) || len(options.PrivateKey) != ed25519.PrivateKeySize || options.MaxLifetime <= 0 || options.MaxLifetime > 60*time.Second || options.MaxBytes == 0 || options.MaxBytes > 64<<20 || options.MaxChunks == 0 || options.MaxChunks > 4096 || options.MaxOperations == 0 || options.MaxOperations > 4096 || options.MaxActive == 0 || options.MaxActive > 4096 {
 		return nil, errors.New("invalid permit issuer configuration")
 	}
 	if options.Now == nil {
@@ -144,7 +146,7 @@ func NewPermitIssuer(options PermitIssuerOptions) (*PermitIssuer, error) {
 	if options.Random == nil {
 		options.Random = rand.Reader
 	}
-	return &PermitIssuer{ledger: options.Ledger, issuerKeyID: options.IssuerKeyID, privateKey: append(ed25519.PrivateKey(nil), options.PrivateKey...), maxLifetime: options.MaxLifetime, maxBytes: options.MaxBytes, maxChunks: options.MaxChunks, maxOperations: options.MaxOperations, now: options.Now, random: options.Random}, nil
+	return &PermitIssuer{ledger: options.Ledger, issuerKeyID: options.IssuerKeyID, privateKey: append(ed25519.PrivateKey(nil), options.PrivateKey...), maxLifetime: options.MaxLifetime, maxBytes: options.MaxBytes, maxChunks: options.MaxChunks, maxOperations: options.MaxOperations, maxActive: options.MaxActive, now: options.Now, random: options.Random}, nil
 }
 
 // Issue verifies a signed request against a fresh directory, derives the
@@ -211,7 +213,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 				return Permit{}, false, refreshErr
 			}
 		} else {
-			stored, replayed, issueErr := i.ledger.IssueForRequest(ctx, request, permit)
+			stored, replayed, issueErr := i.ledger.IssueForRequestBounded(ctx, request, permit, i.maxActive, now)
 			if issueErr == nil {
 				return stored, replayed, nil
 			}
