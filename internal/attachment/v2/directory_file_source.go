@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -73,4 +74,15 @@ func (s *DirectorySnapshotFileSource) CurrentDirectorySnapshot() ([]byte, error)
 		return nil, errors.New("directory snapshot source is unavailable")
 	}
 	return append([]byte(nil), raw...), nil
+}
+
+// FetchDirectorySnapshot makes the private publisher usable as the daemon's
+// fresh authority source. Context is accepted for the common fetcher contract;
+// local bounded file I/O has no independently cancellable operation.
+func (s *DirectorySnapshotFileSource) FetchDirectorySnapshot(_ context.Context) (DirectorySnapshot, error) {
+	raw, err := s.CurrentDirectorySnapshot()
+	if err != nil {
+		return DirectorySnapshot{}, err
+	}
+	return DecodeDirectorySnapshot(raw)
 }

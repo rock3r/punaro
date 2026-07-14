@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,10 @@ func TestDirectorySnapshotFileSourceReadsFreshCanonicalSnapshot(t *testing.T) {
 	got, err := source.CurrentDirectorySnapshot()
 	if err != nil || string(got) != string(first) {
 		t.Fatalf("first=%x err=%v", got, err)
+	}
+	snapshot, err := source.FetchDirectorySnapshot(context.Background())
+	if err != nil || len(snapshot.Entries) != 1 {
+		t.Fatalf("snapshot=%+v err=%v", snapshot, err)
 	}
 	second := testDirectorySnapshot(t, 2)
 	if err := os.WriteFile(path, second, 0o600); err != nil {
