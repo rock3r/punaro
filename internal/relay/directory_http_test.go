@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -39,14 +40,14 @@ func TestDirectoryHTTPHandlerRequiresSignedEnrolledMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unsigned := httptest.NewRequest(http.MethodGet, "/v2/directory", nil)
+	unsigned := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v2/directory", nil)
 	unsignedResponse := httptest.NewRecorder()
 	handler.ServeHTTP(unsignedResponse, unsigned)
 	if unsignedResponse.Code != http.StatusUnauthorized {
 		t.Fatalf("unsigned status=%d", unsignedResponse.Code)
 	}
 
-	request := httptest.NewRequest(http.MethodGet, "/v2/directory", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v2/directory", nil)
 	signed := signRequest(private, "machine-a", http.MethodGet, "/v2/directory", nil, clock, "directory-nonce")
 	request.Header.Set("X-Punaro-Machine", signed.MachineID)
 	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
@@ -79,7 +80,7 @@ func TestDirectoryHTTPHandlerRejectsQueriesAndSourceFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "/v2/directory?ignored=true", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v2/directory?ignored=true", nil)
 	signed := signRequest(private, "machine-a", http.MethodGet, "/v2/directory", nil, clock, "query-nonce")
 	request.Header.Set("X-Punaro-Machine", signed.MachineID)
 	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
@@ -90,7 +91,7 @@ func TestDirectoryHTTPHandlerRejectsQueriesAndSourceFailures(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("query status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodGet, "/v2/directory", nil)
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v2/directory", nil)
 	signed = signRequest(private, "machine-a", http.MethodGet, "/v2/directory", nil, clock, "source-failure-nonce")
 	request.Header.Set("X-Punaro-Machine", signed.MachineID)
 	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
