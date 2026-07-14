@@ -403,6 +403,17 @@ No query string, fragment, alternate encoding, extra path segment, or other
 HTTP method is valid. For a lifecycle route, the parsed transfer ID and
 operation must exactly equal the permit; an attempt-start route must also equal
 the permit attempt generation before signature verification or a state lookup.
+Each request has exactly one `X-Punaro-Attachment-Permit` and exactly one
+`X-Punaro-Attachment-Operation` header. Each is the unpadded base64url
+encoding of the complete canonical permit or operation record respectively.
+Duplicate, padded, non-canonical, or oversized header values are rejected.
+The relay rejects a body with a content encoding, a request body larger than
+one encrypted frame plus its AEAD tag, and any request whose URL parser exposes
+an escaped-path form. It obtains a fresh directory authority view for every
+request; cache freshness is not an authorization grace period. For downloads,
+it verifies the permit and holder signature before reading a stored ciphertext,
+then verifies the complete path, target, body, and response-ciphertext binding
+before returning bytes.
 
 An offer body is CDE map `{1=2,2=manifest,3=envelope,4=acceptance_nonce}`.
 `manifest` and `envelope` are their complete canonical encodings and

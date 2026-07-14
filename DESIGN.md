@@ -236,9 +236,9 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 
 Attachment transfer uses a separate encrypted data plane; it never puts file
 bytes, file keys, or recipient redemption material in a normal Punaro message
-or WebSocket hint. The current code is a testable protocol foundation only;
-`punarod` deliberately refuses to mount its HTTP surface even when attachment
-configuration is present. It will remain fail-closed until all gates in the
+or WebSocket hint. The current code includes an unmounted strict HTTP handler;
+`punarod` deliberately refuses to mount it even when attachment configuration
+is present. It will remain fail-closed until all gates in the
 [attachment RFC](docs/attachments-v2-rfc.md) and
 [security release checklist](docs/security-release-gates.md) are complete.
 
@@ -252,8 +252,11 @@ generations, directory head, epoch, and expiry are all checked against the
 same fresh directory snapshot, plus a private SQLite serial and
 operation-redemption ledger. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
-the idempotent result. It has no daemon import, runtime directory client, relay
-storage, or transport integration. The v2 core also has a strict, non-secret
+the idempotent result. Its handler accepts only the versioned routes and exact
+canonical permit/operation headers, resolves fresh directory authority for
+every request, and derives all commitments from the request; it remains
+unmounted because it has no daemon import, runtime directory client, permit
+issuance service, or adapter transport integration. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption. It is not
