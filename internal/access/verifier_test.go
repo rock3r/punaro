@@ -138,7 +138,7 @@ func TestVerifierReadsFreshPrivateJWKSSnapshotWithoutNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, raw, 0o640); err != nil {
+	if err := os.WriteFile(path, raw, 0o640); err != nil { // #nosec G306 -- models the root:punaro JWKS cache mode.
 		t.Fatal(err)
 	}
 	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
@@ -165,16 +165,16 @@ func TestVerifierRejectsStaleOrWritableJWKSSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(parent, "current.json")
-	if err := os.WriteFile(path, []byte(`{"keys":[]}`), 0o640); err != nil {
+	if err := os.WriteFile(path, []byte(`{"keys":[]}`), 0o640); err != nil { // #nosec G306 -- models the root:punaro JWKS cache mode.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o660); err != nil {
+	if err := os.Chmod(path, 0o660); err != nil { // #nosec G302 -- intentionally models an unsafe writable cache.
 		t.Fatal(err)
 	}
 	if _, err := NewVerifier(Config{Issuer: "https://team.cloudflareaccess.example", Audience: "punaro-audience", JWKSFile: path}, nil); err == nil {
 		t.Fatal("group-writable JWKS snapshot was accepted")
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
+	if err := os.Chmod(path, 0o640); err != nil { // #nosec G302 -- restores the root:punaro JWKS cache mode.
 		t.Fatal(err)
 	}
 	verifier, err := NewVerifier(Config{Issuer: "https://team.cloudflareaccess.example", Audience: "punaro-audience", JWKSFile: path, CacheTTL: time.Minute}, nil)
