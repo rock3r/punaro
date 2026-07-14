@@ -54,7 +54,7 @@ func TestDirectoryHTTPHandlerRequiresSignedEnrolledMachine(t *testing.T) {
 	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/cbor" || string(response.Body.Bytes()) != string([]byte{0xa1, 0x01, 0x02}) {
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/cbor" || response.Body.String() != string([]byte{0xa1, 0x01, 0x02}) {
 		t.Fatalf("status=%d type=%q body=%x", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())
 	}
 }
