@@ -56,10 +56,14 @@ func DecodeAndVerifyManifest(raw []byte, directory DirectoryKeyResolver) (Verifi
 // signed manifest against its fresh audience, membership, device-generation,
 // revocation, head, and time state before verifying the resolved signer.
 func verifyManifestFromDirectory(m Manifest, directory DirectoryKeyResolver) (VerifiedManifest, error) {
+	return verifyManifestFromDirectoryAt(m, directory, time.Now().UTC())
+}
+
+func verifyManifestFromDirectoryAt(m Manifest, directory DirectoryKeyResolver, now time.Time) (VerifiedManifest, error) {
 	if directory == nil {
 		return VerifiedManifest{}, errors.New("missing directory resolver")
 	}
-	signer, err := directory.ValidateManifestAuthority(m, time.Now().UTC())
+	signer, err := directory.ValidateManifestAuthority(m, now)
 	if err != nil || !VerifyManifest(m, signer) {
 		return VerifiedManifest{}, errors.New("invalid manifest signer binding")
 	}
