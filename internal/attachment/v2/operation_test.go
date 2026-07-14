@@ -50,6 +50,31 @@ func TestOperationRecordBindsSignedRequestToPermitHolderAndExactTarget(t *testin
 	}
 }
 
+func TestDownloadOperationConsumesTheBoundStoredCiphertext(t *testing.T) {
+	t.Parallel()
+	holderPublic, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	permit := samplePermit()
+	permit.Operation = PermitOperationDownload
+	permit.IssuedAt, permit.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(30*time.Second))
+	request, err := NewDownloadOperationRequest(3, "/v2/transfers/transfer/chunks/0", []byte("transfer/chunk/0"), []byte("stored ciphertext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := sampleOperation(permit, request)
+	record.IssuedAt, record.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(10*time.Second))
+	if err := SignOperation(&record, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	resolver := operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: holderPublic}
+	if bytes, chunks, err := VerifyOperationRequest(record, permit, resolver, request, clock); err != nil || bytes != uint64(len("stored ciphertext")) || chunks != 1 {
+		t.Fatalf("bytes=%d chunks=%d err=%v", bytes, chunks, err)
+	}
+}
+
 type operationHolderStub struct {
 	device     [16]byte
 	generation uint64

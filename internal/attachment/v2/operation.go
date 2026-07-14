@@ -48,14 +48,16 @@ type OperationRecord struct {
 // OperationRequest is the authoritative, bounded request representation
 // produced by the HTTP schema decoder. Path is the decoded path without a
 // query or fragment; Target is the canonical target identifier bytes; Body is
-// the exact raw request body. For uploads and downloads one redemption covers
-// exactly one ciphertext chunk, whose bytes are Body. Other operations consume
-// no ciphertext quota.
+// the exact raw request body. A download also carries the exact bounded
+// ciphertext selected by immutable relay storage for the response. Uploads and
+// downloads each redeem one ciphertext chunk; other operations consume no
+// ciphertext quota.
 type OperationRequest struct {
-	method uint64
-	path   string
-	target []byte
-	body   []byte
+	method             uint64
+	path               string
+	target             []byte
+	body               []byte
+	responseCiphertext []byte
 }
 
 // NewOperationRecordRequest derives the three signed commitments from the
@@ -68,6 +70,19 @@ func NewOperationRecordRequest(method uint64, path string, target, body []byte) 
 	return request, nil
 }
 
+// NewDownloadOperationRequest binds an empty-body download request to the
+// exact ciphertext selected from immutable relay storage for its response. A
+// caller cannot account a synthetic byte count: quota is derived from this
+// bounded byte slice, while the signed HTTP-body commitment remains empty.
+func NewDownloadOperationRequest(method uint64, path string, target, ciphertext []byte) (OperationRequest, error) {
+	request, err := NewOperationRecordRequest(method, path, target, nil)
+	if err != nil || len(ciphertext) == 0 || len(ciphertext) > 256<<10+16 {
+		return OperationRequest{}, errors.New("invalid download operation request")
+	}
+	request.responseCiphertext = append([]byte(nil), ciphertext...)
+	return request, nil
+}
+
 func operationRequestCommitments(request OperationRequest) ([32]byte, [32]byte, [32]byte) {
 	path := blake3.Sum256(append([]byte(operationPathDomain), []byte(request.path)...))
 	target := blake3.Sum256(append([]byte(operationTargetDomain), request.target...))
@@ -76,7 +91,7 @@ func operationRequestCommitments(request OperationRequest) ([32]byte, [32]byte, 
 }
 
 func validateOperationRequest(request OperationRequest) error {
-	if request.method == 0 || len(request.path) == 0 || len(request.path) > maxOperationPathBytes || !strings.HasPrefix(request.path, "/") || strings.ContainsAny(request.path, "?#\x00") || len(request.target) == 0 || len(request.target) > maxOperationTargetBytes || len(request.body) > 256<<10+16 {
+	if request.method == 0 || len(request.path) == 0 || len(request.path) > maxOperationPathBytes || !strings.HasPrefix(request.path, "/") || strings.ContainsAny(request.path, "?#\x00") || len(request.target) == 0 || len(request.target) > maxOperationTargetBytes || len(request.body) > 256<<10+16 || len(request.responseCiphertext) > 256<<10+16 {
 		return errors.New("invalid operation request")
 	}
 	return nil
@@ -87,11 +102,16 @@ func operationUsage(operation uint64, request OperationRequest) (uint64, uint64,
 		return 0, 0, err
 	}
 	switch operation {
-	case PermitOperationUpload, PermitOperationDownload:
+	case PermitOperationUpload:
 		if len(request.body) == 0 {
 			return 0, 0, errors.New("ciphertext chunk is required")
 		}
 		return uint64(len(request.body)), 1, nil // #nosec G115 -- len is bounded above.
+	case PermitOperationDownload:
+		if len(request.body) != 0 || len(request.responseCiphertext) == 0 {
+			return 0, 0, errors.New("stored ciphertext chunk is required")
+		}
+		return uint64(len(request.responseCiphertext)), 1, nil // #nosec G115 -- len is bounded above.
 	default:
 		return 0, 0, nil
 	}

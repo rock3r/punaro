@@ -64,10 +64,12 @@ func (s *SQLiteTransferStore) Load(transferID [16]byte) (TransferRecord, bool, e
 }
 
 // RedeemTransition atomically verifies and redeems an exact permit operation,
-// then records the corresponding lifecycle transition. An identical operation
-// retry returns its original transfer result without another transition.
-func (s *SQLiteTransferStore) RedeemTransition(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, issuers PermitAuthorityResolver, holders OperationHolderResolver, action TransferAction, now time.Time) (TransferRecord, bool, error) {
-	if s == nil || s.ledger == nil || permit.Operation != permitOperationForAction(action) {
+// then records the route's corresponding lifecycle transition. Route transfer,
+// operation, and attempt bindings are checked against the permit before any
+// directory, signature, or database work. An identical retry returns its
+// original transfer result without another transition.
+func (s *SQLiteTransferStore) RedeemTransition(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, route AttachmentRoute, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time) (TransferRecord, bool, error) {
+	if s == nil || s.ledger == nil || route.Action == 0 || permit.TransferID != route.TransferID || permit.Operation != route.Operation || permit.Operation != permitOperationForAction(route.Action) || (route.AttemptGeneration != 0 && permit.AttemptGeneration != route.AttemptGeneration) {
 		return TransferRecord{}, false, errors.New("invalid permit transition")
 	}
 	raw, replayed, err := s.ledger.Redeem(ctx, permit, operation, request, issuers, holders, now, func(ctx context.Context, tx *sql.Tx) ([]byte, error) {
@@ -75,7 +77,7 @@ func (s *SQLiteTransferStore) RedeemTransition(ctx context.Context, permit Permi
 		if err != nil || !found {
 			return nil, errors.New("unknown transfer")
 		}
-		next, err := record.Transition(action, now)
+		next, err := record.Transition(route.Action, now)
 		if err != nil {
 			return nil, err
 		}

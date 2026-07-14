@@ -257,7 +257,9 @@ storage, or transport integration. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption. It is not
-mounted yet. The v2 core
+mounted yet. Its strict route parser derives operation bindings only from the
+fixed versioned HTTP schema and prevents a permit from crossing into another
+transfer route. The v2 core
 also has an immutable source-ready store which atomically persists a freshly
 verified manifest, recipient envelope, and all ciphertext chunks before an
 offer can reference it. In

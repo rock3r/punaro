@@ -314,10 +314,12 @@ expired permit, and exhausted quota.
 
 The relay derives the signed path, target, and body commitments from the
 canonical decoded HTTP request; it never accepts client-supplied commitment
-values or usage counters. Upload and download redemption each cover exactly one
-non-empty ciphertext chunk, so their byte usage is the received chunk length
-and their chunk usage is one. Other operations consume zero ciphertext bytes
-and chunks. The ledger totals these derived values in the same transaction as
+values or usage counters. Upload redemption covers the received non-empty
+ciphertext chunk. Download redemption covers the exact non-empty ciphertext
+chunk selected from immutable relay storage for its response, while its signed
+request body remains empty. Each consumes one chunk and its exact ciphertext
+length. Other operations consume zero ciphertext bytes and chunks. The ledger
+totals these derived values in the same transaction as
 the state mutation and redemption result; it rejects a request before that
 mutation if any permit bound would be exceeded.
 
@@ -378,6 +380,29 @@ database lookup. A permit verifier must require every field to match the
 concrete canonical HTTP operation and body before atomically redeeming it. The
 path has no query or fragment, the target is bounded canonical identifier
 bytes, and the raw body has the operation's bounded schema size.
+
+### HTTP operation schema
+
+The only version-two relay routes are below. `transfer_id` is exactly 16 bytes
+encoded as 32 lowercase hexadecimal characters; `index` and `attempt` are
+canonical decimal unsigned integers (no sign or leading zero). The request
+target is CDE map `{1=2,2=transfer_id,3=operation}` with `4=index` for a chunk
+or `5=attempt` for an attempt start. The relay derives it from the parsed route;
+the client does not submit it as a separate field.
+
+| HTTP method | Route | Operation |
+| --- | --- | --- |
+| `POST` | `/v2/attachments/{transfer_id}/offer` | `offer` |
+| `POST` | `/v2/attachments/{transfer_id}/accept` | `accept` |
+| `PUT` | `/v2/attachments/{transfer_id}/chunks/{index}` | `upload` |
+| `GET` | `/v2/attachments/{transfer_id}/chunks/{index}` | `download` |
+| `POST` | `/v2/attachments/{transfer_id}/attempts/{attempt}/begin` | `signal` |
+| `POST` | `/v2/attachments/{transfer_id}/complete` | `complete` |
+
+No query string, fragment, alternate encoding, extra path segment, or other
+HTTP method is valid. For a lifecycle route, the parsed transfer ID and
+operation must exactly equal the permit; an attempt-start route must also equal
+the permit attempt generation before signature verification or a state lookup.
 
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes

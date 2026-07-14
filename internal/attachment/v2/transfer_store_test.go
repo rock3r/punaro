@@ -62,11 +62,12 @@ func TestSQLiteTransferStoreRedeemsOfferAtomicallyAndSurvivesRestart(t *testing.
 	if err := store.CreateSourceReady(context.Background(), sourceReady); err != nil {
 		t.Fatal(err)
 	}
-	result, replayed, err := store.RedeemTransition(context.Background(), permit, operation, request, issuers, holders, TransferActionOffer, clock)
+	route := AttachmentRoute{TransferID: permit.TransferID, Operation: PermitOperationOffer, Action: TransferActionOffer}
+	result, replayed, err := store.RedeemTransition(context.Background(), permit, operation, request, route, issuers, holders, clock)
 	if err != nil || replayed || result.Status != TransferOffered || result.AttemptGeneration != 1 {
 		t.Fatalf("result=%+v replayed=%v err=%v", result, replayed, err)
 	}
-	result, replayed, err = store.RedeemTransition(context.Background(), permit, operation, request, issuers, holders, TransferActionOffer, clock)
+	result, replayed, err = store.RedeemTransition(context.Background(), permit, operation, request, route, issuers, holders, clock)
 	if err != nil || !replayed || result.Status != TransferOffered {
 		t.Fatalf("retry result=%+v replayed=%v err=%v", result, replayed, err)
 	}
@@ -91,7 +92,18 @@ func TestSQLiteTransferStoreRedeemsOfferAtomicallyAndSurvivesRestart(t *testing.
 func TestSQLiteTransferStoreRejectsTransitionWithWrongPermitOperation(t *testing.T) {
 	t.Parallel()
 	store := &SQLiteTransferStore{}
-	if _, _, err := store.RedeemTransition(context.Background(), Permit{Operation: PermitOperationAccept}, OperationRecord{}, OperationRequest{}, nil, nil, TransferActionOffer, time.Now()); err == nil {
+	if _, _, err := store.RedeemTransition(context.Background(), Permit{Operation: PermitOperationAccept}, OperationRecord{}, OperationRequest{}, AttachmentRoute{Operation: PermitOperationOffer, Action: TransferActionOffer}, nil, nil, time.Now()); err == nil {
 		t.Fatal("offer accepted an accept permit")
+	}
+}
+
+func TestSQLiteTransferStoreRejectsRouteForAnotherTransfer(t *testing.T) {
+	t.Parallel()
+	store := &SQLiteTransferStore{}
+	permit := samplePermit()
+	permit.Operation = PermitOperationOffer
+	route := AttachmentRoute{TransferID: bytes16(99), Operation: PermitOperationOffer, Action: TransferActionOffer}
+	if _, _, err := store.RedeemTransition(context.Background(), permit, OperationRecord{}, OperationRequest{}, route, nil, nil, time.Now()); err == nil {
+		t.Fatal("permit was accepted on another transfer route")
 	}
 }
