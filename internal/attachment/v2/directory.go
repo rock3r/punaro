@@ -232,3 +232,10 @@ func directoryMerkleRoot(leaves [][32]byte) [32]byte {
 	}
 	return level[0]
 }
+
+// DirectoryMerkleRoot calculates the ordered directory tree root used by a
+// publisher before it signs a DirectoryHead. Consumers still must verify the
+// full snapshot and signed head through NewDirectorySnapshotResolver.
+func DirectoryMerkleRoot(leaves [][32]byte) [32]byte {
+	return directoryMerkleRoot(leaves)
+}
