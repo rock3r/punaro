@@ -247,9 +247,9 @@ CBOR record core: verified signed manifests, manifest commitments,
 recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
 that reserves file-key/content-salt/nonce uniqueness before encryption. It has
-no daemon import, runtime directory client, atomic source-ready state, relay
-storage, or transport integration. It also has canonical permit records and
-directory-authorized permit issuer keys plus a private SQLite serial and
+canonical permits whose issuer, sender/recipient membership, device
+generations, directory head, epoch, and expiry are all checked against the
+same fresh directory snapshot, plus a private SQLite serial and
 operation-redemption ledger. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. It has no daemon import, runtime directory client, relay

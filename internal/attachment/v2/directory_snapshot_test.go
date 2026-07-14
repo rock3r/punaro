@@ -238,3 +238,75 @@ func TestDirectorySnapshotResolverResolvesOnlyFreshActivePermitIssuers(t *testin
 		t.Fatal("stale permit issuer was accepted")
 	}
 }
+
+func TestDirectorySnapshotResolverRequiresExactActivePermitMembership(t *testing.T) {
+	t.Parallel()
+	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	audience, rootID, issuerID := directoryBytes32(1), directoryBytes32(2), directoryBytes32(3)
+	sender := DirectoryDevice{DeviceID: bytes16(4), Generation: 1, SigningKeyID: directoryBytes32(10), SigningPublicKey: [32]byte(senderPublic), HPKEKeyID: directoryBytes32(11), HPKEPublicKey: directoryBytes32(12)}
+	recipient := DirectoryDevice{DeviceID: bytes16(5), Generation: 2, SigningKeyID: directoryBytes32(13), SigningPublicKey: [32]byte(recipientPublic), HPKEKeyID: directoryBytes32(14), HPKEPublicKey: directoryBytes32(15)}
+	membership := DirectoryMembership{ConversationID: bytes16(6), SenderDeviceID: sender.DeviceID, SenderGeneration: sender.Generation, RecipientDeviceID: recipient.DeviceID, RecipientGeneration: recipient.Generation, Commitment: directoryBytes32(7)}
+	entries := []DirectoryEntry{{Device: &sender}, {Device: &recipient}, {Membership: &membership}, {Issuer: &DirectoryPermitIssuer{KeyID: issuerID, PublicKey: [32]byte(issuerPublic)}}}
+	leaves, err := DirectoryEntryHashes(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := signedDirectoryHead(t, rootPrivate, DirectoryHead{Audience: audience, RootKeyID: rootID, TreeSize: uint64(len(entries)), TreeRoot: directoryMerkleRoot(leaves), Sequence: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), RevocationEpoch: 3})
+	raw, err := EncodeDirectoryHead(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewDirectorySnapshotResolver(raw, DirectoryTrust{Audience: audience, RootKeyID: rootID, RootPublicKey: rootPublic, Checkpoints: &memoryCheckpointStore{checkpoints: make(map[[32]byte]DirectoryCheckpoint)}}, clock, nil, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headCommitment, err := directoryHeadCommitment(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := samplePermit()
+	permit.Audience, permit.IssuerKeyID = audience, issuerID
+	permit.HolderDeviceID, permit.HolderGeneration, permit.HolderRole = sender.DeviceID, sender.Generation, PermitHolderSender
+	permit.ConversationID, permit.SenderDeviceID, permit.SenderGeneration = membership.ConversationID, sender.DeviceID, sender.Generation
+	permit.RecipientDeviceID, permit.RecipientGeneration = recipient.DeviceID, recipient.Generation
+	permit.DirectoryHead, permit.MembershipCommitment, permit.RevocationEpoch = headCommitment, membership.Commitment, head.RevocationEpoch
+	permit.IssuedAt, permit.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(10*time.Second))
+	if err := SignPermit(&permit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPermit(permit, resolver, clock); err != nil {
+		t.Fatal(err)
+	}
+	mismatch := permit
+	mismatch.MembershipCommitment = directoryBytes32(99)
+	if err := SignPermit(&mismatch, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPermit(mismatch, resolver, clock); err == nil {
+		t.Fatal("permit with mismatched membership was accepted")
+	}
+	tooLong := permit
+	tooLong.ExpiresAt = testUnix(t, clock.Add(21*time.Second))
+	if err := SignPermit(&tooLong, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPermit(tooLong, resolver, clock); err == nil {
+		t.Fatal("permit exceeding its directory head lifetime was accepted")
+	}
+}

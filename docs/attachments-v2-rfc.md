@@ -303,7 +303,8 @@ permit itself invalid.  Each authorized request instead includes a CSPRNG
 `operation_id`, canonical operation/path/target commitment, body commitment,
 and idempotency key; all are covered by the holder signature and must match the
 permit's allowed operation and quota.  `redeemed_operations` is keyed by
-`(permit serial, operation_id)` and atomically transitions `pending` to
+`(permit serial, operation_id)` with a second unique key on
+`(permit serial, idempotency key)`, and atomically transitions `pending` to
 `succeeded` with the state mutation.  An identical retry returns the recorded
 result.  A different body, target, operation, or idempotency key for a redeemed
 operation is rejected.  A permit cannot be used after expiry, for a different
@@ -317,7 +318,10 @@ Permit issuer keys are directory entries with CDE map
 `{1=3,2=issuer_key_id,3=issuer_public_key,4=revoked}`. Both fields are 32-byte
 strings. An issuer key first appears unrevoked; a later identical entry may
 only change `revoked` to true. A recipient verifies a permit only through a
-fresh directory snapshot containing the active issuer key. This deliberately
+fresh, current directory snapshot containing the active issuer key, exact
+sender and recipient device generations, and the exact active membership
+tuple. It also verifies the audience, directory-head commitment, revocation
+epoch, and that permit expiry does not outlive that head. This deliberately
 separates root-authorized permit issuers from device signing keys.
 
 The permit signature preimage is ASCII `punaro/attachment/permit/v2`, one NUL
@@ -338,18 +342,20 @@ or attempt.
 | 7 | holder_role | unsigned, `1..3` |
 | 8 | transfer_id | bstr(16) |
 | 9 | conversation_id | bstr(16) |
-| 10 | recipient_device_id | bstr(16) |
-| 11 | recipient_generation | unsigned, non-zero |
-| 12 | attempt_generation | unsigned, non-zero |
-| 13 | operation | unsigned, `1..6` |
-| 14 | directory_head | bstr(32) |
-| 15 | membership_commitment | bstr(32) |
-| 16 | revocation_epoch | unsigned |
-| 17 | issued_at | unsigned |
-| 18 | expires_at | unsigned; at most 60 seconds after issue |
-| 19 | max_bytes | unsigned; at most 64 MiB |
-| 20 | max_chunks | unsigned; at most 4096 |
-| 21 | max_operations | unsigned, `1..4096` |
+| 10 | sender_device_id | bstr(16) |
+| 11 | sender_generation | unsigned, non-zero |
+| 12 | recipient_device_id | bstr(16) |
+| 13 | recipient_generation | unsigned, non-zero |
+| 14 | attempt_generation | unsigned, non-zero |
+| 15 | operation | unsigned, `1..6` |
+| 16 | directory_head | bstr(32) |
+| 17 | membership_commitment | bstr(32) |
+| 18 | revocation_epoch | unsigned |
+| 19 | issued_at | unsigned |
+| 20 | expires_at | unsigned; at most 60 seconds after issue and never later than directory head expiry |
+| 21 | max_bytes | unsigned; at most 64 MiB |
+| 22 | max_chunks | unsigned; at most 4096 |
+| 23 | max_operations | unsigned, `1..4096` |
 | 99 | signature | bstr(64) |
 
 An operation record is CDE map `{1=2,2=permit_serial,3=operation_id,

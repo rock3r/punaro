@@ -41,7 +41,7 @@ func TestSQLitePermitLedgerIssuesOnceAndRedeemsExactOperationIdempotently(t *tes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
-	issuers := permitIssuerStub{keyID: permit.IssuerKeyID, key: issuerPublic}
+	issuers := permitAuthorityStub{keyID: permit.IssuerKeyID, key: issuerPublic}
 	holders := operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: holderPublic}
 	if err := ledger.Issue(permit, issuers, clock); err != nil {
 		t.Fatal(err)
@@ -75,6 +75,14 @@ func TestSQLitePermitLedgerIssuesOnceAndRedeemsExactOperationIdempotently(t *tes
 	}
 	if _, _, err := ledger.Redeem(context.Background(), permit, changed, issuers, holders, clock, mutation); err == nil {
 		t.Fatal("changed-body replay was accepted")
+	}
+	reusedIdempotency := operation
+	reusedIdempotency.OperationID = bytes16(99)
+	if err := SignOperation(&reusedIdempotency, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ledger.Redeem(context.Background(), permit, reusedIdempotency, issuers, holders, clock, mutation); err == nil {
+		t.Fatal("operation with reused idempotency key was accepted")
 	}
 	var effects int
 	if err := ledger.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM test_effects").Scan(&effects); err != nil || effects != 1 {

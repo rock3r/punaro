@@ -52,8 +52,11 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL,
 			path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL,
 			idempotency_key BLOB NOT NULL, result BLOB NOT NULL,
-			PRIMARY KEY(permit_serial, operation_id)
+			PRIMARY KEY(permit_serial, operation_id),
+			UNIQUE(permit_serial, idempotency_key)
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS redeemed_operations_permit_idempotency
+			ON redeemed_operations(permit_serial, idempotency_key)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -64,6 +67,14 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if _, err := os.Lstat(sidecar); err == nil {
+			if err := os.Chmod(sidecar, 0o600); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
+	}
 	return &SQLitePermitLedger{db: db}, nil
 }
 
@@ -71,7 +82,7 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 func (s *SQLitePermitLedger) Close() error { return s.db.Close() }
 
 // Issue verifies and persists a permit serial exactly once.
-func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitIssuerResolver, now time.Time) error {
+func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitAuthorityResolver, now time.Time) error {
 	if s == nil {
 		return errors.New("nil permit ledger")
 	}
@@ -90,7 +101,7 @@ func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitIssuerResolver, 
 
 // Redeem verifies an exact signed operation, applies its state mutation in the
 // same SQLite transaction, and returns a durable result on identical retry.
-func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operation OperationRecord, issuers PermitIssuerResolver, holders OperationHolderResolver, now time.Time, mutation PermitMutation) ([]byte, bool, error) {
+func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operation OperationRecord, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time, mutation PermitMutation) ([]byte, bool, error) {
 	if s == nil || mutation == nil {
 		return nil, false, errors.New("invalid permit redemption")
 	}
@@ -120,6 +131,14 @@ func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operatio
 			return nil, false, errors.New("changed operation replay")
 		}
 		return append([]byte(nil), result...), true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	var reusedOperationID []byte
+	err = tx.QueryRowContext(ctx, "SELECT operation_id FROM redeemed_operations WHERE permit_serial = ? AND idempotency_key = ?", permit.Serial[:], operation.IdempotencyKey[:]).Scan(&reusedOperationID)
+	if err == nil {
+		return nil, false, errors.New("reused idempotency key")
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err

@@ -35,10 +35,12 @@ const (
 
 var errUnknownPermitIssuer = errors.New("unknown permit issuer")
 
-// PermitIssuerResolver is the root-directory authority for relay permit keys.
-// It must reject stale, superseded, or revoked issuers before returning a key.
-type PermitIssuerResolver interface {
-	CurrentPermitIssuerKey(keyID [32]byte) (ed25519.PublicKey, error)
+// PermitAuthorityResolver validates every permit binding against one fresh,
+// current root-signed directory snapshot before returning the issuer key. It
+// must reject a stale directory, revoked membership or device, any superseded
+// generation, and a permit that outlives its bound directory head.
+type PermitAuthorityResolver interface {
+	ValidatePermitAuthority(permit Permit, now time.Time) (ed25519.PublicKey, error)
 }
 
 // Permit is one short-lived, operation-specific relay authorization.
@@ -51,6 +53,8 @@ type Permit struct {
 	HolderRole           uint64
 	TransferID           [16]byte
 	ConversationID       [16]byte
+	SenderDeviceID       [16]byte
+	SenderGeneration     uint64
 	RecipientDeviceID    [16]byte
 	RecipientGeneration  uint64
 	AttemptGeneration    uint64
@@ -76,35 +80,37 @@ type permitWire struct {
 	HolderRole           uint64                      `cbor:"7,keyasint"`
 	TransferID           [16]byte                    `cbor:"8,keyasint"`
 	ConversationID       [16]byte                    `cbor:"9,keyasint"`
-	RecipientDeviceID    [16]byte                    `cbor:"10,keyasint"`
-	RecipientGeneration  uint64                      `cbor:"11,keyasint"`
-	AttemptGeneration    uint64                      `cbor:"12,keyasint"`
-	Operation            uint64                      `cbor:"13,keyasint"`
-	DirectoryHead        [32]byte                    `cbor:"14,keyasint"`
-	MembershipCommitment [32]byte                    `cbor:"15,keyasint"`
-	RevocationEpoch      uint64                      `cbor:"16,keyasint"`
-	IssuedAt             uint64                      `cbor:"17,keyasint"`
-	ExpiresAt            uint64                      `cbor:"18,keyasint"`
-	MaxBytes             uint64                      `cbor:"19,keyasint"`
-	MaxChunks            uint64                      `cbor:"20,keyasint"`
-	MaxOperations        uint64                      `cbor:"21,keyasint"`
+	SenderDeviceID       [16]byte                    `cbor:"10,keyasint"`
+	SenderGeneration     uint64                      `cbor:"11,keyasint"`
+	RecipientDeviceID    [16]byte                    `cbor:"12,keyasint"`
+	RecipientGeneration  uint64                      `cbor:"13,keyasint"`
+	AttemptGeneration    uint64                      `cbor:"14,keyasint"`
+	Operation            uint64                      `cbor:"15,keyasint"`
+	DirectoryHead        [32]byte                    `cbor:"16,keyasint"`
+	MembershipCommitment [32]byte                    `cbor:"17,keyasint"`
+	RevocationEpoch      uint64                      `cbor:"18,keyasint"`
+	IssuedAt             uint64                      `cbor:"19,keyasint"`
+	ExpiresAt            uint64                      `cbor:"20,keyasint"`
+	MaxBytes             uint64                      `cbor:"21,keyasint"`
+	MaxChunks            uint64                      `cbor:"22,keyasint"`
+	MaxOperations        uint64                      `cbor:"23,keyasint"`
 	Signature            [ed25519.SignatureSize]byte `cbor:"99,keyasint"`
 }
 
 func (p Permit) wire() permitWire {
-	return permitWire{Version: protocolVersion, Audience: p.Audience, Serial: p.Serial, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, TransferID: p.TransferID, ConversationID: p.ConversationID, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, AttemptGeneration: p.AttemptGeneration, Operation: p.Operation, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, IssuedAt: p.IssuedAt, ExpiresAt: p.ExpiresAt, MaxBytes: p.MaxBytes, MaxChunks: p.MaxChunks, MaxOperations: p.MaxOperations, Signature: p.Signature}
+	return permitWire{Version: protocolVersion, Audience: p.Audience, Serial: p.Serial, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, TransferID: p.TransferID, ConversationID: p.ConversationID, SenderDeviceID: p.SenderDeviceID, SenderGeneration: p.SenderGeneration, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, AttemptGeneration: p.AttemptGeneration, Operation: p.Operation, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, IssuedAt: p.IssuedAt, ExpiresAt: p.ExpiresAt, MaxBytes: p.MaxBytes, MaxChunks: p.MaxChunks, MaxOperations: p.MaxOperations, Signature: p.Signature}
 }
 
 func (p Permit) signedBytes() ([]byte, error) {
-	encoded, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: p.Audience, 3: p.Serial, 4: p.IssuerKeyID, 5: p.HolderDeviceID, 6: p.HolderGeneration, 7: p.HolderRole, 8: p.TransferID, 9: p.ConversationID, 10: p.RecipientDeviceID, 11: p.RecipientGeneration, 12: p.AttemptGeneration, 13: p.Operation, 14: p.DirectoryHead, 15: p.MembershipCommitment, 16: p.RevocationEpoch, 17: p.IssuedAt, 18: p.ExpiresAt, 19: p.MaxBytes, 20: p.MaxChunks, 21: p.MaxOperations})
+	encoded, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: p.Audience, 3: p.Serial, 4: p.IssuerKeyID, 5: p.HolderDeviceID, 6: p.HolderGeneration, 7: p.HolderRole, 8: p.TransferID, 9: p.ConversationID, 10: p.SenderDeviceID, 11: p.SenderGeneration, 12: p.RecipientDeviceID, 13: p.RecipientGeneration, 14: p.AttemptGeneration, 15: p.Operation, 16: p.DirectoryHead, 17: p.MembershipCommitment, 18: p.RevocationEpoch, 19: p.IssuedAt, 20: p.ExpiresAt, 21: p.MaxBytes, 22: p.MaxChunks, 23: p.MaxOperations})
 	return append([]byte(permitSignatureDomain), encoded...), err
 }
 
 func validatePermit(p Permit) error {
-	if isZero32(p.Audience) || isZero16(p.Serial) || isZero32(p.IssuerKeyID) || isZero16(p.HolderDeviceID) || isZero16(p.TransferID) || isZero16(p.ConversationID) || isZero16(p.RecipientDeviceID) || isZero32(p.DirectoryHead) || isZero32(p.MembershipCommitment) {
+	if isZero32(p.Audience) || isZero16(p.Serial) || isZero32(p.IssuerKeyID) || isZero16(p.HolderDeviceID) || isZero16(p.TransferID) || isZero16(p.ConversationID) || isZero16(p.SenderDeviceID) || isZero16(p.RecipientDeviceID) || isZero32(p.DirectoryHead) || isZero32(p.MembershipCommitment) {
 		return errors.New("missing permit binding")
 	}
-	if p.HolderGeneration == 0 || p.HolderRole < PermitHolderSender || p.HolderRole > PermitHolderRelay || p.RecipientGeneration == 0 || p.AttemptGeneration == 0 || p.Operation < PermitOperationOffer || p.Operation > PermitOperationComplete || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 60 || p.MaxBytes > 64<<20 || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
+	if p.HolderGeneration == 0 || p.HolderRole < PermitHolderSender || p.HolderRole > PermitHolderRelay || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.AttemptGeneration == 0 || p.Operation < PermitOperationOffer || p.Operation > PermitOperationComplete || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 60 || p.MaxBytes > 64<<20 || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
 		return errors.New("invalid permit bounds")
 	}
 	return nil
@@ -125,15 +131,15 @@ func SignPermit(p *Permit, private ed25519.PrivateKey) error {
 
 // VerifyPermit validates time, canonical bindings, the fresh issuer resolver,
 // and the issuer signature. State-machine redemption is deliberately separate.
-func VerifyPermit(p Permit, issuers PermitIssuerResolver, now time.Time) error {
-	if issuers == nil || validatePermit(p) != nil {
+func VerifyPermit(p Permit, authority PermitAuthorityResolver, now time.Time) error {
+	if authority == nil || validatePermit(p) != nil {
 		return errors.New("invalid permit")
 	}
 	seconds := now.UTC().Unix()
 	if seconds < 0 || p.IssuedAt > uint64(seconds) || p.ExpiresAt <= uint64(seconds) {
 		return errors.New("expired permit")
 	}
-	issuer, err := issuers.CurrentPermitIssuerKey(p.IssuerKeyID)
+	issuer, err := authority.ValidatePermitAuthority(p, now)
 	if err != nil || len(issuer) != ed25519.PublicKeySize {
 		return errUnknownPermitIssuer
 	}
@@ -164,7 +170,7 @@ func DecodePermit(raw []byte) (Permit, error) {
 	if wire.Version != protocolVersion {
 		return Permit{}, errors.New("unsupported permit version")
 	}
-	p := Permit{Audience: wire.Audience, Serial: wire.Serial, IssuerKeyID: wire.IssuerKeyID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, DirectoryHead: wire.DirectoryHead, MembershipCommitment: wire.MembershipCommitment, RevocationEpoch: wire.RevocationEpoch, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, Signature: wire.Signature}
+	p := Permit{Audience: wire.Audience, Serial: wire.Serial, IssuerKeyID: wire.IssuerKeyID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, SenderDeviceID: wire.SenderDeviceID, SenderGeneration: wire.SenderGeneration, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, DirectoryHead: wire.DirectoryHead, MembershipCommitment: wire.MembershipCommitment, RevocationEpoch: wire.RevocationEpoch, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, Signature: wire.Signature}
 	if err := validatePermit(p); err != nil {
 		return Permit{}, err
 	}

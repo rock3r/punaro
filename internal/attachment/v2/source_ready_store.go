@@ -27,6 +27,13 @@ func OpenSQLiteSourceReadyStore(path string) (*SQLiteSourceReadyStore, error) {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("source-ready parent must be private and non-symlinked")
 	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+			return nil, errors.New("source-ready database must be private and non-symlinked")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -44,6 +51,14 @@ func OpenSQLiteSourceReadyStore(path string) (*SQLiteSourceReadyStore, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if _, err := os.Lstat(sidecar); err == nil {
+			if err := os.Chmod(sidecar, 0o600); err != nil {
+				_ = db.Close()
+				return nil, err
+			}
+		}
 	}
 	return &SQLiteSourceReadyStore{db: db}, nil
 }
@@ -137,13 +152,20 @@ func (s *SQLiteSourceReadyStore) LoadSourceReady(commitment [32]byte) (SourceArt
 		}
 		var hash [32]byte
 		copy(hash[:], hashRaw)
-		artifact.Chunks = append(artifact.Chunks, EncryptedChunk{Index: uint64FromBytes(indexRaw), Ciphertext: ciphertext, CiphertextCommitment: hash})
+		index := uint64FromBytes(indexRaw)
+		if index != uint64(len(artifact.Chunks)) || ciphertextCommitment(ciphertext) != hash || len(ciphertext) == 0 || len(ciphertext) > 256<<10+16 {
+			return SourceArtifact{}, Envelope{}, false, errors.New("invalid stored source chunk")
+		}
+		artifact.Chunks = append(artifact.Chunks, EncryptedChunk{Index: index, Ciphertext: ciphertext, CiphertextCommitment: hash})
 	}
 	if err := rows.Err(); err != nil {
 		return SourceArtifact{}, Envelope{}, false, err
 	}
 	if uint64(len(artifact.Chunks)) != manifest.ChunkCount {
 		return SourceArtifact{}, Envelope{}, false, errors.New("incomplete source-ready artifact")
+	}
+	if envelope.ManifestCommitment != commitment || envelope.Audience != manifest.Audience || envelope.TransferID != manifest.TransferID || envelope.ConversationID != manifest.ConversationID || envelope.RecipientDeviceID != manifest.RecipientDeviceID || envelope.RecipientGeneration != manifest.RecipientGeneration {
+		return SourceArtifact{}, Envelope{}, false, errors.New("invalid stored source envelope")
 	}
 	return artifact, envelope, true, nil
 }

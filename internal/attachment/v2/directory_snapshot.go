@@ -130,6 +130,40 @@ func (r *DirectorySnapshotResolver) CurrentPermitIssuerKey(keyID [32]byte) (ed25
 	return ed25519.PublicKey(append([]byte(nil), issuer.PublicKey[:]...)), nil
 }
 
+// ValidatePermitAuthority implements PermitAuthorityResolver. A permit is
+// usable only while every signed directory binding names this exact fresh,
+// current snapshot; a merely current issuer key is not sufficient.
+func (r *DirectorySnapshotResolver) ValidatePermitAuthority(permit Permit, now time.Time) (ed25519.PublicKey, error) {
+	if r == nil || !r.fresh(now) || !r.current() {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	headCommitment, err := directoryHeadCommitment(r.head)
+	if err != nil || permit.Audience != r.head.Audience || permit.DirectoryHead != headCommitment || permit.RevocationEpoch != r.head.RevocationEpoch || permit.ExpiresAt > r.head.ExpiresAt {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	issuer, found := r.issuers[permit.IssuerKeyID]
+	if !found || issuer.Revoked {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	if _, found := r.device(permit.SenderDeviceID, permit.SenderGeneration); !found {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	if _, found := r.device(permit.RecipientDeviceID, permit.RecipientGeneration); !found {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	if _, found := r.device(permit.HolderDeviceID, permit.HolderGeneration); !found {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	if (permit.HolderRole == PermitHolderSender && (permit.HolderDeviceID != permit.SenderDeviceID || permit.HolderGeneration != permit.SenderGeneration)) || (permit.HolderRole == PermitHolderRecipient && (permit.HolderDeviceID != permit.RecipientDeviceID || permit.HolderGeneration != permit.RecipientGeneration)) {
+		return nil, errors.New("invalid permit holder binding")
+	}
+	membership, found := r.memberships[directoryMembershipKey{conversation: permit.ConversationID, sender: permit.SenderDeviceID, senderGen: permit.SenderGeneration, recipient: permit.RecipientDeviceID, recipientGen: permit.RecipientGeneration, commitment: permit.MembershipCommitment}]
+	if !found || membership.Revoked {
+		return nil, errors.New("invalid permit directory authority")
+	}
+	return ed25519.PublicKey(append([]byte(nil), issuer.PublicKey[:]...)), nil
+}
+
 // CurrentDeviceSigningKey resolves one active device signing key for a
 // permit-holder operation record.
 func (r *DirectorySnapshotResolver) CurrentDeviceSigningKey(deviceID [16]byte, generation uint64) (ed25519.PublicKey, error) {
@@ -374,3 +408,4 @@ func directoryHeadCommitment(head DirectoryHead) ([32]byte, error) {
 }
 
 var _ DirectoryKeyResolver = (*DirectorySnapshotResolver)(nil)
+var _ PermitAuthorityResolver = (*DirectorySnapshotResolver)(nil)
