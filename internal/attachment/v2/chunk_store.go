@@ -77,6 +77,45 @@ func (s *SQLiteTransferStore) Upload(ctx context.Context, permit Permit, operati
 	return chunk, replayed, nil
 }
 
+// Download authorizes a recipient to receive one exact immutable ciphertext
+// chunk. The response bytes are selected from storage before permit redemption
+// and must match the response-bound operation request exactly.
+func (s *SQLiteTransferStore) Download(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, route AttachmentRoute, issuers PermitAuthorityResolver, holders OperationHolderResolver, directory DirectoryKeyResolver, now time.Time) (EncryptedChunk, bool, error) {
+	if s == nil || s.ledger == nil || route.Operation != PermitOperationDownload || route.Action != 0 || route.TransferID != permit.TransferID || permit.Operation != PermitOperationDownload || permit.HolderRole != PermitHolderRecipient {
+		return EncryptedChunk{}, false, errors.New("invalid attachment download")
+	}
+	manifest, _, found, err := s.LoadOffer(permit.TransferID)
+	if err != nil || !found || permit.HolderDeviceID != manifest.RecipientDeviceID || permit.HolderGeneration != manifest.RecipientGeneration {
+		return EncryptedChunk{}, false, errors.New("invalid attachment download")
+	}
+	if _, err := verifyManifestFromDirectoryAt(manifest, directory, now); err != nil || !manifestPermitBinding(permit, manifest) {
+		return EncryptedChunk{}, false, errors.New("invalid attachment download authority")
+	}
+	chunk, found, err := s.LoadChunk(permit.TransferID, route.ChunkIndex)
+	if err != nil || !found || !bytes.Equal(chunk.Ciphertext, request.responseCiphertext) {
+		return EncryptedChunk{}, false, errors.New("attachment download chunk mismatch")
+	}
+	raw, replayed, err := s.ledger.Redeem(ctx, permit, operation, request, issuers, holders, now, func(ctx context.Context, tx *sql.Tx) ([]byte, error) {
+		record, found, err := loadTransferTx(ctx, tx, permit.TransferID)
+		if err != nil || !found || (record.Status != TransferAccepted && record.Status != TransferTransferring) {
+			return nil, errors.New("transfer does not allow download")
+		}
+		var storedCiphertext, storedCommitment []byte
+		if err := tx.QueryRowContext(ctx, "SELECT ciphertext, ciphertext_commitment FROM attachment_chunks WHERE transfer_id = ? AND chunk_index = ?", permit.TransferID[:], uint64Bytes(route.ChunkIndex)).Scan(&storedCiphertext, &storedCommitment); err != nil || !bytes.Equal(storedCiphertext, chunk.Ciphertext) || !bytes.Equal(storedCommitment, chunk.CiphertextCommitment[:]) {
+			return nil, errors.New("attachment download chunk changed")
+		}
+		return encodeChunkResult(permit.TransferID, route.ChunkIndex, chunk.CiphertextCommitment)
+	})
+	if err != nil {
+		return EncryptedChunk{}, false, err
+	}
+	result, err := decodeChunkResult(raw)
+	if err != nil || result.Index != chunk.Index || result.CiphertextCommitment != chunk.CiphertextCommitment {
+		return EncryptedChunk{}, false, errors.New("invalid attachment download result")
+	}
+	return chunk, replayed, nil
+}
+
 func encodeChunkResult(transferID [16]byte, index uint64, commitment [32]byte) ([]byte, error) {
 	return canonicalEncoding.Marshal(chunkResultWire{Version: protocolVersion, TransferID: transferID, Index: index, Commitment: commitment})
 }

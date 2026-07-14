@@ -148,4 +148,25 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if accepted, replayed, err := store.Accept(context.Background(), acceptPermit, acceptOperation, acceptRequest, acceptRoute, authority, acceptHolders, directory, clock); err != nil || replayed || accepted.Status != TransferAccepted {
 		t.Fatalf("accepted=%+v replayed=%v err=%v", accepted, replayed, err)
 	}
+	downloadPermit := acceptPermit
+	downloadPermit.Serial, downloadPermit.Operation, downloadPermit.MaxOperations = bytes16(83), PermitOperationDownload, 1
+	if err := SignPermit(&downloadPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Issue(downloadPermit, authority, clock); err != nil {
+		t.Fatal(err)
+	}
+	downloadRoute, downloadRequest, err := NewAttachmentOperationRequest("GET", "/v2/attachments/05050505050505050505050505050505/chunks/0", nil, loadedChunk.Ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadOperation := sampleOperation(downloadPermit, downloadRequest)
+	downloadOperation.IssuedAt, downloadOperation.ExpiresAt = downloadPermit.IssuedAt, downloadPermit.ExpiresAt
+	if err := SignOperation(&downloadOperation, recipientSignerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	downloaded, replayed, err := store.Download(context.Background(), downloadPermit, downloadOperation, downloadRequest, downloadRoute, authority, acceptHolders, directory, clock)
+	if err != nil || replayed || string(downloaded.Ciphertext) != string(ciphertext) {
+		t.Fatalf("downloaded=%+v replayed=%v err=%v", downloaded, replayed, err)
+	}
 }
