@@ -88,6 +88,46 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a"]}`, "advertise", "")
+	body := `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]}]}`
+	first := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", body, "create-first", "create-1")
+	second := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", body, "create-retry", "create-1")
+	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
+		t.Fatalf("create statuses first=%d second=%d", first.Code, second.Code)
+	}
+	var firstConversation, secondConversation Conversation
+	if err := json.NewDecoder(first.Body).Decode(&firstConversation); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.NewDecoder(second.Body).Decode(&secondConversation); err != nil {
+		t.Fatal(err)
+	}
+	if firstConversation.ID == "" || secondConversation.ID != firstConversation.ID {
+		t.Fatalf("idempotent create first=%#v second=%#v", firstConversation, secondConversation)
+	}
+	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]},{"endpoint":"agent/b","capabilities":["receive"]}]}`, "create-conflict", "create-1")
+	if changed.Code != http.StatusConflict {
+		t.Fatalf("changed create retry status=%d body=%s", changed.Code, changed.Body.String())
+	}
+}
+
 func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

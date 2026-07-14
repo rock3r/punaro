@@ -144,7 +144,9 @@ punaro-adapter create \
 
 The owner of each endpoint must currently advertise it, and the creator must
 be an attached endpoint on the credentialed machine. Keep the idempotency key
-for retrying this exact creation request.
+for retrying this exact creation request: the relay returns the original
+conversation on an identical retry and rejects a changed request using the
+same key.
 
 ## Opt-in live wake validation
 

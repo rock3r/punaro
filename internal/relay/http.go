@@ -199,7 +199,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		}
 		members = append(members, Member{Endpoint: member.Endpoint, Capabilities: capabilities})
 	}
-	conversation, err := h.store.CreateConversation(request.CreatorEndpoint, members, now)
+	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return

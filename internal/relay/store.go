@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -86,6 +87,16 @@ type AppendInput struct {
 	FromEndpoint    string
 	Body            string
 	IdempotencyKey  string
+	Now             time.Time
+}
+
+// CreateConversationInput identifies one create retry domain. IdempotencyKey
+// is scoped to MachineID and is bound to the creator plus normalized members.
+type CreateConversationInput struct {
+	MachineID       string
+	IdempotencyKey  string
+	CreatorEndpoint string
+	Members         []Member
 	Now             time.Time
 }
 
@@ -167,6 +178,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, key)
 		)`,
+		`CREATE TABLE IF NOT EXISTS conversation_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS request_nonces (
 			machine_id TEXT NOT NULL,
 			nonce TEXT NOT NULL,
@@ -237,6 +256,22 @@ func (s *Store) AssertEndpointOwnership(machineID, endpoint string, now time.Tim
 // member are actively attached. The caller must grant itself all three rights,
 // preventing a room that no live operator can administer.
 func (s *Store) CreateConversation(creatorEndpoint string, members []Member, now time.Time) (Conversation, error) {
+	return s.createConversation(CreateConversationInput{CreatorEndpoint: creatorEndpoint, Members: members, Now: now})
+}
+
+// CreateConversationIdempotent creates a room once for a signed machine retry
+// domain. A repeated key with a different normalized request is a conflict.
+func (s *Store) CreateConversationIdempotent(input CreateConversationInput) (Conversation, error) {
+	if strings.TrimSpace(input.MachineID) == "" || strings.TrimSpace(input.IdempotencyKey) == "" {
+		return Conversation{}, fmt.Errorf("machine and idempotency key are required")
+	}
+	return s.createConversation(input)
+}
+
+func (s *Store) createConversation(input CreateConversationInput) (Conversation, error) {
+	creatorEndpoint := input.CreatorEndpoint
+	members := input.Members
+	now := input.Now
 	if strings.TrimSpace(creatorEndpoint) == "" || len(members) == 0 {
 		return Conversation{}, fmt.Errorf("creator and members are required")
 	}
@@ -262,6 +297,27 @@ func (s *Store) CreateConversation(creatorEndpoint string, members []Member, now
 		return Conversation{}, err
 	}
 	defer rollback(tx)
+	if input.MachineID != "" {
+		requestHash := createConversationHash(creatorEndpoint, members)
+		var existingID, existingHash string
+		err = tx.QueryRowContext(context.Background(), "SELECT conversation_id, request_hash FROM conversation_idempotency WHERE machine_id = ? AND key = ?", input.MachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+		if err == nil {
+			if existingHash != requestHash {
+				return Conversation{}, ErrConflict
+			}
+			conversation, err := conversationByID(tx, existingID)
+			if err != nil {
+				return Conversation{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Conversation{}, err
+			}
+			return conversation, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Conversation{}, fmt.Errorf("read conversation idempotency key: %w", err)
+		}
+	}
 	for endpoint := range seen {
 		if err := endpointActive(tx, endpoint, now); err != nil {
 			return Conversation{}, err
@@ -274,6 +330,11 @@ func (s *Store) CreateConversation(creatorEndpoint string, members []Member, now
 	for _, member := range members {
 		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, member.Endpoint, member.Capabilities); err != nil {
 			return Conversation{}, fmt.Errorf("add conversation member: %w", err)
+		}
+	}
+	if input.MachineID != "" {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_idempotency(machine_id, key, request_hash, conversation_id, created_at) VALUES (?, ?, ?, ?, ?)", input.MachineID, input.IdempotencyKey, createConversationHash(creatorEndpoint, members), conversation.ID, now.UnixMilli()); err != nil {
+			return Conversation{}, fmt.Errorf("record conversation idempotency key: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -553,6 +614,31 @@ func messageByID(tx *sql.Tx, messageID string) (Message, error) {
 	}
 	message.CreatedAt = fromMillis(createdAt)
 	return message, nil
+}
+
+func conversationByID(tx *sql.Tx, conversationID string) (Conversation, error) {
+	var conversation Conversation
+	if err := tx.QueryRowContext(context.Background(), "SELECT id FROM conversations WHERE id = ?", conversationID).Scan(&conversation.ID); err != nil {
+		return Conversation{}, fmt.Errorf("read idempotent conversation: %w", err)
+	}
+	return conversation, nil
+}
+
+func createConversationHash(creatorEndpoint string, members []Member) string {
+	normalized := append([]Member(nil), members...)
+	sort.Slice(normalized, func(left, right int) bool {
+		if normalized[left].Endpoint == normalized[right].Endpoint {
+			return normalized[left].Capabilities < normalized[right].Capabilities
+		}
+		return normalized[left].Endpoint < normalized[right].Endpoint
+	})
+	parts := make([]string, 1, 1+len(normalized)*2)
+	parts[0] = creatorEndpoint
+	for _, member := range normalized {
+		parts = append(parts, member.Endpoint, fmt.Sprintf("%d", member.Capabilities))
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(digest[:])
 }
 
 func appendHash(input AppendInput) string {

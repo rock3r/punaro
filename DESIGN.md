@@ -88,7 +88,9 @@ Punaro separates three principals:
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
 can only advertise endpoints in its configured namespace (for example,
-`agent/`) and only after local attachment is confirmed.
+`agent/`) and only after local attachment is confirmed. A machine may instead
+be enrolled for a named exact legacy endpoint; exact enrollment is equality
+only, never an implicit client-wide namespace.
 
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. The Telegram gateway is a distinct principal; only
@@ -121,10 +123,13 @@ authorization.
 
 ## Delivery model
 
-Messages are immutable rows. A relay-assigned UUID is the message identity;
-the sender supplies a separate idempotency key scoped to its machine. Each
-conversation has a monotonically increasing `sequence` assigned transactionally
-at acceptance. The guarantee is **at-least-once delivery**: a crash after a
+Conversation creation and messages use separate idempotency records, each
+scoped to the signed machine and bound to the normalized request. Retrying a
+create returns the original conversation; changing the request under the same
+key is a conflict. Messages are immutable rows. A relay-assigned UUID is the
+message identity; the sender supplies a separate idempotency key scoped to its
+machine. Each conversation has a monotonically increasing `sequence` assigned
+transactionally at acceptance. The guarantee is **at-least-once delivery**: a crash after a
 local mailbox injection but before the relay receives the acknowledgement can
 produce a redelivery.
 
@@ -197,7 +202,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
-| `POST` | `/v1/conversations` | Create a conversation with explicit members. |
+| `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
