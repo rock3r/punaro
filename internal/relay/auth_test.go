@@ -100,6 +100,46 @@ func TestAuthenticatorRejectsOverlappingMachineEndpointNamespaces(t *testing.T) 
 	}
 }
 
+func TestAuthenticatorAllowsOnlyExplicitExactEndpoint(t *testing.T) {
+	t.Parallel()
+	public := make([]byte, ed25519.PublicKeySize)
+	public[0] = 1
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}, Endpoints: []string{"claude/jbr-skia-reviewer"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.AllowsEndpoint("machine-a", "claude/jbr-skia-reviewer") {
+		t.Fatal("exact endpoint was rejected")
+	}
+	if auth.AllowsEndpoint("machine-a", "claude/jbr-skia-reviewer-extra") {
+		t.Fatal("exact endpoint authorization became a prefix")
+	}
+}
+
+func TestAuthenticatorRejectsExactEndpointOwnedByAnotherMachine(t *testing.T) {
+	t.Parallel()
+	publicA := make([]byte, ed25519.PublicKeySize)
+	publicA[0] = 1
+	publicB := make([]byte, ed25519.PublicKeySize)
+	publicB[0] = 2
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}, Endpoints: []string{"claude/jbr-skia-reviewer"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"claude/"}},
+	}); err == nil {
+		t.Fatal("exact endpoint overlapping another machine namespace was accepted")
+	}
+}
+
 func signRequest(private ed25519.PrivateKey, machineID, method, path string, body []byte, timestamp time.Time, nonce string) SignedRequest {
 	request := SignedRequest{MachineID: machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
 	request.Signature = ed25519.Sign(private, CanonicalRequest(request))

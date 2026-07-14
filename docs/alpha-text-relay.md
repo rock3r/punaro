@@ -26,6 +26,20 @@ one machine from claiming another machine's attached session. Never copy a
 private key into this JSON, a shell argument, a mailbox message, or source
 control.
 
+When an existing mailbox address cannot be moved under the machine-scoped
+`agent/<machine>/` namespace, add it as a narrowly delegated exact endpoint
+instead of granting its broad client namespace. For example, append only the
+specific address to the owning machine's public record:
+
+```json
+{"endpoints":["claude/a-specific-session"]}
+```
+
+Exact endpoints are compared for equality, not prefix matching. They cannot
+overlap an endpoint or endpoint prefix owned by another enrolled machine. This
+is an exception for a named legacy session, not a substitute for using
+machine-scoped aliases for new onboarding.
+
 ## Relay configuration
 
 Run `punarod` as an unprivileged service with a loopback listener and a durable

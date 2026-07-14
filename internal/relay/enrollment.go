@@ -19,6 +19,7 @@ func ParseMachineEnrollments(raw string) ([]Machine, error) {
 		ID                 string   `json:"id"`
 		PublicKey          string   `json:"public_key"`
 		EndpointPrefixes   []string `json:"endpoint_prefixes"`
+		Endpoints          []string `json:"endpoints"`
 		AttachmentDeviceID string   `json:"attachment_device_id"`
 	}
 	if err := decoder.Decode(&records); err != nil {
@@ -47,7 +48,7 @@ func ParseMachineEnrollments(raw string) ([]Machine, error) {
 				return nil, fmt.Errorf("invalid attachment device ID for machine %q", record.ID)
 			}
 		}
-		machines = append(machines, Machine{ID: record.ID, PublicKey: ed25519.PublicKey(publicKey), EndpointPrefixes: record.EndpointPrefixes, AttachmentDeviceID: attachmentDeviceID})
+		machines = append(machines, Machine{ID: record.ID, PublicKey: ed25519.PublicKey(publicKey), EndpointPrefixes: record.EndpointPrefixes, Endpoints: record.Endpoints, AttachmentDeviceID: attachmentDeviceID})
 	}
 	return machines, nil
 }

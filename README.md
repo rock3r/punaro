@@ -69,7 +69,7 @@ precedence over dotenv values.
 | `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
-| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
+| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
 | `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
 | `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, service-private (`0700` parent, `0600` regular non-symlink) canonical directory snapshot publication file. |
 | `PUNARO_PERMIT_ISSUANCE_ENABLED` | `false` | Enables only authenticated attachment-permit issuance; it requires directory service, pinned trust, an issuer key file, explicit limits, and at least one machine/device binding. It does not enable file transfer. |

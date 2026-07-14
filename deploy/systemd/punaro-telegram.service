@@ -11,8 +11,10 @@ StateDirectory=punaro-telegram
 EnvironmentFile=/etc/punaro/telegram.env
 LoadCredential=telegram-bot-token:/etc/punaro/credentials/telegram-bot-token
 LoadCredential=telegram-access:/etc/punaro/credentials/telegram-access
+LoadCredential=telegram-machine-key:/etc/punaro/credentials/telegram-machine-key
 Environment=PUNARO_TELEGRAM_BOT_TOKEN_FILE=%d/telegram-bot-token
 Environment=PUNARO_TELEGRAM_ACCESS_TOKEN_FILE=%d/telegram-access
+Environment=PUNARO_MACHINE_PRIVATE_KEY_FILE=%d/telegram-machine-key
 ExecStart=/usr/local/bin/punaro-telegram
 Restart=on-failure
 RestartSec=3

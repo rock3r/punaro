@@ -20,6 +20,11 @@ type Machine struct {
 	ID               string
 	PublicKey        ed25519.PublicKey
 	EndpointPrefixes []string
+	// Endpoints contains exact mailbox addresses owned by this machine. Unlike
+	// EndpointPrefixes, an entry here never authorizes a similarly named
+	// endpoint. This is for a narrowly delegated external session that cannot
+	// safely be placed under the machine's namespace.
+	Endpoints []string
 	// AttachmentDeviceID binds this enrolled transport identity to one
 	// directory device for attachment permit issuance. It is optional for the
 	// text relay, but permit routes require it and never infer it from a name.
@@ -69,7 +74,7 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 	configured := make(map[string]Machine, len(machines))
 	attachmentDevices := make(map[[16]byte]string, len(machines))
 	for _, machine := range machines {
-		if strings.TrimSpace(machine.ID) == "" || len(machine.PublicKey) != ed25519.PublicKeySize || len(machine.EndpointPrefixes) == 0 {
+		if strings.TrimSpace(machine.ID) == "" || len(machine.PublicKey) != ed25519.PublicKeySize || (len(machine.EndpointPrefixes) == 0 && len(machine.Endpoints) == 0) {
 			return nil, fmt.Errorf("invalid machine enrollment")
 		}
 		if _, exists := configured[machine.ID]; exists {
@@ -86,8 +91,19 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 				return nil, fmt.Errorf("invalid endpoint prefix for machine %q", machine.ID)
 			}
 		}
+		exact := make(map[string]struct{}, len(machine.Endpoints))
+		for _, endpoint := range machine.Endpoints {
+			if endpoint == "" || strings.TrimSpace(endpoint) != endpoint {
+				return nil, fmt.Errorf("invalid exact endpoint for machine %q", machine.ID)
+			}
+			if _, duplicate := exact[endpoint]; duplicate {
+				return nil, fmt.Errorf("duplicate exact endpoint for machine %q", machine.ID)
+			}
+			exact[endpoint] = struct{}{}
+		}
 		machine.PublicKey = append(ed25519.PublicKey(nil), machine.PublicKey...)
 		machine.EndpointPrefixes = append([]string(nil), machine.EndpointPrefixes...)
+		machine.Endpoints = append([]string(nil), machine.Endpoints...)
 		configured[machine.ID] = machine
 	}
 	for leftID, left := range configured {
@@ -100,6 +116,16 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 					if strings.HasPrefix(leftPrefix, rightPrefix) || strings.HasPrefix(rightPrefix, leftPrefix) {
 						return nil, fmt.Errorf("overlapping endpoint namespaces for machines %q and %q", leftID, rightID)
 					}
+				}
+			}
+			for _, endpoint := range left.Endpoints {
+				if machineOwnsEndpoint(right, endpoint) {
+					return nil, fmt.Errorf("exact endpoint %q is owned by both machines %q and %q", endpoint, leftID, rightID)
+				}
+			}
+			for _, endpoint := range right.Endpoints {
+				if machineOwnsEndpoint(left, endpoint) {
+					return nil, fmt.Errorf("exact endpoint %q is owned by both machines %q and %q", endpoint, leftID, rightID)
 				}
 			}
 		}
@@ -176,6 +202,25 @@ func (a *Authenticator) AllowsEndpoint(machineID, endpoint string) bool {
 	machine, found := a.machines[machineID]
 	if !found {
 		return false
+	}
+	for _, exact := range machine.Endpoints {
+		if endpoint == exact {
+			return true
+		}
+	}
+	for _, prefix := range machine.EndpointPrefixes {
+		if strings.HasPrefix(endpoint, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func machineOwnsEndpoint(machine Machine, endpoint string) bool {
+	for _, exact := range machine.Endpoints {
+		if endpoint == exact {
+			return true
+		}
 	}
 	for _, prefix := range machine.EndpointPrefixes {
 		if strings.HasPrefix(endpoint, prefix) {

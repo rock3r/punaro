@@ -33,7 +33,6 @@ illustrative and contain no deployment identity or secret values:
 ```text
 PUNARO_ADAPTER_RELAY_URL=https://relay.example.invalid
 PUNARO_MACHINE_ID=telegram-gateway
-PUNARO_MACHINE_PRIVATE_KEY_FILE=/secure/service-dir/punaro-telegram.key
 PUNARO_TELEGRAM_GATEWAY_ENDPOINT=telegram/primary
 PUNARO_TELEGRAM_STATE_DIR=/var/lib/punaro-telegram
 PUNARO_TELEGRAM_ALLOWED_USER_ID=your-telegram-numeric-user-id
@@ -57,11 +56,10 @@ credentials, path, query, or fragment.
 
 For a Linux deployment, install `deploy/systemd/punaro-telegram.service`, copy
 `deploy/systemd/punaro-telegram.env.example` to `/etc/punaro/telegram.env`, and
-place the two secret source files under `/etc/punaro/credentials` as
-root-owned `0600` files. The unit supplies them using systemd `LoadCredential`,
-so secrets do not appear in the environment file, process arguments, or
-repository. The machine private key remains a private, non-symlinked file
-readable by the gateway service. Run `systemctl daemon-reload`, then enable
+place the bot token, Access pair, and machine private key under
+`/etc/punaro/credentials` as root-owned `0600` files. The unit supplies all
+three using systemd `LoadCredential`, so secrets do not appear in the
+environment file, process arguments, or repository. Run `systemctl daemon-reload`, then enable
 and start `punaro-telegram`; inspect `systemctl status` and redact logs before
 sharing them. Run `systemd-analyze security punaro-telegram.service` on the
 target OS and include the result in deployment evidence.

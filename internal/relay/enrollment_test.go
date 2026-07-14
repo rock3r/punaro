@@ -17,6 +17,18 @@ func TestParseMachineEnrollmentsAcceptsPublicKeysOnly(t *testing.T) {
 	}
 }
 
+func TestParseMachineEnrollmentsAcceptsExactEndpoints(t *testing.T) {
+	publicKey := make([]byte, 32)
+	publicKey[0] = 1
+	machines, err := ParseMachineEnrollments(`[{"id":"mac-review","public_key":"` + base64.RawURLEncoding.EncodeToString(publicKey) + `","endpoint_prefixes":["agent/mac-review/"],"endpoints":["claude/jbr-skia-reviewer"]}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(machines) != 1 || len(machines[0].Endpoints) != 1 || machines[0].Endpoints[0] != "claude/jbr-skia-reviewer" {
+		t.Fatalf("machines = %#v", machines)
+	}
+}
+
 func TestParseMachineEnrollmentsRejectsPrivateKeyFieldsAndMalformedKeys(t *testing.T) {
 	if _, err := ParseMachineEnrollments(`[{"id":"machine-a","public_key":"not-base64","endpoint_prefixes":["agent/"]}]`); err == nil {
 		t.Fatal("malformed public key accepted")
