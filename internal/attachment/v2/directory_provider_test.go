@@ -58,6 +58,13 @@ func TestFreshDirectoryAuthorityProviderFetchesAndVerifiesSnapshotPerRequest(t *
 	if _, err := provider.ResolveAttachmentAuthority(context.Background(), now); err != nil || fetcher.calls != 2 {
 		t.Fatalf("second fetch calls=%d err=%v", fetcher.calls, err)
 	}
+	issuanceAuthority, err := provider.ResolvePermitIssuanceAuthority(context.Background(), now)
+	if err != nil || fetcher.calls != 3 {
+		t.Fatalf("issuance authority calls=%d err=%v", fetcher.calls, err)
+	}
+	if _, err := issuanceAuthority.CurrentPermitBinding(now); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestFreshDirectoryAuthorityProviderFailsClosedWhenRefreshFails(t *testing.T) {

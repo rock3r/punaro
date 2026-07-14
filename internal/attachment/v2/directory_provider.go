@@ -44,6 +44,24 @@ func NewFreshDirectoryAuthorityProvider(fetcher DirectorySnapshotFetcher, trust 
 // ResolveAttachmentAuthority always fetches then verifies the current signed
 // snapshot; it deliberately does not serve a stale last-known-good resolver.
 func (p *FreshDirectoryAuthorityProvider) ResolveAttachmentAuthority(ctx context.Context, now time.Time) (AttachmentAuthority, error) {
+	resolver, err := p.resolve(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	return resolver, nil
+}
+
+// ResolvePermitIssuanceAuthority obtains the same freshly verified complete
+// snapshot for holder-signed permit issuance. It has no stale-cache fallback.
+func (p *FreshDirectoryAuthorityProvider) ResolvePermitIssuanceAuthority(ctx context.Context, now time.Time) (PermitIssuanceAuthority, error) {
+	resolver, err := p.resolve(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	return resolver, nil
+}
+
+func (p *FreshDirectoryAuthorityProvider) resolve(ctx context.Context, now time.Time) (*DirectorySnapshotResolver, error) {
 	if p == nil || p.fetcher == nil {
 		return nil, errors.New("directory authority provider is unavailable")
 	}
