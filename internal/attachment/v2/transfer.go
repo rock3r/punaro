@@ -75,13 +75,23 @@ func NewTransferRecord(transferID [16]byte, manifestCommitment [32]byte, expires
 	return TransferRecord{TransferID: transferID, ManifestCommitment: manifestCommitment, Status: TransferCreated, ExpiresAt: expiresAt}
 }
 
+func validateTransferRecord(record TransferRecord) error {
+	if isZero16(record.TransferID) || isZero32(record.ManifestCommitment) || record.Status < TransferCreated || record.Status > TransferRevoked || record.ExpiresAt == 0 {
+		return errors.New("invalid transfer record")
+	}
+	if record.AttemptGeneration > 1 || (record.AttemptGeneration == 0 && record.Status != TransferCreated && record.Status != TransferSourceReady && record.Status != TransferCancelled && record.Status != TransferRevoked && record.Status != TransferExpired) || (record.AttemptGeneration == 1 && record.Status == TransferCreated) {
+		return errors.New("invalid transfer attempt")
+	}
+	return nil
+}
+
 // Transition applies one lifecycle action without mutating the receiver.
 // Attempt generation is fixed at one for the only currently permitted live
 // attempt; retrying an operation returns through the redemption ledger rather
 // than creating another attempt.
 func (record TransferRecord) Transition(action TransferAction, now time.Time) (TransferRecord, error) {
 	seconds := now.UTC().Unix()
-	if isZero16(record.TransferID) || isZero32(record.ManifestCommitment) || record.Status < TransferCreated || record.Status > TransferRevoked || record.ExpiresAt == 0 || seconds < 0 {
+	if validateTransferRecord(record) != nil || seconds < 0 {
 		return TransferRecord{}, errors.New("invalid transfer record")
 	}
 	if record.Status.Terminal() {
