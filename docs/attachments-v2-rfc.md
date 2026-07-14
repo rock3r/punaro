@@ -312,6 +312,15 @@ attempt, or beyond its byte/chunk/operation quota.  Conformance vectors must
 cover issuance collision, valid retry, changed-body retry, cross-path replay,
 expired permit, and exhausted quota.
 
+The relay derives the signed path, target, and body commitments from the
+canonical decoded HTTP request; it never accepts client-supplied commitment
+values or usage counters. Upload and download redemption each cover exactly one
+non-empty ciphertext chunk, so their byte usage is the received chunk length
+and their chunk usage is one. Other operations consume zero ciphertext bytes
+and chunks. The ledger totals these derived values in the same transaction as
+the state mutation and redemption result; it rejects a request before that
+mutation if any permit bound would be exceeded.
+
 ### Permit and operation-record encoding
 
 Permit issuer keys are directory entries with CDE map
@@ -366,7 +375,9 @@ the fixed unsigned method identifier from the versioned HTTP schema. Its
 signature preimage is ASCII `punaro/attachment/operation/v2`, one NUL byte,
 plus the map without field `99`. The holder signature is required before any
 database lookup. A permit verifier must require every field to match the
-concrete HTTP operation and body before atomically redeeming it.
+concrete canonical HTTP operation and body before atomically redeeming it. The
+path has no query or fragment, the target is bounded canonical identifier
+bytes, and the raw body has the operation's bounded schema size.
 
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes

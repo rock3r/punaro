@@ -5,12 +5,20 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/zeebo/blake3"
 )
 
 const (
 	maxOperationEncodedBytes = 4 << 10
 	operationSignatureDomain = "punaro/attachment/operation/v2\x00"
+	operationPathDomain      = "punaro/attachment/operation-path/v2\x00"
+	operationTargetDomain    = "punaro/attachment/operation-target/v2\x00"
+	operationBodyDomain      = "punaro/attachment/operation-body/v2\x00"
+	maxOperationPathBytes    = 4 << 10
+	maxOperationTargetBytes  = 4 << 10
 )
 
 var errUnknownOperationHolder = errors.New("unknown operation holder")
@@ -35,6 +43,58 @@ type OperationRecord struct {
 	IssuedAt         uint64
 	ExpiresAt        uint64
 	Signature        [ed25519.SignatureSize]byte
+}
+
+// OperationRequest is the authoritative, bounded request representation
+// produced by the HTTP schema decoder. Path is the decoded path without a
+// query or fragment; Target is the canonical target identifier bytes; Body is
+// the exact raw request body. For uploads and downloads one redemption covers
+// exactly one ciphertext chunk, whose bytes are Body. Other operations consume
+// no ciphertext quota.
+type OperationRequest struct {
+	method uint64
+	path   string
+	target []byte
+	body   []byte
+}
+
+// NewOperationRecordRequest derives the three signed commitments from the
+// actual request data. Callers must not construct commitments independently.
+func NewOperationRecordRequest(method uint64, path string, target, body []byte) (OperationRequest, error) {
+	request := OperationRequest{method: method, path: path, target: append([]byte(nil), target...), body: append([]byte(nil), body...)}
+	if err := validateOperationRequest(request); err != nil {
+		return OperationRequest{}, err
+	}
+	return request, nil
+}
+
+func operationRequestCommitments(request OperationRequest) ([32]byte, [32]byte, [32]byte) {
+	path := blake3.Sum256(append([]byte(operationPathDomain), []byte(request.path)...))
+	target := blake3.Sum256(append([]byte(operationTargetDomain), request.target...))
+	body := blake3.Sum256(append([]byte(operationBodyDomain), request.body...))
+	return path, target, body
+}
+
+func validateOperationRequest(request OperationRequest) error {
+	if request.method == 0 || len(request.path) == 0 || len(request.path) > maxOperationPathBytes || !strings.HasPrefix(request.path, "/") || strings.ContainsAny(request.path, "?#\x00") || len(request.target) == 0 || len(request.target) > maxOperationTargetBytes || len(request.body) > 256<<10+16 {
+		return errors.New("invalid operation request")
+	}
+	return nil
+}
+
+func operationUsage(operation uint64, request OperationRequest) (uint64, uint64, error) {
+	if err := validateOperationRequest(request); err != nil {
+		return 0, 0, err
+	}
+	switch operation {
+	case PermitOperationUpload, PermitOperationDownload:
+		if len(request.body) == 0 {
+			return 0, 0, errors.New("ciphertext chunk is required")
+		}
+		return uint64(len(request.body)), 1, nil // #nosec G115 -- len is bounded above.
+	default:
+		return 0, 0, nil
+	}
 }
 
 type operationWire struct {
@@ -101,6 +161,23 @@ func VerifyOperation(r OperationRecord, permit Permit, holders OperationHolderRe
 		return errors.New("invalid operation signature")
 	}
 	return nil
+}
+
+// VerifyOperationRequest requires a valid signed record to name the exact
+// method, path, target, and raw body received by the relay. It returns the
+// authoritative ciphertext quota consumed by this one redemption.
+func VerifyOperationRequest(r OperationRecord, permit Permit, holders OperationHolderResolver, request OperationRequest, now time.Time) (uint64, uint64, error) {
+	if err := VerifyOperation(r, permit, holders, now); err != nil {
+		return 0, 0, err
+	}
+	if err := validateOperationRequest(request); err != nil {
+		return 0, 0, err
+	}
+	path, target, body := operationRequestCommitments(request)
+	if r.Method != request.method || r.PathCommitment != path || r.TargetCommitment != target || r.BodyCommitment != body {
+		return 0, 0, errors.New("operation request commitment mismatch")
+	}
+	return operationUsage(r.Operation, request)
 }
 
 // EncodeOperation serializes a complete canonical operation record.

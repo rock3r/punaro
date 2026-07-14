@@ -16,7 +16,8 @@ func TestOperationRecordBindsSignedRequestToPermitHolderAndExactTarget(t *testin
 	clock := time.Now().UTC().Truncate(time.Second)
 	permit := samplePermit()
 	permit.IssuedAt, permit.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(30*time.Second))
-	record := sampleOperation(permit)
+	request := sampleOperationRequest(t)
+	record := sampleOperation(permit, request)
 	record.IssuedAt, record.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(10*time.Second))
 	if err := SignOperation(&record, holderPrivate); err != nil {
 		t.Fatal(err)
@@ -32,6 +33,16 @@ func TestOperationRecordBindsSignedRequestToPermitHolderAndExactTarget(t *testin
 	resolver := operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: holderPublic}
 	if err := VerifyOperation(decoded, permit, resolver, clock); err != nil {
 		t.Fatal(err)
+	}
+	if bytes, chunks, err := VerifyOperationRequest(decoded, permit, resolver, request, clock); err != nil || bytes != uint64(len("ciphertext")) || chunks != 1 {
+		t.Fatalf("bytes=%d chunks=%d err=%v", bytes, chunks, err)
+	}
+	mismatchedRequest, err := NewOperationRecordRequest(3, "/v2/transfers/other/chunks/0", []byte("transfer/chunk/0"), []byte("ciphertext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := VerifyOperationRequest(decoded, permit, resolver, mismatchedRequest, clock); err == nil {
+		t.Fatal("operation was accepted for a different request path")
 	}
 	decoded.TargetCommitment[0] ^= 1
 	if err := VerifyOperation(decoded, permit, resolver, clock); err == nil {
@@ -52,6 +63,16 @@ func (s operationHolderStub) CurrentDeviceSigningKey(deviceID [16]byte, generati
 	return s.key, nil
 }
 
-func sampleOperation(permit Permit) OperationRecord {
-	return OperationRecord{PermitSerial: permit.Serial, OperationID: bytes16(20), Operation: permit.Operation, Method: 3, PathCommitment: bytes32(21), TargetCommitment: bytes32(22), BodyCommitment: bytes32(23), IdempotencyKey: bytes32(24), IssuedAt: permit.IssuedAt, ExpiresAt: permit.ExpiresAt}
+func sampleOperationRequest(t *testing.T) OperationRequest {
+	t.Helper()
+	request, err := NewOperationRecordRequest(3, "/v2/transfers/transfer/chunks/0", []byte("transfer/chunk/0"), []byte("ciphertext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func sampleOperation(permit Permit, request OperationRequest) OperationRecord {
+	path, target, body := operationRequestCommitments(request)
+	return OperationRecord{PermitSerial: permit.Serial, OperationID: bytes16(20), Operation: permit.Operation, Method: request.method, PathCommitment: path, TargetCommitment: target, BodyCommitment: body, IdempotencyKey: bytes32(24), IssuedAt: permit.IssuedAt, ExpiresAt: permit.ExpiresAt}
 }

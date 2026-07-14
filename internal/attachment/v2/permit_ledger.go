@@ -51,7 +51,8 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 		`CREATE TABLE IF NOT EXISTS redeemed_operations (
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL,
 			path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL,
-			idempotency_key BLOB NOT NULL, result BLOB NOT NULL,
+			idempotency_key BLOB NOT NULL, ciphertext_bytes BLOB NOT NULL, ciphertext_chunks BLOB NOT NULL,
+			result BLOB NOT NULL,
 			PRIMARY KEY(permit_serial, operation_id),
 			UNIQUE(permit_serial, idempotency_key)
 		)`,
@@ -62,6 +63,10 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 			_ = db.Close()
 			return nil, fmt.Errorf("initialize permit ledger: %w", err)
 		}
+	}
+	if err := verifyPermitLedgerSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
@@ -76,6 +81,34 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 		}
 	}
 	return &SQLitePermitLedger{db: db}, nil
+}
+
+// verifyPermitLedgerSchema refuses an older ledger rather than silently
+// redeeming permits without the current durable byte/chunk accounting.
+func verifyPermitLedgerSchema(db *sql.DB) error {
+	rows, err := db.QueryContext(context.Background(), "PRAGMA table_info(redeemed_operations)")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var index int
+		var name, kind string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&index, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !columns["ciphertext_bytes"] || !columns["ciphertext_chunks"] {
+		return errors.New("permit ledger schema is obsolete; create a new attachment v2 ledger")
+	}
+	return nil
 }
 
 // Close closes the permit ledger.
@@ -101,14 +134,15 @@ func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitAuthorityResolve
 
 // Redeem verifies an exact signed operation, applies its state mutation in the
 // same SQLite transaction, and returns a durable result on identical retry.
-func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operation OperationRecord, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time, mutation PermitMutation) ([]byte, bool, error) {
+func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time, mutation PermitMutation) ([]byte, bool, error) {
 	if s == nil || mutation == nil {
 		return nil, false, errors.New("invalid permit redemption")
 	}
 	if err := VerifyPermit(permit, issuers, now); err != nil {
 		return nil, false, err
 	}
-	if err := VerifyOperation(operation, permit, holders, now); err != nil {
+	requestBytes, requestChunks, err := VerifyOperationRequest(operation, permit, holders, request, now)
+	if err != nil {
 		return nil, false, err
 	}
 	rawPermit, err := EncodePermit(permit)
@@ -143,8 +177,34 @@ func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operatio
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err
 	}
-	var used uint64
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM redeemed_operations WHERE permit_serial = ?", permit.Serial[:]).Scan(&used); err != nil || used >= permit.MaxOperations {
+	rows, err := tx.QueryContext(ctx, "SELECT ciphertext_bytes, ciphertext_chunks FROM redeemed_operations WHERE permit_serial = ?", permit.Serial[:])
+	if err != nil {
+		return nil, false, err
+	}
+	var used, usedBytesValue, usedChunks uint64
+	for rows.Next() {
+		var bytesRaw, chunksRaw []byte
+		if err := rows.Scan(&bytesRaw, &chunksRaw); err != nil || len(bytesRaw) != 8 || len(chunksRaw) != 8 || used == ^uint64(0) {
+			_ = rows.Close()
+			return nil, false, errors.New("invalid permit usage ledger")
+		}
+		bytesValue, chunksValue := uint64FromBytes(bytesRaw), uint64FromBytes(chunksRaw)
+		if usedBytesValue > ^uint64(0)-bytesValue || usedChunks > ^uint64(0)-chunksValue {
+			_ = rows.Close()
+			return nil, false, errors.New("invalid permit usage ledger")
+		}
+		used++
+		usedBytesValue += bytesValue
+		usedChunks += chunksValue
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, false, err
+	}
+	if used >= permit.MaxOperations || requestBytes > permit.MaxBytes || usedBytesValue > permit.MaxBytes-requestBytes || requestChunks > permit.MaxChunks || usedChunks > permit.MaxChunks-requestChunks {
 		return nil, false, errors.New("permit operation quota exhausted")
 	}
 	result, err = mutation(ctx, tx)
@@ -154,7 +214,7 @@ func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operatio
 	if len(result) > maxOperationResultBytes {
 		return nil, false, errors.New("operation result exceeds bound")
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO redeemed_operations(permit_serial, operation_id, operation, path_commitment, target_commitment, body_commitment, idempotency_key, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", permit.Serial[:], operation.OperationID[:], uint64Bytes(operation.Operation), operation.PathCommitment[:], operation.TargetCommitment[:], operation.BodyCommitment[:], operation.IdempotencyKey[:], result); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO redeemed_operations(permit_serial, operation_id, operation, path_commitment, target_commitment, body_commitment, idempotency_key, ciphertext_bytes, ciphertext_chunks, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", permit.Serial[:], operation.OperationID[:], uint64Bytes(operation.Operation), operation.PathCommitment[:], operation.TargetCommitment[:], operation.BodyCommitment[:], operation.IdempotencyKey[:], uint64Bytes(requestBytes), uint64Bytes(requestChunks), result); err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
