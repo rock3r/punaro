@@ -24,6 +24,11 @@ func OpenSQLiteTransferStore(ledger *SQLitePermitLedger) (*SQLiteTransferStore, 
 	)`); err != nil {
 		return nil, err
 	}
+	if _, err := ledger.db.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS attachment_offers (
+		transfer_id BLOB PRIMARY KEY, manifest BLOB NOT NULL, envelope BLOB NOT NULL
+	)`); err != nil {
+		return nil, err
+	}
 	return &SQLiteTransferStore{ledger: ledger}, nil
 }
 
@@ -61,6 +66,32 @@ func (s *SQLiteTransferStore) Load(transferID [16]byte) (TransferRecord, bool, e
 		return TransferRecord{}, false, errors.New("invalid transfer lookup")
 	}
 	return loadTransferDB(context.Background(), s.ledger.db, transferID)
+}
+
+// LoadOffer returns the exact immutable manifest and recipient envelope for a
+// transfer. It does not authenticate them; each operation must still perform
+// fresh directory verification before relying on the returned records.
+func (s *SQLiteTransferStore) LoadOffer(transferID [16]byte) (Manifest, Envelope, bool, error) {
+	if s == nil || s.ledger == nil || isZero16(transferID) {
+		return Manifest{}, Envelope{}, false, errors.New("invalid offer lookup")
+	}
+	var manifestRaw, envelopeRaw []byte
+	err := s.ledger.db.QueryRowContext(context.Background(), "SELECT manifest, envelope FROM attachment_offers WHERE transfer_id = ?", transferID[:]).Scan(&manifestRaw, &envelopeRaw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Manifest{}, Envelope{}, false, nil
+	}
+	if err != nil {
+		return Manifest{}, Envelope{}, false, err
+	}
+	manifest, err := DecodeManifest(manifestRaw)
+	if err != nil {
+		return Manifest{}, Envelope{}, false, errors.New("invalid stored offer")
+	}
+	envelope, err := DecodeEnvelope(envelopeRaw)
+	if err != nil {
+		return Manifest{}, Envelope{}, false, errors.New("invalid stored offer")
+	}
+	return manifest, envelope, true, nil
 }
 
 // RedeemTransition atomically verifies and redeems an exact permit operation,

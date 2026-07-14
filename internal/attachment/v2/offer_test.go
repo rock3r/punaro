@@ -1,6 +1,7 @@
 package v2
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdh"
 	"crypto/ed25519"
@@ -84,6 +85,12 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	record, replayed, err := store.Offer(context.Background(), permit, operation, request, route, payload, authority, holders, directory, clock)
 	if err != nil || replayed || record.Status != TransferOffered || record.ManifestCommitment != verified.commitment {
 		t.Fatalf("record=%+v replayed=%v err=%v", record, replayed, err)
+	}
+	storedManifest, storedEnvelope, found, err := store.LoadOffer(permit.TransferID)
+	storedEnvelopeRaw, encodeErr := EncodeEnvelope(storedEnvelope)
+	envelopeRaw, expectedEncodeErr := EncodeEnvelope(envelope)
+	if err != nil || encodeErr != nil || expectedEncodeErr != nil || !found || storedManifest != manifest || !bytes.Equal(storedEnvelopeRaw, envelopeRaw) {
+		t.Fatalf("manifest=%+v envelope=%+v found=%v err=%v", storedManifest, storedEnvelope, found, err)
 	}
 	record, replayed, err = store.Offer(context.Background(), permit, operation, request, route, payload, authority, holders, directory, clock)
 	if err != nil || !replayed || record.Status != TransferOffered {

@@ -67,6 +67,14 @@ func (s *SQLiteTransferStore) Offer(ctx context.Context, permit Permit, operatio
 	if err != nil || !verifyEnvelope(envelope, verified) || !offerPermitBinding(permit, manifest) {
 		return TransferRecord{}, false, errors.New("invalid attachment offer authority")
 	}
+	manifestRaw, err := EncodeManifest(manifest)
+	if err != nil {
+		return TransferRecord{}, false, err
+	}
+	envelopeRaw, err := EncodeEnvelope(envelope)
+	if err != nil {
+		return TransferRecord{}, false, err
+	}
 	raw, replayed, err := s.ledger.Redeem(ctx, permit, operation, request, issuers, holders, now, func(ctx context.Context, tx *sql.Tx) ([]byte, error) {
 		if _, found, err := loadTransferTx(ctx, tx, permit.TransferID); err != nil || found {
 			if err != nil {
@@ -81,6 +89,9 @@ func (s *SQLiteTransferStore) Offer(ctx context.Context, permit Permit, operatio
 			return nil, err
 		}
 		if err := insertTransferTx(ctx, tx, sourceReady); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO attachment_offers(transfer_id, manifest, envelope) VALUES (?, ?, ?)", manifest.TransferID[:], manifestRaw, envelopeRaw); err != nil {
 			return nil, err
 		}
 		offered, err := sourceReady.Transition(TransferActionOffer, now)
