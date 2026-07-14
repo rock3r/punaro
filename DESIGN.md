@@ -242,7 +242,7 @@ is present. It will remain fail-closed until all gates in the
 [attachment RFC](docs/attachments-v2-rfc.md) and
 [security release checklist](docs/security-release-gates.md) are complete.
 
-`internal/attachment/v2` currently provides an offline-only, strict canonical
+`internal/attachment/v2` currently provides a strict canonical
 CBOR record core: verified signed manifests, manifest commitments,
 recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
@@ -254,19 +254,25 @@ operation-redemption ledger. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. Its handler accepts only the versioned routes and exact
 canonical permit/operation headers, resolves fresh directory authority for
-every request, and derives all commitments from the request; it remains
-unmounted because it has no daemon import, directory HTTP transport, permit
-issuance service, or adapter transport integration. The authority provider
-fetches a complete signed snapshot for every request and never falls back to a
-stale accepted view; root pinning and the private checkpoint store remain the
-only sources of directory trust. The v2 core also has a strict, non-secret
+every request, and derives all commitments from the request. A separately
+gated `/v2/directory` endpoint now serves only complete canonical snapshots to
+an enrolled, replay-protected machine request; it reads and validates a fresh
+private snapshot file for every request and is covered by the same optional
+Access middleware as the text relay. The authority provider fetches a complete
+signed snapshot for every attachment request and never falls back to a stale
+accepted view; root pinning and the private checkpoint store remain the only
+sources of directory trust. Attachment operation routes remain unmounted
+because permit issuance, adapter transport integration, reaping, and release
+evidence are incomplete. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption and refuses
 obsolete table layouts rather than attempting a lossy migration. It is not
 mounted yet. Its strict route parser derives operation bindings only from the
 fixed versioned HTTP schema and prevents a permit from crossing into another
-transfer route. Offers contain a one-time recipient acceptance nonce that is
+transfer route; sender-only actions are offer/upload/begin, recipient-only
+actions are accept/download/complete, and no current client route accepts a
+relay-holder permit. Offers contain a one-time recipient acceptance nonce that is
 consumed with the accepted transition, rather than treating a state change
 alone as acceptance evidence. The v2 core
 also has an immutable source-ready store which atomically persists a freshly
@@ -275,7 +281,8 @@ offer can reference it. In
 particular, it does **not** make
 attachments usable, or satisfy the vector/fuzz/review release gates. Callers
 must only construct its verified-manifest input after fresh directory
-verification; the runtime needed to do that does not exist yet.
+verification; the directory-distribution prerequisite now exists, but the
+remaining attachment runtime does not.
 
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally

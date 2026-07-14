@@ -174,7 +174,7 @@ func (s *SQLiteTransferStore) LoadChunk(transferID [16]byte, index uint64) (Encr
 // directory, signature, or database work. An identical retry returns its
 // original transfer result without another transition.
 func (s *SQLiteTransferStore) RedeemTransition(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, route AttachmentRoute, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time) (TransferRecord, bool, error) {
-	if s == nil || s.ledger == nil || route.Action == 0 || permit.TransferID != route.TransferID || permit.Operation != route.Operation || permit.Operation != permitOperationForAction(route.Action) || (route.AttemptGeneration != 0 && permit.AttemptGeneration != route.AttemptGeneration) {
+	if s == nil || s.ledger == nil || route.Action == 0 || permit.TransferID != route.TransferID || permit.Operation != route.Operation || permit.Operation != permitOperationForAction(route.Action) || !validTransitionHolder(route.Action, permit.HolderRole) || (route.AttemptGeneration != 0 && permit.AttemptGeneration != route.AttemptGeneration) {
 		return TransferRecord{}, false, errors.New("invalid permit transition")
 	}
 	raw, replayed, err := s.ledger.Redeem(ctx, permit, operation, request, issuers, holders, now, func(ctx context.Context, tx *sql.Tx) ([]byte, error) {
@@ -199,6 +199,20 @@ func (s *SQLiteTransferStore) RedeemTransition(ctx context.Context, permit Permi
 		return TransferRecord{}, false, err
 	}
 	return record, replayed, nil
+}
+
+// validTransitionHolder prevents a sender credential from finalizing a
+// recipient receipt (or a recipient credential from starting source transfer).
+// Relay-holder permits are intentionally not accepted by client HTTP routes.
+func validTransitionHolder(action TransferAction, holderRole uint64) bool {
+	switch action {
+	case TransferActionOffer, TransferActionBegin:
+		return holderRole == PermitHolderSender
+	case TransferActionAccept, TransferActionComplete:
+		return holderRole == PermitHolderRecipient
+	default:
+		return false
+	}
 }
 
 func permitOperationForAction(action TransferAction) uint64 {

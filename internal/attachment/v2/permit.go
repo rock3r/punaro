@@ -110,10 +110,27 @@ func validatePermit(p Permit) error {
 	if isZero32(p.Audience) || isZero16(p.Serial) || isZero32(p.IssuerKeyID) || isZero16(p.HolderDeviceID) || isZero16(p.TransferID) || isZero16(p.ConversationID) || isZero16(p.SenderDeviceID) || isZero16(p.RecipientDeviceID) || isZero32(p.DirectoryHead) || isZero32(p.MembershipCommitment) {
 		return errors.New("missing permit binding")
 	}
-	if p.HolderGeneration == 0 || p.HolderRole < PermitHolderSender || p.HolderRole > PermitHolderRelay || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.AttemptGeneration == 0 || p.Operation < PermitOperationOffer || p.Operation > PermitOperationComplete || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 60 || p.MaxBytes > 64<<20 || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
+	if p.HolderGeneration == 0 || p.HolderRole < PermitHolderSender || p.HolderRole > PermitHolderRelay || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.AttemptGeneration == 0 || p.Operation < PermitOperationOffer || p.Operation > PermitOperationComplete || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 60 || p.MaxBytes > 64<<20 || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 || !validPermitHolder(p) {
 		return errors.New("invalid permit bounds")
 	}
 	return nil
+}
+
+// validPermitHolder makes sender and recipient holder identities a
+// signed-record invariant. Relay-held permits remain representable for a
+// future relay-only operation, but no current attachment HTTP route accepts
+// them as a client-operation holder.
+func validPermitHolder(p Permit) bool {
+	switch p.HolderRole {
+	case PermitHolderSender:
+		return p.HolderDeviceID == p.SenderDeviceID && p.HolderGeneration == p.SenderGeneration
+	case PermitHolderRecipient:
+		return p.HolderDeviceID == p.RecipientDeviceID && p.HolderGeneration == p.RecipientGeneration
+	case PermitHolderRelay:
+		return true
+	default:
+		return false
+	}
 }
 
 // SignPermit validates and signs a relay permit with an authorized issuer key.

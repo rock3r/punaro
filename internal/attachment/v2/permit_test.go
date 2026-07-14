@@ -40,6 +40,36 @@ func TestPermitCanonicalSignatureAndFreshIssuerBinding(t *testing.T) {
 	}
 }
 
+func TestPermitRejectsHolderIdentityConfusion(t *testing.T) {
+	t.Parallel()
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	for _, test := range []struct {
+		name       string
+		role       uint64
+		holder     [16]byte
+		generation uint64
+	}{
+		{name: "sender holder must match sender", role: PermitHolderSender, holder: bytes16(7), generation: 2},
+		{name: "recipient holder must match recipient", role: PermitHolderRecipient, holder: bytes16(4), generation: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			permit := samplePermit()
+			permit.HolderRole, permit.HolderDeviceID, permit.HolderGeneration = test.role, test.holder, test.generation
+			permit.IssuedAt, permit.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(30*time.Second))
+			if err := SignPermit(&permit, issuerPrivate); err == nil {
+				t.Fatal("invalid holder permit was signed")
+			}
+			if err := VerifyPermit(permit, permitAuthorityStub{keyID: permit.IssuerKeyID, key: issuerPublic}, clock); err == nil {
+				t.Fatal("invalid holder permit was verified")
+			}
+		})
+	}
+}
+
 type permitAuthorityStub struct {
 	keyID  [32]byte
 	key    ed25519.PublicKey

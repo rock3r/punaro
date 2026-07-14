@@ -340,7 +340,10 @@ byte, followed by the map below without field `99`; the signature is Ed25519
 and exactly 64 bytes. `holder_role` is `1=sender`, `2=recipient`, or
 `3=relay`; `operation` is `1=offer`, `2=accept`, `3=upload`, `4=download`,
 `5=signal`, or `6=complete`. There is no wildcard operation, role, recipient,
-or attempt.
+or attempt. The current client HTTP routes bind `offer`, `upload`, and
+`signal` to the sender role; `accept`, `download`, and `complete` to the
+recipient role. Relay-held permits are reserved for a future relay-only route
+and are invalid on every current client HTTP route.
 
 | Key | Field | Type / constraint |
 | --- | --- | --- |

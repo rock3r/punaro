@@ -33,6 +33,23 @@ go run ./cmd/punarod --env-file .env
 Process environment values override dotenv values.  Never commit, log, or
 share a dotenv file, database, backup, private key, token, or message body.
 
+### Signed attachment-directory distribution
+
+The file-transfer API is still disabled. A deployment may, however, exercise
+the prerequisite signed directory distribution independently by setting
+`PUNARO_DIRECTORY_ENABLED=true` and an absolute
+`PUNARO_DIRECTORY_SNAPSHOT_FILE`. The relay must also be enabled with its
+normal machine enrollment set. The snapshot parent and file must be private
+(`0700` directory, `0600` regular non-symlinked file); the daemon validates the
+complete canonical CBOR snapshot on every request and returns no cached
+fallback. Publish an updated snapshot by atomically replacing the configured
+file. The only endpoint is authenticated `GET /v2/directory`; it requires both
+the enrolled machine's signed request and, when configured, Cloudflare Access.
+
+This is a validation aid for enrollment, directory publishing, and revocation
+drills. It does not enable attachment permits or attachment transfer, and it
+does not relax the attachment release gate.
+
 ## Containers and systemd
 
 The Compose file is a hardened build/run baseline, not a public deployment.

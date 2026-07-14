@@ -108,6 +108,27 @@ func TestSQLiteTransferStoreRejectsRouteForAnotherTransfer(t *testing.T) {
 	}
 }
 
+func TestTransitionActionsRequireTheirBoundHolderRole(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		action TransferAction
+		role   uint64
+		valid  bool
+	}{
+		{action: TransferActionOffer, role: PermitHolderSender, valid: true},
+		{action: TransferActionAccept, role: PermitHolderRecipient, valid: true},
+		{action: TransferActionBegin, role: PermitHolderSender, valid: true},
+		{action: TransferActionComplete, role: PermitHolderRecipient, valid: true},
+		{action: TransferActionBegin, role: PermitHolderRecipient},
+		{action: TransferActionComplete, role: PermitHolderSender},
+		{action: TransferActionOffer, role: PermitHolderRelay},
+	} {
+		if got := validTransitionHolder(test.action, test.role); got != test.valid {
+			t.Fatalf("action=%d role=%d valid=%v", test.action, test.role, got)
+		}
+	}
+}
+
 func TestOpenSQLiteTransferStoreRejectsObsoleteOfferSchema(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")
