@@ -14,6 +14,8 @@ import (
 
 const maxOperationResultBytes = 4 << 10
 
+var errPermitSerialCollision = errors.New("permit serial already issued")
+
 // PermitMutation applies the concrete attachment state transition in the same
 // transaction as operation redemption. It must not perform external I/O.
 type PermitMutation func(context.Context, *sql.Tx) ([]byte, error)
@@ -48,6 +50,9 @@ func OpenSQLitePermitLedger(path string) (*SQLitePermitLedger, error) {
 	for _, statement := range []string{
 		"PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000",
 		`CREATE TABLE IF NOT EXISTS issued_permits (serial BLOB PRIMARY KEY, permit BLOB NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS issued_permit_requests (
+			request_id BLOB PRIMARY KEY, request BLOB NOT NULL, permit BLOB NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS redeemed_operations (
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL,
 			path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL,
@@ -127,9 +132,79 @@ func (s *SQLitePermitLedger) Issue(permit Permit, issuers PermitAuthorityResolve
 		return err
 	}
 	if _, err := s.db.ExecContext(context.Background(), "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", permit.Serial[:], raw); err != nil {
-		return errors.New("permit serial already issued")
+		return errPermitSerialCollision
 	}
 	return nil
+}
+
+// IssueForRequest atomically records a holder-signed issuance request and its
+// permit. An identical retry returns the original capability; a changed request
+// with the same request ID is rejected, never silently reissued.
+func (s *SQLitePermitLedger) IssueForRequest(ctx context.Context, request PermitRequest, permit Permit) (Permit, bool, error) {
+	if s == nil || validatePermitRequest(request) != nil {
+		return Permit{}, false, errors.New("invalid permit issuance request")
+	}
+	rawRequest, err := EncodePermitRequest(request)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	rawPermit, err := EncodePermit(permit)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var storedRequest, storedPermit []byte
+	err = tx.QueryRowContext(ctx, "SELECT request, permit FROM issued_permit_requests WHERE request_id = ?", request.RequestID[:]).Scan(&storedRequest, &storedPermit)
+	if err == nil {
+		if !bytes.Equal(storedRequest, rawRequest) {
+			return Permit{}, false, errors.New("changed permit issuance request")
+		}
+		decoded, err := DecodePermit(storedPermit)
+		return decoded, true, err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Permit{}, false, err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", permit.Serial[:], rawPermit); err != nil {
+		return Permit{}, false, errPermitSerialCollision
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permit_requests(request_id, request, permit) VALUES (?, ?, ?)", request.RequestID[:], rawRequest, rawPermit); err != nil {
+		return Permit{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Permit{}, false, err
+	}
+	return permit, false, nil
+}
+
+// LoadIssuedForRequest returns a durable prior issuance after a concurrent
+// writer won the request-ID race. The caller supplies the full request so a
+// reused ID cannot retrieve another capability.
+func (s *SQLitePermitLedger) LoadIssuedForRequest(ctx context.Context, request PermitRequest) (Permit, bool, error) {
+	if s == nil || validatePermitRequest(request) != nil {
+		return Permit{}, false, errors.New("invalid permit issuance request")
+	}
+	rawRequest, err := EncodePermitRequest(request)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	var storedRequest, storedPermit []byte
+	err = s.db.QueryRowContext(ctx, "SELECT request, permit FROM issued_permit_requests WHERE request_id = ?", request.RequestID[:]).Scan(&storedRequest, &storedPermit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Permit{}, false, nil
+	}
+	if err != nil {
+		return Permit{}, false, err
+	}
+	if !bytes.Equal(storedRequest, rawRequest) {
+		return Permit{}, false, errors.New("changed permit issuance request")
+	}
+	permit, err := DecodePermit(storedPermit)
+	return permit, err == nil, err
 }
 
 // Redeem verifies an exact signed operation, applies its state mutation in the

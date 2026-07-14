@@ -250,7 +250,11 @@ that reserves file-key/content-salt/nonce uniqueness before encryption. It has
 canonical permits whose issuer, sender/recipient membership, device
 generations, directory head, epoch, and expiry are all checked against the
 same fresh directory snapshot, plus a private SQLite serial and
-operation-redemption ledger. The ledger accepts only a fully verified exact
+operation-redemption ledger. Permit issuance now starts with a separately
+holder-signed, retry-stable request; the issuer verifies that holder and its
+own public key against the same fresh directory, derives the head/epoch rather
+than accepting caller values, clamps every requested limit, and atomically
+persists the request-to-permit mapping. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. Its handler accepts only the versioned routes and exact
 canonical permit/operation headers, resolves fresh directory authority for

@@ -312,6 +312,20 @@ attempt, or beyond its byte/chunk/operation quota.  Conformance vectors must
 cover issuance collision, valid retry, changed-body retry, cross-path replay,
 expired permit, and exhausted quota.
 
+Before an issuer creates a permit, the intended holder submits a separate
+canonical, holder-signed permit request. It carries a CSPRNG `request_id`, the
+holder device/generation/role, transfer and conversation bindings, sender and
+recipient generations, attempt, operation, membership commitment, requested
+limits, and a short request validity interval. The request contains neither a
+directory head nor a revocation epoch: the issuer obtains those only from its
+fresh root-verified directory view. The issuer resolves the holder's active
+device signing key from that same view, verifies the request signature, applies
+server-side quota limits, ensures its own issuer key is active in that view,
+and clamps permit expiry to the request, directory-head, and issuer limits.
+`request_id` is durable idempotency: an identical retry returns the exact
+stored permit; changed bytes for an existing ID are rejected. Issuance records
+the request and permit serial atomically.
+
 The relay derives the signed path, target, and body commitments from the
 canonical decoded HTTP request; it never accepts client-supplied commitment
 values or usage counters. Upload redemption covers the received non-empty
