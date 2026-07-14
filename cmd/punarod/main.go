@@ -214,7 +214,7 @@ func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, fu
 	}
 	handler = middleware(handler)
 	if cfg.AccessIssuer != "" {
-		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
+		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
 			closeStores()
 			return nil, nil, nil, err
@@ -271,7 +271,7 @@ func buildDirectoryHandler(cfg config.Config, store *relay.Store) (http.Handler,
 		return nil, err
 	}
 	if cfg.AccessIssuer != "" {
-		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
+		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -299,7 +299,7 @@ func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
 	}
 	handler := relay.NewHandler(store, authenticator, relay.HandlerOptions{})
 	if cfg.AccessIssuer != "" {
-		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
+		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
 			_ = store.Close()
 			return nil, nil, err
@@ -307,6 +307,10 @@ func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
 		handler = verifier.Middleware(handler)
 	}
 	return handler, store, nil
+}
+
+func newAccessVerifier(cfg config.Config) (*access.Verifier, error) {
+	return access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL, JWKSFile: cfg.AccessJWKSFile}, nil)
 }
 
 func securityHeaders(next http.Handler) http.Handler {

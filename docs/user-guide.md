@@ -23,8 +23,8 @@ envelope containing the relay message and conversation IDs.
 
 The alpha daemon still binds only to a literal loopback address. Before any
 remote rollout, configure Cloudflare Access to require its JWT at the tunnel
-origin and set all three verifier variables (`PUNARO_ACCESS_ISSUER`,
-`PUNARO_ACCESS_AUDIENCE`, and `PUNARO_ACCESS_JWKS_URL`). The relay then checks
+origin and set `PUNARO_ACCESS_ISSUER`, `PUNARO_ACCESS_AUDIENCE`, and exactly
+one of `PUNARO_ACCESS_JWKS_URL` or `PUNARO_ACCESS_JWKS_FILE`. The relay then checks
 the Access JWT as well as every machine's signed request. This implementation
 work is not, by itself, a completed public-release decision; follow the
 [security release gates](security-release-gates.md).

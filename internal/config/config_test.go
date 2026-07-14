@@ -163,3 +163,22 @@ func TestLoadRejectsPartialCloudflareAccessVerifierConfiguration(t *testing.T) {
 		t.Fatal("partial Access verifier configuration was accepted")
 	}
 }
+
+func TestLoadAcceptsExactlyOneCloudflareAccessJWKSSource(t *testing.T) {
+	t.Setenv("PUNARO_ACCESS_ISSUER", "https://team.cloudflareaccess.com")
+	t.Setenv("PUNARO_ACCESS_AUDIENCE", "audience")
+	t.Setenv("PUNARO_ACCESS_JWKS_FILE", "/etc/punaro/jwks/current.json")
+	config, err := Load("")
+	if err != nil || config.AccessJWKSFile != "/etc/punaro/jwks/current.json" {
+		t.Fatalf("config=%#v err=%v", config, err)
+	}
+	t.Setenv("PUNARO_ACCESS_JWKS_URL", "https://team.cloudflareaccess.com/certs")
+	if _, err := Load(""); err == nil {
+		t.Fatal("multiple Access JWKS sources were accepted")
+	}
+	t.Setenv("PUNARO_ACCESS_JWKS_URL", "")
+	t.Setenv("PUNARO_ACCESS_JWKS_FILE", "relative/current.json")
+	if _, err := Load(""); err == nil {
+		t.Fatal("relative Access JWKS snapshot was accepted")
+	}
+}

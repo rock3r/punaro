@@ -11,6 +11,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,9 @@ type Config struct {
 	Issuer   string
 	Audience string
 	JWKSURL  string
+	// JWKSFile is an optional local, root-managed JWKS snapshot. Exactly one
+	// of JWKSURL and JWKSFile is required.
+	JWKSFile string
 	CacheTTL time.Duration
 }
 
@@ -36,6 +41,7 @@ type Verifier struct {
 	issuer   string
 	audience string
 	jwksURL  string
+	jwksFile string
 	cacheTTL time.Duration
 	client   *http.Client
 
@@ -46,16 +52,26 @@ type Verifier struct {
 
 // NewVerifier validates required origin-verification metadata.
 func NewVerifier(config Config, client *http.Client) (*Verifier, error) {
-	if strings.TrimSpace(config.Issuer) == "" || strings.TrimSpace(config.Audience) == "" || strings.TrimSpace(config.JWKSURL) == "" {
-		return nil, fmt.Errorf("access issuer, audience, and JWKS URL are required")
+	if strings.TrimSpace(config.Issuer) == "" || strings.TrimSpace(config.Audience) == "" {
+		return nil, fmt.Errorf("access issuer and audience are required")
 	}
 	issuer, err := parseSecureAccessURL(config.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Access issuer")
 	}
-	jwksURL, err := parseSecureAccessURL(config.JWKSURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid Access JWKS URL")
+	hasURL := strings.TrimSpace(config.JWKSURL) != ""
+	hasFile := strings.TrimSpace(config.JWKSFile) != ""
+	if hasURL == hasFile {
+		return nil, fmt.Errorf("exactly one Access JWKS source is required")
+	}
+	var jwksURL *url.URL
+	if hasURL {
+		jwksURL, err = parseSecureAccessURL(config.JWKSURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid Access JWKS URL")
+		}
+	} else if err := validateJWKSSnapshotPath(config.JWKSFile); err != nil {
+		return nil, fmt.Errorf("invalid Access JWKS snapshot")
 	}
 	if config.CacheTTL <= 0 {
 		config.CacheTTL = 5 * time.Minute
@@ -73,7 +89,13 @@ func NewVerifier(config Config, client *http.Client) (*Verifier, error) {
 	// Reject it rather than relying on the client to preserve HTTPS and host
 	// constraints across redirect hops.
 	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
-	return &Verifier{issuer: issuer.String(), audience: config.Audience, jwksURL: jwksURL.String(), cacheTTL: config.CacheTTL, client: client}, nil
+	verifier := &Verifier{issuer: issuer.String(), audience: config.Audience, cacheTTL: config.CacheTTL, client: client}
+	if jwksURL != nil {
+		verifier.jwksURL = jwksURL.String()
+	} else {
+		verifier.jwksFile = config.JWKSFile
+	}
+	return verifier, nil
 }
 
 func parseSecureAccessURL(raw string) (*url.URL, error) {
@@ -137,21 +159,9 @@ func (v *Verifier) key(ctx context.Context, keyID string, now time.Time) (*rsa.P
 }
 
 func (v *Verifier) refreshLocked(ctx context.Context, now time.Time) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, nil)
+	body, err := v.readJWKS(ctx, now)
 	if err != nil {
 		return err
-	}
-	response, err := v.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("fetch Access JWKS: %w", err)
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("fetch Access JWKS: HTTP %d", response.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxJWKSBytes+1))
-	if err != nil || len(body) > maxJWKSBytes {
-		return fmt.Errorf("read Access JWKS")
 	}
 	var document struct {
 		Keys []struct {
@@ -186,6 +196,70 @@ func (v *Verifier) refreshLocked(ctx context.Context, now time.Time) error {
 	v.keys = keys
 	v.cacheExpiry = now.Add(v.cacheTTL)
 	return nil
+}
+
+func (v *Verifier) readJWKS(ctx context.Context, now time.Time) ([]byte, error) {
+	if v.jwksFile != "" {
+		return readFreshJWKSSnapshot(v.jwksFile, now, v.cacheTTL)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	response, err := v.client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("fetch Access JWKS: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch Access JWKS: HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxJWKSBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxJWKSBytes {
+		return nil, fmt.Errorf("read Access JWKS")
+	}
+	return body, nil
+}
+
+func validateJWKSSnapshotPath(path string) error {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return fmt.Errorf("snapshot path must be absolute")
+	}
+	parent, err := os.Lstat(filepath.Dir(path))
+	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("snapshot parent is unsafe")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("snapshot file is unsafe")
+	}
+	return nil
+}
+
+func readFreshJWKSSnapshot(path string, now time.Time, maxAge time.Duration) ([]byte, error) {
+	if err := validateJWKSSnapshotPath(path); err != nil {
+		return nil, fmt.Errorf("read Access JWKS snapshot")
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("read Access JWKS snapshot")
+	}
+	// #nosec G304,G703 -- a locally configured path is checked before opening;
+	// SameFile below detects replacement between Lstat and open.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read Access JWKS snapshot")
+	}
+	defer func() { _ = file.Close() }()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || opened.Mode().Perm()&0o022 != 0 || !os.SameFile(before, opened) || opened.ModTime().After(now.Add(time.Minute)) || now.Sub(opened.ModTime()) > maxAge {
+		return nil, fmt.Errorf("read Access JWKS snapshot")
+	}
+	body, err := io.ReadAll(io.LimitReader(file, maxJWKSBytes+1))
+	if err != nil || len(body) == 0 || len(body) > maxJWKSBytes {
+		return nil, fmt.Errorf("read Access JWKS snapshot")
+	}
+	return body, nil
 }
 
 func parseRSAKey(modulus, exponent string) (*rsa.PublicKey, error) {

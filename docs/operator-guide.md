@@ -83,6 +83,33 @@ release gates, including capacity/reaping and source-ready evidence, are met.
 Permit issuance is not a transfer release and does not relax any attachment
 release gate.
 
+## Cloudflare Access under systemd
+
+`punarod.service` denies non-loopback network access. Do not weaken that rule
+just to fetch Access keys. Configure `PUNARO_ACCESS_ISSUER` and
+`PUNARO_ACCESS_AUDIENCE` plus **exactly one** JWKS source:
+
+- `PUNARO_ACCESS_JWKS_URL` is suitable only for a separately reviewed runtime
+  that permits the daemon's narrowly understood HTTPS egress.
+- `PUNARO_ACCESS_JWKS_FILE` is the systemd profile. The verifier accepts only a
+  fresh, regular, non-symlinked file beneath a non-writable parent; its file
+  mode must not allow group or world writes. A stale snapshot is a hard Access
+  verification failure.
+
+For the systemd profile install `deploy/systemd/punaro-jwks-refresh.service`,
+`punaro-jwks-refresh.timer`, and `refresh-jwks`. Create
+`/etc/punaro/jwks` as `root:punaro` mode `0750`; configure a root-owned,
+mode-`0600` `/etc/punaro/jwks-refresh.env` with the public HTTPS JWKS URL and
+`PUNARO_ACCESS_JWKS_FILE=/etc/punaro/jwks/current.json`. Enable the timer and
+run the service once before starting the relay. The script writes an atomic
+`root:punaro` mode-`0640` snapshot and refuses redirects, an empty response,
+oversized content, non-HTTPS URLs, or an output path outside that directory.
+
+Verify both `systemctl status punaro-jwks-refresh.service` and the timestamp
+of the snapshot on every deployment and rotation. If the refresh fails or the
+snapshot ages past the verifier cache interval, Access-protected requests are
+denied rather than being served with an indefinitely stale key.
+
 ## Containers and systemd
 
 The Compose file is a hardened build/run baseline, not a public deployment.
@@ -90,14 +117,18 @@ It intentionally publishes no port and does not import `.env`; provide only
 the specific non-secret configuration a service needs.  The read-only root
 filesystem leaves `/var/lib/punaro` as the only persistent writable location.
 
-The supplied systemd unit is likewise a baseline.  Before using it on Linux,
-run a smoke test under the target distribution, verify SQLite WAL behavior,
-and record `systemd-analyze security punarod.service` together with the exact
-systemd version in release evidence.  Every reported exposure must be either
-eliminated or have a named, time-bounded security exception; an unreviewed
-score or an "inspect" result is not acceptance.  Keep the listener on loopback
-and use a separately reviewed ingress only after the public-runtime release
-gate is complete.
+The supplied systemd units are a baseline. `cloudflared.service` and
+`run-cloudflared` accept the tunnel credential only through systemd's
+`LoadCredential`; keep the source file root-owned `0600` under
+`/etc/punaro/credentials`, inject it directly from a secret manager, and never
+place it in an environment file, command line, repository, or shell history.
+Before using any unit on Linux, run a smoke test under the target distribution,
+verify SQLite WAL behavior, and record `systemd-analyze security` for every
+unit together with the exact systemd version in release evidence. Every
+reported exposure must be either eliminated or have a named, time-bounded
+security exception; an unreviewed score or an "inspect" result is not
+acceptance. Keep the listener on loopback and use a separately reviewed ingress
+only after the public-runtime release gate is complete.
 
 ## Operations and incident response
 

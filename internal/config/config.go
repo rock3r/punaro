@@ -38,6 +38,7 @@ type Config struct {
 	AccessIssuer               string
 	AccessAudience             string
 	AccessJWKSURL              string
+	AccessJWKSFile             string
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -95,6 +96,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
 	accessJWKSURL := value("PUNARO_ACCESS_JWKS_URL", "")
+	accessJWKSFile := value("PUNARO_ACCESS_JWKS_FILE", "")
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	// The authenticated public relay runtime does not exist yet. Keeping even
 	// the health-only draft on loopback prevents an operator from accidentally
@@ -159,10 +161,13 @@ func Load(explicitEnvFile string) (Config, error) {
 	if attachmentRelayEnabled {
 		return Config{}, fmt.Errorf("PUNARO_ATTACHMENT_RELAY_ENABLED is withheld until attachment v2 release gates are complete")
 	}
-	if (accessIssuer == "") != (accessAudience == "") || (accessIssuer == "") != (accessJWKSURL == "") {
-		return Config{}, fmt.Errorf("PUNARO_ACCESS_ISSUER, PUNARO_ACCESS_AUDIENCE, and PUNARO_ACCESS_JWKS_URL must be set together")
+	if (accessIssuer == "") != (accessAudience == "") || (accessIssuer == "") != (accessJWKSURL == "" && accessJWKSFile == "") || (accessJWKSURL != "" && accessJWKSFile != "") {
+		return Config{}, fmt.Errorf("PUNARO_ACCESS_ISSUER and PUNARO_ACCESS_AUDIENCE require exactly one of PUNARO_ACCESS_JWKS_URL or PUNARO_ACCESS_JWKS_FILE")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
+	if accessJWKSFile != "" && !filepath.IsAbs(accessJWKSFile) {
+		return Config{}, fmt.Errorf("PUNARO_ACCESS_JWKS_FILE must be absolute")
+	}
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

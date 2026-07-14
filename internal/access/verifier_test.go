@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +123,73 @@ func TestVerifierDoesNotFollowJWKSRedirects(t *testing.T) {
 	}
 }
 
+func TestVerifierReadsFreshPrivateJWKSSnapshotWithoutNetwork(t *testing.T) {
+	t.Parallel()
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(t.TempDir(), "jwks")
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "current.json")
+	raw, err := json.Marshal(map[string]any{"keys": []any{rsaJWK("key-1", &private.PublicKey)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("network access attempted for local JWKS snapshot")
+		return nil, nil
+	})}
+	now := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(path, now, now); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(Config{Issuer: "https://team.cloudflareaccess.example", Audience: "punaro-audience", JWKSFile: path}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Verify(signedToken(t, private, "key-1", "https://team.cloudflareaccess.example", "punaro-audience", now.Add(time.Minute)), now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifierRejectsStaleOrWritableJWKSSnapshot(t *testing.T) {
+	t.Parallel()
+	parent := filepath.Join(t.TempDir(), "jwks")
+	if err := os.Mkdir(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "current.json")
+	if err := os.WriteFile(path, []byte(`{"keys":[]}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewVerifier(Config{Issuer: "https://team.cloudflareaccess.example", Audience: "punaro-audience", JWKSFile: path}, nil); err == nil {
+		t.Fatal("group-writable JWKS snapshot was accepted")
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := NewVerifier(Config{Issuer: "https://team.cloudflareaccess.example", Audience: "punaro-audience", JWKSFile: path, CacheTTL: time.Minute}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := time.Now().UTC().Add(-2 * time.Minute)
+	if err := os.Chtimes(path, stale, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.refreshLocked(context.Background(), time.Now().UTC()); err == nil {
+		t.Fatal("stale JWKS snapshot was accepted")
+	}
+}
+
 func signedToken(t *testing.T, private *rsa.PrivateKey, keyID, issuer, audience string, expires time.Time) string {
 	t.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{"iss": issuer, "aud": audience, "exp": expires.Unix(), "iat": expires.Add(-time.Hour).Unix()})
@@ -136,3 +205,7 @@ func rsaJWK(keyID string, public *rsa.PublicKey) map[string]string {
 	exponent := big.NewInt(int64(public.E)).Bytes()
 	return map[string]string{"kty": "RSA", "kid": keyID, "alg": "RS256", "use": "sig", "n": base64.RawURLEncoding.EncodeToString(public.N.Bytes()), "e": base64.RawURLEncoding.EncodeToString(exponent)}
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
