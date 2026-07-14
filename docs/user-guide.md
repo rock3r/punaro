@@ -17,7 +17,6 @@ envelope containing the relay message and conversation IDs.
 ## What is intentionally unavailable
 
 - Automatic Telegram topic discovery or main-chat fallback
-- WebSocket wake-up hints (polling is authoritative)
 - File and attachment transfer
 - Browser clients, public sharing links, and anonymous downloads
 
@@ -53,4 +52,6 @@ already delivered to a recipient.  The remaining in-flight exposure will be
 explicitly bounded in the released protocol and release evidence.
 
 Until then, use the established mailbox and Telegram workflows for text-only
-coordination and keep files in an approved storage system.
+coordination and keep files in an approved storage system. The adapter may use
+payload-free WebSocket wake-up hints to trigger an early poll, but reconnecting
+and periodic polling remain the correctness mechanism.

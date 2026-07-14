@@ -21,6 +21,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/telegram"
+	"golang.org/x/sys/unix"
 )
 
 const defaultTelegramAPIURL = "https://api.telegram.org"
@@ -158,8 +159,33 @@ func loadConfig() (config, error) {
 	if cfg.apiURL == "" {
 		cfg.apiURL = defaultTelegramAPIURL
 	}
+	botTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_BOT_TOKEN_FILE"))
+	if (cfg.botToken == "") == (botTokenFile == "") {
+		return config{}, fmt.Errorf("exactly one of PUNARO_TELEGRAM_BOT_TOKEN or PUNARO_TELEGRAM_BOT_TOKEN_FILE is required")
+	}
+	if botTokenFile != "" {
+		botToken, err := readPrivateFile(botTokenFile, "Telegram bot token", 4<<10)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.botToken = strings.TrimSpace(string(botToken))
+		if cfg.botToken == "" {
+			return config{}, fmt.Errorf("telegram bot token file is empty")
+		}
+	}
 	if cfg.relayURL == "" || cfg.machineID == "" || cfg.botToken == "" || cfg.endpoint == "" || cfg.stateDir == "" {
-		return config{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, PUNARO_TELEGRAM_BOT_TOKEN, PUNARO_TELEGRAM_GATEWAY_ENDPOINT, and PUNARO_TELEGRAM_STATE_DIR are required")
+		return config{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, Telegram bot token source, PUNARO_TELEGRAM_GATEWAY_ENDPOINT, and PUNARO_TELEGRAM_STATE_DIR are required")
+	}
+	accessTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE"))
+	if accessTokenFile != "" {
+		if cfg.accessToken.ClientID != "" || cfg.accessToken.ClientSecret != "" {
+			return config{}, fmt.Errorf("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE cannot be combined with Access environment credentials")
+		}
+		accessToken, err := loadAccessTokenFile(accessTokenFile)
+		if err != nil {
+			return config{}, err
+		}
+		cfg.accessToken = accessToken
 	}
 	if (cfg.accessToken.ClientID == "") != (cfg.accessToken.ClientSecret == "") {
 		return config{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
@@ -189,13 +215,59 @@ func loadConfig() (config, error) {
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	// #nosec G304,G703 -- the local operator explicitly selects this private
 	// credential path through configuration; remote inputs never control it.
-	raw, err := os.ReadFile(path)
+	raw, err := readPrivateFile(path, "machine private key", 4<<10)
 	if err != nil {
-		return nil, fmt.Errorf("read machine private key: %w", err)
+		return nil, err
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(raw)))
 	if err != nil || len(decoded) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("machine private key must be a base64url Ed25519 private key")
 	}
 	return ed25519.PrivateKey(decoded), nil
+}
+
+func readPrivateFile(path, label string, maximum int) ([]byte, error) {
+	// O_NOFOLLOW closes the check/open path race: after opening, all validation
+	// and reading happens through that same descriptor.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("%s file must be a private regular file", label)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("%s file must be a private regular file", label)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s file: %w", label, err)
+	}
+	if len(raw) == 0 || len(raw) > maximum {
+		return nil, fmt.Errorf("invalid %s file", label)
+	}
+	return raw, nil
+}
+
+func loadAccessTokenFile(path string) (adapter.AccessServiceToken, error) {
+	raw, err := readPrivateFile(path, "Access token", 4<<10)
+	if err != nil {
+		return adapter.AccessServiceToken{}, err
+	}
+	values := make(map[string]string, 2)
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if !found || value == "" || (key != "PUNARO_CF_ACCESS_CLIENT_ID" && key != "PUNARO_CF_ACCESS_CLIENT_SECRET") {
+			return adapter.AccessServiceToken{}, fmt.Errorf("invalid Access token file")
+		}
+		if _, duplicate := values[key]; duplicate {
+			return adapter.AccessServiceToken{}, fmt.Errorf("invalid Access token file")
+		}
+		values[key] = value
+	}
+	token := adapter.AccessServiceToken{ClientID: values["PUNARO_CF_ACCESS_CLIENT_ID"], ClientSecret: values["PUNARO_CF_ACCESS_CLIENT_SECRET"]}
+	if token.ClientID == "" || token.ClientSecret == "" {
+		return adapter.AccessServiceToken{}, fmt.Errorf("invalid Access token file")
+	}
+	return token, nil
 }

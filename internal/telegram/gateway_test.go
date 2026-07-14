@@ -38,7 +38,7 @@ func TestGatewayAuthorizesClaimsAndRoutesTelegramTextOnce(t *testing.T) {
 	}
 }
 
-func TestGatewayRejectsUnboundTopicWithoutFallback(t *testing.T) {
+func TestGatewaySkipsUnboundTopicWithoutFallback(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
 	if err != nil {
@@ -46,8 +46,12 @@ func TestGatewayRejectsUnboundTopicWithoutFallback(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = state.Close() })
 	gateway := Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { t.Fatal("unbound topic submitted"); return nil }}
-	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 100, ThreadID: 7, Text: "question"}); err == nil {
-		t.Fatal("unbound topic accepted")
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 100, ThreadID: 7, Text: "question"}); err != nil {
+		t.Fatal(err)
+	}
+	processed, err := state.Processed(1)
+	if err != nil || !processed {
+		t.Fatalf("unbound update was not durably skipped: processed=%v err=%v", processed, err)
 	}
 }
 

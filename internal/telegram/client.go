@@ -28,7 +28,7 @@ type Client struct {
 // in memory for the lifetime of the client.
 func NewClient(rawURL, token string, client *http.Client) (*Client, error) {
 	base, err := url.Parse(rawURL)
-	if err != nil || base.Scheme != "https" && base.Scheme != "http" || base.Host == "" || strings.TrimSpace(token) == "" {
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.Path != "" && base.Path != "/" || base.RawQuery != "" || base.Fragment != "" || strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("invalid Telegram API configuration")
 	}
 	if client == nil {

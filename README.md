@@ -84,11 +84,12 @@ precedence over dotenv values.
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 
-The optional `punaro-telegram` process takes its bot token from
-`PUNARO_TELEGRAM_BOT_TOKEN`; use an injected environment variable, protected
-service environment file, Docker/Kubernetes secret, or OS credential store.
-Never place it in source control, a CLI argument, an agent prompt, logs, or a
-message body. See the [Telegram gateway guide](docs/telegram-gateway.md).
+The optional `punaro-telegram` process takes its bot token from exactly one of
+`PUNARO_TELEGRAM_BOT_TOKEN` or `PUNARO_TELEGRAM_BOT_TOKEN_FILE`. Prefer a
+private credential file supplied by the OS service manager; the checked-in
+systemd unit uses `LoadCredential`. Never place a token in source control, a
+CLI argument, an agent prompt, logs, or a message body. See the
+[Telegram gateway guide](docs/telegram-gateway.md).
 
 ## Security model
 

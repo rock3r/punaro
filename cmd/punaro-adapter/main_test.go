@@ -61,3 +61,28 @@ func TestLoadConfigLoadsPrivateKeyWithoutLoggingIt(t *testing.T) {
 		t.Fatalf("unexpected non-secret adapter configuration")
 	}
 }
+
+func TestLoadPrivateKeyRejectsUnsafeFileModesAndSymlinks(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	keyFile := filepath.Join(directory, "machine.key")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPrivateKey(keyFile); err == nil {
+		t.Fatal("group-readable private key accepted")
+	}
+	if err := os.Chmod(keyFile, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(directory, "machine-link")
+	if err := os.Symlink(keyFile, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPrivateKey(symlink); err == nil {
+		t.Fatal("symlinked private key accepted")
+	}
+}

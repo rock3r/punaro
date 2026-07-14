@@ -7,8 +7,11 @@ release gates remain closed.
 ## Machine enrollment
 
 On each adapter machine, generate an exclusive endpoint namespace and a private
-machine key. The command creates the private file with mode `0600` and prints
-only the public record that belongs in the relay configuration:
+machine key. Use an explicit, machine-scoped `agent/<machine>/` namespace for
+the mailbox aliases attached to that machine. Do not enroll a broad client
+namespace such as `codex/` or `claude/`: those names are not unique across
+machines. The command creates the private file with mode `0600` and prints only
+the public record that belongs in the relay configuration:
 
 ```sh
 go run ./cmd/punaro-keygen \
@@ -42,8 +45,9 @@ the tunnel and Access policy are not substitutes for the machine signature.
 
 ## Adapter configuration
 
-Create a local `agent-mailbox` group (for example `group/punaro-attached`) and
-add an agent session while it should be reachable. The adapter polls active
+Create a local `agent-mailbox` group (for example `group/punaro-attached`),
+bind machine-scoped aliases such as `agent/workstation-review/agent-a`, and add
+those aliases while their agents should be reachable. The adapter polls active
 members, renews their relay lease, injects inbound text locally, and only then
 acknowledges the relay delivery.
 
@@ -61,6 +65,44 @@ For an Access service-token policy, provision both
 OS service secret mechanism. The adapter rejects a partial pair. Start the
 adapter with `go run ./cmd/punaro-adapter` during development; production
 service units are not yet part of the released remote deployment profile.
+
+## Onboard and revoke a machine
+
+Every machine gets one distinct relay enrollment record, one private machine
+key, one Access service token, and a non-overlapping `agent/<machine>/`
+mailbox namespace. Do not copy a private key or an Access credential between
+machines.
+
+1. Generate the enrollment record as shown above and add only its public JSON
+   record to `PUNARO_RELAY_MACHINES_JSON` on the relay. Restart the relay and
+   verify its readiness endpoint before continuing.
+2. On the machine, use the `agent-mailbox` MCP `mailbox_bind` operation to bind
+   the explicit alias (for example, `agent/workstation-review/agent-a`). Add it
+   to that machine's `group/punaro-attached` group:
+
+   ```sh
+   agent-mailbox group add-member \
+     --group group/punaro-attached \
+     --person agent/workstation-review/agent-a
+   ```
+
+3. Create a distinct Cloudflare Access service token and an application policy
+   that includes only that token. Inject its client ID and secret through the
+   machine's secret mechanism; do not place either in a checked-in env file.
+4. Start the adapter. Its first successful poll advertises exactly the active
+   attached aliases. Confirm an agent-to-agent text message reaches the local
+   mailbox, then acknowledge the mailbox delivery.
+
+This is a manual alpha revocation procedure, not a live control-plane feature.
+To revoke a machine, first remove its aliases from `group/punaro-attached` to
+stop new relay advertisement. Then remove its public enrollment record from
+the relay, revoke/delete its separate Access service token and policy, restart
+the relay, and securely erase its machine private key. Verify that requests
+signed by the removed machine are rejected and that an already connected
+adapter cannot fetch or acknowledge new deliveries. Do not reuse its machine
+ID or endpoint prefix until any old endpoint leases have expired or have been
+separately purged. Revocation stops future authorization; it cannot recall text
+or ciphertext already delivered.
 
 An agent can reply to a conversation it already knows from an inbound envelope:
 
@@ -89,6 +131,23 @@ punaro-adapter create \
 The owner of each endpoint must currently advertise it, and the creator must
 be an attached endpoint on the credentialed machine. Keep the idempotency key
 for retrying this exact creation request.
+
+## Opt-in live wake validation
+
+The opt-in E2E test opens the payload-free WebSocket wake stream, creates a
+fresh conversation, and verifies that a wake has only its topic ID and sequence.
+It requires an already configured adapter and two machine-scoped attached
+aliases; it does not contain any deployment values:
+
+```sh
+PUNARO_E2E_SENDER=agent/workstation-review/agent-a \
+PUNARO_E2E_RECEIVER=agent/workstation-review/agent-b \
+go test -tags=e2e ./cmd/punaro-adapter -run TestE2EPayloadFreeWake
+```
+
+When the adapter receives its credentials from an external secret provider,
+run that provider's environment wrapper around the test command. A wake is a
+best-effort hint only; fetch/lease/ack polling is still authoritative.
 
 ## Telegram gateway
 

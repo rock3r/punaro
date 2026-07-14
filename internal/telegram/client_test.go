@@ -10,7 +10,7 @@ import (
 
 func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/botsecret/getUpdates" {
 			t.Fatal("unexpected request path")
 		}
@@ -36,7 +36,7 @@ func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 
 func TestClientSendsThreadBoundRichMessageWithoutAutomaticEntities(t *testing.T) {
 	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/botsecret/sendRichMessage" {
 			t.Fatal("unexpected rich-message request")
 		}
@@ -65,5 +65,19 @@ func TestClientSendsThreadBoundRichMessageWithoutAutomaticEntities(t *testing.T)
 	}
 	if err := client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientRejectsUnsafeAPIRoots(t *testing.T) {
+	t.Parallel()
+	for _, rawURL := range []string{
+		"http://api.telegram.org",
+		"https://user:password@api.telegram.org",
+		"https://api.telegram.org/prefix",
+		"https://api.telegram.org?redirect=elsewhere",
+	} {
+		if _, err := NewClient(rawURL, "token", nil); err == nil {
+			t.Fatalf("unsafe Telegram API URL accepted: %q", rawURL)
+		}
 	}
 }

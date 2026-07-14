@@ -100,9 +100,9 @@ func Load(explicitEnvFile string) (Config, error) {
 	accessJWKSURL := value("PUNARO_ACCESS_JWKS_URL", "")
 	accessJWKSFile := value("PUNARO_ACCESS_JWKS_FILE", "")
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
-	// The authenticated public relay runtime does not exist yet. Keeping even
-	// the health-only draft on loopback prevents an operator from accidentally
-	// creating a direct-origin path that future routes could inherit.
+	// The relay origin stays loopback-only even when Cloudflare Access protects
+	// the public hostname. This prevents an operator from accidentally creating
+	// a direct-origin path that could bypass the Access and tunnel boundary.
 	if !isLoopbackListener(listenAddr) {
 		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
 	}
