@@ -148,6 +148,14 @@ provide encrypted backups, integrity verification, a measured restore drill,
 disk-pressure limits, credentials rotation, and revocation exercise.
 
 If a credential or machine is suspected compromised, stop the local service,
-preserve relevant logs without copying secrets or message bodies, rotate the
-credential out of band, and do not re-enable service until the future
-directory/revocation workflow has been exercised.
+preserve relevant logs without copying secrets or message bodies, then follow
+the alpha machine-revocation sequence in
+[the onboarding guide](alpha-text-relay.md#onboard-and-revoke-a-machine): remove
+the attachment-group memberships, remove the relay enrollment, revoke the
+machine-scoped Access token and policy, restart the relay, and securely erase
+the private key. Verify rejection of both the revoked Access credential and a
+request signed by the removed machine before any replacement is enrolled.
+
+This is an alpha text-relay procedure, not a substitute for the still-required
+production restore and revocation exercise. Do not re-enable the compromised
+machine or reuse its machine ID or endpoint namespace.
