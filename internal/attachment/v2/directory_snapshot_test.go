@@ -233,6 +233,10 @@ func TestDirectorySnapshotResolverResolvesOnlyFreshActivePermitIssuers(t *testin
 	if err != nil || string(resolved) != string(issuerPublic) {
 		t.Fatalf("issuer=%x err=%v", resolved, err)
 	}
+	binding, err := resolver.CurrentPermitBinding(clock)
+	if err != nil || binding.Audience != audience || binding.RevocationEpoch != head.RevocationEpoch || binding.ExpiresAt != head.ExpiresAt || isZero32(binding.DirectoryHead) {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
 	resolver.now = func() time.Time { return clock.Add(21 * time.Second) }
 	if _, err := resolver.CurrentPermitIssuerKey(issuerID); err == nil {
 		t.Fatal("stale permit issuer was accepted")

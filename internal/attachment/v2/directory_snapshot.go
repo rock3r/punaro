@@ -246,6 +246,29 @@ type DirectorySnapshotResolver struct {
 	now              func() time.Time
 }
 
+// DirectoryPermitBinding is the exact fresh directory authority an issuer
+// binds into a newly minted permit. It deliberately omits keys: callers must
+// resolve the issuer and holder through the same resolver interfaces.
+type DirectoryPermitBinding struct {
+	Audience        [32]byte
+	DirectoryHead   [32]byte
+	RevocationEpoch uint64
+	ExpiresAt       uint64
+}
+
+// CurrentPermitBinding returns the signed-head commitment and expiry only when
+// the resolver is still fresh and matches its durable checkpoint.
+func (r *DirectorySnapshotResolver) CurrentPermitBinding(now time.Time) (DirectoryPermitBinding, error) {
+	if r == nil || !r.fresh(now) || !r.current() {
+		return DirectoryPermitBinding{}, errors.New("stale permit directory authority")
+	}
+	commitment, err := directoryHeadCommitment(r.head)
+	if err != nil {
+		return DirectoryPermitBinding{}, errors.New("invalid permit directory authority")
+	}
+	return DirectoryPermitBinding{Audience: r.head.Audience, DirectoryHead: commitment, RevocationEpoch: r.head.RevocationEpoch, ExpiresAt: r.head.ExpiresAt}, nil
+}
+
 // NewDirectorySnapshotResolver verifies the exact supplied ordered directory
 // entries against a signed head, then durably checkpoints that verified
 // snapshot. A consistency proof, when required, must describe these same
