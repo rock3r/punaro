@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/access"
+	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -49,12 +50,20 @@ func run(args []string, stderr io.Writer) int {
 	if relayStore != nil {
 		defer func() { _ = relayStore.Close() }()
 	}
+	directoryHandler, err := buildDirectoryHandler(cfg, relayStore)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punarod directory configuration error: %v\n", err)
+		return 2
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ready"}\n`)) })
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
+	}
+	if directoryHandler != nil {
+		mux.Handle("/v2/directory", directoryHandler)
 	}
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	serverErrors := make(chan error, 1)
@@ -79,6 +88,39 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func buildDirectoryHandler(cfg config.Config, store *relay.Store) (http.Handler, error) {
+	if !cfg.DirectoryEnabled {
+		return nil, nil
+	}
+	if store == nil {
+		return nil, errors.New("directory service requires relay store")
+	}
+	machines, err := relay.ParseMachineEnrollments(cfg.RelayMachinesJSON)
+	if err != nil {
+		return nil, err
+	}
+	authenticator, err := relay.NewAuthenticator(store, machines)
+	if err != nil {
+		return nil, err
+	}
+	source, err := attachmentv2.OpenDirectorySnapshotFileSource(cfg.DirectorySnapshotFile)
+	if err != nil {
+		return nil, err
+	}
+	handler, err := relay.NewDirectoryHandler(authenticator, source, nil)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.AccessIssuer != "" {
+		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
+		if err != nil {
+			return nil, err
+		}
+		handler = verifier.Middleware(handler)
+	}
+	return handler, nil
 }
 
 func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {

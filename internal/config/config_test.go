@@ -66,6 +66,24 @@ func TestLoadRequiresMachineEnrollmentWhenRelayIsEnabled(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresAuthenticatedRelayAndPrivateSnapshotForDirectoryService(t *testing.T) {
+	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
+	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
+	if _, err := Load(""); err == nil {
+		t.Fatal("directory service without relay authentication was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
+	config, err := Load("")
+	if err != nil || !config.DirectoryEnabled || config.DirectorySnapshotFile == "" {
+		t.Fatalf("config=%#v err=%v", config, err)
+	}
+	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "relative/directory.cbor")
+	if _, err := Load(""); err == nil {
+		t.Fatal("relative directory snapshot path was accepted")
+	}
+}
+
 func TestLoadAcceptsExplicitRelayMachineEnrollment(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
