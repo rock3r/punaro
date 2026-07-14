@@ -207,6 +207,62 @@ func (s *SQLitePermitLedger) LoadIssuedForRequest(ctx context.Context, request P
 	return permit, err == nil, err
 }
 
+// RefreshIssuedForRequest atomically replaces a previously issued permit for
+// the exact same holder request only when the caller presents the exact
+// currently stored permit. It is used after a directory-head advance: keeping
+// the old request ID avoids retry ambiguity, while returning an old
+// head-bound permit would be a false successful issuance.
+func (s *SQLitePermitLedger) RefreshIssuedForRequest(ctx context.Context, request PermitRequest, previous, replacement Permit) (bool, error) {
+	if s == nil || validatePermitRequest(request) != nil {
+		return false, errors.New("invalid permit issuance request")
+	}
+	rawRequest, err := EncodePermitRequest(request)
+	if err != nil {
+		return false, err
+	}
+	rawPrevious, err := EncodePermit(previous)
+	if err != nil {
+		return false, err
+	}
+	rawReplacement, err := EncodePermit(replacement)
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var storedRequest, storedPermit []byte
+	if err := tx.QueryRowContext(ctx, "SELECT request, permit FROM issued_permit_requests WHERE request_id = ?", request.RequestID[:]).Scan(&storedRequest, &storedPermit); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !bytes.Equal(storedRequest, rawRequest) {
+		return false, errors.New("changed permit issuance request")
+	}
+	if !bytes.Equal(storedPermit, rawPrevious) {
+		return false, nil
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO issued_permits(serial, permit) VALUES (?, ?)", replacement.Serial[:], rawReplacement); err != nil {
+		return false, errPermitSerialCollision
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE issued_permit_requests SET permit = ? WHERE request_id = ? AND request = ? AND permit = ?", rawReplacement, request.RequestID[:], rawRequest, rawPrevious)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil || updated != 1 {
+		return false, errors.New("permit issuance refresh fencing failed")
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // Redeem verifies an exact signed operation, applies its state mutation in the
 // same SQLite transaction, and returns a durable result on identical retry.
 func (s *SQLitePermitLedger) Redeem(ctx context.Context, permit Permit, operation OperationRecord, request OperationRequest, issuers PermitAuthorityResolver, holders OperationHolderResolver, now time.Time, mutation PermitMutation) ([]byte, bool, error) {

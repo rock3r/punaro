@@ -183,6 +183,13 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	if expiresAt <= uint64(nowUnix) || request.MaxBytes > i.maxBytes || request.MaxChunks > i.maxChunks || request.MaxOperations > i.maxOperations {
 		return Permit{}, false, errors.New("permit request exceeds issuer policy")
 	}
+	previous, found, err := i.ledger.LoadIssuedForRequest(ctx, request)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	if found && VerifyPermit(previous, authority, now) == nil {
+		return previous, true, nil
+	}
 	for attempts := 0; attempts < 8; attempts++ {
 		var serial [16]byte
 		if _, err := io.ReadFull(i.random, serial[:]); err != nil || isZero16(serial) {
@@ -195,15 +202,28 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 		if err := VerifyPermit(permit, authority, now); err != nil {
 			return Permit{}, false, errors.New("issuer generated an invalid permit")
 		}
-		stored, replayed, err := i.ledger.IssueForRequest(ctx, request, permit)
-		if err == nil {
-			return stored, replayed, nil
+		if found {
+			refreshed, refreshErr := i.ledger.RefreshIssuedForRequest(ctx, request, previous, permit)
+			if refreshErr == nil && refreshed {
+				return permit, false, nil
+			}
+			if refreshErr != nil && !errors.Is(refreshErr, errPermitSerialCollision) {
+				return Permit{}, false, refreshErr
+			}
+		} else {
+			stored, replayed, issueErr := i.ledger.IssueForRequest(ctx, request, permit)
+			if issueErr == nil {
+				return stored, replayed, nil
+			}
+			if !errors.Is(issueErr, errPermitSerialCollision) {
+				if prior, lookupFound, lookupErr := i.ledger.LoadIssuedForRequest(ctx, request); lookupErr == nil && lookupFound && VerifyPermit(prior, authority, now) == nil {
+					return prior, true, nil
+				}
+				return Permit{}, false, issueErr
+			}
 		}
-		if prior, found, lookupErr := i.ledger.LoadIssuedForRequest(ctx, request); lookupErr == nil && found {
+		if prior, lookupFound, lookupErr := i.ledger.LoadIssuedForRequest(ctx, request); lookupErr == nil && lookupFound && VerifyPermit(prior, authority, now) == nil {
 			return prior, true, nil
-		}
-		if !errors.Is(err, errPermitSerialCollision) {
-			return Permit{}, false, err
 		}
 	}
 	return Permit{}, false, errors.New("permit serial collision limit exceeded")

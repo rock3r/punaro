@@ -47,12 +47,12 @@ func TestBuildPermitHandlerRequiresEnrolledAttachmentDeviceBinding(t *testing.T)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	cfg := permitHandlerConfig(t, privateDir, keyPath)
-	if _, closePermit, err := buildPermitHandler(cfg, store); err == nil || closePermit != nil {
+	if _, closePermit, _, err := buildPermitHandler(cfg, store); err == nil || closePermit != nil {
 		t.Fatal("permit handler accepted no enrolled attachment device binding")
 	}
 }
 
-func TestBuildPermitHandlerBuildsBoundedAuthenticatedIssuer(t *testing.T) {
+func TestBuildPermitHandlerRejectsUnavailableDirectoryAtStartup(t *testing.T) {
 	privateDir := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(privateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -75,48 +75,9 @@ func TestBuildPermitHandlerBuildsBoundedAuthenticatedIssuer(t *testing.T) {
 	cfg := permitHandlerConfig(t, privateDir, keyPath)
 	cfg.DataDir = dataDir
 	cfg.RelayMachinesJSON = machines
-	handler, closePermit, err := buildPermitHandler(cfg, store)
-	if err != nil {
-		t.Fatal(err)
+	if _, closePermit, _, err := buildPermitHandler(cfg, store); err == nil || closePermit != nil {
+		t.Fatal("permit handler accepted unavailable directory snapshot")
 	}
-	if handler == nil || closePermit == nil {
-		t.Fatal("permit handler did not return a bounded runtime")
-	}
-	closePermit()
-}
-
-func TestBuildAttachmentRelayHandlerBuildsBoundedAuthenticatedFallback(t *testing.T) {
-	privateDir := filepath.Join(t.TempDir(), "private")
-	if err := os.Mkdir(privateDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	_, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	keyPath := filepath.Join(privateDir, "issuer.key")
-	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(issuerPrivate)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	dataDir := t.TempDir()
-	machines := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`
-	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	cfg := permitHandlerConfig(t, privateDir, keyPath)
-	cfg.DataDir = dataDir
-	cfg.RelayMachinesJSON = machines
-	cfg.AttachmentRelayEnabled = true
-	handler, closeAttachment, err := buildAttachmentRelayHandler(cfg, store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if handler == nil || closeAttachment == nil {
-		t.Fatal("attachment relay handler did not return a bounded runtime")
-	}
-	closeAttachment()
 }
 
 func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
@@ -190,11 +151,14 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	cfg := config.Config{DataDir: dataDir, PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, RelayMachinesJSON: machines}
-	handler, closePermit, err := buildPermitHandler(cfg, store)
+	handler, closePermit, readiness, err := buildPermitHandler(cfg, store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(closePermit)
+	if readiness == nil || readiness() != nil {
+		t.Fatal("permit runtime was not ready with its verified directory snapshot")
+	}
 	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{14}, HolderDeviceID: senderID, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{15}, ConversationID: conversationID, SenderDeviceID: senderID, SenderGeneration: 1, RecipientDeviceID: recipientID, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: membership, IssuedAt: uint64(clock.Add(-time.Second).Unix()), ExpiresAt: uint64(clock.Add(10 * time.Second).Unix()), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
 	if err := attachmentv2.SignPermitRequest(&permitRequest, holderPrivate); err != nil {
 		t.Fatal(err)
@@ -218,6 +182,12 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	handler.ServeHTTP(badResponse, badRequest)
 	if badResponse.Code != http.StatusForbidden {
 		t.Fatalf("unbound machine status=%d", badResponse.Code)
+	}
+	if err := os.Remove(snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := readiness(); err == nil {
+		t.Fatal("permit runtime remained ready after its current directory disappeared")
 	}
 }
 

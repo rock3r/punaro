@@ -2,7 +2,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -55,7 +57,7 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "punarod directory configuration error: %v\n", err)
 		return 2
 	}
-	permitHandler, closePermit, err := buildPermitHandler(cfg, relayStore)
+	permitHandler, closePermit, permitReadiness, err := buildPermitHandler(cfg, relayStore)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punarod permit configuration error: %v\n", err)
 		return 2
@@ -63,18 +65,16 @@ func run(args []string, stderr io.Writer) int {
 	if closePermit != nil {
 		defer closePermit()
 	}
-	attachmentHandler, closeAttachment, err := buildAttachmentRelayHandler(cfg, relayStore)
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "punarod attachment relay configuration error: %v\n", err)
-		return 2
-	}
-	if closeAttachment != nil {
-		defer closeAttachment()
-	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ready"}\n`)) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if permitReadiness != nil && permitReadiness() != nil {
+			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"ready"}\n`))
+	})
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
 	}
@@ -83,9 +83,6 @@ func run(args []string, stderr io.Writer) int {
 	}
 	if permitHandler != nil {
 		mux.Handle("/v2/permits", permitHandler)
-	}
-	if attachmentHandler != nil {
-		mux.Handle("/v2/attachments/", attachmentHandler)
 	}
 	server := &http.Server{Addr: cfg.ListenAddr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	serverErrors := make(chan error, 1)
@@ -143,16 +140,16 @@ func (a permitRouteAuthorizer) AuthorizeAttachmentRequest(ctx context.Context, p
 // before issuing a capability and fetches a newly verified directory snapshot
 // for every request. The returned closer owns the private checkpoint and
 // issuance ledgers.
-func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, func(), error) {
+func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, func(), func() error, error) {
 	if !cfg.PermitIssuanceEnabled {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	if store == nil {
-		return nil, nil, errors.New("permit issuance requires relay store")
+		return nil, nil, nil, errors.New("permit issuance requires relay store")
 	}
 	machines, err := relay.ParseMachineEnrollments(cfg.RelayMachinesJSON)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	boundMachines := 0
 	for _, machine := range machines {
@@ -161,25 +158,25 @@ func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, fu
 		}
 	}
 	if boundMachines == 0 {
-		return nil, nil, errors.New("permit issuance requires an enrolled attachment device binding")
+		return nil, nil, nil, errors.New("permit issuance requires an enrolled attachment device binding")
 	}
 	authenticator, err := relay.NewAuthenticator(store, machines)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	source, err := attachmentv2.OpenDirectorySnapshotFileSource(cfg.DirectorySnapshotFile)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	privateDir := filepath.Join(cfg.DataDir, "attachment-v2")
 	checkpoints, err := attachmentv2.OpenSQLiteCheckpointStore(filepath.Join(privateDir, "directory-checkpoints.db"))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ledger, err := attachmentv2.OpenSQLitePermitLedger(filepath.Join(privateDir, "permit-ledger.db"))
 	if err != nil {
 		_ = checkpoints.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	closeStores := func() {
 		_ = ledger.Close()
@@ -188,43 +185,59 @@ func buildPermitHandler(cfg config.Config, store *relay.Store) (http.Handler, fu
 	privateKey, err := attachmentv2.LoadPrivateEd25519KeyFile(cfg.PermitIssuerPrivateKeyFile)
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	authority, err := attachmentv2.NewFreshDirectoryAuthorityProvider(source, attachmentv2.DirectoryTrust{Audience: cfg.DirectoryAudience, RootKeyID: cfg.DirectoryRootKeyID, RootPublicKey: cfg.DirectoryRootPublicKey, Checkpoints: checkpoints})
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	lifetime, err := permitIssuerLifetime(cfg.PermitMaxLifetimeSeconds)
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	issuer, err := attachmentv2.NewPermitIssuer(attachmentv2.PermitIssuerOptions{Ledger: ledger, IssuerKeyID: cfg.PermitIssuerKeyID, PrivateKey: privateKey, MaxLifetime: lifetime, MaxBytes: cfg.PermitMaxBytes, MaxChunks: cfg.PermitMaxChunks, MaxOperations: cfg.PermitMaxOperations})
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	handler, err := attachmentv2.NewPermitHTTPHandler(issuer, authority, permitRouteAuthorizer{authenticator: authenticator}, nil)
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	middleware, err := relay.NewMachineAuthenticationMiddleware(authenticator, 4<<10, nil)
 	if err != nil {
 		closeStores()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	handler = middleware(handler)
 	if cfg.AccessIssuer != "" {
 		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
 		if err != nil {
 			closeStores()
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		handler = verifier.Middleware(handler)
 	}
-	return handler, closeStores, nil
+	issuerPublic := privateKey.Public().(ed25519.PublicKey)
+	readiness := func() error {
+		current, err := authority.ResolvePermitIssuanceAuthority(context.Background(), time.Now().UTC())
+		if err != nil {
+			return errors.New("fresh permit directory authority is unavailable")
+		}
+		authorized, err := current.CurrentPermitIssuerKey(cfg.PermitIssuerKeyID)
+		if err != nil || !bytes.Equal(authorized, issuerPublic) {
+			return errors.New("permit issuer is not directory-authorized")
+		}
+		return nil
+	}
+	if err := readiness(); err != nil {
+		closeStores()
+		return nil, nil, nil, err
+	}
+	return handler, closeStores, readiness, nil
 }
 
 func permitIssuerLifetime(seconds uint64) (time.Duration, error) {
@@ -232,75 +245,6 @@ func permitIssuerLifetime(seconds uint64) (time.Duration, error) {
 		return 0, errors.New("permit issuer lifetime must be between one and sixty seconds")
 	}
 	return time.Duration(seconds) * time.Second, nil // #nosec G115 -- bound above is safely representable in time.Duration.
-}
-
-// buildAttachmentRelayHandler enables the bounded encrypted relay fallback,
-// not direct peer transport. Every operation still needs a short-lived permit,
-// a holder operation signature, a fresh directory view, and the same explicit
-// enrolled-machine/device binding used for permit issuance.
-func buildAttachmentRelayHandler(cfg config.Config, store *relay.Store) (http.Handler, func(), error) {
-	if !cfg.AttachmentRelayEnabled {
-		return nil, nil, nil
-	}
-	if store == nil {
-		return nil, nil, errors.New("attachment relay requires relay store")
-	}
-	machines, err := relay.ParseMachineEnrollments(cfg.RelayMachinesJSON)
-	if err != nil {
-		return nil, nil, err
-	}
-	authenticator, err := relay.NewAuthenticator(store, machines)
-	if err != nil {
-		return nil, nil, err
-	}
-	source, err := attachmentv2.OpenDirectorySnapshotFileSource(cfg.DirectorySnapshotFile)
-	if err != nil {
-		return nil, nil, err
-	}
-	privateDir := filepath.Join(cfg.DataDir, "attachment-v2")
-	checkpoints, err := attachmentv2.OpenSQLiteCheckpointStore(filepath.Join(privateDir, "directory-checkpoints.db"))
-	if err != nil {
-		return nil, nil, err
-	}
-	ledger, err := attachmentv2.OpenSQLitePermitLedger(filepath.Join(privateDir, "permit-ledger.db"))
-	if err != nil {
-		_ = checkpoints.Close()
-		return nil, nil, err
-	}
-	closeStores := func() {
-		_ = ledger.Close()
-		_ = checkpoints.Close()
-	}
-	authority, err := attachmentv2.NewFreshDirectoryAuthorityProvider(source, attachmentv2.DirectoryTrust{Audience: cfg.DirectoryAudience, RootKeyID: cfg.DirectoryRootKeyID, RootPublicKey: cfg.DirectoryRootPublicKey, Checkpoints: checkpoints})
-	if err != nil {
-		closeStores()
-		return nil, nil, err
-	}
-	transferStore, err := attachmentv2.OpenSQLiteTransferStore(ledger)
-	if err != nil {
-		closeStores()
-		return nil, nil, err
-	}
-	handler, err := attachmentv2.NewAttachmentHTTPHandler(attachmentv2.AttachmentHTTPHandlerOptions{Store: transferStore, Authority: authority, Authorize: permitRouteAuthorizer{authenticator: authenticator}})
-	if err != nil {
-		closeStores()
-		return nil, nil, err
-	}
-	middleware, err := relay.NewMachineAuthenticationMiddleware(authenticator, 256<<10+16, nil)
-	if err != nil {
-		closeStores()
-		return nil, nil, err
-	}
-	handler = middleware(handler)
-	if cfg.AccessIssuer != "" {
-		verifier, err := access.NewVerifier(access.Config{Issuer: cfg.AccessIssuer, Audience: cfg.AccessAudience, JWKSURL: cfg.AccessJWKSURL}, nil)
-		if err != nil {
-			closeStores()
-			return nil, nil, err
-		}
-		handler = verifier.Middleware(handler)
-	}
-	return handler, closeStores, nil
 }
 
 func buildDirectoryHandler(cfg config.Config, store *relay.Store) (http.Handler, error) {

@@ -1,9 +1,9 @@
 # Operator guide
 
 Punaro currently provides a loopback alpha text relay for enrolled adapters and
-a separately deployable Telegram bridge. It is not a released public service.
-An explicitly opt-in relay-backed attachment path exists only for controlled
-pre-release drills; do not use it for sensitive production work yet.
+a separately deployable Telegram bridge. It is not a released public service
+and does not support attachment transfer. Do not use it to carry sensitive
+production work yet.
 
 ## Run locally
 
@@ -76,20 +76,12 @@ back, or equivocated snapshot rejects issuance. It persists both the directory
 anti-rollback checkpoint and issuance idempotency under
 `$PUNARO_DATA_DIR/attachment-v2` with private SQLite permissions.
 
-Setting `PUNARO_ATTACHMENT_RELAY_ENABLED=true` additionally mounts the strict
-relay fallback at `/v2/attachments/`. It requires permit issuance and applies
-the same Access, enrolled-machine signature/replay protection, and exact
-machine-to-holder-device binding to every offer, acceptance, upload, download,
-attempt, and completion request. Each operation also carries a short-lived
-directory-bound permit and holder signature; the daemon obtains a fresh signed
-directory snapshot before redeeming it. Ciphertext only is stored in the
-private permit ledger database.
-
-This is a controlled pre-release relay fallback, not a user-facing transfer
-release: there is no adapter workflow or direct peer transport, no completed
-reaper/retention drill, and no release evidence. Keep the legacy
-`PUNARO_ATTACHMENTS_ENABLED=false`; setting it to true still exits fail-closed.
-Neither opt-in route relaxes an attachment release gate.
+The attachment operation routes are not mounted. Both
+`PUNARO_ATTACHMENT_RELAY_ENABLED=true` and the legacy
+`PUNARO_ATTACHMENTS_ENABLED=true` fail closed until the complete attachment v2
+release gates, including capacity/reaping and source-ready evidence, are met.
+Permit issuance is not a transfer release and does not relax any attachment
+release gate.
 
 ## Containers and systemd
 

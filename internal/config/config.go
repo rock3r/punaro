@@ -24,7 +24,6 @@ type Config struct {
 	DirectoryEnabled           bool
 	DirectorySnapshotFile      string
 	PermitIssuanceEnabled      bool
-	AttachmentRelayEnabled     bool
 	DirectoryAudience          [32]byte
 	DirectoryRootKeyID         [32]byte
 	DirectoryRootPublicKey     ed25519.PublicKey
@@ -82,10 +81,6 @@ func Load(explicitEnvFile string) (Config, error) {
 	permitIssuanceEnabled, err := strconv.ParseBool(value("PUNARO_PERMIT_ISSUANCE_ENABLED", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_PERMIT_ISSUANCE_ENABLED: %w", err)
-	}
-	attachmentRelayEnabled, err := strconv.ParseBool(value("PUNARO_ATTACHMENT_RELAY_ENABLED", "false"))
-	if err != nil {
-		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENT_RELAY_ENABLED: %w", err)
 	}
 	directoryAudience := value("PUNARO_DIRECTORY_AUDIENCE", "")
 	directoryRootKeyID := value("PUNARO_DIRECTORY_ROOT_KEY_ID", "")
@@ -157,16 +152,17 @@ func Load(explicitEnvFile string) (Config, error) {
 			return Config{}, decodeErr
 		}
 	}
-	if attachmentRelayEnabled && !permitIssuanceEnabled {
-		return Config{}, fmt.Errorf("attachment relay requires PUNARO_PERMIT_ISSUANCE_ENABLED")
+	attachmentRelayEnabled, err := strconv.ParseBool(value("PUNARO_ATTACHMENT_RELAY_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENT_RELAY_ENABLED: %w", err)
 	}
-	if attachmentRelayEnabled && attachmentsEnabled {
-		return Config{}, fmt.Errorf("attachment relay cannot be combined with legacy PUNARO_ATTACHMENTS_ENABLED")
+	if attachmentRelayEnabled {
+		return Config{}, fmt.Errorf("PUNARO_ATTACHMENT_RELAY_ENABLED is withheld until attachment v2 release gates are complete")
 	}
 	if (accessIssuer == "") != (accessAudience == "") || (accessIssuer == "") != (accessJWKSURL == "") {
 		return Config{}, fmt.Errorf("PUNARO_ACCESS_ISSUER, PUNARO_ACCESS_AUDIENCE, and PUNARO_ACCESS_JWKS_URL must be set together")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, AttachmentRelayEnabled: attachmentRelayEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

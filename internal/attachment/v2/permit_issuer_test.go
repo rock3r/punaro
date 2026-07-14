@@ -133,6 +133,49 @@ func TestPermitIssuerRejectsUnsignedOrOverbroadRequest(t *testing.T) {
 	}
 }
 
+func TestPermitIssuerRefreshesIdempotentRequestAfterDirectoryHeadAdvance(t *testing.T) {
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderPublic, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	request := samplePermitRequest(t, clock)
+	if err := SignPermitRequest(&request, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := OpenSQLitePermitLedger(filepath.Join(parent, "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	authorityA := permitIssuanceAuthorityStub{issuerID: bytes32(3), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: bytes32(1), DirectoryHead: bytes32(8), RevocationEpoch: 4, ExpiresAt: testUnix(t, clock.Add(20*time.Second))}}
+	issuer, err := NewPermitIssuer(PermitIssuerOptions{Ledger: ledger, IssuerKeyID: bytes32(3), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, replayed, err := issuer.Issue(context.Background(), request, authorityA)
+	if err != nil || replayed {
+		t.Fatalf("first=%+v replayed=%v err=%v", first, replayed, err)
+	}
+	authorityB := authorityA
+	authorityB.binding.DirectoryHead = bytes32(10)
+	refreshed, replayed, err := issuer.Issue(context.Background(), request, authorityB)
+	if err != nil || replayed || refreshed.Serial == first.Serial || refreshed.DirectoryHead != authorityB.binding.DirectoryHead {
+		t.Fatalf("refreshed=%+v replayed=%v err=%v", refreshed, replayed, err)
+	}
+	if err := VerifyPermit(refreshed, authorityB, clock); err != nil {
+		t.Fatalf("refreshed permit is not valid under the new head: %v", err)
+	}
+}
+
 func samplePermitRequest(t *testing.T, clock time.Time) PermitRequest {
 	return PermitRequest{RequestID: bytes16(90), HolderDeviceID: bytes16(4), HolderGeneration: 1, HolderRole: PermitHolderSender, TransferID: bytes16(5), ConversationID: bytes16(6), SenderDeviceID: bytes16(4), SenderGeneration: 1, RecipientDeviceID: bytes16(7), RecipientGeneration: 2, AttemptGeneration: 1, Operation: PermitOperationUpload, MembershipCommitment: bytes32(9), IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(15*time.Second)), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
 }

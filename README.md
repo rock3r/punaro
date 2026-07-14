@@ -78,7 +78,7 @@ precedence over dotenv values.
 | `PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE` | unset | Absolute path to a `0600`, non-symlinked file containing exactly one canonical raw-base64url Ed25519 private key. |
 | `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` | unset | Explicit permit lifetime, 1–60 seconds. |
 | `PUNARO_PERMIT_MAX_BYTES`, `PUNARO_PERMIT_MAX_CHUNKS`, `PUNARO_PERMIT_MAX_OPERATIONS` | unset | Explicit per-permit quotas; no default quota is granted. |
-| `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Enables the pre-release relay-backed encrypted attachment route after permit issuance is enabled. It does not enable direct peer transport or satisfy the transfer release gates. |
+| `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Reserved attachment relay switch; enabling it is rejected until the attachment v2 release gates are complete. |
 | `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
