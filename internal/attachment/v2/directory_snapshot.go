@@ -52,6 +52,13 @@ type DirectoryEntry struct {
 	Issuer     *DirectoryPermitIssuer
 }
 
+// EncodeDirectoryEntry returns one canonical directory leaf payload suitable
+// for a signed snapshot transport. It performs the same validation used when
+// calculating the transparency-tree leaf hash.
+func EncodeDirectoryEntry(entry DirectoryEntry) ([]byte, error) {
+	return entry.canonicalBytes()
+}
+
 type directoryDeviceKey struct {
 	id         [16]byte
 	generation uint64
