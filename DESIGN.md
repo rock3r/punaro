@@ -16,9 +16,11 @@ current `punarod` binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
 this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
-adds explicit Telegram topic routing and a restricted Bot API client. The
-attachment package remains a testable foundation only and enablement fails
-closed before listening. The authoritative release conditions are in
+adds explicit Telegram topic routing and a restricted Bot API client. The full
+attachment data plane remains a testable foundation and enablement fails closed
+before listening. A separately opt-in permit issuer exists only for
+directory/authorization drills; it does not mount a transfer route. The
+authoritative release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
 
 ## Goals
@@ -262,11 +264,18 @@ every request, and derives all commitments from the request. A separately
 gated `/v2/directory` endpoint now serves only complete canonical snapshots to
 an enrolled, replay-protected machine request; it reads and validates a fresh
 private snapshot file for every request and is covered by the same optional
-Access middleware as the text relay. The authority provider fetches a complete
+Access middleware as the text relay. A separately gated `POST /v2/permits`
+uses the same fresh provider, but only after an enrolled machine's
+replay-protected request is explicitly bound to the request holder's 16-byte
+directory device ID; a directory device cannot be bound to multiple machine
+credentials. Its issuer key comes only from a private, non-symlinked,
+canonical-key file and its lifetime and quotas are explicit configuration.
+The authority provider fetches a complete
 signed snapshot for every attachment request and never falls back to a stale
 accepted view; root pinning and the private checkpoint store remain the only
 sources of directory trust. Attachment operation routes remain unmounted
-because permit issuance, adapter transport integration, reaping, and release
+because adapter transport integration, reaping, end-to-end transfer drills,
+and release
 evidence are incomplete. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted

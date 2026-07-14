@@ -20,6 +20,23 @@ type Machine struct {
 	ID               string
 	PublicKey        ed25519.PublicKey
 	EndpointPrefixes []string
+	// AttachmentDeviceID binds this enrolled transport identity to one
+	// directory device for attachment permit issuance. It is optional for the
+	// text relay, but permit routes require it and never infer it from a name.
+	AttachmentDeviceID [16]byte
+}
+
+// AttachmentDeviceID returns the explicit attachment device bound to a
+// machine enrollment. A missing binding is never treated as a wildcard.
+func (a *Authenticator) AttachmentDeviceID(machineID string) ([16]byte, bool) {
+	if a == nil {
+		return [16]byte{}, false
+	}
+	machine, found := a.machines[machineID]
+	if !found || machine.AttachmentDeviceID == [16]byte{} {
+		return [16]byte{}, false
+	}
+	return machine.AttachmentDeviceID, true
 }
 
 // SignedRequest is the complete application-level authentication envelope.
@@ -50,12 +67,19 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 		return nil, fmt.Errorf("relay authenticator requires enrolled machines")
 	}
 	configured := make(map[string]Machine, len(machines))
+	attachmentDevices := make(map[[16]byte]string, len(machines))
 	for _, machine := range machines {
 		if strings.TrimSpace(machine.ID) == "" || len(machine.PublicKey) != ed25519.PublicKeySize || len(machine.EndpointPrefixes) == 0 {
 			return nil, fmt.Errorf("invalid machine enrollment")
 		}
 		if _, exists := configured[machine.ID]; exists {
 			return nil, fmt.Errorf("duplicate machine enrollment %q", machine.ID)
+		}
+		if machine.AttachmentDeviceID != [16]byte{} {
+			if prior, exists := attachmentDevices[machine.AttachmentDeviceID]; exists {
+				return nil, fmt.Errorf("attachment device is bound to both machines %q and %q", prior, machine.ID)
+			}
+			attachmentDevices[machine.AttachmentDeviceID] = machine.ID
 		}
 		for _, prefix := range machine.EndpointPrefixes {
 			if strings.TrimSpace(prefix) == "" {

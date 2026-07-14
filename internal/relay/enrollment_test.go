@@ -25,3 +25,33 @@ func TestParseMachineEnrollmentsRejectsPrivateKeyFieldsAndMalformedKeys(t *testi
 		t.Fatal("private key field accepted")
 	}
 }
+
+func TestParseMachineEnrollmentsDecodesAttachmentDeviceBinding(t *testing.T) {
+	machines, err := ParseMachineEnrollments(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if machines[0].AttachmentDeviceID[0] != 1 {
+		t.Fatalf("attachment device binding = %x", machines[0].AttachmentDeviceID)
+	}
+}
+
+func TestParseMachineEnrollmentsRejectsNonCanonicalAttachmentDeviceBinding(t *testing.T) {
+	if _, err := ParseMachineEnrollments(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ=="}]`); err == nil {
+		t.Fatal("non-canonical attachment device binding was accepted")
+	}
+}
+
+func TestAuthenticatorRejectsDuplicatedAttachmentDeviceBinding(t *testing.T) {
+	publicKey := make([]byte, 32)
+	publicKey[0] = 1
+	store, err := Open(t.TempDir() + "/relay.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	device := [16]byte{1}
+	if _, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicKey, EndpointPrefixes: []string{"agent/a/"}, AttachmentDeviceID: device}, {ID: "machine-b", PublicKey: publicKey, EndpointPrefixes: []string{"agent/b/"}, AttachmentDeviceID: device}}); err == nil {
+		t.Fatal("duplicate attachment device binding was accepted")
+	}
+}

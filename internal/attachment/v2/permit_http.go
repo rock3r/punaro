@@ -15,23 +15,33 @@ type PermitIssuanceAuthorityProvider interface {
 	ResolvePermitIssuanceAuthority(context.Context, time.Time) (PermitIssuanceAuthority, error)
 }
 
+// PermitRequestAuthorizer binds a holder-signed permit request to an
+// independently authenticated transport identity. The issuer must not rely on
+// possession of a holder signature as network admission: callers configure
+// this with the enrolled machine-to-directory-device binding.
+type PermitRequestAuthorizer interface {
+	AuthorizePermitRequest(context.Context, PermitRequest) error
+}
+
 type permitHTTPHandler struct {
 	issuer    *PermitIssuer
 	authority PermitIssuanceAuthorityProvider
+	authorize PermitRequestAuthorizer
 	now       func() time.Time
 }
 
 // NewPermitHTTPHandler exposes only canonical holder-signed permit requests.
-// The daemon must place enrolled-machine and optional Access authentication in
-// front of it; this handler independently verifies the directory device key.
-func NewPermitHTTPHandler(issuer *PermitIssuer, authority PermitIssuanceAuthorityProvider, now func() time.Time) (http.Handler, error) {
-	if issuer == nil || authority == nil {
-		return nil, errors.New("permit HTTP handler requires issuer and authority")
+// It requires a separate route-admission binding in addition to verifying the
+// directory device key, so a signature copied from one machine cannot be
+// submitted by another enrolled machine.
+func NewPermitHTTPHandler(issuer *PermitIssuer, authority PermitIssuanceAuthorityProvider, authorize PermitRequestAuthorizer, now func() time.Time) (http.Handler, error) {
+	if issuer == nil || authority == nil || authorize == nil {
+		return nil, errors.New("permit HTTP handler requires issuer, authority, and route admission")
 	}
 	if now == nil {
 		now = time.Now
 	}
-	return &permitHTTPHandler{issuer: issuer, authority: authority, now: now}, nil
+	return &permitHTTPHandler{issuer: issuer, authority: authority, authorize: authorize, now: now}, nil
 }
 
 func (h *permitHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +61,10 @@ func (h *permitHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	request, err := DecodePermitRequest(body)
 	if err != nil {
 		attachmentHTTPError(w, http.StatusBadRequest)
+		return
+	}
+	if err := h.authorize.AuthorizePermitRequest(r.Context(), request); err != nil {
+		attachmentHTTPError(w, http.StatusForbidden)
 		return
 	}
 	now := h.now().UTC()

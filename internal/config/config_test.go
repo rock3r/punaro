@@ -84,6 +84,54 @@ func TestLoadRequiresAuthenticatedRelayAndPrivateSnapshotForDirectoryService(t *
 	}
 }
 
+func TestLoadRequiresCompletePermitIssuanceTrustAndExplicitLimits(t *testing.T) {
+	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
+	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
+	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
+	if _, err := Load(""); err == nil {
+		t.Fatal("permit issuance without pinned trust and issuer configuration was accepted")
+	}
+	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
+	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
+	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
+	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
+	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
+	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
+	cfg, err := Load("")
+	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "61")
+	if _, err := Load(""); err == nil {
+		t.Fatal("permit issuance accepted a lifetime over sixty seconds")
+	}
+}
+
+func TestLoadRejectsMalformedPinnedPermitTrust(t *testing.T) {
+	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
+	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
+	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
+	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "not-base64url")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
+	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
+	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
+	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
+	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
+	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
+	if _, err := Load(""); err == nil {
+		t.Fatal("permit issuance accepted malformed pinned root material")
+	}
+}
+
 func TestLoadAcceptsExplicitRelayMachineEnrollment(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)

@@ -69,7 +69,15 @@ precedence over dotenv values.
 | `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
-| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records for the alpha relay. |
+| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
+| `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
+| `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, service-private (`0700` parent, `0600` regular non-symlink) canonical directory snapshot publication file. |
+| `PUNARO_PERMIT_ISSUANCE_ENABLED` | `false` | Enables only authenticated attachment-permit issuance; it requires directory service, pinned trust, an issuer key file, explicit limits, and at least one machine/device binding. It does not enable file transfer. |
+| `PUNARO_DIRECTORY_AUDIENCE`, `PUNARO_DIRECTORY_ROOT_KEY_ID`, `PUNARO_DIRECTORY_ROOT_PUBLIC_KEY` | unset | Canonical raw-base64url 32-byte pinned directory trust material for permit issuance. |
+| `PUNARO_PERMIT_ISSUER_KEY_ID` | unset | Canonical raw-base64url 32-byte active issuer key ID. |
+| `PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE` | unset | Absolute path to a `0600`, non-symlinked file containing exactly one canonical raw-base64url Ed25519 private key. |
+| `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` | unset | Explicit permit lifetime, 1–60 seconds. |
+| `PUNARO_PERMIT_MAX_BYTES`, `PUNARO_PERMIT_MAX_CHUNKS`, `PUNARO_PERMIT_MAX_OPERATIONS` | unset | Explicit per-permit quotas; no default quota is granted. |
 | `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |

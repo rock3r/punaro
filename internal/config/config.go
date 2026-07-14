@@ -3,6 +3,8 @@ package config
 
 import (
 	"bufio"
+	"crypto/ed25519"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -13,19 +15,29 @@ import (
 
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
-	ListenAddr               string
-	DataDir                  string
-	LogLevel                 string
-	AttachmentsEnabled       bool
-	AttachmentDeviceKeysJSON string
-	AttachmentMembershipJSON string
-	DirectoryEnabled         bool
-	DirectorySnapshotFile    string
-	RelayEnabled             bool
-	RelayMachinesJSON        string
-	AccessIssuer             string
-	AccessAudience           string
-	AccessJWKSURL            string
+	ListenAddr                 string
+	DataDir                    string
+	LogLevel                   string
+	AttachmentsEnabled         bool
+	AttachmentDeviceKeysJSON   string
+	AttachmentMembershipJSON   string
+	DirectoryEnabled           bool
+	DirectorySnapshotFile      string
+	PermitIssuanceEnabled      bool
+	DirectoryAudience          [32]byte
+	DirectoryRootKeyID         [32]byte
+	DirectoryRootPublicKey     ed25519.PublicKey
+	PermitIssuerKeyID          [32]byte
+	PermitIssuerPrivateKeyFile string
+	PermitMaxLifetimeSeconds   uint64
+	PermitMaxBytes             uint64
+	PermitMaxChunks            uint64
+	PermitMaxOperations        uint64
+	RelayEnabled               bool
+	RelayMachinesJSON          string
+	AccessIssuer               string
+	AccessAudience             string
+	AccessJWKSURL              string
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -66,6 +78,19 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, fmt.Errorf("parse PUNARO_DIRECTORY_ENABLED: %w", err)
 	}
 	directorySnapshotFile := value("PUNARO_DIRECTORY_SNAPSHOT_FILE", "")
+	permitIssuanceEnabled, err := strconv.ParseBool(value("PUNARO_PERMIT_ISSUANCE_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_PERMIT_ISSUANCE_ENABLED: %w", err)
+	}
+	directoryAudience := value("PUNARO_DIRECTORY_AUDIENCE", "")
+	directoryRootKeyID := value("PUNARO_DIRECTORY_ROOT_KEY_ID", "")
+	directoryRootPublicKey := value("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "")
+	permitIssuerKeyID := value("PUNARO_PERMIT_ISSUER_KEY_ID", "")
+	permitIssuerPrivateKeyFile := value("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "")
+	permitMaxLifetimeSeconds := value("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "")
+	permitMaxBytes := value("PUNARO_PERMIT_MAX_BYTES", "")
+	permitMaxChunks := value("PUNARO_PERMIT_MAX_CHUNKS", "")
+	permitMaxOperations := value("PUNARO_PERMIT_MAX_OPERATIONS", "")
 	relayMachines := value("PUNARO_RELAY_MACHINES_JSON", "")
 	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
@@ -89,10 +114,69 @@ func Load(explicitEnvFile string) (Config, error) {
 	if directoryEnabled && (directorySnapshotFile == "" || !filepath.IsAbs(directorySnapshotFile)) {
 		return Config{}, fmt.Errorf("directory service requires an absolute PUNARO_DIRECTORY_SNAPSHOT_FILE")
 	}
+	var audience, rootKeyID, issuerKeyID [32]byte
+	var rootPublicKey ed25519.PublicKey
+	var maxLifetime, maxBytes, maxChunks, maxOperations uint64
+	if permitIssuanceEnabled {
+		if !directoryEnabled {
+			return Config{}, fmt.Errorf("permit issuance requires PUNARO_DIRECTORY_ENABLED")
+		}
+		var decodeErr error
+		if audience, decodeErr = decodeFixedBase64URL("PUNARO_DIRECTORY_AUDIENCE", directoryAudience, 32); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		if rootKeyID, decodeErr = decodeFixedBase64URL("PUNARO_DIRECTORY_ROOT_KEY_ID", directoryRootKeyID, 32); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		var rootRaw [32]byte
+		if rootRaw, decodeErr = decodeFixedBase64URL("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", directoryRootPublicKey, ed25519.PublicKeySize); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		rootPublicKey = append(ed25519.PublicKey(nil), rootRaw[:]...)
+		if issuerKeyID, decodeErr = decodeFixedBase64URL("PUNARO_PERMIT_ISSUER_KEY_ID", permitIssuerKeyID, 32); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		if permitIssuerPrivateKeyFile == "" || !filepath.IsAbs(permitIssuerPrivateKeyFile) {
+			return Config{}, fmt.Errorf("permit issuance requires an absolute PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE")
+		}
+		if maxLifetime, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", permitMaxLifetimeSeconds, 60); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		if maxBytes, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_BYTES", permitMaxBytes, 64<<20); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		if maxChunks, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_CHUNKS", permitMaxChunks, 4096); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+		if maxOperations, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_OPERATIONS", permitMaxOperations, 4096); decodeErr != nil {
+			return Config{}, decodeErr
+		}
+	}
 	if (accessIssuer == "") != (accessAudience == "") || (accessIssuer == "") != (accessJWKSURL == "") {
 		return Config{}, fmt.Errorf("PUNARO_ACCESS_ISSUER, PUNARO_ACCESS_AUDIENCE, and PUNARO_ACCESS_JWKS_URL must be set together")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL}, nil
+}
+
+func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {
+	var result [32]byte
+	if value == "" || size != len(result) {
+		return result, fmt.Errorf("%s must be canonical base64url %d-byte material", name, size)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) != size || base64.RawURLEncoding.EncodeToString(raw) != value {
+		return result, fmt.Errorf("%s must be canonical base64url %d-byte material", name, size)
+	}
+	copy(result[:], raw)
+	return result, nil
+}
+
+func parsePositiveUint64(name, value string, maximum uint64) (uint64, error) {
+	parsed, err := strconv.ParseUint(value, 10, 64)
+	if err != nil || parsed == 0 || parsed > maximum {
+		return 0, fmt.Errorf("%s must be an integer from 1 to %d", name, maximum)
+	}
+	return parsed, nil
 }
 
 func isLoopbackListener(address string) bool {

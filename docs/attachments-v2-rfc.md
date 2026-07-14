@@ -326,6 +326,18 @@ and clamps permit expiry to the request, directory-head, and issuer limits.
 stored permit; changed bytes for an existing ID are rejected. Issuance records
 the request and permit serial atomically.
 
+The pre-release issuer endpoint, when exercised for authorization drills, is
+`POST /v2/permits`. It is admitted by the normal optional Access layer and a
+durably replay-protected enrolled-machine request signature before the holder
+request is parsed. The deployment configuration binds each issuer-capable
+machine credential to exactly one 16-byte directory device ID, and the route
+requires that binding to equal the holder ID in the signed permit request.
+This is an independent admission check: possession of a copied holder
+signature never authorizes another enrolled machine to submit it. The endpoint
+must fetch and verify one complete fresh directory snapshot per request and
+must not mount any transfer, signaling, or chunk route merely because permit
+issuance is enabled.
+
 The relay derives the signed path, target, and body commitments from the
 canonical decoded HTTP request; it never accepts client-supplied commitment
 values or usage counters. Upload redemption covers the received non-empty
