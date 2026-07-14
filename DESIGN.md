@@ -253,7 +253,9 @@ same fresh directory snapshot, plus a private SQLite serial and
 operation-redemption ledger. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. It has no daemon import, runtime directory client, relay
-storage, or transport integration. The v2 core
+storage, or transport integration. The v2 core also has a strict, non-secret
+transfer lifecycle model with one fenced attempt and no transition out of a
+terminal state; it is not persisted or mounted yet. The v2 core
 also has an immutable source-ready store which atomically persists a freshly
 verified manifest, recipient envelope, and all ciphertext chunks before an
 offer can reference it. In
