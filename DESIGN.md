@@ -103,7 +103,10 @@ prompt, repository, or mailbox body.
 
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
-only through the tunnel. It requires a valid machine credential for every
+only through the tunnel. Both the issuer and JWKS endpoint must be
+unambiguous HTTPS URLs (no credentials, query, or fragment), and the bounded
+JWKS fetcher rejects redirects so configuration validation cannot be bypassed
+by a later hop. It requires a valid machine credential for every
 adapter request. Use an enrolled Ed25519 device key with request signatures
 (method, path, body hash, timestamp, and nonce), or mTLS client certificates;
 the exact choice is an implementation decision, not an optional security
@@ -322,6 +325,9 @@ and static/container configuration checks.  The operator guide explicitly
 lists what is not yet a supported production operation.
 
 - TLS only; no HTTP listener exposed outside loopback/private LXC network.
+  Access issuer/JWKS metadata is HTTPS-only and its JWKS client must not follow
+  redirects; a deployment must prove the sandboxed service can fetch its
+  configured JWKS before reporting ready.
 - Firewall the LXC so only `cloudflared` reaches the relay listener. Strip
   incoming `CF-*` and forwarding headers before any reverse-proxy boundary;
   never treat a client-supplied identity header as authenticated.

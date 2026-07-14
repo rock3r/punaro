@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,7 +22,7 @@ func TestVerifierValidatesCloudflareStyleJWTClaimsAndSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{rsaJWK("key-1", &private.PublicKey)}})
 	}))
 	defer server.Close()
@@ -61,7 +62,7 @@ func TestVerifierRejectsUnknownKeyAndExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{rsaJWK("known", &known.PublicKey)}})
 	}))
 	defer server.Close()
@@ -75,6 +76,48 @@ func TestVerifierRejectsUnknownKeyAndExpiredToken(t *testing.T) {
 	}
 	if err := verifier.Verify(signedToken(t, known, "known", server.URL, "punaro-audience", now.Add(-time.Minute)), now); err == nil {
 		t.Fatal("expired token accepted")
+	}
+}
+
+func TestNewVerifierRejectsInsecureOrAmbiguousMetadata(t *testing.T) {
+	t.Parallel()
+	validIssuer := "https://team.cloudflareaccess.example"
+	validJWKS := "https://team.cloudflareaccess.example/cdn-cgi/access/certs"
+	for name, config := range map[string]Config{
+		"http issuer":         {Issuer: "http://team.cloudflareaccess.example", Audience: "audience", JWKSURL: validJWKS},
+		"http jwks":           {Issuer: validIssuer, Audience: "audience", JWKSURL: "http://team.cloudflareaccess.example/certs"},
+		"issuer userinfo":     {Issuer: "https://user@team.cloudflareaccess.example", Audience: "audience", JWKSURL: validJWKS},
+		"jwks query":          {Issuer: validIssuer, Audience: "audience", JWKSURL: validJWKS + "?next=https://elsewhere.example"},
+		"issuer fragment":     {Issuer: validIssuer + "#fragment", Audience: "audience", JWKSURL: validJWKS},
+		"jwks missing host":   {Issuer: validIssuer, Audience: "audience", JWKSURL: "https:/certs"},
+		"issuer missing host": {Issuer: "https:/issuer", Audience: "audience", JWKSURL: validJWKS},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := NewVerifier(config, nil); err == nil {
+				t.Fatal("unsafe Access metadata was accepted")
+			}
+		})
+	}
+}
+
+func TestVerifierDoesNotFollowJWKSRedirects(t *testing.T) {
+	t.Parallel()
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Location", "https://untrusted.example/jwks")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer server.Close()
+	verifier, err := NewVerifier(Config{Issuer: server.URL, Audience: "punaro-audience", JWKSURL: server.URL}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.refreshLocked(context.Background(), time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "HTTP 302") {
+		t.Fatalf("redirect result = %v, want HTTP 302 rejection", err)
+	}
+	if requests != 1 {
+		t.Fatalf("JWKS requests = %d, want 1 (no redirect follow)", requests)
 	}
 }
 

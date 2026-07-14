@@ -49,12 +49,12 @@ func NewVerifier(config Config, client *http.Client) (*Verifier, error) {
 	if strings.TrimSpace(config.Issuer) == "" || strings.TrimSpace(config.Audience) == "" || strings.TrimSpace(config.JWKSURL) == "" {
 		return nil, fmt.Errorf("access issuer, audience, and JWKS URL are required")
 	}
-	issuer, err := url.Parse(config.Issuer)
-	if err != nil || issuer.Scheme == "" || issuer.Host == "" {
+	issuer, err := parseSecureAccessURL(config.Issuer)
+	if err != nil {
 		return nil, fmt.Errorf("invalid Access issuer")
 	}
-	jwksURL, err := url.Parse(config.JWKSURL)
-	if err != nil || jwksURL.Scheme == "" || jwksURL.Host == "" {
+	jwksURL, err := parseSecureAccessURL(config.JWKSURL)
+	if err != nil {
 		return nil, fmt.Errorf("invalid Access JWKS URL")
 	}
 	if config.CacheTTL <= 0 {
@@ -65,8 +65,23 @@ func NewVerifier(config Config, client *http.Client) (*Verifier, error) {
 	}
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
+	} else {
+		clone := *client
+		client = &clone
 	}
-	return &Verifier{issuer: config.Issuer, audience: config.Audience, jwksURL: config.JWKSURL, cacheTTL: config.CacheTTL, client: client}, nil
+	// A JWKS redirect could change the endpoint after configuration validation.
+	// Reject it rather than relying on the client to preserve HTTPS and host
+	// constraints across redirect hops.
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return &Verifier{issuer: issuer.String(), audience: config.Audience, jwksURL: jwksURL.String(), cacheTTL: config.CacheTTL, client: client}, nil
+}
+
+func parseSecureAccessURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("unsafe Access URL")
+	}
+	return parsed, nil
 }
 
 // Verify accepts only RS256 JWTs with a known cached-or-refreshed signing key,
