@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -116,6 +118,58 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 func (c *HTTPRelayClient) Ack(ctx context.Context, delivery relay.Delivery) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/"+url.PathEscape(delivery.ID)+"/ack", map[string]any{"endpoint": delivery.RecipientEndpoint, "lease_token": delivery.LeaseToken, "lease_generation": delivery.LeaseGeneration}, nil)
 	return err
+}
+
+const (
+	directorySnapshotPath     = "/v2/directory"
+	maxDirectorySnapshotBytes = 2 << 20
+)
+
+// FetchDirectorySnapshot retrieves the complete current root-signed directory
+// view. It is machine-authenticated in addition to any Cloudflare Access
+// policy: directory membership and public-key metadata are not public relay
+// content. Callers must still root-verify the returned snapshot before use.
+func (c *HTTPRelayClient) FetchDirectorySnapshot(ctx context.Context) (attachmentv2.DirectorySnapshot, error) {
+	nonce, err := randomNonce()
+	if err != nil {
+		return attachmentv2.DirectorySnapshot{}, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodGet, Path: directorySnapshotPath, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: directorySnapshotPath})
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return attachmentv2.DirectorySnapshot{}, fmt.Errorf("build directory request: %w", err)
+	}
+	request.Header.Set("Accept", "application/cbor")
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return attachmentv2.DirectorySnapshot{}, fmt.Errorf("directory request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/cbor" {
+		return attachmentv2.DirectorySnapshot{}, fmt.Errorf("directory rejected request with HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxDirectorySnapshotBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxDirectorySnapshotBytes {
+		return attachmentv2.DirectorySnapshot{}, errors.New("invalid directory response")
+	}
+	snapshot, err := attachmentv2.DecodeDirectorySnapshot(raw)
+	if err != nil {
+		return attachmentv2.DirectorySnapshot{}, errors.New("invalid directory response")
+	}
+	return snapshot, nil
 }
 
 // ReadNotifications consumes a signed, content-free wake stream until ctx or

@@ -12,8 +12,69 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	"github.com/rock3r/punaro/internal/relay"
 )
+
+func TestHTTPRelayClientFetchesOnlySignedCanonicalDirectorySnapshot(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := attachmentv2.DirectoryEntry{Issuer: &attachmentv2.DirectoryPermitIssuer{KeyID: [32]byte{1}, PublicKey: [32]byte{2}}}
+	head, err := attachmentv2.EncodeDirectoryHead(attachmentv2.DirectoryHead{Audience: [32]byte{3}, RootKeyID: [32]byte{4}, TreeSize: 1, TreeRoot: [32]byte{5}, Sequence: 1, IssuedAt: 1, ExpiresAt: 2, RevocationEpoch: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := attachmentv2.EncodeDirectorySnapshot(attachmentv2.DirectorySnapshot{RawHead: head, Entries: []attachmentv2.DirectoryEntry{entry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v2/directory" || r.URL.RawQuery != "" {
+			t.Fatalf("unexpected directory request %s %s", r.Method, r.URL.String())
+		}
+		if r.Header.Get("CF-Access-Client-Id") != "access-id" || r.Header.Get("CF-Access-Client-Secret") != "access-secret" {
+			t.Fatal("missing Access service-token headers")
+		}
+		request := signedRequestFromHTTP(t, r, mustReadAll(t, r))
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("directory request was not signed")
+		}
+		w.Header().Set("Content-Type", "application/cbor")
+		_, _ = w.Write(snapshot)
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.FetchDirectorySnapshot(context.Background())
+	if err != nil || len(got.Entries) != 1 || got.Entries[0].Issuer == nil || got.Entries[0].Issuer.KeyID != entry.Issuer.KeyID {
+		t.Fatalf("snapshot=%#v err=%v", got, err)
+	}
+}
+
+func TestHTTPRelayClientRejectsUnsafeDirectoryResponse(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/cbor; charset=binary")
+		_, _ = w.Write([]byte{0xa0})
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.FetchDirectorySnapshot(context.Background()); err == nil {
+		t.Fatal("unsafe directory response accepted")
+	}
+}
 
 func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	t.Parallel()
