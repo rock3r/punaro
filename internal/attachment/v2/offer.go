@@ -98,6 +98,9 @@ func (s *SQLiteTransferStore) Offer(ctx context.Context, permit Permit, operatio
 			}
 			return nil, errors.New("transfer already exists")
 		}
+		if err := verifyCompleteRelaySourceTx(ctx, tx, manifest); err != nil {
+			return nil, err
+		}
 		sourceReady := NewTransferRecord(manifest.TransferID, verified.commitment, manifest.ExpiresAt)
 		var err error
 		sourceReady, err = sourceReady.Transition(TransferActionSourceReady, now)

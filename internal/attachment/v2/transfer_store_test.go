@@ -149,3 +149,54 @@ func TestOpenSQLiteTransferStoreRejectsObsoleteOfferSchema(t *testing.T) {
 		t.Fatal("obsolete offer schema was accepted")
 	}
 }
+
+func TestSQLiteTransferStoreReapsExpiredTransferArtifactsAtomically(t *testing.T) {
+	t.Parallel()
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := OpenSQLitePermitLedger(filepath.Join(parent, "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	store, err := OpenSQLiteTransferStore(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	record := NewTransferRecord(bytes16(46), bytes32(47), testUnix(t, clock.Add(-time.Second)))
+	record, err = record.Transition(TransferActionSourceReady, clock.Add(-2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateSourceReady(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	nonce := bytes32(48)
+	if _, err := ledger.db.ExecContext(context.Background(), "INSERT INTO attachment_offers(transfer_id, manifest, envelope, acceptance_nonce, acceptance_consumed) VALUES (?, ?, ?, ?, ?)", record.TransferID[:], []byte{1}, []byte{2}, nonce[:], uint64Bytes(0)); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := []byte{1, 2, 3}
+	commitment := ciphertextCommitment(ciphertext)
+	if _, err := ledger.db.ExecContext(context.Background(), "INSERT INTO attachment_chunks(transfer_id, chunk_index, ciphertext, ciphertext_commitment) VALUES (?, ?, ?, ?)", record.TransferID[:], uint64Bytes(0), ciphertext, commitment[:]); err != nil {
+		t.Fatal(err)
+	}
+	reaped, err := store.ReapExpired(context.Background(), clock, 1)
+	if err != nil || reaped != 1 {
+		t.Fatalf("reaped=%d err=%v", reaped, err)
+	}
+	if _, found, err := store.Load(record.TransferID); err != nil || found {
+		t.Fatalf("expired transfer remained found=%v err=%v", found, err)
+	}
+	for _, table := range []string{"attachment_offers", "attachment_chunks"} {
+		var count int
+		if err := ledger.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+table+" WHERE transfer_id = ?", record.TransferID[:]).Scan(&count); err != nil { // #nosec G202 -- fixed internal table names in a test assertion.
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("expired transfer rows remained in %s: %d", table, count)
+		}
+	}
+}

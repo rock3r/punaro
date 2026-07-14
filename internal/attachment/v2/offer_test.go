@@ -87,6 +87,17 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := store.Offer(context.Background(), permit, operation, request, route, payload, authority, holders, directory, clock); err == nil {
+		t.Fatal("offer without a complete relay source was accepted")
+	}
+	if _, found, err := store.Load(permit.TransferID); err != nil || found {
+		t.Fatalf("failed offer left transfer state found=%v err=%v", found, err)
+	}
+	ciphertext := make([]byte, 58) // manifest has one 42-byte plaintext chunk plus tag.
+	ciphertextHash := ciphertextCommitment(ciphertext)
+	if _, err := ledger.db.ExecContext(context.Background(), "INSERT INTO attachment_chunks(transfer_id, chunk_index, ciphertext, ciphertext_commitment) VALUES (?, ?, ?, ?)", permit.TransferID[:], uint64Bytes(0), ciphertext, ciphertextHash[:]); err != nil {
+		t.Fatal(err)
+	}
 	record, replayed, err := store.Offer(context.Background(), permit, operation, request, route, payload, authority, holders, directory, clock)
 	if err != nil || replayed || record.Status != TransferOffered || record.ManifestCommitment != verified.commitment {
 		t.Fatalf("record=%+v replayed=%v err=%v", record, replayed, err)
@@ -109,7 +120,6 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if err := ledger.Issue(uploadPermit, authority, clock); err != nil {
 		t.Fatal(err)
 	}
-	ciphertext := make([]byte, 58) // manifest has one 42-byte plaintext chunk plus tag.
 	uploadRoute, uploadRequest, err := NewAttachmentOperationRequest("PUT", "/v2/attachments/05050505050505050505050505050505/chunks/0", ciphertext, nil)
 	if err != nil {
 		t.Fatal(err)

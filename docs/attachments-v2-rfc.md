@@ -278,7 +278,10 @@ dependency/toolchain update must pass it plus decoder fuzzing.
 `created -> source-ready -> offered -> accepted -> transferring -> completed`
 is the only successful path.  `expired`, `cancelled`, and `revoked` are
 terminal.  Source readiness is atomic: the complete immutable artifact and
-manifest must exist before an offer can be accepted.
+manifest must exist before an offer can be accepted. When a relay stores
+ciphertext, every exact-sized chunk and its ciphertext commitment must already
+be durable there before the `offered` transition; a relay may not advertise a
+partial source and rely on later upload completion.
 
 The directory authorizes the sender, conversation, recipient snapshot, and
 operation.  A relay-signed, short-lived permit is required for every operation.

@@ -122,6 +122,72 @@ func (s *SQLiteTransferStore) Load(transferID [16]byte) (TransferRecord, bool, e
 	return loadTransferDB(context.Background(), s.ledger.db, transferID)
 }
 
+// ReapExpired removes only expired relay-side transfer state in bounded,
+// crash-safe batches. It deliberately does not touch source key/salt/nonce
+// reservations: those commitments are cryptographic collision tripwires and
+// must outlive transferable ciphertext. A caller should invoke this from a
+// bounded maintenance loop rather than on an untrusted request path.
+func (s *SQLiteTransferStore) ReapExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+	if s == nil || s.ledger == nil || limit <= 0 || limit > 1024 {
+		return 0, errors.New("invalid transfer reap limit")
+	}
+	seconds := now.UTC().Unix()
+	if seconds < 0 {
+		return 0, errors.New("invalid transfer reap time")
+	}
+	cutoff := uint64(seconds) // #nosec G115 -- negative Unix time is rejected above.
+	tx, err := s.ledger.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, "SELECT transfer_id FROM attachment_transfers WHERE expires_at <= ? ORDER BY expires_at, transfer_id LIMIT ?", uint64Bytes(cutoff), limit)
+	if err != nil {
+		return 0, err
+	}
+	var transferIDs [][16]byte
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		if len(raw) != 16 {
+			_ = rows.Close()
+			return 0, errors.New("invalid stored transfer ID")
+		}
+		var transferID [16]byte
+		copy(transferID[:], raw)
+		transferIDs = append(transferIDs, transferID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, transferID := range transferIDs {
+		for _, table := range []string{"attachment_offers", "attachment_chunks"} {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE transfer_id = ?", transferID[:]); err != nil { // #nosec G202 -- fixed internal table names.
+				return 0, err
+			}
+		}
+		result, err := tx.ExecContext(ctx, "DELETE FROM attachment_transfers WHERE transfer_id = ? AND expires_at <= ?", transferID[:], uint64Bytes(cutoff))
+		if err != nil {
+			return 0, err
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil || deleted != 1 {
+			return 0, errors.New("transfer reap fencing failed")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(transferIDs), nil
+}
+
 // LoadOffer returns the exact immutable manifest and recipient envelope for a
 // transfer. It does not authenticate them; each operation must still perform
 // fresh directory verification before relying on the returned records.
@@ -311,6 +377,49 @@ func updateTransferTx(ctx context.Context, tx *sql.Tx, previous, next TransferRe
 	updated, err := result.RowsAffected()
 	if err != nil || updated != 1 {
 		return errors.New("transfer update fencing failed")
+	}
+	return nil
+}
+
+// verifyCompleteRelaySourceTx proves that every immutable ciphertext frame is
+// already present before an offer becomes recipient-visible. The relay cannot
+// decrypt a sender's artifact, but it can and must prove availability, exact
+// frame sizes, ordering, and stored commitments. This deliberately fails
+// closed rather than exposing an offer that a recipient cannot download.
+func verifyCompleteRelaySourceTx(ctx context.Context, tx *sql.Tx, manifest Manifest) error {
+	if validateManifest(manifest) != nil {
+		return errors.New("invalid relay source manifest")
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT chunk_index, ciphertext, ciphertext_commitment FROM attachment_chunks WHERE transfer_id = ? ORDER BY chunk_index", manifest.TransferID[:])
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	expectedIndex := uint64(0)
+	for rows.Next() {
+		var indexRaw, ciphertext, commitmentRaw []byte
+		if err := rows.Scan(&indexRaw, &ciphertext, &commitmentRaw); err != nil {
+			return err
+		}
+		if len(indexRaw) != 8 || len(commitmentRaw) != 32 || expectedIndex >= manifest.ChunkCount || uint64FromBytes(indexRaw) != expectedIndex {
+			return errors.New("relay source chunks are incomplete")
+		}
+		expectedLength, err := expectedCiphertextChunkLength(manifest, expectedIndex)
+		if err != nil || uint64(len(ciphertext)) != expectedLength { // #nosec G115 -- attachment HTTP and manifest bounds keep length representable.
+			return errors.New("relay source chunk length is invalid")
+		}
+		var commitment [32]byte
+		copy(commitment[:], commitmentRaw)
+		if ciphertextCommitment(ciphertext) != commitment {
+			return errors.New("relay source chunk commitment is invalid")
+		}
+		expectedIndex++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if expectedIndex != manifest.ChunkCount {
+		return errors.New("relay source chunks are incomplete")
 	}
 	return nil
 }

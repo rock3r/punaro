@@ -146,6 +146,11 @@ func TestAttachmentHTTPHandlerRedeemsSignedOfferAgainstFreshAuthority(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	ciphertext := make([]byte, 58) // sample manifest has one 42-byte plaintext chunk plus tag.
+	ciphertextHash := ciphertextCommitment(ciphertext)
+	if _, err := ledger.db.ExecContext(context.Background(), "INSERT INTO attachment_chunks(transfer_id, chunk_index, ciphertext, ciphertext_commitment) VALUES (?, ?, ?, ?)", permit.TransferID[:], uint64Bytes(0), ciphertext, ciphertextHash[:]); err != nil {
+		t.Fatal(err)
+	}
 	handler, err := NewAttachmentHTTPHandler(AttachmentHTTPHandlerOptions{Store: store, Authority: staticAttachmentAuthorityProvider{authority: authority}, Authorize: attachmentRequestAuthorizerFunc(func(context.Context, Permit) error { return nil }), Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)

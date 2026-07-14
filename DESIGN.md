@@ -280,7 +280,7 @@ The authority provider fetches a complete
 signed snapshot for every attachment request and never falls back to a stale
 accepted view; root pinning and the private checkpoint store remain the only
 sources of directory trust. Attachment operation routes remain unmounted
-because capacity/reaping, source-ready enforcement, adapter transport
+because runtime capacity quotas and reaper scheduling, adapter transport
 integration, end-to-end transfer drills, and release evidence are incomplete.
 The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
@@ -296,7 +296,10 @@ consumed with the accepted transition, rather than treating a state change
 alone as acceptance evidence. The v2 core
 also has an immutable source-ready store which atomically persists a freshly
 verified manifest, recipient envelope, and all ciphertext chunks before an
-offer can reference it. In
+offer can reference it. Its withheld relay store independently refuses to
+make an offer recipient-visible unless it already contains every exact-sized,
+commitment-verified ciphertext chunk for that Manifest; a partial source is a
+hard failure, not a pending offer. In
 particular, it does **not** make
 attachments usable, or satisfy the vector/fuzz/review release gates. Callers
 must only construct its verified-manifest input after fresh directory
