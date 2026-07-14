@@ -96,4 +96,29 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if err != nil || !replayed || record.Status != TransferOffered {
 		t.Fatalf("retry record=%+v replayed=%v err=%v", record, replayed, err)
 	}
+	uploadPermit := permit
+	uploadPermit.Serial, uploadPermit.Operation, uploadPermit.MaxOperations = bytes16(80), PermitOperationUpload, 1
+	if err := SignPermit(&uploadPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Issue(uploadPermit, authority, clock); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext := make([]byte, 58) // manifest has one 42-byte plaintext chunk plus tag.
+	uploadRoute, uploadRequest, err := NewAttachmentOperationRequest("PUT", "/v2/attachments/05050505050505050505050505050505/chunks/0", ciphertext, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadOperation := sampleOperation(uploadPermit, uploadRequest)
+	uploadOperation.IssuedAt, uploadOperation.ExpiresAt = uploadPermit.IssuedAt, uploadPermit.ExpiresAt
+	if err := SignOperation(&uploadOperation, signerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if _, replayed, err := store.Upload(context.Background(), uploadPermit, uploadOperation, uploadRequest, uploadRoute, authority, holders, directory, clock); err != nil || replayed {
+		t.Fatalf("upload replayed=%v err=%v", replayed, err)
+	}
+	loadedChunk, found, err := store.LoadChunk(permit.TransferID, 0)
+	if err != nil || !found || string(loadedChunk.Ciphertext) != string(ciphertext) || loadedChunk.CiphertextCommitment != ciphertextCommitment(ciphertext) {
+		t.Fatalf("chunk=%+v found=%v err=%v", loadedChunk, found, err)
+	}
 }

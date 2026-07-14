@@ -29,6 +29,12 @@ func OpenSQLiteTransferStore(ledger *SQLitePermitLedger) (*SQLiteTransferStore, 
 	)`); err != nil {
 		return nil, err
 	}
+	if _, err := ledger.db.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS attachment_chunks (
+		transfer_id BLOB NOT NULL, chunk_index BLOB NOT NULL, ciphertext BLOB NOT NULL,
+		ciphertext_commitment BLOB NOT NULL, PRIMARY KEY(transfer_id, chunk_index)
+	)`); err != nil {
+		return nil, err
+	}
 	return &SQLiteTransferStore{ledger: ledger}, nil
 }
 
@@ -92,6 +98,26 @@ func (s *SQLiteTransferStore) LoadOffer(transferID [16]byte) (Manifest, Envelope
 		return Manifest{}, Envelope{}, false, errors.New("invalid stored offer")
 	}
 	return manifest, envelope, true, nil
+}
+
+// LoadChunk returns one immutable ciphertext chunk. Callers must authorize the
+// download before using it and construct the response-bound operation request
+// from this exact byte slice.
+func (s *SQLiteTransferStore) LoadChunk(transferID [16]byte, index uint64) (EncryptedChunk, bool, error) {
+	if s == nil || s.ledger == nil || isZero16(transferID) {
+		return EncryptedChunk{}, false, errors.New("invalid chunk lookup")
+	}
+	var ciphertext, commitment []byte
+	err := s.ledger.db.QueryRowContext(context.Background(), "SELECT ciphertext, ciphertext_commitment FROM attachment_chunks WHERE transfer_id = ? AND chunk_index = ?", transferID[:], uint64Bytes(index)).Scan(&ciphertext, &commitment)
+	if errors.Is(err, sql.ErrNoRows) {
+		return EncryptedChunk{}, false, nil
+	}
+	if err != nil || len(commitment) != 32 || len(ciphertext) == 0 || ciphertextCommitment(ciphertext) != [32]byte(commitment) {
+		return EncryptedChunk{}, false, errors.New("invalid stored attachment chunk")
+	}
+	var hash [32]byte
+	copy(hash[:], commitment)
+	return EncryptedChunk{Index: index, Ciphertext: append([]byte(nil), ciphertext...), CiphertextCommitment: hash}, true, nil
 }
 
 // RedeemTransition atomically verifies and redeems an exact permit operation,
