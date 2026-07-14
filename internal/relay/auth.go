@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -118,6 +120,29 @@ func (a *Authenticator) Verify(request SignedRequest, now time.Time) error {
 		return ErrForbidden
 	}
 	return tx.Commit()
+}
+
+// AuthenticateHTTP authenticates a request over its exact already-bounded
+// body. Route handlers remain responsible for rejecting unsigned URL features
+// (query strings and alternate escaped paths) before calling this method.
+func (a *Authenticator) AuthenticateHTTP(request *http.Request, body []byte, now time.Time) (string, error) {
+	if a == nil || request == nil {
+		return "", ErrForbidden
+	}
+	timestamp, err := time.Parse(time.RFC3339Nano, request.Header.Get("X-Punaro-Timestamp"))
+	if err != nil {
+		return "", ErrForbidden
+	}
+	signatureText := request.Header.Get("X-Punaro-Signature")
+	signature, err := base64.RawURLEncoding.DecodeString(signatureText)
+	if err != nil || base64.RawURLEncoding.EncodeToString(signature) != signatureText {
+		return "", ErrForbidden
+	}
+	signed := SignedRequest{MachineID: request.Header.Get("X-Punaro-Machine"), Method: request.Method, Path: request.URL.Path, Body: body, Timestamp: timestamp, Nonce: request.Header.Get("X-Punaro-Nonce"), Signature: signature}
+	if err := a.Verify(signed, now.UTC()); err != nil {
+		return "", err
+	}
+	return signed.MachineID, nil
 }
 
 // AllowsEndpoint checks a configured endpoint namespace. It is used before an

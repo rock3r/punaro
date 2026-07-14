@@ -3,7 +3,6 @@ package relay
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,19 +142,7 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineI
 }
 
 func (h *handler) authenticate(r *http.Request, body []byte) (string, error) {
-	timestamp, err := time.Parse(time.RFC3339Nano, r.Header.Get("X-Punaro-Timestamp"))
-	if err != nil {
-		return "", ErrForbidden
-	}
-	signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get("X-Punaro-Signature"))
-	if err != nil {
-		return "", ErrForbidden
-	}
-	request := SignedRequest{MachineID: r.Header.Get("X-Punaro-Machine"), Method: r.Method, Path: r.URL.Path, Body: body, Timestamp: timestamp, Nonce: r.Header.Get("X-Punaro-Nonce"), Signature: signature}
-	if err := h.auth.Verify(request, h.now().UTC()); err != nil {
-		return "", err
-	}
-	return request.MachineID, nil
+	return h.auth.AuthenticateHTTP(r, body, h.now())
 }
 
 func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
