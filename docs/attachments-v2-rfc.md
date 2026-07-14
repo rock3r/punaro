@@ -421,6 +421,14 @@ snapshot-root, freshness, checkpoint, and equivocation checks before using it.
 An unavailable, malformed, stale, or unverifiable refresh is a hard failure;
 the last accepted view must not be used as a grace fallback.
 
+The transport representation of this complete view is a bounded canonical
+version-two CBOR envelope. It carries the exact encoded head, the ordered full
+consistency leaf hashes (or an empty proof for an initial checkpoint), and the
+complete ordered directory entries. A consumer decodes, re-encodes, and
+requires byte-for-byte equality before snapshot verification; a relay never
+constructs a verifier input from partially decoded JSON or caller-selected key
+maps.
+
 An offer body is CDE map `{1=2,2=manifest,3=envelope,4=acceptance_nonce}`.
 `manifest` and `envelope` are their complete canonical encodings and
 `acceptance_nonce` is a fresh 32-byte random value. The recipient's accept body
