@@ -26,6 +26,10 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	recipientSignerPublic, recipientSignerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	clock := time.Now().UTC().Truncate(time.Second)
 	permit := samplePermit()
 	permit.Operation = PermitOperationOffer
@@ -51,7 +55,8 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := EncodeOfferPayload(manifest, envelope)
+	acceptanceNonce := bytes32(81)
+	payload, err := EncodeOfferPayload(manifest, envelope, acceptanceNonce)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,5 +125,27 @@ func TestSQLiteTransferStoreOffersVerifiedManifestAndEnvelopeAtomically(t *testi
 	loadedChunk, found, err := store.LoadChunk(permit.TransferID, 0)
 	if err != nil || !found || string(loadedChunk.Ciphertext) != string(ciphertext) || loadedChunk.CiphertextCommitment != ciphertextCommitment(ciphertext) {
 		t.Fatalf("chunk=%+v found=%v err=%v", loadedChunk, found, err)
+	}
+	acceptPermit := permit
+	acceptPermit.Serial, acceptPermit.Operation = bytes16(82), PermitOperationAccept
+	acceptPermit.HolderDeviceID, acceptPermit.HolderGeneration, acceptPermit.HolderRole = permit.RecipientDeviceID, permit.RecipientGeneration, PermitHolderRecipient
+	if err := SignPermit(&acceptPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Issue(acceptPermit, authority, clock); err != nil {
+		t.Fatal(err)
+	}
+	acceptRoute, acceptRequest, err := NewAttachmentOperationRequest("POST", "/v2/attachments/05050505050505050505050505050505/accept", acceptanceNonce[:], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptOperation := sampleOperation(acceptPermit, acceptRequest)
+	acceptOperation.IssuedAt, acceptOperation.ExpiresAt = acceptPermit.IssuedAt, acceptPermit.ExpiresAt
+	if err := SignOperation(&acceptOperation, recipientSignerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	acceptHolders := operationHolderStub{device: acceptPermit.HolderDeviceID, generation: acceptPermit.HolderGeneration, key: recipientSignerPublic}
+	if accepted, replayed, err := store.Accept(context.Background(), acceptPermit, acceptOperation, acceptRequest, acceptRoute, authority, acceptHolders, directory, clock); err != nil || replayed || accepted.Status != TransferAccepted {
+		t.Fatalf("accepted=%+v replayed=%v err=%v", accepted, replayed, err)
 	}
 }

@@ -404,6 +404,14 @@ HTTP method is valid. For a lifecycle route, the parsed transfer ID and
 operation must exactly equal the permit; an attempt-start route must also equal
 the permit attempt generation before signature verification or a state lookup.
 
+An offer body is CDE map `{1=2,2=manifest,3=envelope,4=acceptance_nonce}`.
+`manifest` and `envelope` are their complete canonical encodings and
+`acceptance_nonce` is a fresh 32-byte random value. The recipient's accept body
+is exactly that 32-byte nonce. The relay stores it with the immutable offer and
+uses a compare-and-set update to consume it in the same transaction as the
+recipient-signed `offered -> accepted` transition. A retry returns the original
+redemption result; a distinct operation cannot consume the nonce again.
+
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes
 on revocation notification or permit expiry.  Because a permit cannot outlive

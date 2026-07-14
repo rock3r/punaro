@@ -25,7 +25,8 @@ func OpenSQLiteTransferStore(ledger *SQLitePermitLedger) (*SQLiteTransferStore, 
 		return nil, err
 	}
 	if _, err := ledger.db.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS attachment_offers (
-		transfer_id BLOB PRIMARY KEY, manifest BLOB NOT NULL, envelope BLOB NOT NULL
+		transfer_id BLOB PRIMARY KEY, manifest BLOB NOT NULL, envelope BLOB NOT NULL,
+		acceptance_nonce BLOB NOT NULL, acceptance_consumed BLOB NOT NULL
 	)`); err != nil {
 		return nil, err
 	}
