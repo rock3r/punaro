@@ -26,7 +26,6 @@ if [ "$bytes" -eq 0 ] || [ "$bytes" -gt 262144 ]; then
 	exit 1
 fi
 
-chown root:punaro "$temporary"
 chmod 0640 "$temporary"
 mv -f "$temporary" "$PUNARO_ACCESS_JWKS_FILE"
 trap - EXIT HUP INT TERM
