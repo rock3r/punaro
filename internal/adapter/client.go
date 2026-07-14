@@ -123,7 +123,60 @@ func (c *HTTPRelayClient) Ack(ctx context.Context, delivery relay.Delivery) erro
 const (
 	directorySnapshotPath     = "/v2/directory"
 	maxDirectorySnapshotBytes = 2 << 20
+	permitIssuancePath        = "/v2/permits"
+	maxPermitResponseBytes    = 4 << 10
 )
+
+// IssuePermit submits an already holder-signed canonical permit request over
+// the adapter's enrolled machine channel. The relay separately verifies the
+// holder signature, fresh directory authority, and machine-to-holder binding.
+func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachmentv2.PermitRequest) (attachmentv2.Permit, error) {
+	body, err := attachmentv2.EncodePermitRequest(permitRequest)
+	if err != nil {
+		return attachmentv2.Permit{}, fmt.Errorf("encode permit request: %w", err)
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return attachmentv2.Permit{}, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: http.MethodPost, Path: permitIssuancePath, Body: body, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: permitIssuancePath})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return attachmentv2.Permit{}, fmt.Errorf("build permit request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/cbor")
+	request.Header.Set("Accept", "application/cbor")
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return attachmentv2.Permit{}, fmt.Errorf("permit request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "application/cbor" {
+		return attachmentv2.Permit{}, fmt.Errorf("permit request rejected with HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxPermitResponseBytes+1))
+	if err != nil || len(raw) == 0 || len(raw) > maxPermitResponseBytes {
+		return attachmentv2.Permit{}, errors.New("invalid permit response")
+	}
+	permit, err := attachmentv2.DecodePermit(raw)
+	if err != nil {
+		return attachmentv2.Permit{}, errors.New("invalid permit response")
+	}
+	return permit, nil
+}
 
 // FetchDirectorySnapshot retrieves the complete current root-signed directory
 // view. It is machine-authenticated in addition to any Cloudflare Access

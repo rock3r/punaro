@@ -16,6 +16,66 @@ import (
 	"github.com/rock3r/punaro/internal/relay"
 )
 
+func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
+	machinePublic, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{1}, HolderDeviceID: [16]byte{2}, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{3}, ConversationID: [16]byte{4}, SenderDeviceID: [16]byte{2}, SenderGeneration: 1, RecipientDeviceID: [16]byte{5}, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: [32]byte{6}, IssuedAt: uint64(clock.Add(-time.Second).Unix()), ExpiresAt: uint64(clock.Add(20 * time.Second).Unix()), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
+	if err := attachmentv2.SignPermitRequest(&permitRequest, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	expectedPermit := attachmentv2.Permit{Audience: [32]byte{7}, Serial: [16]byte{8}, IssuerKeyID: [32]byte{9}, HolderDeviceID: permitRequest.HolderDeviceID, HolderGeneration: permitRequest.HolderGeneration, HolderRole: permitRequest.HolderRole, TransferID: permitRequest.TransferID, ConversationID: permitRequest.ConversationID, SenderDeviceID: permitRequest.SenderDeviceID, SenderGeneration: permitRequest.SenderGeneration, RecipientDeviceID: permitRequest.RecipientDeviceID, RecipientGeneration: permitRequest.RecipientGeneration, AttemptGeneration: permitRequest.AttemptGeneration, Operation: permitRequest.Operation, DirectoryHead: [32]byte{10}, MembershipCommitment: permitRequest.MembershipCommitment, RevocationEpoch: 1, IssuedAt: uint64(clock.Unix()), ExpiresAt: uint64(clock.Add(15 * time.Second).Unix()), MaxBytes: permitRequest.MaxBytes, MaxChunks: permitRequest.MaxChunks, MaxOperations: permitRequest.MaxOperations}
+	if err := attachmentv2.SignPermit(&expectedPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	expectedRaw, err := attachmentv2.EncodePermit(expectedPermit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v2/permits" || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/cbor" {
+			t.Fatalf("unexpected request %s %s type=%q", r.Method, r.URL.String(), r.Header.Get("Content-Type"))
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := attachmentv2.DecodePermitRequest(body)
+		if err != nil || decoded != permitRequest {
+			t.Fatalf("request=%+v err=%v", decoded, err)
+		}
+		timestamp, err := time.Parse(time.RFC3339Nano, r.Header.Get("X-Punaro-Timestamp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		signature, err := base64.RawURLEncoding.DecodeString(r.Header.Get("X-Punaro-Signature"))
+		if err != nil || !ed25519.Verify(machinePublic, relay.CanonicalRequest(relay.SignedRequest{MachineID: "machine-a", Method: http.MethodPost, Path: "/v2/permits", Body: body, Timestamp: timestamp, Nonce: r.Header.Get("X-Punaro-Nonce")}), signature) {
+			t.Fatal("permit request did not have a valid machine signature")
+		}
+		w.Header().Set("Content-Type", "application/cbor")
+		_, _ = w.Write(expectedRaw)
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", machinePrivate, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit, err := client.IssuePermit(context.Background(), permitRequest)
+	if err != nil || permit != expectedPermit {
+		t.Fatalf("permit=%+v err=%v", permit, err)
+	}
+}
+
 func TestHTTPRelayClientFetchesOnlySignedCanonicalDirectorySnapshot(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
