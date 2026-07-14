@@ -1,0 +1,4 @@
+interface:
+  display_name: "Punaro Reply"
+  short_description: "Reply safely to a Punaro conversation"
+  default_prompt: "Reply to the current Punaro conversation using its durable envelope."
