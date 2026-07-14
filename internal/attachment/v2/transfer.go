@@ -11,14 +11,23 @@ import (
 type TransferStatus uint64
 
 const (
+	// TransferCreated is the initial state before the source artifact is durable.
 	TransferCreated TransferStatus = iota + 1
+	// TransferSourceReady has a complete immutable source artifact.
 	TransferSourceReady
+	// TransferOffered is visible to the recipient for one active attempt.
 	TransferOffered
+	// TransferAccepted has a recipient acceptance for the current attempt.
 	TransferAccepted
+	// TransferTransferring has one live ciphertext transport attempt.
 	TransferTransferring
+	// TransferCompleted has delivered its terminal completion acknowledgement.
 	TransferCompleted
+	// TransferExpired reached its fixed expiry without further activity.
 	TransferExpired
+	// TransferCancelled was cancelled by an authorized party.
 	TransferCancelled
+	// TransferRevoked was stopped by fresh directory revocation.
 	TransferRevoked
 )
 
@@ -32,13 +41,21 @@ func (status TransferStatus) Terminal() bool {
 type TransferAction uint64
 
 const (
+	// TransferActionSourceReady records the completed immutable source artifact.
 	TransferActionSourceReady TransferAction = iota + 1
+	// TransferActionOffer exposes the source-ready transfer to its recipient.
 	TransferActionOffer
+	// TransferActionAccept records the recipient's one-time acceptance.
 	TransferActionAccept
+	// TransferActionBegin starts the only fenced transfer attempt.
 	TransferActionBegin
+	// TransferActionComplete records successful final acknowledgement.
 	TransferActionComplete
+	// TransferActionExpire reaps an expired non-terminal transfer.
 	TransferActionExpire
+	// TransferActionCancel ends a non-terminal transfer by cancellation.
 	TransferActionCancel
+	// TransferActionRevoke ends a non-terminal transfer after directory revocation.
 	TransferActionRevoke
 )
 

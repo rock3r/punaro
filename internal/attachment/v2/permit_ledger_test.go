@@ -117,7 +117,7 @@ func TestSQLitePermitLedgerRejectsObsoleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec("CREATE TABLE redeemed_operations (permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL, path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL, idempotency_key BLOB NOT NULL, result BLOB NOT NULL, PRIMARY KEY(permit_serial, operation_id))"); err != nil {
+	if _, err := db.ExecContext(context.Background(), "CREATE TABLE redeemed_operations (permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation BLOB NOT NULL, path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL, body_commitment BLOB NOT NULL, idempotency_key BLOB NOT NULL, result BLOB NOT NULL, PRIMARY KEY(permit_serial, operation_id))"); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
