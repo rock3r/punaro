@@ -1,11 +1,13 @@
 package v2
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"errors"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/zeebo/blake3"
 )
 
@@ -57,6 +59,54 @@ type DirectoryEntry struct {
 // calculating the transparency-tree leaf hash.
 func EncodeDirectoryEntry(entry DirectoryEntry) ([]byte, error) {
 	return entry.canonicalBytes()
+}
+
+// DecodeDirectoryEntry accepts one complete canonical directory leaf payload.
+func DecodeDirectoryEntry(raw []byte) (DirectoryEntry, error) {
+	var fields map[uint64]cbor.RawMessage
+	if len(raw) == 0 || strictDecoding.Unmarshal(raw, &fields) != nil {
+		return DirectoryEntry{}, errors.New("invalid directory entry")
+	}
+	var kind uint64
+	if decodeDirectoryField(fields, 1, &kind) != nil {
+		return DirectoryEntry{}, errors.New("invalid directory entry")
+	}
+	var entry DirectoryEntry
+	switch kind {
+	case 1:
+		value := DirectoryDevice{}
+		if decodeDirectoryField(fields, 2, &value.DeviceID) != nil || decodeDirectoryField(fields, 3, &value.Generation) != nil || decodeDirectoryField(fields, 4, &value.SigningKeyID) != nil || decodeDirectoryField(fields, 5, &value.SigningPublicKey) != nil || decodeDirectoryField(fields, 6, &value.HPKEKeyID) != nil || decodeDirectoryField(fields, 7, &value.HPKEPublicKey) != nil || decodeDirectoryField(fields, 8, &value.Revoked) != nil {
+			return DirectoryEntry{}, errors.New("invalid directory entry")
+		}
+		entry.Device = &value
+	case 2:
+		value := DirectoryMembership{}
+		if decodeDirectoryField(fields, 2, &value.ConversationID) != nil || decodeDirectoryField(fields, 3, &value.SenderDeviceID) != nil || decodeDirectoryField(fields, 4, &value.SenderGeneration) != nil || decodeDirectoryField(fields, 5, &value.RecipientDeviceID) != nil || decodeDirectoryField(fields, 6, &value.RecipientGeneration) != nil || decodeDirectoryField(fields, 7, &value.Commitment) != nil || decodeDirectoryField(fields, 8, &value.Revoked) != nil {
+			return DirectoryEntry{}, errors.New("invalid directory entry")
+		}
+		entry.Membership = &value
+	case 3:
+		value := DirectoryPermitIssuer{}
+		if decodeDirectoryField(fields, 2, &value.KeyID) != nil || decodeDirectoryField(fields, 3, &value.PublicKey) != nil || decodeDirectoryField(fields, 4, &value.Revoked) != nil {
+			return DirectoryEntry{}, errors.New("invalid directory entry")
+		}
+		entry.Issuer = &value
+	default:
+		return DirectoryEntry{}, errors.New("invalid directory entry")
+	}
+	canonical, err := entry.canonicalBytes()
+	if err != nil || !bytes.Equal(raw, canonical) {
+		return DirectoryEntry{}, errors.New("non-canonical directory entry")
+	}
+	return entry, nil
+}
+
+func decodeDirectoryField(fields map[uint64]cbor.RawMessage, field uint64, target any) error {
+	raw, found := fields[field]
+	if !found {
+		return errors.New("missing directory field")
+	}
+	return strictDecoding.Unmarshal(raw, target)
 }
 
 type directoryDeviceKey struct {
