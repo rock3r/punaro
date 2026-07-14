@@ -106,9 +106,21 @@ func TestLoadRequiresCompletePermitIssuanceTrustAndExplicitLimits(t *testing.T) 
 	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 {
 		t.Fatalf("config=%#v err=%v", cfg, err)
 	}
+	t.Setenv("PUNARO_ATTACHMENT_RELAY_ENABLED", "true")
+	cfg, err = Load("")
+	if err != nil || !cfg.AttachmentRelayEnabled {
+		t.Fatalf("attachment relay config=%#v err=%v", cfg, err)
+	}
 	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "61")
 	if _, err := Load(""); err == nil {
 		t.Fatal("permit issuance accepted a lifetime over sixty seconds")
+	}
+}
+
+func TestLoadRejectsAttachmentRelayWithoutPermitIssuer(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENT_RELAY_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("attachment relay without permit issuance was accepted")
 	}
 }
 

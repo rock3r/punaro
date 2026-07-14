@@ -273,15 +273,17 @@ canonical-key file and its lifetime and quotas are explicit configuration.
 The authority provider fetches a complete
 signed snapshot for every attachment request and never falls back to a stale
 accepted view; root pinning and the private checkpoint store remain the only
-sources of directory trust. Attachment operation routes remain unmounted
-because adapter transport integration, reaping, end-to-end transfer drills,
-and release
-evidence are incomplete. The v2 core also has a strict, non-secret
+sources of directory trust. The bounded relay fallback routes are separately
+mountable only with the explicit pre-release attachment-relay configuration;
+they use the same Access and machine/device binding as permit issuance and
+never instantiate WebRTC. Adapter transport integration, reaping, end-to-end
+transfer drills, and release evidence are incomplete, so this is not a
+released attachment service. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption and refuses
-obsolete table layouts rather than attempting a lossy migration. It is not
-mounted yet. Its strict route parser derives operation bindings only from the
+obsolete table layouts rather than attempting a lossy migration. Its strict
+route parser derives operation bindings only from the
 fixed versioned HTTP schema and prevents a permit from crossing into another
 transfer route; sender-only actions are offer/upload/begin, recipient-only
 actions are accept/download/complete, and no current client route accepts a

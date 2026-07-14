@@ -32,17 +32,27 @@ type AttachmentAuthorityProvider interface {
 	ResolveAttachmentAuthority(context.Context, time.Time) (AttachmentAuthority, error)
 }
 
+// AttachmentRequestAuthorizer admits the holder permit only when the
+// independently authenticated transport identity is explicitly bound to that
+// holder device. It prevents a permit captured on one enrolled machine from
+// being submitted from another before any directory or store access.
+type AttachmentRequestAuthorizer interface {
+	AuthorizeAttachmentRequest(context.Context, Permit) error
+}
+
 // AttachmentHTTPHandlerOptions configure the strict attachment-v2 relay API.
 // The store and authority provider must be private, process-local dependencies.
 type AttachmentHTTPHandlerOptions struct {
 	Store     *SQLiteTransferStore
 	Authority AttachmentAuthorityProvider
+	Authorize AttachmentRequestAuthorizer
 	Now       func() time.Time
 }
 
 type attachmentHTTPHandler struct {
 	store     *SQLiteTransferStore
 	authority AttachmentAuthorityProvider
+	authorize AttachmentRequestAuthorizer
 	now       func() time.Time
 }
 
@@ -50,13 +60,13 @@ type attachmentHTTPHandler struct {
 // deliberately has no compatibility routes and no ambient machine identity:
 // each request carries its own short-lived, directory-bound authority.
 func NewAttachmentHTTPHandler(options AttachmentHTTPHandlerOptions) (http.Handler, error) {
-	if options.Store == nil || options.Authority == nil {
-		return nil, errors.New("attachment HTTP handler requires store and authority")
+	if options.Store == nil || options.Authority == nil || options.Authorize == nil {
+		return nil, errors.New("attachment HTTP handler requires store, authority, and route admission")
 	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &attachmentHTTPHandler{store: options.Store, authority: options.Authority, now: options.Now}, nil
+	return &attachmentHTTPHandler{store: options.Store, authority: options.Authority, authorize: options.Authorize, now: options.Now}, nil
 }
 
 func (h *attachmentHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +91,10 @@ func (h *attachmentHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 	if permit.TransferID != route.TransferID || permit.Operation != route.Operation || (route.AttemptGeneration != 0 && permit.AttemptGeneration != route.AttemptGeneration) {
 		attachmentHTTPError(w, http.StatusUnauthorized)
+		return
+	}
+	if err := h.authorize.AuthorizeAttachmentRequest(r.Context(), permit); err != nil {
+		attachmentHTTPError(w, http.StatusForbidden)
 		return
 	}
 	now := h.now().UTC()

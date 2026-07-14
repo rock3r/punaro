@@ -4,7 +4,7 @@ Punaro is the proposed local relay layer for agents and people. It now has an
 **alpha, loopback-hosted text relay**: enrolled machines can advertise local
 `agent-mailbox` attachments, send durable text, receive it through a local
 adapter, and optionally bridge explicitly mapped Telegram topics. It is not
-yet a released remote service or an attachment system.
+yet a released remote service or user-facing attachment system.
 
 ## What you can do today
 
@@ -18,7 +18,7 @@ envelope containing the relay message and conversation IDs.
 
 - Automatic Telegram topic discovery or main-chat fallback
 - WebSocket wake-up hints (polling is authoritative)
-- File and attachment transfer
+- User-facing file and attachment transfer
 - Browser clients, public sharing links, and anonymous downloads
 
 The alpha daemon still binds only to a literal loopback address. Before any
@@ -35,9 +35,10 @@ or chat settings already restrict access. See the [Telegram gateway guide](teleg
 for safe setup, durable retry behavior, and its at-least-once external-send
 boundary.
 
-Setting `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail.  This protects
-you from mistaking the tested attachment foundation for a released file-transfer
-feature.
+Setting the legacy `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail. An
+operator-only relay-backed attachment drill exists behind separate explicit
+configuration, but it has no adapter workflow and is not a released
+file-transfer feature.
 
 ## How future attachments will behave
 

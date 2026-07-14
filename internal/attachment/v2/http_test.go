@@ -34,6 +34,12 @@ func (p staticAttachmentAuthorityProvider) ResolveAttachmentAuthority(_ context.
 	return p.authority, nil
 }
 
+type attachmentRequestAuthorizerFunc func(context.Context, Permit) error
+
+func (f attachmentRequestAuthorizerFunc) AuthorizeAttachmentRequest(ctx context.Context, permit Permit) error {
+	return f(ctx, permit)
+}
+
 func TestAttachmentHTTPHandlerRejectsUnsignedRequestBeforeDirectoryLookup(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")
@@ -52,6 +58,7 @@ func TestAttachmentHTTPHandlerRejectsUnsignedRequestBeforeDirectoryLookup(t *tes
 	handler, err := NewAttachmentHTTPHandler(AttachmentHTTPHandlerOptions{
 		Store:     store,
 		Authority: failingAttachmentAuthorityProvider{},
+		Authorize: attachmentRequestAuthorizerFunc(func(context.Context, Permit) error { return nil }),
 		Now:       time.Now,
 	})
 	if err != nil {
@@ -139,7 +146,7 @@ func TestAttachmentHTTPHandlerRedeemsSignedOfferAgainstFreshAuthority(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewAttachmentHTTPHandler(AttachmentHTTPHandlerOptions{Store: store, Authority: staticAttachmentAuthorityProvider{authority: authority}, Now: func() time.Time { return clock }})
+	handler, err := NewAttachmentHTTPHandler(AttachmentHTTPHandlerOptions{Store: store, Authority: staticAttachmentAuthorityProvider{authority: authority}, Authorize: attachmentRequestAuthorizerFunc(func(context.Context, Permit) error { return nil }), Now: func() time.Time { return clock }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,5 +169,65 @@ func TestAttachmentHTTPHandlerRedeemsSignedOfferAgainstFreshAuthority(t *testing
 	record, err := decodeTransferResult(response.Body.Bytes())
 	if err != nil || record.Status != TransferOffered || record.ManifestCommitment != verified.commitment {
 		t.Fatalf("record=%+v err=%v", record, err)
+	}
+}
+
+func TestAttachmentHTTPHandlerRejectsPermitWithoutMachineDeviceAdmission(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := OpenSQLitePermitLedger(filepath.Join(parent, "ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	store, err := OpenSQLiteTransferStore(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewAttachmentHTTPHandler(AttachmentHTTPHandlerOptions{Store: store, Authority: failingAttachmentAuthorityProvider{}, Authorize: attachmentRequestAuthorizerFunc(func(context.Context, Permit) error { return errors.New("machine is not bound to holder") }), Now: time.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	permit := samplePermit()
+	permit.Operation = PermitOperationOffer
+	permit.IssuedAt, permit.ExpiresAt = testUnix(t, clock.Add(-time.Second)), testUnix(t, clock.Add(20*time.Second))
+	if err := SignPermit(&permit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	path := "/v2/attachments/05050505050505050505050505050505/offer"
+	_, operationRequest, err := NewAttachmentOperationRequest(http.MethodPost, path, []byte("opaque"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operation := sampleOperation(permit, operationRequest)
+	if err := SignOperation(&operation, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	permitRaw, err := EncodePermit(permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationRaw, err := EncodeOperation(operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, path, bytes.NewReader([]byte("opaque")))
+	request.Header.Set(attachmentPermitHeader, base64.RawURLEncoding.EncodeToString(permitRaw))
+	request.Header.Set(attachmentOperationHeader, base64.RawURLEncoding.EncodeToString(operationRaw))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", response.Code)
 	}
 }

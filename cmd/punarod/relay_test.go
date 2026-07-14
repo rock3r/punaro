@@ -79,6 +79,40 @@ func TestBuildPermitHandlerBuildsBoundedAuthenticatedIssuer(t *testing.T) {
 	closePermit()
 }
 
+func TestBuildAttachmentRelayHandlerBuildsBoundedAuthenticatedFallback(t *testing.T) {
+	privateDir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(privateDir, "issuer.key")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(issuerPrivate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	machines := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := permitHandlerConfig(t, privateDir, keyPath)
+	cfg.DataDir = dataDir
+	cfg.RelayMachinesJSON = machines
+	cfg.AttachmentRelayEnabled = true
+	handler, closeAttachment, err := buildAttachmentRelayHandler(cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handler == nil || closeAttachment == nil {
+		t.Fatal("attachment relay handler did not return a bounded runtime")
+	}
+	closeAttachment()
+}
+
 func TestPermitIssuerLifetimeRejectsOutOfRangeConfiguration(t *testing.T) {
 	if _, err := permitIssuerLifetime(0); err == nil {
 		t.Fatal("zero permit lifetime was accepted")

@@ -14,9 +14,12 @@ current attachment gate is intentionally **closed**.
 
 ## Current source assertions (not release evidence)
 
-- The source rejects every non-literal-loopback listener and tests attachment
-  startup refusal before a listener is constructed.
-- `punarod` has no attachment import, route mount, or WebRTC constructor.
+- The source rejects every non-literal-loopback listener. The legacy full
+  attachment switch still fails closed before a listener is constructed.
+- `punarod` can mount only an explicitly configured pre-release v2 relay
+  fallback, behind Access (when configured), durable machine replay checks,
+  holder/device binding, fresh directory authority, and short-lived permits;
+  it has no WebRTC constructor.
 - The container context is allow-listed; Compose has no `.env`, port, or network
   and has a read-only root with no Linux capabilities.
 - CI source pins Actions and OCI lint/build inputs to immutable revisions.
