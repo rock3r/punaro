@@ -140,6 +140,20 @@ func (v *Verifier) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// Warm proves that the configured JWKS source is currently readable and
+// contains at least one valid Access signing key. Callers use this for startup
+// and readiness checks so an origin is not reported ready before its Access
+// boundary is usable. It performs no token validation and never relaxes the
+// normal cache/refresh rules.
+func (v *Verifier) Warm(ctx context.Context, now time.Time) error {
+	if v == nil {
+		return fmt.Errorf("nil Access verifier")
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.refreshLocked(ctx, now.UTC())
+}
+
 func (v *Verifier) key(ctx context.Context, keyID string, now time.Time) (*rsa.PublicKey, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()

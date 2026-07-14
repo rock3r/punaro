@@ -109,7 +109,9 @@ JWKS fetcher rejects redirects so configuration validation cannot be bypassed
 by a later hop. A systemd deployment instead consumes a fresh, root-managed
 local JWKS snapshot; this keeps the daemon's egress deny-list intact while a
 separate, constrained refresh unit is the only component permitted to fetch
-the configured HTTPS URL. It requires a valid machine credential for every
+the configured HTTPS URL. The daemon warms and revalidates that source for
+startup and `/readyz`, so it cannot advertise readiness with a missing, stale,
+or unparsable Access boundary. It requires a valid machine credential for every
 adapter request. Use an enrolled Ed25519 device key with request signatures
 (method, path, body hash, timestamp, and nonce), or mTLS client certificates;
 the exact choice is an implementation decision, not an optional security

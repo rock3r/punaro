@@ -153,6 +153,9 @@ func TestVerifierReadsFreshPrivateJWKSSnapshotWithoutNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := verifier.Warm(context.Background(), now); err != nil {
+		t.Fatalf("warm local snapshot: %v", err)
+	}
 	if err := verifier.Verify(signedToken(t, private, "key-1", "https://team.cloudflareaccess.example", "punaro-audience", now.Add(time.Minute)), now); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +188,7 @@ func TestVerifierRejectsStaleOrWritableJWKSSnapshot(t *testing.T) {
 	if err := os.Chtimes(path, stale, stale); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifier.refreshLocked(context.Background(), time.Now().UTC()); err == nil {
+	if err := verifier.Warm(context.Background(), time.Now().UTC()); err == nil {
 		t.Fatal("stale JWKS snapshot was accepted")
 	}
 }

@@ -110,6 +110,11 @@ atomic snapshot the non-writable `punaro` group without granting the refresh
 unit `CAP_CHOWN`; the script writes it mode-`0640` and refuses redirects, an empty response,
 oversized content, non-HTTPS URLs, or an output path outside that directory.
 
+`/readyz` is deliberately unavailable until the configured JWKS source has
+been parsed into at least one valid RS256 signing key. It rechecks that source
+on every readiness probe, so a stale, missing, or malformed snapshot is a
+service-unready condition rather than a deferred first-request failure.
+
 Verify both `systemctl status punaro-jwks-refresh.service` and the timestamp
 of the snapshot on every deployment and rotation. If the refresh fails or the
 snapshot ages past the verifier cache interval, Access-protected requests are

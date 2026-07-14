@@ -44,6 +44,19 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
 		return 2
 	}
+	accessReadiness := func() error { return nil }
+	if cfg.AccessIssuer != "" {
+		verifier, err := newAccessVerifier(cfg)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "punarod Access configuration error: %v\n", err)
+			return 2
+		}
+		accessReadiness = func() error { return verifier.Warm(context.Background(), time.Now().UTC()) }
+		if err := accessReadiness(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "punarod Access readiness error: %v\n", err)
+			return 2
+		}
+	}
 	relayHandler, relayStore, err := buildRelayHandler(cfg)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punarod relay configuration error: %v\n", err)
@@ -69,7 +82,7 @@ func run(args []string, stderr io.Writer) int {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if permitReadiness != nil && permitReadiness() != nil {
+		if accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
