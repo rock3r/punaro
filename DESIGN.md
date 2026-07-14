@@ -252,8 +252,11 @@ storage, or transport integration. It also has canonical permit records and
 directory-authorized permit issuer keys plus a private SQLite serial and
 operation-redemption ledger. The ledger accepts only a fully verified exact
 operation and runs its SQL state mutation in the same transaction as recording
-the idempotent result. It has no atomic source-ready lifecycle, daemon import,
-runtime directory client, relay storage, or transport integration. In
+the idempotent result. It has no daemon import, runtime directory client, relay
+storage, or transport integration. The v2 core
+also has an immutable source-ready store which atomically persists a freshly
+verified manifest, recipient envelope, and all ciphertext chunks before an
+offer can reference it. In
 particular, it does **not** make
 attachments usable, or satisfy the vector/fuzz/review release gates. Callers
 must only construct its verified-manifest input after fresh directory
