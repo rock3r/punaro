@@ -8,3 +8,4 @@ coverage.out
 *.pem
 *.key
 *.db
+.local/
