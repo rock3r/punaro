@@ -119,7 +119,7 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head := attachmentv2.DirectoryHead{Audience: [32]byte{12}, RootKeyID: [32]byte{13}, TreeSize: uint64(len(entries)), TreeRoot: attachmentv2.DirectoryMerkleRoot(hashes), Sequence: 1, IssuedAt: uint64(clock.Add(-time.Second).Unix()), ExpiresAt: uint64(clock.Add(20 * time.Second).Unix()), RevocationEpoch: 1}
+	head := attachmentv2.DirectoryHead{Audience: [32]byte{12}, RootKeyID: [32]byte{13}, TreeSize: uint64(len(entries)), TreeRoot: attachmentv2.DirectoryMerkleRoot(hashes), Sequence: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), RevocationEpoch: 1}
 	if err := attachmentv2.SignDirectoryHead(&head, rootPrivate); err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	if readiness == nil || readiness() != nil {
 		t.Fatal("permit runtime was not ready with its verified directory snapshot")
 	}
-	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{14}, HolderDeviceID: senderID, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{15}, ConversationID: conversationID, SenderDeviceID: senderID, SenderGeneration: 1, RecipientDeviceID: recipientID, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: membership, IssuedAt: uint64(clock.Add(-time.Second).Unix()), ExpiresAt: uint64(clock.Add(10 * time.Second).Unix()), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
+	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{14}, HolderDeviceID: senderID, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{15}, ConversationID: conversationID, SenderDeviceID: senderID, SenderGeneration: 1, RecipientDeviceID: recipientID, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: membership, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(10*time.Second)), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
 	if err := attachmentv2.SignPermitRequest(&permitRequest, holderPrivate); err != nil {
 		t.Fatal(err)
 	}
@@ -189,6 +189,15 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	if err := readiness(); err == nil {
 		t.Fatal("permit runtime remained ready after its current directory disappeared")
 	}
+}
+
+func testUnix(t testing.TB, value time.Time) uint64 {
+	t.Helper()
+	seconds := value.Unix()
+	if seconds < 0 {
+		t.Fatalf("time %s predates Unix epoch", value)
+	}
+	return uint64(seconds) // #nosec G115 -- negative values are rejected above.
 }
 
 func signedPermitHTTPTestRequest(t *testing.T, private ed25519.PrivateKey, machineID string, body []byte, nonce string, timestamp time.Time) *http.Request {

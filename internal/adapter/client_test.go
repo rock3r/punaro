@@ -30,11 +30,11 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Now().UTC().Truncate(time.Second)
-	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{1}, HolderDeviceID: [16]byte{2}, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{3}, ConversationID: [16]byte{4}, SenderDeviceID: [16]byte{2}, SenderGeneration: 1, RecipientDeviceID: [16]byte{5}, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: [32]byte{6}, IssuedAt: uint64(clock.Add(-time.Second).Unix()), ExpiresAt: uint64(clock.Add(20 * time.Second).Unix()), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
+	permitRequest := attachmentv2.PermitRequest{RequestID: [16]byte{1}, HolderDeviceID: [16]byte{2}, HolderGeneration: 1, HolderRole: attachmentv2.PermitHolderSender, TransferID: [16]byte{3}, ConversationID: [16]byte{4}, SenderDeviceID: [16]byte{2}, SenderGeneration: 1, RecipientDeviceID: [16]byte{5}, RecipientGeneration: 1, AttemptGeneration: 1, Operation: attachmentv2.PermitOperationOffer, MembershipCommitment: [32]byte{6}, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
 	if err := attachmentv2.SignPermitRequest(&permitRequest, holderPrivate); err != nil {
 		t.Fatal(err)
 	}
-	expectedPermit := attachmentv2.Permit{Audience: [32]byte{7}, Serial: [16]byte{8}, IssuerKeyID: [32]byte{9}, HolderDeviceID: permitRequest.HolderDeviceID, HolderGeneration: permitRequest.HolderGeneration, HolderRole: permitRequest.HolderRole, TransferID: permitRequest.TransferID, ConversationID: permitRequest.ConversationID, SenderDeviceID: permitRequest.SenderDeviceID, SenderGeneration: permitRequest.SenderGeneration, RecipientDeviceID: permitRequest.RecipientDeviceID, RecipientGeneration: permitRequest.RecipientGeneration, AttemptGeneration: permitRequest.AttemptGeneration, Operation: permitRequest.Operation, DirectoryHead: [32]byte{10}, MembershipCommitment: permitRequest.MembershipCommitment, RevocationEpoch: 1, IssuedAt: uint64(clock.Unix()), ExpiresAt: uint64(clock.Add(15 * time.Second).Unix()), MaxBytes: permitRequest.MaxBytes, MaxChunks: permitRequest.MaxChunks, MaxOperations: permitRequest.MaxOperations}
+	expectedPermit := attachmentv2.Permit{Audience: [32]byte{7}, Serial: [16]byte{8}, IssuerKeyID: [32]byte{9}, HolderDeviceID: permitRequest.HolderDeviceID, HolderGeneration: permitRequest.HolderGeneration, HolderRole: permitRequest.HolderRole, TransferID: permitRequest.TransferID, ConversationID: permitRequest.ConversationID, SenderDeviceID: permitRequest.SenderDeviceID, SenderGeneration: permitRequest.SenderGeneration, RecipientDeviceID: permitRequest.RecipientDeviceID, RecipientGeneration: permitRequest.RecipientGeneration, AttemptGeneration: permitRequest.AttemptGeneration, Operation: permitRequest.Operation, DirectoryHead: [32]byte{10}, MembershipCommitment: permitRequest.MembershipCommitment, RevocationEpoch: 1, IssuedAt: testUnix(t, clock), ExpiresAt: testUnix(t, clock.Add(15*time.Second)), MaxBytes: permitRequest.MaxBytes, MaxChunks: permitRequest.MaxChunks, MaxOperations: permitRequest.MaxOperations}
 	if err := attachmentv2.SignPermit(&expectedPermit, issuerPrivate); err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +74,15 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 	if err != nil || permit != expectedPermit {
 		t.Fatalf("permit=%+v err=%v", permit, err)
 	}
+}
+
+func testUnix(t testing.TB, value time.Time) uint64 {
+	t.Helper()
+	seconds := value.Unix()
+	if seconds < 0 {
+		t.Fatalf("time %s predates Unix epoch", value)
+	}
+	return uint64(seconds) // #nosec G115 -- negative values are rejected above.
 }
 
 func TestHTTPRelayClientFetchesOnlySignedCanonicalDirectorySnapshot(t *testing.T) {
