@@ -255,8 +255,11 @@ operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. Its handler accepts only the versioned routes and exact
 canonical permit/operation headers, resolves fresh directory authority for
 every request, and derives all commitments from the request; it remains
-unmounted because it has no daemon import, runtime directory client, permit
-issuance service, or adapter transport integration. The v2 core also has a strict, non-secret
+unmounted because it has no daemon import, directory HTTP transport, permit
+issuance service, or adapter transport integration. The authority provider
+fetches a complete signed snapshot for every request and never falls back to a
+stale accepted view; root pinning and the private checkpoint store remain the
+only sources of directory trust. The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption and refuses

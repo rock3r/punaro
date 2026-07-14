@@ -415,6 +415,12 @@ it verifies the permit and holder signature before reading a stored ciphertext,
 then verifies the complete path, target, body, and response-ciphertext binding
 before returning bytes.
 
+A directory consumer fetches a complete `{head, consistency proof, ordered
+entries}` view for every attachment request and runs the complete root-signature,
+snapshot-root, freshness, checkpoint, and equivocation checks before using it.
+An unavailable, malformed, stale, or unverifiable refresh is a hard failure;
+the last accepted view must not be used as a grace fallback.
+
 An offer body is CDE map `{1=2,2=manifest,3=envelope,4=acceptance_nonce}`.
 `manifest` and `envelope` are their complete canonical encodings and
 `acceptance_nonce` is a fresh 32-byte random value. The recipient's accept body
