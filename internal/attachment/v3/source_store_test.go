@@ -22,6 +22,7 @@ func TestSourceStoreStagesImmutableChunksBeforeReady(t *testing.T) {
 	if err := store.initialize(context.Background(), source, now); err != nil {
 		t.Fatal(err)
 	}
+	assertTransferStatus(t, store, source.TransferID(), transferSourceUploading)
 	if ready, err := store.readyAt(source.TransferID(), now); err != nil || ready {
 		t.Fatalf("ready=%v err=%v", ready, err)
 	}
@@ -34,6 +35,7 @@ func TestSourceStoreStagesImmutableChunksBeforeReady(t *testing.T) {
 	if ready, err := store.readyAt(source.TransferID(), now); err != nil || !ready {
 		t.Fatalf("ready=%v err=%v", ready, err)
 	}
+	assertTransferStatus(t, store, source.TransferID(), transferSourceReady)
 }
 
 func TestSourceStoreRejectsReplacementAndWrongCiphertextLength(t *testing.T) {
@@ -143,6 +145,55 @@ func TestSourceStoreReadinessRejectsTamperedManifestOrDerivedColumns(t *testing.
 	}
 }
 
+func TestSourceStoreFailsClosedWithoutMatchingLifecycleRow(t *testing.T) {
+	path := privateDatabase(t)
+	store, err := openSourceStore(path, defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	source := verifiedTestSource(t, now, 1, 4, 4)
+	if err := store.initialize(context.Background(), source, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM v3_transfers`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.upload(context.Background(), source.TransferID(), 0, bytes.Repeat([]byte{1}, 20), now); err == nil {
+		t.Fatal("final upload accepted without lifecycle row")
+	}
+	var ready int
+	transferID := source.TransferID()
+	if err := store.db.QueryRow(`SELECT ready FROM v3_source_specs WHERE transfer_id = ?`, transferID[:]).Scan(&ready); err != nil || ready != 0 {
+		t.Fatalf("ready=%d err=%v", ready, err)
+	}
+	if err := store.close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openSourceStore(path, defaultSourceLimits()); err == nil {
+		t.Fatal("untracked active source accepted on reopen")
+	}
+}
+
+func TestSourceStoreReadinessRejectsLifecycleReadyMismatch(t *testing.T) {
+	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	source := verifiedTestSource(t, now, 1, 4, 4)
+	if err := store.initialize(context.Background(), source, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE v3_transfers SET status = ?`, transferSourceReady); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.readyAt(source.TransferID(), now); err == nil {
+		t.Fatal("ready lifecycle mismatch accepted")
+	}
+}
+
 func TestSourceStoreRejectsRelativeOrInsecureParent(t *testing.T) {
 	if _, err := openSourceStore("source.db", defaultSourceLimits()); err == nil {
 		t.Fatal("relative source store accepted")
@@ -227,6 +278,7 @@ func TestSourceStoreReservesQuotaAndRetainsTerminalUniqueness(t *testing.T) {
 	if err := store.cancel(context.Background(), first.TransferID(), now); err != nil {
 		t.Fatal(err)
 	}
+	assertTransferStatus(t, store, first.TransferID(), transferCancelled)
 	if err := store.initialize(context.Background(), first, now); err == nil {
 		t.Fatal("cancelled transfer identity was reused")
 	}
@@ -254,6 +306,7 @@ func TestSourceStoreReaperReleasesCapacityButNotUniqueness(t *testing.T) {
 	if reaped, err := store.reapExpired(context.Background(), now.Add(31*time.Second), 1); err != nil || reaped != 1 {
 		t.Fatalf("reaped=%d err=%v", reaped, err)
 	}
+	assertTransferStatus(t, store, first.TransferID(), transferExpired)
 	if err := store.initialize(context.Background(), first, now); err == nil {
 		t.Fatal("expired source identity was reused")
 	}
@@ -322,4 +375,12 @@ func privateDatabase(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return filepath.Join(directory, "source.db")
+}
+
+func assertTransferStatus(t *testing.T, store *sourceStore, transferID [16]byte, want transferStatus) {
+	t.Helper()
+	var got transferStatus
+	if err := store.db.QueryRow(`SELECT status FROM v3_transfers WHERE transfer_id = ?`, transferID[:]).Scan(&got); err != nil || got != want {
+		t.Fatalf("transfer status=%d err=%v want=%d", got, err, want)
+	}
 }

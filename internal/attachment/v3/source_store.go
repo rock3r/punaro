@@ -133,6 +133,10 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 			plaintext_size INTEGER NOT NULL, expires_at INTEGER NOT NULL,
 			ready INTEGER NOT NULL CHECK(ready IN (0,1))
 		)`,
+		`CREATE TABLE IF NOT EXISTS v3_transfers (
+			transfer_id BLOB PRIMARY KEY, manifest_commitment BLOB NOT NULL UNIQUE,
+			status INTEGER NOT NULL, attempt_generation INTEGER NOT NULL, expires_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS v3_source_chunks (
 			transfer_id BLOB NOT NULL, chunk_index INTEGER NOT NULL,
 			ciphertext BLOB NOT NULL, ciphertext_commitment BLOB NOT NULL,
@@ -178,6 +182,10 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := verifyTrackedSources(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &sourceStore{db: db, limits: limits}, nil
 }
 
@@ -203,6 +211,9 @@ func (s *sourceStore) initialize(ctx context.Context, source VerifiedSource, now
 		if !sameSpec(current, spec) {
 			return errors.New("source specification replacement is forbidden")
 		}
+		if err := verifyTrackedSourceTx(ctx, tx, current); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	if err != nil {
@@ -219,6 +230,9 @@ func (s *sourceStore) initialize(ctx context.Context, source VerifiedSource, now
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO v3_source_specs(transfer_id, manifest_commitment, manifest, chunk_size, chunk_count, plaintext_size, expires_at, ready) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`, spec.TransferID[:], spec.ManifestCommitment[:], spec.Manifest, spec.ChunkSize, spec.ChunkCount, spec.PlaintextSize, spec.ExpiresAt)
 	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_transfers(transfer_id, manifest_commitment, status, attempt_generation, expires_at) VALUES (?, ?, ?, 0, ?)`, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, spec.ExpiresAt); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -348,8 +362,25 @@ func (s *sourceStore) upload(ctx context.Context, transferID [16]byte, index uin
 		if err != nil {
 			return err
 		}
-		if changed, err := result.RowsAffected(); err != nil || changed > 1 {
+		changed, err := result.RowsAffected()
+		if err != nil || changed > 1 {
 			return errors.New("source-ready fencing failed")
+		}
+		if changed == 1 {
+			transition, err := tx.ExecContext(ctx, `UPDATE v3_transfers SET status = ? WHERE transfer_id = ? AND manifest_commitment = ? AND status = ? AND attempt_generation = 0 AND expires_at = ?`, transferSourceReady, transferID[:], spec.ManifestCommitment[:], transferSourceUploading, spec.ExpiresAt)
+			if err != nil {
+				return err
+			}
+			if changed, err := transition.RowsAffected(); err != nil || changed != 1 {
+				return errors.New("source-ready lifecycle transition failed")
+			}
+		} else if err := verifyTrackedSourceTx(ctx, tx, spec); err != nil {
+			return err
+		} else {
+			var status transferStatus
+			if err := tx.QueryRowContext(ctx, `SELECT status FROM v3_transfers WHERE transfer_id = ?`, transferID[:]).Scan(&status); err != nil || status != transferSourceReady {
+				return errors.New("invalid ready source lifecycle state")
+			}
 		}
 	}
 	return tx.Commit()
@@ -366,6 +397,9 @@ func (s *sourceStore) readyAt(transferID [16]byte, now time.Time) (bool, error) 
 	defer func() { _ = tx.Rollback() }()
 	spec, found, err := loadSpecTx(context.Background(), tx, transferID)
 	if err != nil || !found {
+		return false, err
+	}
+	if err := verifyTrackedSourceTx(context.Background(), tx, spec); err != nil {
 		return false, err
 	}
 	if now.UTC().Unix() >= spec.ExpiresAt {
@@ -464,6 +498,7 @@ func consistentStoredSpec(spec sourceSpec) bool {
 func verifySourceStoreSchema(db *sql.DB) error {
 	expected := map[string][]string{
 		"v3_source_specs":            {"transfer_id", "manifest_commitment", "manifest", "chunk_size", "chunk_count", "plaintext_size", "expires_at", "ready"},
+		"v3_transfers":               {"transfer_id", "manifest_commitment", "status", "attempt_generation", "expires_at"},
 		"v3_source_chunks":           {"transfer_id", "chunk_index", "ciphertext", "ciphertext_commitment"},
 		"v3_source_quota":            {"scope", "scope_id", "ciphertext_bytes", "chunks", "transfers"},
 		"v3_source_tombstones":       {"transfer_id", "manifest_commitment", "retain_until"},
@@ -505,6 +540,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 	}
 	requiredDefinitions := map[string][]string{
 		"v3_source_specs":            {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique", "readyintegernotnullcheck(readyin(0,1))"},
+		"v3_transfers":               {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
 		"v3_source_chunks":           {"primarykey(transfer_id,chunk_index)", "foreignkey(transfer_id)referencesv3_source_specs(transfer_id)ondeletecascade"},
 		"v3_source_quota":            {"primarykey(scope,scope_id)"},
 		"v3_source_tombstones":       {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
@@ -526,6 +562,30 @@ func verifySourceStoreSchema(db *sql.DB) error {
 				return errors.New("obsolete source store schema")
 			}
 		}
+	}
+	return nil
+}
+
+func verifyTrackedSources(db *sql.DB) error {
+	var missing int
+	err := db.QueryRowContext(context.Background(), `SELECT 1 FROM v3_source_specs s LEFT JOIN v3_transfers t ON s.transfer_id = t.transfer_id AND s.manifest_commitment = t.manifest_commitment WHERE t.transfer_id IS NULL OR t.attempt_generation != 0 OR t.expires_at != s.expires_at OR (s.ready = 0 AND t.status != ?) OR (s.ready = 1 AND t.status != ?) LIMIT 1`, transferSourceUploading, transferSourceReady).Scan(&missing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New("untracked source staging state requires operator recovery")
+}
+
+func verifyTrackedSourceTx(ctx context.Context, tx *sql.Tx, spec sourceSpec) error {
+	var status transferStatus
+	var attempts uint64
+	var expires int64
+	var ready int
+	err := tx.QueryRowContext(ctx, `SELECT s.ready, t.status, t.attempt_generation, t.expires_at FROM v3_source_specs s JOIN v3_transfers t ON s.transfer_id = t.transfer_id AND s.manifest_commitment = t.manifest_commitment WHERE s.transfer_id = ? AND s.manifest_commitment = ?`, spec.TransferID[:], spec.ManifestCommitment[:]).Scan(&ready, &status, &attempts, &expires)
+	if err != nil || attempts != 0 || expires != spec.ExpiresAt || (ready == 0 && status != transferSourceUploading) || (ready == 1 && status != transferSourceReady) || (ready != 0 && ready != 1) {
+		return errors.New("invalid tracked source lifecycle state")
 	}
 	return nil
 }
@@ -681,6 +741,17 @@ func (s *sourceStore) terminalizeSourceTx(ctx context.Context, tx *sql.Tx, spec 
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_tombstones(transfer_id, manifest_commitment, retain_until) VALUES (?, ?, ?) ON CONFLICT(transfer_id) DO NOTHING`, spec.TransferID[:], spec.ManifestCommitment[:], retainUntil); err != nil {
 		return err
+	}
+	terminal := transferCancelled
+	if now.UTC().Unix() >= spec.ExpiresAt {
+		terminal = transferExpired
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE v3_transfers SET status = ? WHERE transfer_id = ? AND manifest_commitment = ? AND status IN (?, ?) AND attempt_generation = 0 AND expires_at = ?`, terminal, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, transferSourceReady, spec.ExpiresAt)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return errors.New("invalid source terminal transition")
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_source_specs WHERE transfer_id = ?`, spec.TransferID[:]); err != nil {
 		return err
