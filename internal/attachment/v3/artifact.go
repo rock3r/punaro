@@ -1,7 +1,6 @@
 package v3
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/hkdf"
@@ -67,7 +66,7 @@ func prepareSourceArtifact(plaintext []byte, manifest Manifest, signer ed25519.P
 		return sourceArtifact{}, [32]byte{}, err
 	}
 	commitment := blake3.Sum256(raw)
-	if err := store.reserveCrypto(fileKey, manifest, raw, commitment); err != nil {
+	if err := store.reserveCrypto(fileKey, raw, commitment); err != nil {
 		return sourceArtifact{}, [32]byte{}, fmt.Errorf("reserve source cryptographic material: %w", err)
 	}
 	key, err := chunkKey(fileKey, manifest.ContentSalt, commitment)
@@ -137,9 +136,9 @@ func openSourceArtifact(source VerifiedSource, chunks []encryptedChunk, fileKey 
 	return plaintext, nil
 }
 
-func (s *sourceStore) reserveCrypto(fileKey [32]byte, manifest Manifest, raw []byte, commitment [32]byte) error {
-	expectedRaw, err := EncodeManifest(manifest)
-	if s == nil || s.db == nil || err != nil || !bytes.Equal(raw, expectedRaw) || fileKey == [32]byte{} || manifest.ContentSalt == [32]byte{} || manifest.TransferID == [16]byte{} || commitment == [32]byte{} || manifest.ChunkCount == 0 || manifest.ChunkCount > 4096 || blake3.Sum256(raw) != commitment {
+func (s *sourceStore) reserveCrypto(fileKey [32]byte, raw []byte, commitment [32]byte) error {
+	manifest, err := DecodeManifest(raw)
+	if s == nil || s.db == nil || err != nil || fileKey == [32]byte{} || manifest.ContentSalt == [32]byte{} || manifest.TransferID == [16]byte{} || commitment == [32]byte{} || manifest.ChunkCount == 0 || manifest.ChunkCount > 4096 || blake3.Sum256(raw) != commitment {
 		return errors.New("invalid cryptographic reservation")
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)

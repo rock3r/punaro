@@ -37,7 +37,7 @@ func TestPrepareSourceArtifactReservesV3MaterialBeforeEncrypting(t *testing.T) {
 	if _, err := store.db.Exec(`SELECT 1 FROM v3_source_file_keys LIMIT 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.reserveCrypto(fileKey, artifact.Manifest, mustEncodeManifest(t, artifact.Manifest), artifact.ManifestCommitment); err == nil {
+	if err := store.reserveCrypto(fileKey, mustEncodeManifest(t, artifact.Manifest), artifact.ManifestCommitment); err == nil {
 		t.Fatal("reused cryptographic material accepted")
 	}
 	if _, err := openSourceArtifact(verified, artifact.Chunks, testHash(99), now); err == nil {
