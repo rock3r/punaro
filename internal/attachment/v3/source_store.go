@@ -25,10 +25,11 @@ const (
 )
 
 type quotaLimit struct {
-	CiphertextBytes uint64
-	Chunks          uint64
-	Transfers       uint64
-	DurableSources  uint64
+	CiphertextBytes    uint64
+	Chunks             uint64
+	Transfers          uint64
+	DurableSources     uint64
+	CryptoReservations uint64
 }
 
 type sourceLimits struct {
@@ -38,7 +39,7 @@ type sourceLimits struct {
 
 func (l sourceLimits) valid() bool {
 	for _, limit := range []quotaLimit{l.Sender, l.Recipient, l.Conversation, l.Relay} {
-		if limit.CiphertextBytes == 0 || limit.CiphertextBytes > 1<<40 || limit.Chunks == 0 || limit.Chunks > 1<<20 || limit.Transfers == 0 || limit.Transfers > 1<<20 || limit.DurableSources == 0 || limit.DurableSources > 1<<30 {
+		if limit.CiphertextBytes == 0 || limit.CiphertextBytes > 1<<40 || limit.Chunks == 0 || limit.Chunks > 1<<20 || limit.Transfers == 0 || limit.Transfers > 1<<20 || limit.DurableSources == 0 || limit.DurableSources > 1<<30 || limit.CryptoReservations == 0 || limit.CryptoReservations > 1<<32 {
 			return false
 		}
 	}
@@ -48,7 +49,7 @@ func (l sourceLimits) valid() bool {
 func defaultSourceLimits() sourceLimits {
 	// 65 MiB accommodates the 64 MiB plaintext ceiling plus one 16-byte AEAD
 	// tag per permitted chunk, while leaving a small implementation margin.
-	limit := quotaLimit{CiphertextBytes: 65 << 20, Chunks: 4096, Transfers: 64, DurableSources: 1 << 20}
+	limit := quotaLimit{CiphertextBytes: 65 << 20, Chunks: 4096, Transfers: 64, DurableSources: 1 << 20, CryptoReservations: 1 << 20}
 	return sourceLimits{Sender: limit, Recipient: limit, Conversation: limit, Relay: limit, TombstoneRetention: defaultTombstoneRetention}
 }
 
@@ -151,6 +152,16 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 		)`,
 		`CREATE TABLE IF NOT EXISTS v3_source_admission (
 			scope INTEGER NOT NULL, scope_id BLOB NOT NULL, durable_sources INTEGER NOT NULL,
+			PRIMARY KEY(scope, scope_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS v3_source_file_keys (commitment BLOB PRIMARY KEY)`,
+		`CREATE TABLE IF NOT EXISTS v3_source_content_salts (commitment BLOB PRIMARY KEY)`,
+		`CREATE TABLE IF NOT EXISTS v3_source_nonce_tuples (
+			transfer_id BLOB NOT NULL, manifest_commitment BLOB NOT NULL, chunk_index INTEGER NOT NULL,
+			PRIMARY KEY(transfer_id, manifest_commitment, chunk_index)
+		)`,
+		`CREATE TABLE IF NOT EXISTS v3_source_crypto_admission (
+			scope INTEGER NOT NULL, scope_id BLOB NOT NULL, reservations INTEGER NOT NULL,
 			PRIMARY KEY(scope, scope_id)
 		)`,
 	} {
@@ -452,12 +463,16 @@ func consistentStoredSpec(spec sourceSpec) bool {
 
 func verifySourceStoreSchema(db *sql.DB) error {
 	expected := map[string][]string{
-		"v3_source_specs":      {"transfer_id", "manifest_commitment", "manifest", "chunk_size", "chunk_count", "plaintext_size", "expires_at", "ready"},
-		"v3_source_chunks":     {"transfer_id", "chunk_index", "ciphertext", "ciphertext_commitment"},
-		"v3_source_quota":      {"scope", "scope_id", "ciphertext_bytes", "chunks", "transfers"},
-		"v3_source_tombstones": {"transfer_id", "manifest_commitment", "retain_until"},
-		"v3_source_uniqueness": {"transfer_id", "manifest_commitment"},
-		"v3_source_admission":  {"scope", "scope_id", "durable_sources"},
+		"v3_source_specs":            {"transfer_id", "manifest_commitment", "manifest", "chunk_size", "chunk_count", "plaintext_size", "expires_at", "ready"},
+		"v3_source_chunks":           {"transfer_id", "chunk_index", "ciphertext", "ciphertext_commitment"},
+		"v3_source_quota":            {"scope", "scope_id", "ciphertext_bytes", "chunks", "transfers"},
+		"v3_source_tombstones":       {"transfer_id", "manifest_commitment", "retain_until"},
+		"v3_source_uniqueness":       {"transfer_id", "manifest_commitment"},
+		"v3_source_admission":        {"scope", "scope_id", "durable_sources"},
+		"v3_source_file_keys":        {"commitment"},
+		"v3_source_content_salts":    {"commitment"},
+		"v3_source_nonce_tuples":     {"transfer_id", "manifest_commitment", "chunk_index"},
+		"v3_source_crypto_admission": {"scope", "scope_id", "reservations"},
 	}
 	for table, columns := range expected {
 		rows, err := db.QueryContext(context.Background(), "PRAGMA table_info("+table+")") // #nosec G202 -- table names are fixed constants.
@@ -489,12 +504,16 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		}
 	}
 	requiredDefinitions := map[string][]string{
-		"v3_source_specs":      {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique", "readyintegernotnullcheck(readyin(0,1))"},
-		"v3_source_chunks":     {"primarykey(transfer_id,chunk_index)", "foreignkey(transfer_id)referencesv3_source_specs(transfer_id)ondeletecascade"},
-		"v3_source_quota":      {"primarykey(scope,scope_id)"},
-		"v3_source_tombstones": {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
-		"v3_source_uniqueness": {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
-		"v3_source_admission":  {"primarykey(scope,scope_id)"},
+		"v3_source_specs":            {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique", "readyintegernotnullcheck(readyin(0,1))"},
+		"v3_source_chunks":           {"primarykey(transfer_id,chunk_index)", "foreignkey(transfer_id)referencesv3_source_specs(transfer_id)ondeletecascade"},
+		"v3_source_quota":            {"primarykey(scope,scope_id)"},
+		"v3_source_tombstones":       {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
+		"v3_source_uniqueness":       {"transfer_idblobprimarykey", "manifest_commitmentblobnotnullunique"},
+		"v3_source_admission":        {"primarykey(scope,scope_id)"},
+		"v3_source_file_keys":        {"commitmentblobprimarykey"},
+		"v3_source_content_salts":    {"commitmentblobprimarykey"},
+		"v3_source_nonce_tuples":     {"primarykey(transfer_id,manifest_commitment,chunk_index)"},
+		"v3_source_crypto_admission": {"primarykey(scope,scope_id)"},
 	}
 	for table, required := range requiredDefinitions {
 		var definition string
@@ -607,6 +626,30 @@ func (s *sourceStore) admitDurableSourceTx(ctx context.Context, tx *sql.Tx, spec
 			return errors.New("source durable admission budget exhausted")
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_admission(scope, scope_id, durable_sources) VALUES (?, ?, 1) ON CONFLICT(scope, scope_id) DO UPDATE SET durable_sources = v3_source_admission.durable_sources + 1`, key.scope, key.id[:]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *sourceStore) admitCryptoTx(tx *sql.Tx, spec sourceSpec, units uint64) error {
+	keys, err := sourceQuotaKeys(spec)
+	if err != nil || units < 2 || units > 4098 {
+		return errors.New("invalid crypto admission")
+	}
+	for _, key := range keys {
+		var current uint64
+		err := tx.QueryRow(`SELECT reservations FROM v3_source_crypto_admission WHERE scope = ? AND scope_id = ?`, key.scope, key.id[:]).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			current = 0
+		} else if err != nil {
+			return err
+		}
+		limit := s.scopeLimit(key.scope).CryptoReservations
+		if units > limit || current > limit-units {
+			return errors.New("crypto reservation budget exhausted")
+		}
+		if _, err := tx.Exec(`INSERT INTO v3_source_crypto_admission(scope, scope_id, reservations) VALUES (?, ?, ?) ON CONFLICT(scope, scope_id) DO UPDATE SET reservations = v3_source_crypto_admission.reservations + excluded.reservations`, key.scope, key.id[:], units); err != nil {
 			return err
 		}
 	}
