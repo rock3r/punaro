@@ -187,38 +187,70 @@ func (r *DirectorySnapshotResolver) CurrentPermitIssuerKey(keyID [32]byte) (ed25
 	return ed25519.PublicKey(append([]byte(nil), issuer.PublicKey[:]...)), nil
 }
 
-// ValidatePermitAuthority implements PermitAuthorityResolver. A permit is
-// usable only while every signed directory binding names this exact fresh,
-// current snapshot; a merely current issuer key is not sufficient.
-func (r *DirectorySnapshotResolver) ValidatePermitAuthority(permit Permit, now time.Time) (ed25519.PublicKey, error) {
+// PermitDirectoryBinding contains only version-neutral directory facts. It is
+// deliberately not a permit wire record: another attachment version may reuse
+// the root-verified authority checks without accidentally inheriting v2 route,
+// attempt, or operation-number policy.
+type PermitDirectoryBinding struct {
+	Audience             [32]byte
+	IssuerKeyID          [32]byte
+	HolderDeviceID       [16]byte
+	HolderGeneration     uint64
+	HolderRole           uint64
+	ConversationID       [16]byte
+	SenderDeviceID       [16]byte
+	SenderGeneration     uint64
+	RecipientDeviceID    [16]byte
+	RecipientGeneration  uint64
+	DirectoryHead        [32]byte
+	MembershipCommitment [32]byte
+	RevocationEpoch      uint64
+	ExpiresAt            uint64
+}
+
+// ValidatePermitDirectoryBinding validates only fresh directory membership,
+// key, device, revocation and signed-head facts. It intentionally has no
+// operation or attempt field, so it remains safe for separately-versioned
+// attachment protocols.
+func (r *DirectorySnapshotResolver) ValidatePermitDirectoryBinding(binding PermitDirectoryBinding, now time.Time) (ed25519.PublicKey, error) {
 	if r == nil || !r.fresh(now) || !r.current() {
 		return nil, errors.New("invalid permit directory authority")
 	}
 	headCommitment, err := directoryHeadCommitment(r.head)
-	if err != nil || permit.Audience != r.head.Audience || permit.DirectoryHead != headCommitment || permit.RevocationEpoch != r.head.RevocationEpoch || permit.ExpiresAt > r.head.ExpiresAt {
+	if err != nil || binding.Audience != r.head.Audience || binding.DirectoryHead != headCommitment || binding.RevocationEpoch != r.head.RevocationEpoch || binding.ExpiresAt > r.head.ExpiresAt {
 		return nil, errors.New("invalid permit directory authority")
 	}
-	issuer, found := r.issuers[permit.IssuerKeyID]
+	issuer, found := r.issuers[binding.IssuerKeyID]
 	if !found || issuer.Revoked {
 		return nil, errors.New("invalid permit directory authority")
 	}
-	if _, found := r.device(permit.SenderDeviceID, permit.SenderGeneration); !found {
+	if _, found := r.device(binding.SenderDeviceID, binding.SenderGeneration); !found {
 		return nil, errors.New("invalid permit directory authority")
 	}
-	if _, found := r.device(permit.RecipientDeviceID, permit.RecipientGeneration); !found {
+	if _, found := r.device(binding.RecipientDeviceID, binding.RecipientGeneration); !found {
 		return nil, errors.New("invalid permit directory authority")
 	}
-	if _, found := r.device(permit.HolderDeviceID, permit.HolderGeneration); !found {
+	if _, found := r.device(binding.HolderDeviceID, binding.HolderGeneration); !found {
 		return nil, errors.New("invalid permit directory authority")
 	}
-	if (permit.HolderRole == PermitHolderSender && (permit.HolderDeviceID != permit.SenderDeviceID || permit.HolderGeneration != permit.SenderGeneration)) || (permit.HolderRole == PermitHolderRecipient && (permit.HolderDeviceID != permit.RecipientDeviceID || permit.HolderGeneration != permit.RecipientGeneration)) {
+	if binding.HolderRole != PermitHolderSender && binding.HolderRole != PermitHolderRecipient {
 		return nil, errors.New("invalid permit holder binding")
 	}
-	membership, found := r.memberships[directoryMembershipKey{conversation: permit.ConversationID, sender: permit.SenderDeviceID, senderGen: permit.SenderGeneration, recipient: permit.RecipientDeviceID, recipientGen: permit.RecipientGeneration, commitment: permit.MembershipCommitment}]
+	if (binding.HolderRole == PermitHolderSender && (binding.HolderDeviceID != binding.SenderDeviceID || binding.HolderGeneration != binding.SenderGeneration)) || (binding.HolderRole == PermitHolderRecipient && (binding.HolderDeviceID != binding.RecipientDeviceID || binding.HolderGeneration != binding.RecipientGeneration)) {
+		return nil, errors.New("invalid permit holder binding")
+	}
+	membership, found := r.memberships[directoryMembershipKey{conversation: binding.ConversationID, sender: binding.SenderDeviceID, senderGen: binding.SenderGeneration, recipient: binding.RecipientDeviceID, recipientGen: binding.RecipientGeneration, commitment: binding.MembershipCommitment}]
 	if !found || membership.Revoked {
 		return nil, errors.New("invalid permit directory authority")
 	}
 	return ed25519.PublicKey(append([]byte(nil), issuer.PublicKey[:]...)), nil
+}
+
+// ValidatePermitAuthority implements PermitAuthorityResolver. A permit is
+// usable only while every signed directory binding names this exact fresh,
+// current snapshot; a merely current issuer key is not sufficient.
+func (r *DirectorySnapshotResolver) ValidatePermitAuthority(permit Permit, now time.Time) (ed25519.PublicKey, error) {
+	return r.ValidatePermitDirectoryBinding(PermitDirectoryBinding{Audience: permit.Audience, IssuerKeyID: permit.IssuerKeyID, HolderDeviceID: permit.HolderDeviceID, HolderGeneration: permit.HolderGeneration, HolderRole: permit.HolderRole, ConversationID: permit.ConversationID, SenderDeviceID: permit.SenderDeviceID, SenderGeneration: permit.SenderGeneration, RecipientDeviceID: permit.RecipientDeviceID, RecipientGeneration: permit.RecipientGeneration, DirectoryHead: permit.DirectoryHead, MembershipCommitment: permit.MembershipCommitment, RevocationEpoch: permit.RevocationEpoch, ExpiresAt: permit.ExpiresAt}, now)
 }
 
 // CurrentDeviceSigningKey resolves one active device signing key for a

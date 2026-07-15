@@ -129,6 +129,48 @@ func TestLoadRejectsWithheldAttachmentRelay(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresIndependentV3AttachmentRuntimeTrustAndPrivateStore(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENT_V3_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
+	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
+	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
+	if _, err := Load(""); err == nil {
+		t.Fatal("v3 runtime without explicit permit trust was accepted")
+	}
+	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
+	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
+	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
+	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
+	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
+	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
+	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
+	if _, err := Load(""); err == nil {
+		t.Fatal("v3 runtime without private source store was accepted")
+	}
+	t.Setenv("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "relative/source.db")
+	if _, err := Load(""); err == nil {
+		t.Fatal("v3 runtime accepted a relative source store")
+	}
+	t.Setenv("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "/var/lib/punaro/private/source.db")
+	cfg, err := Load("")
+	if err != nil || !cfg.AttachmentV3Enabled || cfg.AttachmentV3SourceStoreFile == "" || cfg.PermitIssuanceEnabled {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "31")
+	if _, err := Load(""); err == nil {
+		t.Fatal("v3 runtime accepted a permit lifetime over thirty seconds")
+	}
+	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
+	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("v3 runtime was combined with the v2 permit route")
+	}
+}
+
 func TestLoadRejectsMalformedPinnedPermitTrust(t *testing.T) {
 	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")

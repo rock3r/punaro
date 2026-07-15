@@ -14,6 +14,7 @@ import (
 	"time"
 
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
+	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -49,6 +50,35 @@ func TestBuildPermitHandlerRequiresEnrolledAttachmentDeviceBinding(t *testing.T)
 	cfg := permitHandlerConfig(t, privateDir, keyPath)
 	if _, closePermit, _, err := buildPermitHandler(cfg, store); err == nil || closePermit != nil {
 		t.Fatal("permit handler accepted no enrolled attachment device binding")
+	}
+}
+
+func TestBuildV3AttachmentHandlersRequireEnrolledAttachmentDeviceBinding(t *testing.T) {
+	privateDir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(privateDir, "issuer.key")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(issuerPrivate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: `[{
+"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := permitHandlerConfig(t, privateDir, keyPath)
+	cfg.DataDir = dataDir
+	cfg.AttachmentV3Enabled = true
+	cfg.AttachmentV3SourceStoreFile = filepath.Join(privateDir, "v3-source.db")
+	if _, _, closeV3, _, err := buildV3AttachmentHandlers(cfg, store); err == nil || closeV3 != nil {
+		t.Fatal("v3 attachment handlers accepted no enrolled attachment device binding")
 	}
 }
 
@@ -191,6 +221,110 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 	}
 }
 
+func TestV3PermitRuntimeMintsOnlyForBoundMachineHolder(t *testing.T) {
+	machinePublic, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineBPublic, machineBPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderPublic, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipientPublic, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	senderID, recipientID, conversationID := [16]byte{1}, [16]byte{2}, [16]byte{3}
+	membership, issuerID := [32]byte{4}, [32]byte{5}
+	entries := []attachmentv2.DirectoryEntry{
+		{Device: &attachmentv2.DirectoryDevice{DeviceID: senderID, Generation: 1, SigningKeyID: [32]byte{6}, SigningPublicKey: [32]byte(holderPublic), HPKEKeyID: [32]byte{7}, HPKEPublicKey: [32]byte{8}}},
+		{Device: &attachmentv2.DirectoryDevice{DeviceID: recipientID, Generation: 1, SigningKeyID: [32]byte{9}, SigningPublicKey: [32]byte(recipientPublic), HPKEKeyID: [32]byte{10}, HPKEPublicKey: [32]byte{11}}},
+		{Membership: &attachmentv2.DirectoryMembership{ConversationID: conversationID, SenderDeviceID: senderID, SenderGeneration: 1, RecipientDeviceID: recipientID, RecipientGeneration: 1, Commitment: membership}},
+		{Issuer: &attachmentv2.DirectoryPermitIssuer{KeyID: issuerID, PublicKey: [32]byte(issuerPublic)}},
+	}
+	hashes, err := attachmentv2.DirectoryEntryHashes(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := attachmentv2.DirectoryHead{Audience: [32]byte{12}, RootKeyID: [32]byte{13}, TreeSize: uint64(len(entries)), TreeRoot: attachmentv2.DirectoryMerkleRoot(hashes), Sequence: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), RevocationEpoch: 1}
+	if err := attachmentv2.SignDirectoryHead(&head, rootPrivate); err != nil {
+		t.Fatal(err)
+	}
+	rawHead, err := attachmentv2.EncodeDirectoryHead(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawSnapshot, err := attachmentv2.EncodeDirectorySnapshot(attachmentv2.DirectorySnapshot{RawHead: rawHead, Entries: entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateDir := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(privateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(privateDir, "directory.cbor")
+	if err := os.WriteFile(snapshotPath, rawSnapshot, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	issuerPath := filepath.Join(privateDir, "issuer.key")
+	if err := os.WriteFile(issuerPath, []byte(base64.RawURLEncoding.EncodeToString(issuerPrivate)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(machinePublic) + `","endpoint_prefixes":["agent/a/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(senderID[:]) + `"},{"id":"machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(machineBPublic) + `","endpoint_prefixes":["agent/b/"],"attachment_device_id":"` + base64.RawURLEncoding.EncodeToString(recipientID[:]) + `"}]`
+	_, store, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cfg := config.Config{DataDir: dataDir, AttachmentV3Enabled: true, AttachmentV3SourceStoreFile: filepath.Join(privateDir, "v3-source.db"), DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
+	permitHandler, _, closeV3, readiness, err := buildV3AttachmentHandlers(cfg, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(closeV3)
+	if readiness == nil || readiness() != nil {
+		t.Fatal("v3 permit runtime was not ready with its verified directory snapshot")
+	}
+	permitRequest := attachmentv3.PermitRequest{RequestID: [16]byte{14}, HolderDeviceID: senderID, HolderGeneration: 1, HolderRole: attachmentv3.PermitHolderSender, TransferID: [16]byte{15}, ConversationID: conversationID, SenderDeviceID: senderID, SenderGeneration: 1, RecipientDeviceID: recipientID, RecipientGeneration: 1, Operation: attachmentv3.PermitOperationSourceInit, MembershipCommitment: membership, StagedManifestCommitment: [32]byte{16}, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(10*time.Second)), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
+	if err := attachmentv3.SignPermitRequest(&permitRequest, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	body, err := attachmentv3.EncodePermitRequest(permitRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := signedV3PermitHTTPTestRequest(t, machinePrivate, "machine-a", body, "request-1", clock)
+	response := httptest.NewRecorder()
+	permitHandler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%x", response.Code, response.Body.Bytes())
+	}
+	permit, err := attachmentv3.DecodePermit(response.Body.Bytes())
+	if err != nil || permit.HolderDeviceID != senderID || permit.IssuerKeyID != issuerID || permit.StagedManifestCommitment != permitRequest.StagedManifestCommitment {
+		t.Fatalf("permit=%+v err=%v", permit, err)
+	}
+	badRequest := signedV3PermitHTTPTestRequest(t, machineBPrivate, "machine-b", body, "request-2", clock)
+	badResponse := httptest.NewRecorder()
+	permitHandler.ServeHTTP(badResponse, badRequest)
+	if badResponse.Code != http.StatusForbidden {
+		t.Fatalf("unbound machine status=%d", badResponse.Code)
+	}
+}
+
 func testUnix(t testing.TB, value time.Time) uint64 {
 	t.Helper()
 	seconds := value.Unix()
@@ -205,6 +339,19 @@ func signedPermitHTTPTestRequest(t *testing.T, private ed25519.PrivateKey, machi
 	signed := relay.SignedRequest{MachineID: machineID, Method: http.MethodPost, Path: "/v2/permits", Body: body, Timestamp: timestamp, Nonce: nonce}
 	signed.Signature = ed25519.Sign(private, relay.CanonicalRequest(signed))
 	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v2/permits", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/cbor")
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	return request
+}
+
+func signedV3PermitHTTPTestRequest(t *testing.T, private ed25519.PrivateKey, machineID string, body []byte, nonce string, timestamp time.Time) *http.Request {
+	t.Helper()
+	signed := relay.SignedRequest{MachineID: machineID, Method: http.MethodPost, Path: "/v3/permits", Body: body, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(private, relay.CanonicalRequest(signed))
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/permits", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/cbor")
 	request.Header.Set("X-Punaro-Machine", signed.MachineID)
 	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))

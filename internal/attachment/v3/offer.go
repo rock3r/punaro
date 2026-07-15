@@ -5,7 +5,11 @@ import (
 	"errors"
 )
 
-const maxOfferPayloadBytes = 24 << 10
+// maxOfferPayloadBytes is deliberately just below 24 KiB. Its raw-base64url
+// representation plus the v3 notice marker must fit one 32 KiB durable relay
+// body; accepting a larger offer that cannot be made recipient-discoverable
+// would create a stranded transfer state.
+const maxOfferPayloadBytes = 24555
 
 type offerPayloadWire struct {
 	Version         uint64   `cbor:"1,keyasint"`
@@ -32,26 +36,31 @@ func EncodeOfferPayload(manifest Manifest, envelope Envelope, acceptanceNonce [3
 }
 
 func decodeOfferPayload(raw []byte) (Manifest, []byte, Envelope, [32]byte, error) {
+	manifest, manifestRaw, envelope, _, nonce, err := decodeOfferPayloadDetailed(raw)
+	return manifest, manifestRaw, envelope, nonce, err
+}
+
+func decodeOfferPayloadDetailed(raw []byte) (Manifest, []byte, Envelope, []byte, [32]byte, error) {
 	if len(raw) == 0 || len(raw) > maxOfferPayloadBytes {
-		return Manifest{}, nil, Envelope{}, [32]byte{}, errors.New("invalid v3 offer payload")
+		return Manifest{}, nil, Envelope{}, nil, [32]byte{}, errors.New("invalid v3 offer payload")
 	}
 	var wire offerPayloadWire
 	if err := strictDecoding.Unmarshal(raw, &wire); err != nil || wire.Version != protocolVersion || wire.AcceptanceNonce == [32]byte{} {
-		return Manifest{}, nil, Envelope{}, [32]byte{}, errors.New("invalid v3 offer payload")
+		return Manifest{}, nil, Envelope{}, nil, [32]byte{}, errors.New("invalid v3 offer payload")
 	}
 	canonical, err := canonicalEncoding.Marshal(wire)
 	if err != nil || !bytes.Equal(raw, canonical) {
-		return Manifest{}, nil, Envelope{}, [32]byte{}, errors.New("non-canonical v3 offer payload")
+		return Manifest{}, nil, Envelope{}, nil, [32]byte{}, errors.New("non-canonical v3 offer payload")
 	}
 	manifest, err := DecodeManifest(wire.Manifest)
 	if err != nil {
-		return Manifest{}, nil, Envelope{}, [32]byte{}, errors.New("invalid v3 offer manifest")
+		return Manifest{}, nil, Envelope{}, nil, [32]byte{}, errors.New("invalid v3 offer manifest")
 	}
 	envelope, err := DecodeEnvelope(wire.Envelope)
 	if err != nil || !sameEnvelopeManifestBinding(envelope, manifest, wire.Manifest) {
-		return Manifest{}, nil, Envelope{}, [32]byte{}, errors.New("invalid v3 offer envelope")
+		return Manifest{}, nil, Envelope{}, nil, [32]byte{}, errors.New("invalid v3 offer envelope")
 	}
-	return manifest, append([]byte(nil), wire.Manifest...), envelope, wire.AcceptanceNonce, nil
+	return manifest, append([]byte(nil), wire.Manifest...), envelope, append([]byte(nil), wire.Envelope...), wire.AcceptanceNonce, nil
 }
 
 func validateOfferPayloadForPermit(raw []byte, permit Permit) error {

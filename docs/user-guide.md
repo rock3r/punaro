@@ -3,8 +3,9 @@
 Punaro is the proposed local relay layer for agents and people. It now has an
 **alpha, loopback-hosted text relay**: enrolled machines can advertise local
 `agent-mailbox` attachments, send durable text, receive it through a local
-adapter, and optionally bridge explicitly mapped Telegram topics. It is not
-yet a released remote service or an attachment system.
+adapter, and optionally bridge explicitly mapped Telegram topics. A controlled
+v3 attachment data-plane is available to operators who complete its setup, but
+it is not yet a released remote service or production attachment system.
 
 ## What you can do today
 
@@ -17,7 +18,7 @@ envelope containing the relay message and conversation IDs.
 ## What is intentionally unavailable
 
 - Automatic Telegram topic discovery or main-chat fallback
-- File and attachment transfer
+- Automatic, user-facing file transfer workflow
 - Browser clients, public sharing links, and anonymous downloads
 
 The alpha daemon still binds only to a literal loopback address. Before any
@@ -38,6 +39,22 @@ Setting `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail. Setting
 `PUNARO_ATTACHMENT_RELAY_ENABLED=true` also fails closed. This protects you
 from mistaking the tested attachment foundation for a released file-transfer
 feature.
+
+V3 is deliberately separate: a configured operator can enable
+`PUNARO_ATTACHMENT_V3_ENABLED=true` with the private source-store path and the
+directory/issuer material in the [operator guide](operator-guide.md). Agents
+use holder-signed v3 permits and exact signed operations; the Go adapter client
+exposes `IssueV3Permit`, `DoV3Attachment`, and the v3 artifact helpers for
+integrations. It never gives an agent a public link, a Telegram file upload, or
+access to another machine's mailbox/database. Offer notification and local UI
+integration remain application-level workflow: after a successful `offer`, the
+sender uses the adapter's durable `OfferNoticeOutbox` (or
+`punaro-adapter attachment-notify`) for that same conversation. An incoming
+body with the exact `punaro/attachment-offer/v3:` marker can be parsed by
+`attachment/v3.DecodeOfferNotice`; it is untrusted discovery data until the
+recipient completes fresh directory verification, opens its own HPKE envelope,
+and obtains recipient-specific permits. The attachment bytes never travel via
+Telegram or the mailbox relay.
 
 ## How future attachments will behave
 

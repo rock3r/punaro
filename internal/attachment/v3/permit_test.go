@@ -3,6 +3,7 @@ package v3
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"math"
 	"testing"
 	"time"
 )
@@ -63,6 +64,23 @@ func TestPermitRejectsInvalidHolderOperationAndAttempt(t *testing.T) {
 	p.MaxBytes = maxPermitCiphertextBytes + 1
 	if _, err := EncodePermit(p); err == nil {
 		t.Fatal("oversized ciphertext quota accepted")
+	}
+	p = testPermit(now)
+	p.IssuedAt, p.ExpiresAt = math.MaxInt64+1, math.MaxInt64+2
+	if _, err := EncodePermit(p); err == nil {
+		t.Fatal("unrepresentable permit timestamp accepted")
+	}
+}
+
+func TestUnixSecondsRejectsUnrepresentableProtocolTime(t *testing.T) {
+	if _, err := unixSeconds(math.MaxInt64 + 1); err == nil {
+		t.Fatal("unrepresentable Unix seconds accepted")
+	}
+}
+
+func TestPermitExportsOnlyProtocolOperationIdentifiers(t *testing.T) {
+	if PermitHolderSender != permitHolderSender || PermitHolderRecipient != permitHolderRecipient || PermitOperationSourceInit != permitOperationSourceInit || PermitOperationSourceUpload != permitOperationSourceUpload || PermitOperationOffer != permitOperationOffer || PermitOperationAccept != permitOperationAccept || PermitOperationBegin != permitOperationBegin || PermitOperationDownload != permitOperationDownload || PermitOperationComplete != permitOperationComplete || PermitOperationCancel != permitOperationCancel {
+		t.Fatal("public v3 permit protocol identifiers drifted")
 	}
 }
 

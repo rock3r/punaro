@@ -59,6 +59,9 @@ func TestAttachmentOperationRequestEnforcesOperationBodiesAndPermitRoute(t *test
 	if _, _, err := NewAttachmentOperationRequest("POST", "/v3/attachments/"+transferHex+"/accept", []byte("short"), nil); err == nil {
 		t.Fatal("non-nonce accept body accepted")
 	}
+	if _, _, err := NewAttachmentOperationRequest("POST", "/v3/attachments/"+transferHex+"/offer", make([]byte, maxOfferPayloadBytes+1), nil); err == nil {
+		t.Fatal("oversized offer body accepted")
+	}
 	if _, _, err := NewAttachmentOperationRequest("GET", "/v3/attachments/"+transferHex+"/chunks/0", []byte("body"), []byte("ciphertext")); err == nil {
 		t.Fatal("download body accepted")
 	}

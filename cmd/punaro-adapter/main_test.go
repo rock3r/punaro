@@ -19,6 +19,16 @@ func TestParseSendArgsRequiresExplicitIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestParseAttachmentNotifyArgsRequiresStableOfferHandoff(t *testing.T) {
+	if _, err := parseAttachmentNotifyArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--offer-file", "offer.cbor"}); err == nil {
+		t.Fatal("attachment notify without idempotency key was accepted")
+	}
+	request, err := parseAttachmentNotifyArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--offer-file", "offer.cbor", "--idempotency-key", "offer-transfer-1"})
+	if err != nil || request.offerFile != "offer.cbor" || request.idempotencyKey != "offer-transfer-1" {
+		t.Fatalf("attachment notify request did not parse: %#v err=%v", request, err)
+	}
+}
+
 func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
 	request, err := parseCreateArgs([]string{"--creator", "agent/a", "--member", "agent/a:send,receive,admin", "--member", "agent/b:receive", "--idempotency-key", "create-1"})
 	if err != nil || len(request.members) != 2 || request.idempotencyKey != "create-1" {

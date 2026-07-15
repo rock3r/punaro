@@ -18,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
+	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -114,6 +115,19 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 	return message, err
 }
 
+// SendV3OfferNotice makes one idempotent attempt to make a completed attachment
+// offer discoverable through the same durable, membership-scoped conversation
+// as its control messages. It transports no plaintext and grants no attachment
+// authority. Long-running callers must use OfferNoticeOutbox so the notice is
+// persisted before this attempt and retried after process/network failure.
+func (c *HTTPRelayClient) SendV3OfferNotice(ctx context.Context, conversationID, fromEndpoint string, rawOffer []byte, idempotencyKey string) (relay.Message, error) {
+	notice, err := attachmentv3.EncodeOfferNotice(rawOffer)
+	if err != nil {
+		return relay.Message{}, fmt.Errorf("encode v3 attachment offer notice: %w", err)
+	}
+	return c.Send(ctx, conversationID, fromEndpoint, notice, idempotencyKey)
+}
+
 // Ack acknowledges a locally committed delivery using its live lease fence.
 func (c *HTTPRelayClient) Ack(ctx context.Context, delivery relay.Delivery) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/"+url.PathEscape(delivery.ID)+"/ack", map[string]any{"endpoint": delivery.RecipientEndpoint, "lease_token": delivery.LeaseToken, "lease_generation": delivery.LeaseGeneration}, nil)
@@ -124,7 +138,9 @@ const (
 	directorySnapshotPath     = "/v2/directory"
 	maxDirectorySnapshotBytes = 2 << 20
 	permitIssuancePath        = "/v2/permits"
+	v3PermitIssuancePath      = "/v3/permits"
 	maxPermitResponseBytes    = 4 << 10
+	maxV3AttachmentBody       = 256<<10 + 16
 )
 
 // IssuePermit submits an already holder-signed canonical permit request over
@@ -176,6 +192,138 @@ func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachm
 		return attachmentv2.Permit{}, errors.New("invalid permit response")
 	}
 	return permit, nil
+}
+
+// IssueV3Permit submits an already holder-signed canonical v3 permit request.
+// The relay independently authenticates this machine and binds it to the
+// request's holder device before it considers the holder signature.
+func (c *HTTPRelayClient) IssueV3Permit(ctx context.Context, permitRequest attachmentv3.PermitRequest) (attachmentv3.Permit, error) {
+	body, err := attachmentv3.EncodePermitRequest(permitRequest)
+	if err != nil {
+		return attachmentv3.Permit{}, fmt.Errorf("encode v3 permit request: %w", err)
+	}
+	raw, err := c.doSignedCBOR(ctx, http.MethodPost, v3PermitIssuancePath, body, "application/cbor", maxPermitResponseBytes)
+	if err != nil {
+		return attachmentv3.Permit{}, err
+	}
+	permit, err := attachmentv3.DecodePermit(raw)
+	if err != nil {
+		return attachmentv3.Permit{}, errors.New("invalid v3 permit response")
+	}
+	return permit, nil
+}
+
+// DoV3Attachment sends one exact permit-bound v3 attachment operation. The
+// caller must obtain the operation-specific permit first and construct its
+// holder-signed operation record with BuildSignedAttachmentOperation. A relay
+// response is either canonical CBOR lifecycle state or, for download, raw
+// ciphertext; no response is interpreted as plaintext here.
+func (c *HTTPRelayClient) DoV3Attachment(ctx context.Context, method, path string, body []byte, permit attachmentv3.Permit, operation attachmentv3.OperationRecord) ([]byte, error) {
+	if len(body) > maxV3AttachmentBody || method == "" || path == "" {
+		return nil, errors.New("invalid v3 attachment request")
+	}
+	permitRaw, err := attachmentv3.EncodePermit(permit)
+	if err != nil {
+		return nil, errors.New("invalid v3 attachment permit")
+	}
+	operationRaw, err := attachmentv3.EncodeOperation(operation)
+	if err != nil {
+		return nil, errors.New("invalid v3 attachment operation")
+	}
+	route, err := attachmentv3.ParseAttachmentRoute(method, path)
+	if err != nil || attachmentv3.VerifyAttachmentRoute(route, permit) != nil {
+		return nil, errors.New("invalid v3 attachment route")
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: path})
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build v3 attachment request: %w", err)
+	}
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	request.Header.Set("X-Punaro-Attachment-Permit", base64.RawURLEncoding.EncodeToString(permitRaw))
+	request.Header.Set("X-Punaro-Attachment-Operation", base64.RawURLEncoding.EncodeToString(operationRaw))
+	if len(body) > 0 {
+		request.Header.Set("Content-Type", "application/octet-stream")
+	}
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("v3 attachment request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || (response.Header.Get("Content-Type") != "application/cbor" && response.Header.Get("Content-Type") != "application/octet-stream") {
+		return nil, fmt.Errorf("v3 attachment request rejected with HTTP %d", response.StatusCode)
+	}
+	maximum := maxV3AttachmentBody
+	if response.Header.Get("Content-Type") == "application/cbor" {
+		maximum = 256
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, int64(maximum)+1))
+	if err != nil || len(raw) == 0 || len(raw) > maximum {
+		return nil, errors.New("invalid v3 attachment response")
+	}
+	return raw, nil
+}
+
+// doSignedCBOR is the strict non-redirecting transport primitive shared by
+// versioned attachment protocol records. The opaque body is authenticated as
+// received; callers still validate its version-specific canonical CBOR.
+func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string, body []byte, contentType string, maximum int) ([]byte, error) {
+	if c == nil || maximum <= 0 || len(body) == 0 || path == "" || contentType != "application/cbor" {
+		return nil, errors.New("invalid signed CBOR request")
+	}
+	nonce, err := randomNonce()
+	if err != nil {
+		return nil, err
+	}
+	timestamp := time.Now().UTC()
+	signed := relay.SignedRequest{MachineID: c.machineID, Method: method, Path: path, Body: body, Timestamp: timestamp, Nonce: nonce}
+	signed.Signature = ed25519.Sign(c.privateKey, relay.CanonicalRequest(signed))
+	target := c.baseURL.ResolveReference(&url.URL{Path: path})
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("build signed CBOR request: %w", err)
+	}
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("Accept", contentType)
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	if c.accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
+	}
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("signed CBOR request failed: %w", err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != contentType {
+		return nil, fmt.Errorf("signed CBOR request rejected with HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, int64(maximum)+1))
+	if err != nil || len(raw) == 0 || len(raw) > maximum {
+		return nil, errors.New("invalid signed CBOR response")
+	}
+	return raw, nil
 }
 
 // FetchDirectorySnapshot retrieves the complete current root-signed directory
@@ -309,7 +457,12 @@ func (c *HTTPRelayClient) doJSONWithIdempotency(ctx context.Context, method, pat
 		httpRequest.Header.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		httpRequest.Header.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
 	}
-	response, err := c.httpClient.Do(httpRequest)
+	// Signed relay requests carry machine and, optionally, Access credentials.
+	// A redirect is therefore a rejection, never an instruction to replay the
+	// opaque body or these headers at a different origin.
+	client := *c.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := client.Do(httpRequest)
 	if err != nil {
 		return 0, fmt.Errorf("relay request failed: %w", err)
 	}

@@ -75,3 +75,38 @@ func TestPermitLedgerIsAtomicAndReturnsExactReplayResult(t *testing.T) {
 		t.Fatalf("terminal replay result=%q replayed=%v calls=%d err=%v", result, replayed, calls, err)
 	}
 }
+
+func TestPermitLedgerReturnsExactIssuedPermitAfterLifecycleAdvance(t *testing.T) {
+	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	source := verifiedTestSource(t, now, 1, 4, 4)
+	if err := store.initialize(context.Background(), source, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.upload(context.Background(), source.TransferID(), 0, make([]byte, 20), now); err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := permitForManifest(source.manifest, source.raw, now)
+	permit.Operation = permitOperationOffer
+	if err := SignPermit(&permit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	authority := permitAuthorityStub{key: issuerPublic}
+	if err := store.issuePermit(context.Background(), permit, authority, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE v3_transfers SET status = ? WHERE transfer_id = ?`, transferOffered, permit.TransferID[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.issuePermit(context.Background(), permit, authority, now); err != nil {
+		t.Fatalf("exact issued permit retry was lifecycle-gated: %v", err)
+	}
+}

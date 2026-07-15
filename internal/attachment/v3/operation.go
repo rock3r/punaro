@@ -156,6 +156,26 @@ func SignOperation(r *OperationRecord, private ed25519.PrivateKey) error {
 	return nil
 }
 
+// BuildSignedAttachmentOperation derives every operation commitment from the
+// fixed v3 route and exact body, then signs it with the permit holder key.
+// Callers provide only opaque per-operation identities and bounded timing;
+// they cannot supply a target, path, or body commitment separately.
+func BuildSignedAttachmentOperation(permit Permit, method, path string, body []byte, operationID [16]byte, idempotencyKey [32]byte, issuedAt, expiresAt uint64, private ed25519.PrivateKey) (OperationRecord, error) {
+	if validatePermit(permit) != nil || operationID == [16]byte{} || idempotencyKey == [32]byte{} || issuedAt < permit.IssuedAt || expiresAt > permit.ExpiresAt || expiresAt <= issuedAt {
+		return OperationRecord{}, errors.New("invalid v3 attachment operation input")
+	}
+	route, request, err := NewAttachmentOperationRequest(method, path, body, nil)
+	if err != nil || VerifyAttachmentRoute(route, permit) != nil || verifyAttachmentRequestRoute(route, permit, request) != nil {
+		return OperationRecord{}, errors.New("invalid v3 attachment operation route")
+	}
+	pathCommitment, targetCommitment, bodyCommitment := operationRequestCommitments(request)
+	operation := OperationRecord{PermitSerial: permit.Serial, OperationID: operationID, Operation: permit.Operation, Method: request.method, PathCommitment: pathCommitment, TargetCommitment: targetCommitment, BodyCommitment: bodyCommitment, IdempotencyKey: idempotencyKey, IssuedAt: issuedAt, ExpiresAt: expiresAt, StagedManifestCommitment: permit.StagedManifestCommitment}
+	if err := SignOperation(&operation, private); err != nil {
+		return OperationRecord{}, err
+	}
+	return operation, nil
+}
+
 // VerifyOperation checks timing, permit binding, fresh holder authorization,
 // staged source binding, and holder signature before state lookup/redemption.
 func VerifyOperation(r OperationRecord, permit Permit, holders OperationHolderResolver, now time.Time) error {

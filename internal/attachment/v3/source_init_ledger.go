@@ -32,11 +32,26 @@ func (s *sourceStore) redeemSourceInit(ctx context.Context, directory DirectoryK
 	if err != nil {
 		return nil, false, err
 	}
+	permitExpiry, err := unixSeconds(permit.ExpiresAt)
+	if err != nil {
+		return nil, false, err
+	}
+	sourceExpiry, err := unixSeconds(source.manifest.ExpiresAt)
+	if err != nil {
+		return nil, false, err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Source-init is the one operation whose source does not exist when the
+	// permit is issued. Require the issuance journal before creating it: an
+	// otherwise-valid issuer signature is not a bootstrap admission token.
+	var journalPermit []byte
+	if err := tx.QueryRowContext(ctx, `SELECT permit FROM v3_permit_requests WHERE permit_serial = ?`, permit.Serial[:]).Scan(&journalPermit); err != nil || !bytes.Equal(journalPermit, rawPermit) {
+		return nil, false, errors.New("unknown or mismatched v3 source-init permit issuance")
+	}
 	var stored []byte
 	err = tx.QueryRowContext(ctx, `SELECT permit FROM v3_issued_permits WHERE serial = ?`, permit.Serial[:]).Scan(&stored)
 	if err == nil {
@@ -63,13 +78,13 @@ func (s *sourceStore) redeemSourceInit(ctx context.Context, directory DirectoryK
 		return nil, false, err
 	}
 	retainUntil := now.UTC().Add(s.limits.TombstoneRetention).Unix()
-	if retainUntil < int64(permit.ExpiresAt) {
-		retainUntil = int64(permit.ExpiresAt)
+	if retainUntil < permitExpiry {
+		retainUntil = permitExpiry
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_issued_permits(serial, permit, transfer_id, manifest_commitment, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?)`, permit.Serial[:], rawPermit, permit.TransferID[:], permit.StagedManifestCommitment[:], permit.ExpiresAt, retainUntil); err != nil {
 		return nil, false, err
 	}
-	result, err := encodeTransferResult(permit.TransferID, permit.StagedManifestCommitment, transferSourceUploading, 0, int64(source.manifest.ExpiresAt))
+	result, err := encodeTransferResult(permit.TransferID, permit.StagedManifestCommitment, transferSourceUploading, 0, sourceExpiry)
 	if err != nil {
 		return nil, false, err
 	}

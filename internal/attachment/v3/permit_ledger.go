@@ -30,11 +30,30 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if err != nil {
 		return err
 	}
+	permitExpiry, err := unixSeconds(permit.ExpiresAt)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// An exact issuance retry must remain retrievable after the permit has
+	// advanced the lifecycle or terminal cleanup released its source. It still
+	// passed fresh issuer/revocation validation above; only a *new* serial needs
+	// current source admission below.
+	var existing []byte
+	err = tx.QueryRowContext(ctx, `SELECT permit FROM v3_issued_permits WHERE serial = ?`, permit.Serial[:]).Scan(&existing)
+	if err == nil {
+		if !bytes.Equal(existing, raw) {
+			return errors.New("changed v3 permit serial")
+		}
+		return tx.Commit()
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	spec, found, err := loadSpecTx(ctx, tx, permit.TransferID)
 	if err != nil || !found || spec.ManifestCommitment != permit.StagedManifestCommitment {
 		return errors.New("unknown v3 staged source")
@@ -48,24 +67,13 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if err := tx.QueryRowContext(ctx, `SELECT status, attempt_generation FROM v3_transfers WHERE transfer_id = ? AND manifest_commitment = ?`, permit.TransferID[:], permit.StagedManifestCommitment[:]).Scan(&status, &attempt); err != nil || !permitCompatibleSourceStatus(permit, status, attempt) {
 		return errors.New("v3 permit is not admitted by source lifecycle")
 	}
-	var existing []byte
-	err = tx.QueryRowContext(ctx, `SELECT permit FROM v3_issued_permits WHERE serial = ?`, permit.Serial[:]).Scan(&existing)
-	if err == nil {
-		if !bytes.Equal(existing, raw) {
-			return errors.New("changed v3 permit serial")
-		}
-		return tx.Commit()
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
 	var active uint64
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM v3_issued_permits WHERE transfer_id = ? AND retain_until > ?`, permit.TransferID[:], now.UTC().Unix()).Scan(&active); err != nil || active >= maxActivePermitsPerSource {
 		return errors.New("v3 permit admission exhausted")
 	}
 	retainUntil := now.UTC().Add(s.limits.TombstoneRetention).Unix()
-	if retainUntil < int64(permit.ExpiresAt) {
-		retainUntil = int64(permit.ExpiresAt)
+	if retainUntil < permitExpiry {
+		retainUntil = permitExpiry
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_issued_permits(serial, permit, transfer_id, manifest_commitment, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?)`, permit.Serial[:], raw, permit.TransferID[:], permit.StagedManifestCommitment[:], permit.ExpiresAt, retainUntil); err != nil {
 		return errors.New("v3 permit serial collision")

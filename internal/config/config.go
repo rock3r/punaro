@@ -15,31 +15,33 @@ import (
 
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
-	ListenAddr                 string
-	DataDir                    string
-	LogLevel                   string
-	AttachmentsEnabled         bool
-	AttachmentDeviceKeysJSON   string
-	AttachmentMembershipJSON   string
-	DirectoryEnabled           bool
-	DirectorySnapshotFile      string
-	PermitIssuanceEnabled      bool
-	DirectoryAudience          [32]byte
-	DirectoryRootKeyID         [32]byte
-	DirectoryRootPublicKey     ed25519.PublicKey
-	PermitIssuerKeyID          [32]byte
-	PermitIssuerPrivateKeyFile string
-	PermitMaxLifetimeSeconds   uint64
-	PermitMaxBytes             uint64
-	PermitMaxChunks            uint64
-	PermitMaxOperations        uint64
-	PermitMaxActive            uint64
-	RelayEnabled               bool
-	RelayMachinesJSON          string
-	AccessIssuer               string
-	AccessAudience             string
-	AccessJWKSURL              string
-	AccessJWKSFile             string
+	ListenAddr                  string
+	DataDir                     string
+	LogLevel                    string
+	AttachmentsEnabled          bool
+	AttachmentDeviceKeysJSON    string
+	AttachmentMembershipJSON    string
+	AttachmentV3Enabled         bool
+	AttachmentV3SourceStoreFile string
+	DirectoryEnabled            bool
+	DirectorySnapshotFile       string
+	PermitIssuanceEnabled       bool
+	DirectoryAudience           [32]byte
+	DirectoryRootKeyID          [32]byte
+	DirectoryRootPublicKey      ed25519.PublicKey
+	PermitIssuerKeyID           [32]byte
+	PermitIssuerPrivateKeyFile  string
+	PermitMaxLifetimeSeconds    uint64
+	PermitMaxBytes              uint64
+	PermitMaxChunks             uint64
+	PermitMaxOperations         uint64
+	PermitMaxActive             uint64
+	RelayEnabled                bool
+	RelayMachinesJSON           string
+	AccessIssuer                string
+	AccessAudience              string
+	AccessJWKSURL               string
+	AccessJWKSFile              string
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -69,6 +71,10 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENTS_ENABLED: %w", err)
 	}
+	attachmentV3Enabled, err := strconv.ParseBool(value("PUNARO_ATTACHMENT_V3_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_ATTACHMENT_V3_ENABLED: %w", err)
+	}
 	relayEnabled, err := strconv.ParseBool(value("PUNARO_RELAY_ENABLED", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_RELAY_ENABLED: %w", err)
@@ -94,6 +100,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	permitMaxChunks := value("PUNARO_PERMIT_MAX_CHUNKS", "")
 	permitMaxOperations := value("PUNARO_PERMIT_MAX_OPERATIONS", "")
 	permitMaxActive := value("PUNARO_PERMIT_MAX_ACTIVE", "")
+	attachmentV3SourceStoreFile := value("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "")
 	relayMachines := value("PUNARO_RELAY_MACHINES_JSON", "")
 	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
@@ -109,6 +116,18 @@ func Load(explicitEnvFile string) (Config, error) {
 	if attachmentsEnabled && (deviceKeys == "" || membership == "") {
 		return Config{}, fmt.Errorf("attachments require PUNARO_ATTACHMENT_DEVICE_KEYS_JSON and PUNARO_ATTACHMENT_MEMBERSHIP_JSON")
 	}
+	if attachmentV3Enabled && !relayEnabled {
+		return Config{}, fmt.Errorf("v3 attachment runtime requires PUNARO_RELAY_ENABLED")
+	}
+	if attachmentV3Enabled && (attachmentsEnabled || permitIssuanceEnabled) {
+		return Config{}, fmt.Errorf("v3 attachment runtime cannot be enabled with v2 attachment switches")
+	}
+	if attachmentV3Enabled && attachmentV3SourceStoreFile == "" {
+		return Config{}, fmt.Errorf("v3 attachment runtime requires PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE")
+	}
+	if attachmentV3Enabled && !filepath.IsAbs(attachmentV3SourceStoreFile) {
+		return Config{}, fmt.Errorf("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE must be absolute")
+	}
 	if relayEnabled && relayMachines == "" {
 		return Config{}, fmt.Errorf("enabled relay requires PUNARO_RELAY_MACHINES_JSON")
 	}
@@ -121,9 +140,9 @@ func Load(explicitEnvFile string) (Config, error) {
 	var audience, rootKeyID, issuerKeyID [32]byte
 	var rootPublicKey ed25519.PublicKey
 	var maxLifetime, maxBytes, maxChunks, maxOperations, maxActive uint64
-	if permitIssuanceEnabled {
+	if permitIssuanceEnabled || attachmentV3Enabled {
 		if !directoryEnabled {
-			return Config{}, fmt.Errorf("permit issuance requires PUNARO_DIRECTORY_ENABLED")
+			return Config{}, fmt.Errorf("permit issuance and v3 attachment runtime require PUNARO_DIRECTORY_ENABLED")
 		}
 		var decodeErr error
 		if audience, decodeErr = decodeFixedBase64URL("PUNARO_DIRECTORY_AUDIENCE", directoryAudience, 32); decodeErr != nil {
@@ -143,7 +162,11 @@ func Load(explicitEnvFile string) (Config, error) {
 		if permitIssuerPrivateKeyFile == "" || !filepath.IsAbs(permitIssuerPrivateKeyFile) {
 			return Config{}, fmt.Errorf("permit issuance requires an absolute PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE")
 		}
-		if maxLifetime, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", permitMaxLifetimeSeconds, 60); decodeErr != nil {
+		maxPermitLifetime := uint64(60)
+		if attachmentV3Enabled {
+			maxPermitLifetime = 30
+		}
+		if maxLifetime, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", permitMaxLifetimeSeconds, maxPermitLifetime); decodeErr != nil {
 			return Config{}, decodeErr
 		}
 		if maxBytes, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_BYTES", permitMaxBytes, 64<<20); decodeErr != nil {
@@ -172,7 +195,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if accessJWKSFile != "" && !filepath.IsAbs(accessJWKSFile) {
 		return Config{}, fmt.Errorf("PUNARO_ACCESS_JWKS_FILE must be absolute")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

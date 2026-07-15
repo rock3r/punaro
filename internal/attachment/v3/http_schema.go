@@ -120,7 +120,7 @@ func validAttachmentRequestBody(operation uint64, body []byte) bool {
 	case permitOperationSourceUpload:
 		return len(body) > 0
 	case permitOperationOffer:
-		return len(body) > 0 && len(body) <= 24<<10
+		return len(body) > 0 && len(body) <= maxOfferPayloadBytes
 	case permitOperationAccept:
 		return len(body) == 32
 	case permitOperationBegin, permitOperationComplete, permitOperationCancel:

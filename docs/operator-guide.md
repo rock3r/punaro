@@ -35,7 +35,7 @@ share a dotenv file, database, backup, private key, token, or message body.
 
 ### Signed attachment-directory distribution and permit issuance
 
-The file-transfer API is still disabled. A deployment may, however, exercise
+The v2 file-transfer API is disabled. A deployment may, however, exercise
 the prerequisite signed directory distribution independently by setting
 `PUNARO_DIRECTORY_ENABLED=true` and an absolute
 `PUNARO_DIRECTORY_SNAPSHOT_FILE`. The relay must also be enabled with its
@@ -60,7 +60,7 @@ service above and all of the following explicit inputs:
   `PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE`: an absolute private (`0700` parent,
   `0600` non-symlink regular file) containing exactly one canonical
   raw-base64url 64-byte Ed25519 private key.
-- `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` (1–60),
+- `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` (1–60; 1–30 for v3),
   `PUNARO_PERMIT_MAX_BYTES` (1–67108864), `PUNARO_PERMIT_MAX_CHUNKS`
   (1–4096), `PUNARO_PERMIT_MAX_OPERATIONS` (1–4096), and
   `PUNARO_PERMIT_MAX_ACTIVE` (1–4096). There are no defaults. The last bound
@@ -86,6 +86,72 @@ The attachment operation routes are not mounted. Both
 release gates, including capacity/reaping and source-ready evidence, are met.
 Permit issuance is not a transfer release and does not relax any attachment
 release gate.
+
+### Controlled v3 attachment runtime
+
+V3 is a separate protocol and route namespace; it does not turn on v2. For a
+controlled validation deployment, set `PUNARO_ATTACHMENT_V3_ENABLED=true` and
+leave both `PUNARO_ATTACHMENTS_ENABLED` and
+`PUNARO_PERMIT_ISSUANCE_ENABLED` unset/false. In addition to the relay,
+directory, root trust, issuer key, permit limits, and enrolled
+`attachment_device_id` records listed above, provide:
+
+- `PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE`: an absolute path beneath an
+  existing private, non-symlinked `0700` directory. The daemon creates a
+  `0600` SQLite file there; do not put it on NFS, a shared filesystem, or a
+  synchronized folder.
+- A current root-signed directory snapshot that names the sender, recipient,
+  membership, and active permit issuer. A missing, expired, rolled-back, or
+  revoked snapshot makes `/readyz`, issuance, and attachment operations fail
+  closed.
+- For remote use, Cloudflare Access plus machine request signatures. Access is
+  an admission layer, not a substitute for the enrolled machine-to-directory
+  device binding enforced by both `/v3/permits` and `/v3/attachments/...`.
+
+The v3 daemon mounts only `POST /v3/permits` and the exact routes in
+[`attachments-v3-rfc.md`](attachments-v3-rfc.md). A source-init permit is
+accepted only if the exact holder-signed issuance request is present in the
+same private journal; subsequent permits are registered in the source ledger
+before a response is sent. Request identities and exact operation retries have
+bounded tombstone retention, so do not delete or restore the source database
+piecemeal.
+
+The daemon runs a bounded reaper batch once a minute and waits for that worker
+to stop before it closes SQLite. It only reclaims already expired retry,
+receipt, source, and issuance-journal state; it never authorizes a request or
+uses a cached directory decision. A fresh directory revocation or membership
+change fences the next permit or attachment operation immediately. Treat a
+denied transfer as terminal for the old credentials: rotate/re-enroll as
+needed and start a new transfer rather than trying to restore old permits.
+
+After the sender receives the successful `offer` operation result, it must
+durably enqueue the offer in its local `OfferNoticeOutbox` before treating
+recipient discovery as handed off. `punaro-adapter attachment-notify` does
+this and then attempts immediate delivery; the long-running adapter drains the
+same private SQLite outbox on every cycle. Use a stable transfer-scoped
+idempotency key. The notice carries the canonical offer record only; it is
+bounded to the relay's ordinary message limit and contains no plaintext or
+public URL. A crash after relay acceptance but before the local delete is safe
+because the exact append is retried. Do not re-wrap or mutate the offer.
+Recipients parse the notice locally, then independently fresh-verify and use
+recipient permits. The outbox uses a private, single-connection SQLite file in
+the adapter data directory and admits at most 64 pending notices (2 MiB total,
+including bounded route and idempotency fields) without evicting an
+undelivered record. If it fills, restore relay connectivity and let the adapter
+drain it; do not delete pending rows to make space.
+
+V3 uses the conservative finite source limits compiled into the current
+runtime (64 MiB artifact, 4096 chunks, 256 KiB plaintext chunk; finite sender,
+recipient, conversation, and relay reservations). It is a singleton SQLite
+deployment shape. Do not run more than one writer against the source database.
+For a generic deployment, use one `punarod` process in a container or LXC,
+bind it to loopback, and let a Cloudflare Tunnel reach that loopback listener;
+the repository intentionally contains no hostname, tunnel, account, token, or
+deployment-specific example.
+
+This is a controlled validation feature, not a production-release declaration.
+Before allowing sensitive files, complete the v3 vector/fuzz, restore,
+revocation, independent-review, and release-evidence gates below.
 
 ## Cloudflare Access under systemd
 

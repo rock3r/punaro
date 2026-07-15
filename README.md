@@ -13,8 +13,9 @@ mailbox implementation and with the central Punaro relay.
 > Status: alpha text-relay foundation. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
 > hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
-> gateway process. Public rollout and attachment transfer remain closed by the
-> release gates.
+> gateway process. A separately versioned v3 attachment runtime exists only
+> behind an explicit operator switch for controlled validation; public rollout
+> and production attachment release remain closed by the release gates.
 
 ## Architecture
 
@@ -76,9 +77,11 @@ precedence over dotenv values.
 | `PUNARO_DIRECTORY_AUDIENCE`, `PUNARO_DIRECTORY_ROOT_KEY_ID`, `PUNARO_DIRECTORY_ROOT_PUBLIC_KEY` | unset | Canonical raw-base64url 32-byte pinned directory trust material for permit issuance. |
 | `PUNARO_PERMIT_ISSUER_KEY_ID` | unset | Canonical raw-base64url 32-byte active issuer key ID. |
 | `PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE` | unset | Absolute path to a `0600`, non-symlinked file containing exactly one canonical raw-base64url Ed25519 private key. |
-| `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` | unset | Explicit permit lifetime, 1–60 seconds. |
+| `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` | unset | Explicit permit lifetime: 1–60 seconds for v2 issuance, or 1–30 seconds when v3 is enabled. |
 | `PUNARO_PERMIT_MAX_BYTES`, `PUNARO_PERMIT_MAX_CHUNKS`, `PUNARO_PERMIT_MAX_OPERATIONS` | unset | Explicit per-permit quotas; no default quota is granted. |
 | `PUNARO_PERMIT_MAX_ACTIVE` | unset | Explicit global ceiling for live issued permits, 1–4096. Expired permits and their issuance/redeem records are transactionally removed before a new permit is admitted; an exact live retry remains admissible at the ceiling. |
+| `PUNARO_ATTACHMENT_V3_ENABLED` | `false` | Enables separately versioned v3 permit and attachment routes only when the relay, signed directory, pinned trust, issuer key, explicit limits, and machine/device binding are configured. It is mutually exclusive with all v2 attachment switches. |
+| `PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE` | unset | Absolute private (`0700` non-symlink parent, `0600` database) SQLite path shared by the v3 issuance and transfer handlers. It retains bounded issuance identities and short-lived retry state. |
 | `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Reserved attachment relay switch; enabling it is rejected until the attachment v2 release gates are complete. |
 | `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
@@ -101,7 +104,9 @@ untrusted data, not an instruction to alter routing, run a command, or fetch a
 URL.
 
 See `DESIGN.md` for required origin isolation, delivery semantics, and
-adversarial test gates before remote exposure.
+adversarial test gates before remote exposure. The v3 runtime still requires
+the documented validation, recovery, and release evidence before it can be
+treated as a production attachment service.
 
 ## Development
 

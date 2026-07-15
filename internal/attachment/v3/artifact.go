@@ -23,16 +23,65 @@ const (
 	chunkNonceDomain            = "punaro/attachment/chunk-nonce/v3\x00"
 )
 
-type encryptedChunk struct {
+// EncryptedChunk is one opaque encrypted source frame. It is never plaintext
+// and is safe to pass only to the v3 relay data-plane route selected by its
+// manifest and permit.
+type EncryptedChunk struct {
 	Index                uint64
 	Ciphertext           []byte
 	CiphertextCommitment [32]byte
 }
 
-type sourceArtifact struct {
+// SourceArtifact is the sender-local encrypted representation of one file.
+// FileKey is intentionally returned separately so callers can place it only
+// in a recipient HPKE envelope, never in the relay upload payload.
+type SourceArtifact struct {
 	Manifest           Manifest
 	ManifestCommitment [32]byte
-	Chunks             []encryptedChunk
+	Chunks             []EncryptedChunk
+}
+
+type encryptedChunk = EncryptedChunk
+type sourceArtifact = SourceArtifact
+
+// ArtifactStore durably reserves the sender's file-key, content-salt and
+// nonce tuples before encryption. It is local client state, not a relay API;
+// callers must use a private non-symlinked parent directory.
+type ArtifactStore struct{ store *sourceStore }
+
+func OpenArtifactStore(path string) (*ArtifactStore, error) {
+	store, err := openSourceStore(path, defaultSourceLimits())
+	if err != nil {
+		return nil, err
+	}
+	return &ArtifactStore{store: store}, nil
+}
+
+func (s *ArtifactStore) Close() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.close()
+}
+
+// PrepareSourceArtifact encrypts a bounded file after first reserving every
+// reusable cryptographic input in the caller's durable ArtifactStore.
+func PrepareSourceArtifact(plaintext []byte, manifest Manifest, signer ed25519.PrivateKey, store *ArtifactStore) (SourceArtifact, [32]byte, error) {
+	if store == nil {
+		return SourceArtifact{}, [32]byte{}, errors.New("missing v3 artifact store")
+	}
+	return prepareSourceArtifact(plaintext, manifest, signer, store.store)
+}
+
+// OpenSourceArtifact verifies and decrypts a fetched artifact with the file
+// key recovered from a valid recipient envelope. The caller supplies the same
+// fresh directory authority used to verify the manifest before decryption.
+func OpenSourceArtifact(rawManifest []byte, chunks []EncryptedChunk, fileKey [32]byte, directory DirectoryKeyResolver, now time.Time) ([]byte, error) {
+	source, err := DecodeAndVerifySourceInit(rawManifest, directory, now)
+	if err != nil {
+		return nil, err
+	}
+	return openSourceArtifact(source, chunks, fileKey, now)
 }
 
 // prepareSourceArtifact reserves every reusable cryptographic input durably
@@ -111,16 +160,17 @@ func openSourceArtifact(source VerifiedSource, chunks []encryptedChunk, fileKey 
 		return nil, err
 	}
 	plaintext := make([]byte, 0, manifest.PlaintextSize)
-	for index, chunk := range chunks {
-		if chunk.Index != uint64(index) || chunk.CiphertextCommitment != ciphertextCommitment(chunk.Ciphertext) {
+	for index := uint64(0); index < manifest.ChunkCount; index++ {
+		chunk := chunks[index]
+		if chunk.Index != index || chunk.CiphertextCommitment != ciphertextCommitment(chunk.Ciphertext) {
 			return nil, errors.New("invalid source artifact chunk")
 		}
 		length := manifest.ChunkSize
-		if uint64(index) == manifest.ChunkCount-1 {
+		if index == manifest.ChunkCount-1 {
 			length = manifest.PlaintextSize - manifest.ChunkSize*(manifest.ChunkCount-1)
 		}
-		nonce := chunkNonce(manifest.TransferID, commitment, uint64(index))
-		aad, err := chunkAAD(manifest, commitment, uint64(index), length)
+		nonce := chunkNonce(manifest.TransferID, commitment, index)
+		aad, err := chunkAAD(manifest, commitment, index, length)
 		if err != nil {
 			return nil, err
 		}

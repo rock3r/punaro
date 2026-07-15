@@ -317,6 +317,52 @@ must only construct its verified-manifest input after fresh directory
 verification; the directory-distribution prerequisite now exists, but the
 remaining attachment runtime does not.
 
+## Attachment-transfer v3 controlled runtime
+
+V3 is a distinct record, signature, and route namespace that solves the v2
+source-staging bootstrap cycle. It does not reinterpret any v2 manifest,
+permit, operation, or envelope. Its explicit runtime is constructed only when
+all of these are present: a private shared source store, a fresh root-verified
+directory adapter, an authorized issuer key, an independently authenticated
+machine-to-directory-device binding for permit issuance, and the equivalent
+binding for every attachment operation. It mounts `/v3/permits` and the strict
+`/v3/attachments/...` routes together; the runtime owns one SQLite source
+store, so issuance and redemption cannot accidentally use different ledgers.
+
+The source-init exception is deliberate and narrow. A sender must first obtain
+a holder-signed v3 source-init permit. The issuer journals the exact request
+and permit; source init verifies that journal entry, verifies the fresh signed
+Manifest body, records both the source and issued permit, and records the
+operation result in one transaction. Later permits are registered against the
+current lifecycle before they are returned. Exact issuance retries remain
+available after lifecycle advance only after fresh issuer/revocation
+validation; retained request identities are bounded per holder and expire only
+after tombstone retention. This prevents bootstrap by an arbitrary valid
+issuer signature, request-ID replacement after short permit expiry, and
+retry failure after normal source cleanup.
+
+The adapter's v3 helpers create encrypted artifacts only after a local private
+artifact store has reserved file-key, salt, and nonce tuples. They issue
+holder-signed v3 permits and submit permit/operation-bound bytes through the
+same replay-protected machine transport as text. Once the sender has received
+the successful `offer` result, it enqueues the exact canonical, bounded offer
+payload in the local `OfferNoticeOutbox`; the running adapter drains that
+outbox to the existing durable conversation. A crash after relay acceptance
+but before local deletion merely retries the stable relay idempotency key. The
+notice is
+discovery data only: it is neither a download URL nor an authorization grant;
+the recipient must fresh-verify its manifest/envelope, use its local HPKE key,
+reaper runs in the daemon and is stopped before its SQLite stores close.
+and obtain recipient-held permits before it can accept or download. A bounded
+reaper runs in the daemon and is stopped before its SQLite stores close.
+reaper runs in the daemon and is stopped before its SQLite stores close.
+
+The implementation does not expose a mailbox database, accept public links,
+move file bytes through Telegram, or decrypt at the relay. Recipient-side
+orchestration, recovery drills, vectors/fuzzing, and release evidence remain
+required; the runtime is a controlled validation surface, not a production
+attachment release.
+
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally
 **non-normative**: they do not specify cipher parameters, nonce/AAD

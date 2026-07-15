@@ -95,6 +95,31 @@ func TestOperationCannotPredatePermit(t *testing.T) {
 	}
 }
 
+func TestBuildSignedAttachmentOperationDerivesFixedRouteCommitments(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 4, 0, 0, 0, time.UTC)
+	permit := testPermit(now)
+	op, err := BuildSignedAttachmentOperation(permit, "POST", "/v3/attachments/05000000000000000000000000000000/source", []byte("manifest"), testID(20), testHash(20), uint64(now.Unix()), uint64(now.Add(time.Second).Unix()), private)
+	if err == nil || op != (OperationRecord{}) {
+		t.Fatal("invalid source-init body was signed")
+	}
+	permit.Operation = permitOperationSourceUpload
+	op, err = BuildSignedAttachmentOperation(permit, "PUT", "/v3/attachments/05000000000000000000000000000000/source/chunks/0", []byte("ciphertext"), testID(21), testHash(21), uint64(now.Unix()), uint64(now.Add(time.Second).Unix()), private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, request, err := NewAttachmentOperationRequest("PUT", "/v3/attachments/05000000000000000000000000000000/source/chunks/0", []byte("ciphertext"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyAttachmentOperationAdmission(op, permit, operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: public}, route, request, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAttachmentOperationRejectsRequestForAnotherRoute(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

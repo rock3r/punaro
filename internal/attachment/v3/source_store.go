@@ -172,6 +172,15 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 			serial BLOB PRIMARY KEY, permit BLOB NOT NULL UNIQUE, transfer_id BLOB NOT NULL,
 			manifest_commitment BLOB NOT NULL, expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
 		)`,
+		// Permit issuance is deliberately journaled beside source admission. That
+		// makes a holder's retry stable across daemon restarts without allowing a
+		// second database to mint an unregistered source-init capability.
+		`CREATE TABLE IF NOT EXISTS v3_permit_requests (
+			request_id BLOB PRIMARY KEY, request BLOB NOT NULL, permit BLOB NOT NULL,
+			permit_serial BLOB NOT NULL UNIQUE, holder_device_id BLOB NOT NULL,
+			expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS v3_permit_requests_retain_until ON v3_permit_requests(retain_until)`,
 		`CREATE TABLE IF NOT EXISTS v3_redeemed_operations (
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation INTEGER NOT NULL,
 			method INTEGER NOT NULL, path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL,
@@ -441,6 +450,9 @@ func (s *sourceStore) reapExpired(ctx context.Context, now time.Time, limit uint
 	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_ledger_admission WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_permit_requests WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -579,13 +591,14 @@ func (s *sourceStore) readyAt(transferID [16]byte, now time.Time) (bool, error) 
 }
 
 func (v VerifiedSource) sourceSpec() (sourceSpec, error) {
-	if v.manifest.ExpiresAt > math.MaxInt64 {
-		return sourceSpec{}, errors.New("unrepresentable source expiry")
+	expiresAt, err := unixSeconds(v.manifest.ExpiresAt)
+	if err != nil {
+		return sourceSpec{}, err
 	}
 	return sourceSpec{TransferID: v.manifest.TransferID, ManifestCommitment: v.commitment,
 		Manifest: append([]byte(nil), v.raw...), ChunkSize: v.manifest.ChunkSize,
 		ChunkCount: v.manifest.ChunkCount, PlaintextSize: v.manifest.PlaintextSize,
-		ExpiresAt: int64(v.manifest.ExpiresAt)}, nil
+		ExpiresAt: expiresAt}, nil
 }
 
 func expectedCiphertextLength(spec sourceSpec, index uint64) uint64 {
@@ -647,6 +660,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_nonce_tuples":     {"transfer_id", "manifest_commitment", "chunk_index"},
 		"v3_source_crypto_admission": {"scope", "scope_id", "reservations"},
 		"v3_issued_permits":          {"serial", "permit", "transfer_id", "manifest_commitment", "expires_at", "retain_until"},
+		"v3_permit_requests":         {"request_id", "request", "permit", "permit_serial", "holder_device_id", "expires_at", "retain_until"},
 		"v3_redeemed_operations":     {"permit_serial", "operation_id", "operation", "method", "path_commitment", "target_commitment", "body_commitment", "idempotency_key", "ciphertext_bytes", "ciphertext_chunks", "result"},
 		"v3_ledger_admission":        {"transfer_id", "manifest_commitment", "operations", "result_bytes", "retain_until"},
 		"v3_offers":                  {"transfer_id", "manifest", "envelope", "acceptance_nonce", "acceptance_consumed"},
@@ -694,6 +708,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_nonce_tuples":     {"primarykey(transfer_id,manifest_commitment,chunk_index)"},
 		"v3_source_crypto_admission": {"primarykey(scope,scope_id)"},
 		"v3_issued_permits":          {"serialblobprimarykey", "permitblobnotnullunique", "retain_untilintegernotnull"},
+		"v3_permit_requests":         {"request_idblobprimarykey", "permitblobnotnull", "permit_serialblobnotnullunique", "holder_device_idblobnotnull", "expires_atintegernotnull", "retain_untilintegernotnull"},
 		"v3_redeemed_operations":     {"primarykey(permit_serial,operation_id)", "unique(permit_serial,idempotency_key)"},
 		"v3_ledger_admission":        {"transfer_idblobprimarykey", "manifest_commitmentblobnotnull", "retain_untilintegernotnull"},
 		"v3_offers":                  {"transfer_idblobprimarykey", "acceptance_consumedintegernotnullcheck(acceptance_consumedin(0,1))"},

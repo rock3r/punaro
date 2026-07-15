@@ -131,6 +131,49 @@ punaro-adapter send \
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
 
+## Controlled v3 attachment enrollment
+
+V3 attachment validation is separate from text onboarding. In addition to the
+normal machine credential, bind exactly one public `attachment_device_id` from
+the signed directory to the enrollment record for each participating machine.
+Do not bind two machines to one device, and do not treat a mailbox endpoint as
+an attachment identity. The relay refuses a permit request unless its enrolled
+machine credential is bound to the request holder's directory device.
+
+The sender stages and offers ciphertext via the v3 API, then invokes
+`punaro-adapter attachment-notify` (or queues `OfferNoticeOutbox`) with the
+exact canonical offer. This persists the notification before the adapter sends
+it through the existing conversation; retain a transfer-scoped idempotency key
+for that notification. The recipient's normal adapter delivery injects the
+bounded `punaro/attachment-offer/v3:` notice into its attached mailbox; its
+agent must parse it with `attachment/v3.DecodeOfferNotice` and perform the
+fresh directory, HPKE, permit, accept, download, and completion steps locally.
+Neither the mailbox nor the Telegram bridge carries file bytes or becomes a
+download proxy.
+
+```sh
+punaro-adapter attachment-notify \
+  --conversation CONVERSATION_ID \
+  --from agent/workstation-review/session-name \
+  --offer-file canonical-offer.cbor \
+  --idempotency-key transfer-notice-TRANSFER_ID
+```
+
+If the immediate relay attempt is unavailable, the command exits non-zero but
+leaves the exact row in `$PUNARO_ADAPTER_DATA_DIR/attachment-offers.db`; start
+or keep the normal adapter running to drain it. Do not delete that database or
+reuse its idempotency key with another offer. The private outbox has a strict
+64-notice / 2 MiB pending limit including bounded route/idempotency metadata;
+repair relay connectivity instead of deleting undelivered entries when
+admission is exhausted.
+
+To revoke an attachment participant, remove the directory membership/key or
+advance its revocation state and publish the signed snapshot, then remove its
+relay enrollment and revoke its Access token as in the preceding section. The
+next permit or attachment operation refreshes the directory and fails closed;
+the daemon's bounded reaper releases expired state after the short transfer
+lifetime. This cannot recall ciphertext already delivered to a recipient.
+
 Create a new explicit conversation from an attached creator endpoint with one
 or more declared members:
 

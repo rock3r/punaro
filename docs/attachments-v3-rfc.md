@@ -1,8 +1,9 @@
 # Attachment transfer v3: source staging amendment
 
-**Status:** pre-release. This amendment defines the only acceptable remedy for
-the v2 source-upload bootstrap cycle. It does not open the attachment release
-gate or authorize mounting an attachment endpoint.
+**Status:** controlled-validation pre-release. This amendment defines the only
+acceptable remedy for the v2 source-upload bootstrap cycle. It permits only the
+explicit, machine-authenticated v3 validation mount; it does not open the
+production attachment release gate.
 
 ## Compatibility
 
@@ -53,7 +54,7 @@ operation target from that parsed route; a client never supplies target bytes.
 The parser binds route transfer/operation/attempt to the permit before it
 checks the signed request commitment. Bodies are exactly: canonical Manifest
 (<=4 KiB) for source-init; ciphertext for source-upload; canonical offer CDE
-(<=24 KiB) for offer; a 32-byte nonce for accept; empty for begin, complete,
+(<=24,555 bytes) for offer; a 32-byte nonce for accept; empty for begin, complete,
 and cancel; and empty request body plus stored ciphertext response for download.
 
 `Manifest` and `Envelope` mean v3 records, never v2 bytes: they retain the v2
@@ -91,12 +92,32 @@ number changes. The v3 vector corpus must cover each identifier and rejection
 path.
 
 The offer body is CDE map `{1=3,2=manifest_bytes,3=envelope_bytes,
-4=acceptance_nonce}` at most 24 KiB. `manifest_bytes` must be byte-identical to
+4=acceptance_nonce}` at most 24,555 bytes. `manifest_bytes` must be byte-identical to
 the staged manifest; `envelope_bytes` is canonical and fresh-directory-verified
 against its commitment; `acceptance_nonce` is exactly 32 random bytes. The
 accept body is exactly that raw 32-byte nonce, preserving an unambiguous
 one-time comparison. Cancel has an empty body and is sender-only before offer;
 after offer it is forbidden because it cannot recall a delivered envelope.
+
+### Durable offer discovery
+
+After an `offer` operation has succeeded, the sender durably records the exact
+raw offer CDE in a local outbox, then places it in its existing authorized
+relay conversation as the single text grammar
+`punaro/attachment-offer/v3:` followed by unpadded raw-base64url bytes. The
+entire text body, including marker, is bounded to 32 KiB. The outbox is deleted
+only after the relay accepts the append; a sender retries the same relay append
+with a transfer-scoped stable idempotency key and never changes or re-wraps the
+offer on retry. This notification is deliberately
+outside the attachment authorization state machine: it is recipient discovery,
+not an attachment URL, a capability, or permission to decrypt/download.
+
+An adapter may recognize only that literal marker and must reject padded,
+whitespace-containing, noncanonical, malformed, oversized, or non-v3 values.
+It then treats the recovered offer as untrusted network input and performs the
+normal fresh manifest/envelope verification, recipient HPKE open, and
+recipient-held permit flow. A mailbox, Telegram gateway, or WebSocket wake
+must never interpret the notice as a file payload or proxy attachment bytes.
 
 V3 status values are `1=created`, `2=source-uploading`, `3=source-ready`,
 `4=offered`, `5=accepted`, `6=transferring`, `7=completed`, `8=expired`,

@@ -297,6 +297,10 @@ func TestDirectorySnapshotResolverRequiresExactActivePermitMembership(t *testing
 	if err := VerifyPermit(permit, resolver, clock); err != nil {
 		t.Fatal(err)
 	}
+	unknownRole := PermitDirectoryBinding{Audience: permit.Audience, IssuerKeyID: permit.IssuerKeyID, HolderDeviceID: permit.HolderDeviceID, HolderGeneration: permit.HolderGeneration, HolderRole: 99, ConversationID: permit.ConversationID, SenderDeviceID: permit.SenderDeviceID, SenderGeneration: permit.SenderGeneration, RecipientDeviceID: permit.RecipientDeviceID, RecipientGeneration: permit.RecipientGeneration, DirectoryHead: permit.DirectoryHead, MembershipCommitment: permit.MembershipCommitment, RevocationEpoch: permit.RevocationEpoch, ExpiresAt: permit.ExpiresAt}
+	if _, err := resolver.ValidatePermitDirectoryBinding(unknownRole, clock); err == nil {
+		t.Fatal("unknown version-neutral permit holder role was accepted")
+	}
 	mismatch := permit
 	mismatch.MembershipCommitment = directoryBytes32(99)
 	if err := SignPermit(&mismatch, issuerPrivate); err != nil {

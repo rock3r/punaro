@@ -45,6 +45,31 @@ func TestPrepareSourceArtifactReservesV3MaterialBeforeEncrypting(t *testing.T) {
 	}
 }
 
+func TestPublicArtifactStoreRoundTripsOnlyVerifiedEncryptedArtifact(t *testing.T) {
+	_, signer, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenArtifactStore(privateDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	manifest := testManifest(now)
+	manifest.ContentSalt, manifest.PlaintextCommitment = [32]byte{}, [32]byte{}
+	manifest.ChunkSize, manifest.ChunkCount, manifest.PlaintextSize = 5, 0, 0
+	artifact, fileKey, err := PrepareSourceArtifact([]byte("public artifact"), manifest, signer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := mustEncodeManifest(t, artifact.Manifest)
+	opened, err := OpenSourceArtifact(raw, artifact.Chunks, fileKey, manifestAuthorityStub{public: signer.Public().(ed25519.PublicKey)}, now)
+	if err != nil || !bytes.Equal(opened, []byte("public artifact")) {
+		t.Fatalf("opened=%q err=%v", opened, err)
+	}
+}
+
 func TestPrepareSourceArtifactBoundsPermanentCryptoReservations(t *testing.T) {
 	_, signer, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

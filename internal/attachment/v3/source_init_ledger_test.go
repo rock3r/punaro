@@ -38,6 +38,7 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	if err := SignPermit(&permit, issuerPrivate); err != nil {
 		t.Fatal(err)
 	}
+	journalSourceInitPermit(t, store, permit)
 	route, request, err := NewAttachmentOperationRequest("POST", "/v3/attachments/02000000000000000000000000000000/source", raw, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -72,10 +73,51 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	if _, _, err := store.redeemSourceInit(context.Background(), directory, second, secondOp, route, request, authority, holders, now); err == nil {
 		t.Fatal("second source-init permit accepted for an existing source")
 	}
+	// A valid issuer signature alone is insufficient for bootstrap. The relay
+	// must prove this exact capability was journaled by the holder-request
+	// issuance path before it creates any new source state.
+	thirdManifest := manifest
+	thirdManifest.TransferID, thirdManifest.PlaintextCommitment = testID(97), testHash(97)
+	if err := SignManifest(&thirdManifest, manifestPrivate); err != nil {
+		t.Fatal(err)
+	}
+	thirdRaw, err := EncodeManifest(thirdManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdPermit := permitForManifest(thirdManifest, thirdRaw, now)
+	thirdPermit.Operation, thirdPermit.MaxOperations, thirdPermit.Serial = permitOperationSourceInit, 1, testID(96)
+	if err := SignPermit(&thirdPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	thirdRoute, thirdRequest, err := NewAttachmentOperationRequest("POST", "/v3/attachments/61000000000000000000000000000000/source", thirdRaw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdOp := testOperation(thirdPermit, thirdRequest, now)
+	thirdOp.OperationID, thirdOp.IdempotencyKey = testID(95), testHash(95)
+	if err := SignOperation(&thirdOp, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.redeemSourceInit(context.Background(), directory, thirdPermit, thirdOp, thirdRoute, thirdRequest, authority, holders, now); err == nil {
+		t.Fatal("unjournaled but correctly signed source-init permit was accepted")
+	}
 	if err := store.close(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openSourceStore(path, defaultSourceLimits()); err != nil {
 		t.Fatalf("reopen did not validate complete ledger admission: %v", err)
+	}
+}
+
+func journalSourceInitPermit(t testing.TB, store *sourceStore, permit Permit) {
+	t.Helper()
+	raw, err := EncodePermit(permit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestID := testID(90)
+	if _, err := store.db.Exec(`INSERT INTO v3_permit_requests(request_id, request, permit, permit_serial, holder_device_id, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?, ?)`, requestID[:], []byte{1}, raw, permit.Serial[:], permit.HolderDeviceID[:], permit.ExpiresAt, int64(permit.ExpiresAt)+86400); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -39,6 +39,24 @@ func (a *DirectoryAuthorityAdapter) ResolveAttachmentAuthority(ctx context.Conte
 	return directoryAuthorityView{resolver: resolver}, nil
 }
 
+// ResolvePermitIssuanceAuthority uses the same fresh root-verified snapshot
+// as attachment redemption. It projects only directory facts into the v3
+// issuance authority; no v2 permit or request bytes cross this boundary.
+func (a *DirectoryAuthorityAdapter) ResolvePermitIssuanceAuthority(ctx context.Context, now time.Time) (PermitIssuanceAuthority, error) {
+	if a == nil || a.provider == nil {
+		return nil, errors.New("missing v3 directory provider")
+	}
+	authority, err := a.provider.ResolvePermitIssuanceAuthority(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	resolver, ok := authority.(*attachmentv2.DirectorySnapshotResolver)
+	if !ok || resolver == nil {
+		return nil, errors.New("invalid v3 directory authority")
+	}
+	return directoryAuthorityView{resolver: resolver}, nil
+}
+
 type directoryAuthorityView struct {
 	resolver *attachmentv2.DirectorySnapshotResolver
 }
@@ -47,10 +65,20 @@ func (v directoryAuthorityView) ValidateManifestAuthority(m Manifest, now time.T
 	return v.resolver.ValidateManifestAuthority(attachmentv2.Manifest{Audience: m.Audience, TransferID: m.TransferID, ConversationID: m.ConversationID, SenderDeviceID: m.SenderDeviceID, SenderGeneration: m.SenderGeneration, RecipientDeviceID: m.RecipientDeviceID, RecipientGeneration: m.RecipientGeneration, DirectoryHead: m.DirectoryHead, MembershipCommitment: m.MembershipCommitment, RevocationEpoch: m.RevocationEpoch, IssuedAt: m.IssuedAt, ExpiresAt: m.ExpiresAt, ContentSalt: m.ContentSalt, PlaintextCommitment: m.PlaintextCommitment, ChunkSize: m.ChunkSize, ChunkCount: m.ChunkCount, PlaintextSize: m.PlaintextSize, SignerKeyID: m.SignerKeyID}, now)
 }
 func (v directoryAuthorityView) ValidatePermitAuthority(p Permit, now time.Time) (ed25519.PublicKey, error) {
-	return v.resolver.ValidatePermitAuthority(attachmentv2.Permit{Audience: p.Audience, Serial: p.Serial, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, TransferID: p.TransferID, ConversationID: p.ConversationID, SenderDeviceID: p.SenderDeviceID, SenderGeneration: p.SenderGeneration, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, AttemptGeneration: p.AttemptGeneration, Operation: attachmentv2.PermitOperationOffer, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, IssuedAt: p.IssuedAt, ExpiresAt: p.ExpiresAt, MaxBytes: p.MaxBytes, MaxChunks: p.MaxChunks, MaxOperations: p.MaxOperations}, now)
+	return v.resolver.ValidatePermitDirectoryBinding(attachmentv2.PermitDirectoryBinding{Audience: p.Audience, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, ConversationID: p.ConversationID, SenderDeviceID: p.SenderDeviceID, SenderGeneration: p.SenderGeneration, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, ExpiresAt: p.ExpiresAt}, now)
 }
 func (v directoryAuthorityView) CurrentDeviceSigningKey(id [16]byte, generation uint64) (ed25519.PublicKey, error) {
 	return v.resolver.CurrentDeviceSigningKey(id, generation)
+}
+func (v directoryAuthorityView) CurrentPermitIssuerKey(keyID [32]byte) (ed25519.PublicKey, error) {
+	return v.resolver.CurrentPermitIssuerKey(keyID)
+}
+func (v directoryAuthorityView) CurrentPermitBinding(now time.Time) (DirectoryPermitBinding, error) {
+	binding, err := v.resolver.CurrentPermitBinding(now)
+	if err != nil {
+		return DirectoryPermitBinding{}, err
+	}
+	return DirectoryPermitBinding{Audience: binding.Audience, DirectoryHead: binding.DirectoryHead, RevocationEpoch: binding.RevocationEpoch, ExpiresAt: binding.ExpiresAt}, nil
 }
 func (v directoryAuthorityView) CurrentRecipientHPKEKey(id [16]byte, generation uint64) ([32]byte, *ecdh.PublicKey, error) {
 	return v.resolver.CurrentRecipientHPKEKey(id, generation)
