@@ -456,6 +456,19 @@ func (s *sourceStore) upload(ctx context.Context, transferID [16]byte, index uin
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.uploadTx(ctx, tx, transferID, index, ciphertext, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// uploadTx is the one transactional source-chunk mutation. Permit redemption
+// calls it directly so a chunk, source-ready transition, operation result, and
+// quota charge cannot cross a crash boundary.
+func (s *sourceStore) uploadTx(ctx context.Context, tx *sql.Tx, transferID [16]byte, index uint64, ciphertext []byte, now time.Time) error {
+	if s == nil || tx == nil || transferID == [16]byte{} || len(ciphertext) == 0 || len(ciphertext) > maxCiphertextFrame {
+		return errors.New("invalid staged chunk")
+	}
 	spec, found, err := loadSpecTx(ctx, tx, transferID)
 	if err != nil || !found {
 		return errors.New("unknown staged source")
@@ -508,7 +521,7 @@ func (s *sourceStore) upload(ctx context.Context, transferID [16]byte, index uin
 			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *sourceStore) readyAt(transferID [16]byte, now time.Time) (bool, error) {
