@@ -221,5 +221,6 @@ fallback route for the main chat.
   discovery is implemented.
 - WebSocket hints are best-effort; polling remains correct when a machine
   sleeps or reconnects.
-- Attachments remain disabled until every v2 gate is complete, including the
-  independent cryptography review and restore/revocation exercise.
+- V2 attachments remain disabled. The distinct v3 runtime is available only
+  for controlled validation; its own vector, end-to-end, review, and
+  restore/revocation release gates remain closed.

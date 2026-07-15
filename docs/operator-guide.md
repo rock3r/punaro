@@ -1,9 +1,9 @@
 # Operator guide
 
-Punaro currently provides a loopback alpha text relay for enrolled adapters and
-a separately deployable Telegram bridge. It is not a released public service
-and does not support attachment transfer. Do not use it to carry sensitive
-production work yet.
+Punaro currently provides a loopback alpha text relay for enrolled adapters, a
+separately deployable Telegram bridge, and a controlled v3 attachment-runtime
+validation surface. It is not a released public service or production file
+transfer system. Do not use it to carry sensitive production work yet.
 
 ## Run locally
 
@@ -63,10 +63,12 @@ service above and all of the following explicit inputs:
 - `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` (1–60; 1–30 for v3),
   `PUNARO_PERMIT_MAX_BYTES` (1–67108864), `PUNARO_PERMIT_MAX_CHUNKS`
   (1–4096), `PUNARO_PERMIT_MAX_OPERATIONS` (1–4096), and
-  `PUNARO_PERMIT_MAX_ACTIVE` (1–4096). There are no defaults. The last bound
-  is a global capacity limit for concurrently live permits; expiry cleanup is
+  `PUNARO_PERMIT_MAX_ACTIVE` (1–4096). There are no defaults. For v2 it is a
+  global capacity limit for concurrently live permits; expiry cleanup is
   transactional and removes the permit plus its issuance and redemption rows.
-  An exact retry of a still-live request does not consume another slot.
+  For v3 it bounds retained issuance identities per holder (including
+  short-lived retry tombstones), while the source store separately enforces
+  aggregate transfer capacity. An exact retry does not consume another slot.
 - At least one `PUNARO_RELAY_MACHINES_JSON` record with an
   `attachment_device_id`, encoded as canonical raw-base64url 16-byte data.
   Each device ID may be bound to only one machine. The permit route rejects a

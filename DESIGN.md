@@ -349,13 +349,11 @@ the successful `offer` result, it enqueues the exact canonical, bounded offer
 payload in the local `OfferNoticeOutbox`; the running adapter drains that
 outbox to the existing durable conversation. A crash after relay acceptance
 but before local deletion merely retries the stable relay idempotency key. The
-notice is
-discovery data only: it is neither a download URL nor an authorization grant;
-the recipient must fresh-verify its manifest/envelope, use its local HPKE key,
-reaper runs in the daemon and is stopped before its SQLite stores close.
-and obtain recipient-held permits before it can accept or download. A bounded
-reaper runs in the daemon and is stopped before its SQLite stores close.
-reaper runs in the daemon and is stopped before its SQLite stores close.
+notice is discovery data only: it is neither a download URL nor an
+authorization grant; the recipient must fresh-verify its manifest/envelope,
+use its local HPKE key, and obtain recipient-held permits before it can accept
+or download. A bounded reaper runs in the daemon and is stopped before its
+SQLite stores close.
 
 The implementation does not expose a mailbox database, accept public links,
 move file bytes through Telegram, or decrypt at the relay. Recipient-side
