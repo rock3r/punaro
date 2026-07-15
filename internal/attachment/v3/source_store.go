@@ -183,6 +183,14 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 			transfer_id BLOB PRIMARY KEY, manifest_commitment BLOB NOT NULL,
 			operations INTEGER NOT NULL, result_bytes INTEGER NOT NULL, retain_until INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS v3_offers (
+			transfer_id BLOB PRIMARY KEY, manifest BLOB NOT NULL, envelope BLOB NOT NULL,
+			acceptance_nonce BLOB NOT NULL, acceptance_consumed INTEGER NOT NULL CHECK(acceptance_consumed IN (0,1))
+		)`,
+		`CREATE TABLE IF NOT EXISTS v3_receipt_chunks (
+			transfer_id BLOB NOT NULL, attempt_generation INTEGER NOT NULL, chunk_index INTEGER NOT NULL,
+			ciphertext_commitment BLOB NOT NULL, PRIMARY KEY(transfer_id, attempt_generation, chunk_index)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -628,6 +636,8 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_issued_permits":          {"serial", "permit", "transfer_id", "manifest_commitment", "expires_at", "retain_until"},
 		"v3_redeemed_operations":     {"permit_serial", "operation_id", "operation", "method", "path_commitment", "target_commitment", "body_commitment", "idempotency_key", "ciphertext_bytes", "ciphertext_chunks", "result"},
 		"v3_ledger_admission":        {"transfer_id", "manifest_commitment", "operations", "result_bytes", "retain_until"},
+		"v3_offers":                  {"transfer_id", "manifest", "envelope", "acceptance_nonce", "acceptance_consumed"},
+		"v3_receipt_chunks":          {"transfer_id", "attempt_generation", "chunk_index", "ciphertext_commitment"},
 	}
 	for table, columns := range expected {
 		rows, err := db.QueryContext(context.Background(), "PRAGMA table_info("+table+")") // #nosec G202 -- table names are fixed constants.
@@ -673,6 +683,8 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_issued_permits":          {"serialblobprimarykey", "permitblobnotnullunique", "retain_untilintegernotnull"},
 		"v3_redeemed_operations":     {"primarykey(permit_serial,operation_id)", "unique(permit_serial,idempotency_key)"},
 		"v3_ledger_admission":        {"transfer_idblobprimarykey", "manifest_commitmentblobnotnull", "retain_untilintegernotnull"},
+		"v3_offers":                  {"transfer_idblobprimarykey", "acceptance_consumedintegernotnullcheck(acceptance_consumedin(0,1))"},
+		"v3_receipt_chunks":          {"primarykey(transfer_id,attempt_generation,chunk_index)"},
 	}
 	for table, required := range requiredDefinitions {
 		var definition string
@@ -691,7 +703,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 
 func verifyTrackedSources(db *sql.DB) error {
 	var missing int
-	err := db.QueryRowContext(context.Background(), `SELECT 1 FROM v3_source_specs s LEFT JOIN v3_transfers t ON s.transfer_id = t.transfer_id AND s.manifest_commitment = t.manifest_commitment WHERE t.transfer_id IS NULL OR t.attempt_generation != 0 OR t.expires_at != s.expires_at OR (s.ready = 0 AND t.status != ?) OR (s.ready = 1 AND t.status != ?) LIMIT 1`, transferSourceUploading, transferSourceReady).Scan(&missing)
+	err := db.QueryRowContext(context.Background(), `SELECT 1 FROM v3_source_specs s LEFT JOIN v3_transfers t ON s.transfer_id = t.transfer_id AND s.manifest_commitment = t.manifest_commitment WHERE t.transfer_id IS NULL OR t.expires_at != s.expires_at OR (s.ready = 0 AND (t.status != ? OR t.attempt_generation != 0)) OR (s.ready = 1 AND NOT ((t.status IN (?, ?, ?) AND t.attempt_generation = 0) OR (t.status IN (?, ?) AND t.attempt_generation = 1))) LIMIT 1`, transferSourceUploading, transferSourceReady, transferOffered, transferAccepted, transferTransferring, transferCompleted).Scan(&missing)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -707,7 +719,8 @@ func verifyTrackedSourceTx(ctx context.Context, tx *sql.Tx, spec sourceSpec) err
 	var expires int64
 	var ready int
 	err := tx.QueryRowContext(ctx, `SELECT s.ready, t.status, t.attempt_generation, t.expires_at FROM v3_source_specs s JOIN v3_transfers t ON s.transfer_id = t.transfer_id AND s.manifest_commitment = t.manifest_commitment WHERE s.transfer_id = ? AND s.manifest_commitment = ?`, spec.TransferID[:], spec.ManifestCommitment[:]).Scan(&ready, &status, &attempts, &expires)
-	if err != nil || attempts != 0 || expires != spec.ExpiresAt || (ready == 0 && status != transferSourceUploading) || (ready == 1 && status != transferSourceReady) || (ready != 0 && ready != 1) {
+	valid := (ready == 0 && status == transferSourceUploading && attempts == 0) || (ready == 1 && (((status == transferSourceReady || status == transferOffered || status == transferAccepted) && attempts == 0) || ((status == transferTransferring || status == transferCompleted) && attempts == 1)))
+	if err != nil || expires != spec.ExpiresAt || !valid || (ready != 0 && ready != 1) {
 		return errors.New("invalid tracked source lifecycle state")
 	}
 	return nil
@@ -840,6 +853,38 @@ func (s *sourceStore) admitCryptoTx(tx *sql.Tx, spec sourceSpec, units uint64) e
 }
 
 func (s *sourceStore) terminalizeSourceTx(ctx context.Context, tx *sql.Tx, spec sourceSpec, now time.Time) error {
+	var status transferStatus
+	var attempt uint64
+	if err := tx.QueryRowContext(ctx, `SELECT status, attempt_generation FROM v3_transfers WHERE transfer_id = ? AND manifest_commitment = ? AND expires_at = ?`, spec.TransferID[:], spec.ManifestCommitment[:], spec.ExpiresAt).Scan(&status, &attempt); err != nil {
+		return errors.New("invalid source terminal transition")
+	}
+	// A completed transfer is already terminal. Older stores may still retain
+	// its staging rows, so expiry recovery releases those rows without ever
+	// rewriting the durable completed status.
+	if status == transferCompleted && attempt == 1 {
+		return s.releaseTerminalSourceTx(ctx, tx, spec, now)
+	}
+	if status.terminal() {
+		return errors.New("invalid source terminal transition")
+	}
+	terminal := transferCancelled
+	if now.UTC().Unix() >= spec.ExpiresAt {
+		terminal = transferExpired
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE v3_transfers SET status = ? WHERE transfer_id = ? AND manifest_commitment = ? AND status IN (?, ?, ?, ?, ?) AND expires_at = ?`, terminal, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, transferSourceReady, transferOffered, transferAccepted, transferTransferring, spec.ExpiresAt)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return errors.New("invalid source terminal transition")
+	}
+	return s.releaseTerminalSourceTx(ctx, tx, spec, now)
+}
+
+// releaseTerminalSourceTx drops every capacity-consuming artifact after the
+// caller has recorded a terminal transfer state. It never changes that state:
+// completed, cancelled, and expired remain durable audit/replay outcomes.
+func (s *sourceStore) releaseTerminalSourceTx(ctx context.Context, tx *sql.Tx, spec sourceSpec, now time.Time) error {
 	bytes, chunks, err := sourceUsage(spec)
 	if err != nil {
 		return err
@@ -871,16 +916,11 @@ func (s *sourceStore) terminalizeSourceTx(ctx context.Context, tx *sql.Tx, spec 
 	if _, err := tx.ExecContext(ctx, `UPDATE v3_ledger_admission SET retain_until = MAX(retain_until, ?) WHERE transfer_id = ? AND manifest_commitment = ?`, retainUntil, spec.TransferID[:], spec.ManifestCommitment[:]); err != nil {
 		return err
 	}
-	terminal := transferCancelled
-	if now.UTC().Unix() >= spec.ExpiresAt {
-		terminal = transferExpired
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE v3_transfers SET status = ? WHERE transfer_id = ? AND manifest_commitment = ? AND status IN (?, ?) AND attempt_generation = 0 AND expires_at = ?`, terminal, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, transferSourceReady, spec.ExpiresAt)
-	if err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_offers WHERE transfer_id = ?`, spec.TransferID[:]); err != nil {
 		return err
 	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
-		return errors.New("invalid source terminal transition")
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_receipt_chunks WHERE transfer_id = ?`, spec.TransferID[:]); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_source_specs WHERE transfer_id = ?`, spec.TransferID[:]); err != nil {
 		return err

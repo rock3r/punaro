@@ -119,7 +119,10 @@ ciphertext bytes plus exact chunk/transfer slots in one transaction, using
 checked unsigned arithmetic. Configuration has finite implementation maxima;
 every overflow fails closed. Those
 reservations remain through completed delivery and release only in the terminal
-cleanup transaction. Chunk uploads atomically
+cleanup transaction. A completed relay-blob source remains quota-accounted
+until its short Manifest/permit expiry so an exact signed download retry can
+return the original immutable ciphertext; the expiry reaper preserves the
+durable `completed` status while releasing those rows. Chunk uploads atomically
 redeem their operation, enforce exact length and index, and store either the
 identical ciphertext or nothing. The final missing chunk atomically verifies
 the complete contiguous set and advances `source-uploading` to `source-ready`.

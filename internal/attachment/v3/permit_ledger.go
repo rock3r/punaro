@@ -77,16 +77,19 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 // fail-closed. Recipient permits are issued only once their offer/receipt
 // stores exist and perform their own same-transaction lifecycle admission.
 func permitCompatibleSourceStatus(permit Permit, status transferStatus, attempt uint64) bool {
-	if attempt != 0 {
-		return false
-	}
 	switch permit.Operation {
 	case permitOperationSourceUpload:
-		return status == transferSourceUploading
+		return status == transferSourceUploading && attempt == 0 && permit.AttemptGeneration == 0
 	case permitOperationOffer:
-		return status == transferSourceReady
+		return status == transferSourceReady && attempt == 0 && permit.AttemptGeneration == 0
 	case permitOperationCancel:
-		return status == transferSourceUploading || status == transferSourceReady
+		return (status == transferSourceUploading || status == transferSourceReady) && attempt == 0 && permit.AttemptGeneration == 0
+	case permitOperationAccept:
+		return status == transferOffered && attempt == 0 && permit.AttemptGeneration == 0
+	case permitOperationBegin:
+		return status == transferAccepted && attempt == 0 && permit.AttemptGeneration == 1
+	case permitOperationDownload, permitOperationComplete:
+		return status == transferTransferring && attempt == 1 && permit.AttemptGeneration == 1
 	default:
 		return false
 	}

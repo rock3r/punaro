@@ -85,8 +85,11 @@ func ParseAttachmentRoute(method, path string) (AttachmentRoute, error) {
 
 // NewAttachmentOperationRequest derives the target from the parsed fixed
 // route. A handler must never accept an arbitrary target, path or method as a
-// substitute for this constructor. The actual HTTP handler additionally
-// rejects URL normalization ambiguity before calling this function.
+// substitute for this constructor. Download admission deliberately has no
+// response ciphertext: the relay selects it only after permit and operation
+// authorization inside its storage transaction. The actual HTTP handler
+// additionally rejects URL normalization ambiguity before calling this
+// function.
 func NewAttachmentOperationRequest(method, path string, body, responseCiphertext []byte) (AttachmentRoute, OperationRequest, error) {
 	route, err := ParseAttachmentRoute(method, path)
 	if err != nil {
@@ -97,10 +100,10 @@ func NewAttachmentOperationRequest(method, path string, body, responseCiphertext
 		return AttachmentRoute{}, OperationRequest{}, err
 	}
 	if route.Operation == permitOperationDownload {
-		if len(body) != 0 {
+		if len(body) != 0 || len(responseCiphertext) != 0 {
 			return AttachmentRoute{}, OperationRequest{}, errors.New("v3 download request body is forbidden")
 		}
-		request, err := newDownloadOperationRequest(route.httpMethod, path, target, responseCiphertext)
+		request, err := newOperationRecordRequest(route.httpMethod, path, target, nil)
 		return route, request, err
 	}
 	if len(responseCiphertext) != 0 || !validAttachmentRequestBody(route.Operation, body) {
@@ -160,7 +163,7 @@ func verifyAttachmentRequestRoute(route AttachmentRoute, permit Permit, request 
 		return errors.New("v3 operation request route mismatch")
 	}
 	if route.Operation == permitOperationDownload {
-		if len(request.body) != 0 || len(request.responseCiphertext) == 0 {
+		if len(request.body) != 0 || len(request.responseCiphertext) != 0 {
 			return errors.New("invalid v3 download request body")
 		}
 		return nil

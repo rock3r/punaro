@@ -92,6 +92,14 @@ func SignEnvelope(e *Envelope, private ed25519.PrivateKey) error {
 	return nil
 }
 
+func verifyEnvelope(e Envelope, m Manifest, raw []byte, signer ed25519.PublicKey) bool {
+	if len(signer) != ed25519.PublicKeySize || validateEnvelope(e) != nil || !sameEnvelopeManifestBinding(e, m, raw) {
+		return false
+	}
+	payload, err := e.signedBytes()
+	return err == nil && ed25519.Verify(signer, payload, e.Signature[:])
+}
+
 func EncodeEnvelope(e Envelope) ([]byte, error) {
 	if err := validateEnvelope(e); err != nil {
 		return nil, err

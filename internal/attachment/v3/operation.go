@@ -73,18 +73,6 @@ func newOperationRecordRequest(method uint64, path string, target, body []byte) 
 	return request, nil
 }
 
-// newDownloadOperationRequest binds an empty-body download request to the
-// exact ciphertext selected from immutable relay storage. Quota derives only
-// from that bounded stored ciphertext, never from a caller-provided count.
-func newDownloadOperationRequest(method uint64, path string, target, ciphertext []byte) (OperationRequest, error) {
-	request, err := newOperationRecordRequest(method, path, target, nil)
-	if err != nil || len(ciphertext) == 0 || len(ciphertext) > maxCiphertextChunkBytes {
-		return OperationRequest{}, errors.New("invalid v3 download operation request")
-	}
-	request.responseCiphertext = append([]byte(nil), ciphertext...)
-	return request, nil
-}
-
 func operationRequestCommitments(request OperationRequest) ([32]byte, [32]byte, [32]byte) {
 	path := blake3.Sum256(append([]byte(operationPathDomain), []byte(request.path)...))
 	target := blake3.Sum256(append([]byte(operationTargetDomain), request.target...))
@@ -191,31 +179,42 @@ func VerifyOperation(r OperationRecord, permit Permit, holders OperationHolderRe
 
 // verifyOperationRequest checks an already route-admitted operation against
 // its exact decoded request and returns authoritative permit usage.
-func verifyOperationRequest(r OperationRecord, permit Permit, holders OperationHolderResolver, request OperationRequest, now time.Time) (uint64, uint64, error) {
+func verifyOperationRequestAuthorization(r OperationRecord, permit Permit, holders OperationHolderResolver, request OperationRequest, now time.Time) error {
 	if err := VerifyOperation(r, permit, holders, now); err != nil {
-		return 0, 0, err
+		return err
 	}
 	if err := validateOperationRequest(request); err != nil {
-		return 0, 0, err
+		return err
 	}
 	path, target, body := operationRequestCommitments(request)
 	if r.Method != request.method || r.PathCommitment != path || r.TargetCommitment != target || r.BodyCommitment != body {
-		return 0, 0, errors.New("v3 operation request commitment mismatch")
+		return errors.New("v3 operation request commitment mismatch")
 	}
-	return operationUsage(r.Operation, request)
+	return nil
+}
+
+// VerifyAttachmentOperationAdmission authenticates the fixed route, permit
+// holder, and signed request without reading or selecting a relay blob. It is
+// used only for downloads, whose response bytes are selected atomically after
+// this admission succeeds.
+func VerifyAttachmentOperationAdmission(r OperationRecord, permit Permit, holders OperationHolderResolver, route AttachmentRoute, request OperationRequest, now time.Time) error {
+	if err := VerifyAttachmentRoute(route, permit); err != nil {
+		return err
+	}
+	if err := verifyAttachmentRequestRoute(route, permit, request); err != nil {
+		return err
+	}
+	return verifyOperationRequestAuthorization(r, permit, holders, request, now)
 }
 
 // VerifyAttachmentOperationRequest is the only v3 HTTP-facing operation
 // verifier. It binds the signed request to the fixed parsed route and permit
 // before examining request commitments or charging permit quota.
 func VerifyAttachmentOperationRequest(r OperationRecord, permit Permit, holders OperationHolderResolver, route AttachmentRoute, request OperationRequest, now time.Time) (uint64, uint64, error) {
-	if err := VerifyAttachmentRoute(route, permit); err != nil {
+	if err := VerifyAttachmentOperationAdmission(r, permit, holders, route, request, now); err != nil {
 		return 0, 0, err
 	}
-	if err := verifyAttachmentRequestRoute(route, permit, request); err != nil {
-		return 0, 0, err
-	}
-	return verifyOperationRequest(r, permit, holders, request, now)
+	return operationUsage(r.Operation, request)
 }
 
 func EncodeOperation(r OperationRecord) ([]byte, error) {

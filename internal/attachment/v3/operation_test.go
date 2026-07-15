@@ -44,7 +44,7 @@ func TestOperationRecordBindsV3RequestPermitAndStagedSource(t *testing.T) {
 	}
 }
 
-func TestDownloadOperationAccountsImmutableCiphertextOnly(t *testing.T) {
+func TestDownloadOperationAdmissionDoesNotTakeCiphertextFromCaller(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +53,7 @@ func TestDownloadOperationAccountsImmutableCiphertextOnly(t *testing.T) {
 	permit := testPermit(now)
 	permit.HolderRole, permit.HolderDeviceID, permit.HolderGeneration = permitHolderRecipient, permit.RecipientDeviceID, permit.RecipientGeneration
 	permit.Operation, permit.AttemptGeneration = permitOperationDownload, 1
-	route, request, err := NewAttachmentOperationRequest("GET", "/v3/attachments/05000000000000000000000000000000/chunks/0", nil, []byte("stored ciphertext"))
+	route, request, err := NewAttachmentOperationRequest("GET", "/v3/attachments/05000000000000000000000000000000/chunks/0", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +65,11 @@ func TestDownloadOperationAccountsImmutableCiphertextOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	holders := operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: public}
-	if bytes, chunks, err := VerifyAttachmentOperationRequest(record, permit, holders, route, request, now); err != nil || bytes != uint64(len("stored ciphertext")) || chunks != 1 {
-		t.Fatalf("bytes=%d chunks=%d err=%v", bytes, chunks, err)
+	if err := VerifyAttachmentOperationAdmission(record, permit, holders, route, request, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := NewAttachmentOperationRequest("GET", "/v3/attachments/05000000000000000000000000000000/chunks/0", nil, []byte("caller bytes")); err == nil {
+		t.Fatal("download admission accepted caller-supplied response bytes")
 	}
 }
 
