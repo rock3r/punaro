@@ -212,7 +212,7 @@ func VerifyAttachmentOperationRequest(r OperationRecord, permit Permit, holders 
 	if err := VerifyAttachmentRoute(route, permit); err != nil {
 		return 0, 0, err
 	}
-	if err := verifyAttachmentRequestRoute(route, request); err != nil {
+	if err := verifyAttachmentRequestRoute(route, permit, request); err != nil {
 		return 0, 0, err
 	}
 	return verifyOperationRequest(r, permit, holders, request, now)

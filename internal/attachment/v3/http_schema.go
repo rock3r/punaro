@@ -6,6 +6,8 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+
+	"github.com/zeebo/blake3"
 )
 
 const (
@@ -149,7 +151,7 @@ func VerifyAttachmentRoute(route AttachmentRoute, permit Permit) error {
 	return nil
 }
 
-func verifyAttachmentRequestRoute(route AttachmentRoute, request OperationRequest) error {
+func verifyAttachmentRequestRoute(route AttachmentRoute, permit Permit, request OperationRequest) error {
 	if request.method != route.httpMethod || request.path != route.path {
 		return errors.New("v3 operation request route mismatch")
 	}
@@ -166,7 +168,31 @@ func verifyAttachmentRequestRoute(route AttachmentRoute, request OperationReques
 	if len(request.responseCiphertext) != 0 || !validAttachmentRequestBody(route.Operation, request.body) {
 		return errors.New("invalid v3 attachment request body")
 	}
+	if route.Operation == permitOperationSourceInit {
+		manifest, err := DecodeManifest(request.body)
+		if err != nil || !sourceInitPermitBinding(permit, manifest, request.body) {
+			return errors.New("invalid v3 source-init permit body")
+		}
+	}
+	if route.Operation == permitOperationOffer {
+		if err := validateOfferPayloadForPermit(request.body, permit); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// sourceInitPermitBinding is syntax/binding validation only. The source-init
+// handler must still call DecodeAndVerifySourceInit with its fresh directory
+// resolver before reserving storage or redeeming the operation.
+func sourceInitPermitBinding(permit Permit, manifest Manifest, raw []byte) bool {
+	commitment := blake3.Sum256(raw)
+	return commitment == permit.StagedManifestCommitment && manifest.Audience == permit.Audience &&
+		manifest.TransferID == permit.TransferID && manifest.ConversationID == permit.ConversationID &&
+		manifest.SenderDeviceID == permit.SenderDeviceID && manifest.SenderGeneration == permit.SenderGeneration &&
+		manifest.RecipientDeviceID == permit.RecipientDeviceID && manifest.RecipientGeneration == permit.RecipientGeneration &&
+		manifest.DirectoryHead == permit.DirectoryHead && manifest.MembershipCommitment == permit.MembershipCommitment &&
+		manifest.RevocationEpoch == permit.RevocationEpoch && permit.ExpiresAt <= manifest.ExpiresAt
 }
 
 func attachmentHTTPMethod(method string) (uint64, bool) {

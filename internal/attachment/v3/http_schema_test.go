@@ -1,8 +1,11 @@
 package v3
 
 import (
+	"crypto/ed25519"
 	"testing"
 	"time"
+
+	"github.com/zeebo/blake3"
 )
 
 func TestParseAttachmentRouteAcceptsOnlyCanonicalV3Routes(t *testing.T) {
@@ -71,5 +74,40 @@ func TestAttachmentOperationRequestEnforcesOperationBodiesAndPermitRoute(t *test
 	route.TransferID = testID(12)
 	if err := VerifyAttachmentRoute(route, permit); err == nil {
 		t.Fatal("route for another transfer accepted")
+	}
+}
+
+func TestSourceInitOperationRequiresCanonicalPermitBoundManifest(t *testing.T) {
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	manifest := testManifest(now)
+	private := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	if err := SignManifest(&manifest, private); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := testPermit(now)
+	permit.Operation = permitOperationSourceInit
+	permit.Audience, permit.TransferID, permit.ConversationID = manifest.Audience, manifest.TransferID, manifest.ConversationID
+	permit.SenderDeviceID, permit.SenderGeneration = manifest.SenderDeviceID, manifest.SenderGeneration
+	permit.RecipientDeviceID, permit.RecipientGeneration = manifest.RecipientDeviceID, manifest.RecipientGeneration
+	permit.HolderDeviceID, permit.HolderGeneration, permit.HolderRole = manifest.SenderDeviceID, manifest.SenderGeneration, permitHolderSender
+	permit.DirectoryHead, permit.MembershipCommitment, permit.RevocationEpoch = manifest.DirectoryHead, manifest.MembershipCommitment, manifest.RevocationEpoch
+	permit.ExpiresAt, permit.StagedManifestCommitment = manifest.ExpiresAt, blake3.Sum256(raw)
+	route, request, err := NewAttachmentOperationRequest("POST", "/v3/attachments/02000000000000000000000000000000/source", raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyAttachmentRoute(route, permit); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyAttachmentRequestRoute(route, permit, request); err != nil {
+		t.Fatal(err)
+	}
+	permit.StagedManifestCommitment = testHash(99)
+	if err := verifyAttachmentRequestRoute(route, permit, request); err == nil {
+		t.Fatal("source-init body with a mismatched staged commitment accepted")
 	}
 }
