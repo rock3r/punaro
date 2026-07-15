@@ -155,6 +155,31 @@ This is a controlled validation feature, not a production-release declaration.
 Before allowing sensitive files, complete the v3 vector/fuzz, restore,
 revocation, independent-review, and release-evidence gates below.
 
+### Create v3 directory material
+
+`punaro-directory` avoids hand-encoding signed CBOR. Run it only from a
+private `0700` directory; it never prints a private key and refuses to create
+an output over an existing file. Generate root/issuer/device signing keys with
+`keygen --algorithm ed25519`, device HPKE keys with `keygen --algorithm
+x25519`, and public 16- or 32-byte identifiers with `id --bytes 16|32`.
+Each command prints a small JSON object containing only public base64url data.
+The manifest has only `audience`, `root_key_id`, `sequence`,
+`revocation_epoch`, and an ordered `entries` array; each entry has exactly one
+of `device`, `membership`, or `issuer`. Unknown or
+duplicate fields are rejected. Build a short-lived snapshot from that
+non-secret JSON manifest using `build --config ... --root-private-key-file ...
+--output ... --ttl 30s`, then atomically publish that new file at
+`PUNARO_DIRECTORY_SNAPSHOT_FILE`. Keep the root and issuer private keys
+separate from the relay runtime; only the issuer key belongs in the relay's
+private credential directory. Never place device private keys, root keys, or
+issuer keys in the manifest, an environment file, or source control.
+
+Directory history is append-only. For an update, retain every existing entry
+in the same order, append new/revocation entries, increment `sequence`, and
+keep `revocation_epoch` monotonic. The tool emits the required full bounded
+consistency proof; replacing prior entries or publishing an equal sequence
+with different content deliberately freezes checkpointed clients.
+
 ## Cloudflare Access under systemd
 
 `punarod.service` denies non-loopback network access. Do not weaken that rule

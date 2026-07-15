@@ -94,6 +94,11 @@ systemd unit uses `LoadCredential`. Never place a token in source control, a
 CLI argument, an agent prompt, logs, or a message body. See the
 [Telegram gateway guide](docs/telegram-gateway.md).
 
+For controlled v3 validation, `punaro-directory` generates private key files,
+public IDs, and canonical root-signed directory snapshots without hand-writing
+CBOR. Its setup and strict private-file requirements are in the
+[operator guide](docs/operator-guide.md#create-v3-directory-material).
+
 ## Security model
 
 Cloudflare Access is optional admission, not complete application authorization.
