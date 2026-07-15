@@ -168,6 +168,21 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 			scope INTEGER NOT NULL, scope_id BLOB NOT NULL, reservations INTEGER NOT NULL,
 			PRIMARY KEY(scope, scope_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS v3_issued_permits (
+			serial BLOB PRIMARY KEY, permit BLOB NOT NULL UNIQUE, transfer_id BLOB NOT NULL,
+			manifest_commitment BLOB NOT NULL, expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS v3_redeemed_operations (
+			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation INTEGER NOT NULL,
+			method INTEGER NOT NULL, path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL,
+			body_commitment BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			ciphertext_bytes INTEGER NOT NULL, ciphertext_chunks INTEGER NOT NULL, result BLOB NOT NULL,
+			PRIMARY KEY(permit_serial, operation_id), UNIQUE(permit_serial, idempotency_key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS v3_ledger_admission (
+			transfer_id BLOB PRIMARY KEY, manifest_commitment BLOB NOT NULL,
+			operations INTEGER NOT NULL, result_bytes INTEGER NOT NULL, retain_until INTEGER NOT NULL
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -186,7 +201,88 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := reconcileLedgerAdmission(db, limits); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return &sourceStore{db: db, limits: limits}, nil
+}
+
+// reconcileLedgerAdmission fails closed when a database created before the
+// aggregate ledger budget contains durable operation results. It can only
+// backfill rows whose active source still supplies a trustworthy chunk bound.
+func reconcileLedgerAdmission(db *sql.DB, limits sourceLimits) error {
+	rows, err := db.QueryContext(context.Background(), `SELECT i.transfer_id, i.manifest_commitment, COUNT(o.operation_id), MAX(i.retain_until) FROM v3_issued_permits i JOIN v3_redeemed_operations o ON o.permit_serial = i.serial GROUP BY i.transfer_id, i.manifest_commitment`)
+	if err != nil {
+		return err
+	}
+	type row struct {
+		transferRaw, commitmentRaw []byte
+		operations                 uint64
+		retainUntil                int64
+	}
+	var recovered []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.transferRaw, &item.commitmentRaw, &item.operations, &item.retainUntil); err != nil || len(item.transferRaw) != 16 || len(item.commitmentRaw) != 32 {
+			_ = rows.Close()
+			return errors.New("unreconcilable v3 ledger state")
+		}
+		item.transferRaw, item.commitmentRaw = append([]byte(nil), item.transferRaw...), append([]byte(nil), item.commitmentRaw...)
+		recovered = append(recovered, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	var existingCount uint64
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM v3_ledger_admission`).Scan(&existingCount); err != nil {
+		return err
+	}
+	if existingCount != 0 {
+		if existingCount != uint64(len(recovered)) {
+			return errors.New("incomplete v3 ledger admission state")
+		}
+		for _, item := range recovered {
+			var commitmentRaw []byte
+			var operations, resultBytes uint64
+			var retainUntil int64
+			if err := db.QueryRowContext(context.Background(), `SELECT manifest_commitment, operations, result_bytes, retain_until FROM v3_ledger_admission WHERE transfer_id = ?`, item.transferRaw).Scan(&commitmentRaw, &operations, &resultBytes, &retainUntil); err != nil || !bytes.Equal(commitmentRaw, item.commitmentRaw) || operations != item.operations || resultBytes != item.operations*uint64(maxOperationResultBytes) || retainUntil < item.retainUntil {
+				return errors.New("incomplete v3 ledger admission state")
+			}
+			var chunks uint64
+			err := db.QueryRowContext(context.Background(), `SELECT chunk_count FROM v3_source_specs WHERE transfer_id = ? AND manifest_commitment = ?`, item.transferRaw, item.commitmentRaw).Scan(&chunks)
+			if err == nil && (chunks > 4096 || operations > chunks+16) {
+				return errors.New("invalid v3 ledger admission state")
+			}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
+		return nil
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, item := range recovered {
+		transferRaw, commitmentRaw, operations, retainUntil := item.transferRaw, item.commitmentRaw, item.operations, item.retainUntil
+		var id [16]byte
+		var commitment [32]byte
+		copy(id[:], transferRaw)
+		copy(commitment[:], commitmentRaw)
+		spec, found, err := loadSpecTx(context.Background(), tx, id)
+		if err != nil || !found || spec.ManifestCommitment != commitment || operations > spec.ChunkCount+16 {
+			return errors.New("unreconcilable v3 ledger state")
+		}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO v3_ledger_admission(transfer_id, manifest_commitment, operations, result_bytes, retain_until) VALUES (?, ?, ?, ?, ?)`, id[:], commitment[:], operations, operations*uint64(maxOperationResultBytes), retainUntil); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *sourceStore) close() error { return s.db.Close() }
@@ -194,48 +290,60 @@ func (s *sourceStore) close() error { return s.db.Close() }
 // Initialize records a source only after DecodeAndVerifySourceInit has derived
 // its immutable values from a canonical, signed v3 manifest.
 func (s *sourceStore) initialize(ctx context.Context, source VerifiedSource, now time.Time) error {
-	if s == nil || s.db == nil || !source.valid(now) {
+	if s == nil || s.db == nil {
 		return errors.New("invalid source specification")
-	}
-	spec, err := source.sourceSpec()
-	if err != nil {
-		return err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	current, found, err := loadSpecTx(ctx, tx, spec.TransferID)
-	if found && err == nil {
-		if !sameSpec(current, spec) {
-			return errors.New("source specification replacement is forbidden")
-		}
-		if err := verifyTrackedSourceTx(ctx, tx, current); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}
-	if err != nil {
-		return err
-	}
-	if err := s.reserveSourceTx(ctx, tx, spec); err != nil {
-		return err
-	}
-	if err := s.admitDurableSourceTx(ctx, tx, spec); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_uniqueness(transfer_id, manifest_commitment) VALUES (?, ?)`, spec.TransferID[:], spec.ManifestCommitment[:]); err != nil {
-		return errors.New("source transfer identity is not reusable")
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO v3_source_specs(transfer_id, manifest_commitment, manifest, chunk_size, chunk_count, plaintext_size, expires_at, ready) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`, spec.TransferID[:], spec.ManifestCommitment[:], spec.Manifest, spec.ChunkSize, spec.ChunkCount, spec.PlaintextSize, spec.ExpiresAt)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_transfers(transfer_id, manifest_commitment, status, attempt_generation, expires_at) VALUES (?, ?, ?, 0, ?)`, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, spec.ExpiresAt); err != nil {
+	if _, err := s.initializeTx(ctx, tx, source, now); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// initializeTx is shared by ordinary pre-authorized staging and the atomic
+// source-init redemption path. Callers own commit/rollback.
+func (s *sourceStore) initializeTx(ctx context.Context, tx *sql.Tx, source VerifiedSource, now time.Time) (bool, error) {
+	if s == nil || tx == nil || !source.valid(now) {
+		return false, errors.New("invalid source specification")
+	}
+	spec, err := source.sourceSpec()
+	if err != nil {
+		return false, err
+	}
+	current, found, err := loadSpecTx(ctx, tx, spec.TransferID)
+	if found && err == nil {
+		if !sameSpec(current, spec) {
+			return false, errors.New("source specification replacement is forbidden")
+		}
+		if err := verifyTrackedSourceTx(ctx, tx, current); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if err := s.reserveSourceTx(ctx, tx, spec); err != nil {
+		return false, err
+	}
+	if err := s.admitDurableSourceTx(ctx, tx, spec); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_uniqueness(transfer_id, manifest_commitment) VALUES (?, ?)`, spec.TransferID[:], spec.ManifestCommitment[:]); err != nil {
+		return false, errors.New("source transfer identity is not reusable")
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO v3_source_specs(transfer_id, manifest_commitment, manifest, chunk_size, chunk_count, plaintext_size, expires_at, ready) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`, spec.TransferID[:], spec.ManifestCommitment[:], spec.Manifest, spec.ChunkSize, spec.ChunkCount, spec.PlaintextSize, spec.ExpiresAt)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_transfers(transfer_id, manifest_commitment, status, attempt_generation, expires_at) VALUES (?, ?, ?, 0, ?)`, spec.TransferID[:], spec.ManifestCommitment[:], transferSourceUploading, spec.ExpiresAt); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Cancel is deliberately internal staging cleanup only. An HTTP route must
@@ -314,6 +422,15 @@ func (s *sourceStore) reapExpired(ctx context.Context, now time.Time, limit uint
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_source_tombstones WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_redeemed_operations WHERE permit_serial IN (SELECT serial FROM v3_issued_permits WHERE retain_until <= ?)`, now.UTC().Unix()); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_issued_permits WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_ledger_admission WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -508,6 +625,9 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_content_salts":    {"commitment"},
 		"v3_source_nonce_tuples":     {"transfer_id", "manifest_commitment", "chunk_index"},
 		"v3_source_crypto_admission": {"scope", "scope_id", "reservations"},
+		"v3_issued_permits":          {"serial", "permit", "transfer_id", "manifest_commitment", "expires_at", "retain_until"},
+		"v3_redeemed_operations":     {"permit_serial", "operation_id", "operation", "method", "path_commitment", "target_commitment", "body_commitment", "idempotency_key", "ciphertext_bytes", "ciphertext_chunks", "result"},
+		"v3_ledger_admission":        {"transfer_id", "manifest_commitment", "operations", "result_bytes", "retain_until"},
 	}
 	for table, columns := range expected {
 		rows, err := db.QueryContext(context.Background(), "PRAGMA table_info("+table+")") // #nosec G202 -- table names are fixed constants.
@@ -550,6 +670,9 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_content_salts":    {"commitmentblobprimarykey"},
 		"v3_source_nonce_tuples":     {"primarykey(transfer_id,manifest_commitment,chunk_index)"},
 		"v3_source_crypto_admission": {"primarykey(scope,scope_id)"},
+		"v3_issued_permits":          {"serialblobprimarykey", "permitblobnotnullunique", "retain_untilintegernotnull"},
+		"v3_redeemed_operations":     {"primarykey(permit_serial,operation_id)", "unique(permit_serial,idempotency_key)"},
+		"v3_ledger_admission":        {"transfer_idblobprimarykey", "manifest_commitmentblobnotnull", "retain_untilintegernotnull"},
 	}
 	for table, required := range requiredDefinitions {
 		var definition string
@@ -740,6 +863,12 @@ func (s *sourceStore) terminalizeSourceTx(ctx context.Context, tx *sql.Tx, spec 
 		retainUntil = spec.ExpiresAt
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_tombstones(transfer_id, manifest_commitment, retain_until) VALUES (?, ?, ?) ON CONFLICT(transfer_id) DO NOTHING`, spec.TransferID[:], spec.ManifestCommitment[:], retainUntil); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE v3_issued_permits SET retain_until = MAX(retain_until, ?) WHERE transfer_id = ? AND manifest_commitment = ?`, retainUntil, spec.TransferID[:], spec.ManifestCommitment[:]); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE v3_ledger_admission SET retain_until = MAX(retain_until, ?) WHERE transfer_id = ? AND manifest_commitment = ?`, retainUntil, spec.TransferID[:], spec.ManifestCommitment[:]); err != nil {
 		return err
 	}
 	terminal := transferCancelled
