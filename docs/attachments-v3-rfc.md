@@ -45,6 +45,17 @@ headers bind that exact body commitment. A source-init permit has operation
 `source-init`; a source-upload permit has operation `source-upload`. Neither
 permit is valid for offer, accept, download, begin, completion, or cancellation.
 
+Before any body is read, a relay accepts only the literal fixed route grammar
+in the table below: uppercase method, lowercase 32-hex transfer ID, decimal
+integers without leading zeroes, and no escape, duplicate separator, dot
+segment, query, fragment, `RawPath`, or content encoding. It derives the
+operation target from that parsed route; a client never supplies target bytes.
+The parser binds route transfer/operation/attempt to the permit before it
+checks the signed request commitment. Bodies are exactly: canonical Manifest
+(<=4 KiB) for source-init; ciphertext for source-upload; canonical offer CDE
+(<=24 KiB) for offer; a 32-byte nonce for accept; empty for begin, complete,
+and cancel; and empty request body plus stored ciphertext response for download.
+
 `Manifest` and `Envelope` mean v3 records, never v2 bytes: they retain the v2
 field tables, byte limits, algorithms, and validation rules, with required
 version `3` and every signature/commitment domain's version segment replaced
