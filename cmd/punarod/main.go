@@ -19,6 +19,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/access"
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
+	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -123,6 +124,23 @@ func run(args []string, stderr io.Writer) int {
 }
 
 type permitRouteAuthorizer struct{ authenticator *relay.Authenticator }
+
+// attachmentV3RouteAuthorizer binds an independently authenticated enrolled
+// machine to the exact directory device named by a v3 permit. Possession of a
+// copied permit/operation is never sufficient for route admission.
+type attachmentV3RouteAuthorizer struct{ authenticator *relay.Authenticator }
+
+func (a attachmentV3RouteAuthorizer) AuthorizeAttachmentRequest(ctx context.Context, permit attachmentv3.Permit) error {
+	machineID, authenticated := relay.AuthenticatedMachineID(ctx)
+	if !authenticated || a.authenticator == nil {
+		return errors.New("v3 attachment route is not machine-authenticated")
+	}
+	deviceID, bound := a.authenticator.AttachmentDeviceID(machineID)
+	if !bound || deviceID != permit.HolderDeviceID {
+		return errors.New("machine is not bound to v3 attachment permit holder")
+	}
+	return nil
+}
 
 func (a permitRouteAuthorizer) AuthorizePermitRequest(ctx context.Context, request attachmentv2.PermitRequest) error {
 	machineID, authenticated := relay.AuthenticatedMachineID(ctx)
