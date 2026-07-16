@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -35,6 +36,7 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	}
 	permit := permitForManifest(manifest, raw, now)
 	permit.Operation, permit.MaxOperations = permitOperationSourceInit, 1
+	permit.ExpiresAt = uint64(now.Add(15 * time.Second).Unix())
 	if err := SignPermit(&permit, issuerPrivate); err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +60,34 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	result, replayed, err = store.redeemSourceInit(context.Background(), directory, permit, op, route, request, authority, holders, now)
 	if err != nil || !replayed || len(result) == 0 {
 		t.Fatalf("replay result=%x replayed=%v err=%v", result, replayed, err)
+	}
+	// The outcome is bound to the precise expired source-init serial. Because
+	// that original mutation committed, reconciliation returns its durable
+	// source-uploading result rather than the later lifecycle guess.
+	outcome := permit
+	outcome.Serial, outcome.Operation, outcome.OutcomeOfSerial = testID(97), permitOperationOutcome, permit.Serial
+	outcome.IssuedAt, outcome.ExpiresAt = uint64(now.Add(16*time.Second).Unix()), uint64(now.Add(26*time.Second).Unix())
+	if err := SignPermit(&outcome, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.issuePermit(context.Background(), outcome, authority, now.Add(16*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	outcomeRoute, outcomeRequest, err := NewAttachmentOperationRequest("GET", fmt.Sprintf("/v3/attachments/%x/outcome", permit.TransferID), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcomeOp := testOperation(outcome, outcomeRequest, now.Add(16*time.Second))
+	if err := SignOperation(&outcomeOp, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	outcomeResult, outcomeReplayed, err := store.redeemOutcome(context.Background(), outcome, outcomeOp, outcomeRoute, outcomeRequest, authority, holders, now.Add(16*time.Second))
+	if err != nil || outcomeReplayed {
+		t.Fatalf("outcome=%x replayed=%v err=%v", outcomeResult, outcomeReplayed, err)
+	}
+	decodedOutcome, err := DecodeTransferResult(outcomeResult)
+	if err != nil || decodedOutcome.State != TransferStateSourceUploading {
+		t.Fatalf("outcome=%+v err=%v", decodedOutcome, err)
 	}
 	second := permit
 	second.Serial = testID(99)

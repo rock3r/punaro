@@ -113,6 +113,64 @@ func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 	}
 }
 
+func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = journal.Close() }()
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(1), SenderDeviceID: bytes16(2), SenderGeneration: 1, RecipientDeviceID: bytes16(3), RecipientGeneration: 1, MembershipCommitment: bytes32(4)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	_, senderPrivate, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	manifest, _ := stagedSenderManifest(t, mapping, senderPrivate, now)
+	var raw []byte
+	manifest.ExpiresAt = 130
+	if err := attachmentv3.SignManifest(&manifest, senderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = attachmentv3.EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertStagedSenderTransfer(journal, mapping, manifest, raw); err != nil {
+		t.Fatal(err)
+	}
+	commitment := attachmentCommitment(t, raw)
+	transport := &senderTransportStub{operationErr: errors.New("response lost"), results: map[string][]byte{outcomePath(manifest.TransferID): sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}}
+	authority := testSenderAuthority(t, mapping, senderPrivate).(senderAuthorityStub)
+	authority.bindingResolverStub.binding = testCurrentBinding(mapping, 130)
+	copy(authority.bindingResolverStub.binding.Sender.SigningPublicKey[:], senderPrivate.Public().(ed25519.PublicKey))
+	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: authority}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71), bytes16(72), bytes16(73)), NewIdempotencyKey: sequenceKey(bytes32(74), bytes32(75))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.Initialize(context.Background(), manifest.TransferID); err == nil {
+		t.Fatal("lost source-init response was treated as complete")
+	}
+	now = time.Unix(116, 0).UTC()
+	transport.operationErr = nil
+	outcomes, err := NewSenderOutcomeWorker(worker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := outcomes.Reconcile(context.Background(), manifest.TransferID, senderPhaseSourceInit, 0)
+	if err != nil || result.State != attachmentv3.TransferStateSourceUploading {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if transport.issueCalls != 2 || transport.operationCalls != 2 || transport.method != http.MethodGet || transport.path != outcomePath(manifest.TransferID) || transport.request.Operation != attachmentv3.PermitOperationOutcome || transport.request.OutcomeOfSerial == [16]byte{} {
+		t.Fatalf("unsafe sender outcome issue=%d calls=%d method=%s path=%s request=%+v", transport.issueCalls, transport.operationCalls, transport.method, transport.path, transport.request)
+	}
+	if _, err := worker.Initialize(context.Background(), manifest.TransferID); err != nil {
+		t.Fatalf("reconciled source-init did not become replayable: %v", err)
+	}
+}
+
 func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
 	if err != nil {
@@ -269,12 +327,13 @@ type senderTransportStub struct {
 	method, path               string
 	body                       []byte
 	issueCalls, operationCalls int
+	operationErr               error
 }
 
 func (s *senderTransportStub) IssueV3Permit(_ context.Context, request attachmentv3.PermitRequest) (attachmentv3.Permit, error) {
 	s.issueCalls++
 	s.request = request
-	s.permit = attachmentv3.Permit{Audience: bytes32(31), Serial: bytes16(80), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(32), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment}
+	s.permit = attachmentv3.Permit{Audience: bytes32(31), Serial: bytes16(80), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(32), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
 	_, signer := testOfferSigner()
 	if err := attachmentv3.SignPermit(&s.permit, signer); err != nil {
 		return attachmentv3.Permit{}, err
@@ -286,6 +345,9 @@ func (s *senderTransportStub) DoV3Attachment(_ context.Context, method, path str
 	s.method, s.path, s.body = method, path, append([]byte(nil), body...)
 	if permit != s.permit {
 		return nil, errors.New("changed sender permit")
+	}
+	if s.operationErr != nil {
+		return nil, s.operationErr
 	}
 	if s.results != nil {
 		return append([]byte(nil), s.results[path]...), nil

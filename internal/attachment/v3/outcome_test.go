@@ -79,7 +79,7 @@ func TestOutcomeRedemptionIsFreshAuthorizedAndExactReplay(t *testing.T) {
 		t.Fatalf("replayed=%t err=%v", replayed, err)
 	}
 	result, err := DecodeTransferResult(raw)
-	if err != nil || result.State != TransferStateSourceUploading || result.TransferID != source.TransferID() {
+	if err != nil || result.State != TransferStateCancelled || result.TransferID != source.TransferID() {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	raw, replayed, err = store.redeemOutcome(context.Background(), permit, op, route, request, authority, holders, now)

@@ -175,6 +175,17 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			PRIMARY KEY(transfer_id, phase, chunk_index),
 			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
 		)`,
+		// Outcome attempts are separate from the operation they reconcile. A
+		// response can be lost too, so each expired attempt receives a new,
+		// durably retained outcome capability without rewriting the original.
+		`CREATE TABLE IF NOT EXISTS controller_sender_outcome_attempts (
+			transfer_id BLOB NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			attempt_index INTEGER NOT NULL, permit_request BLOB NOT NULL,
+			operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(transfer_id, phase, chunk_index, attempt_index),
+			FOREIGN KEY(transfer_id, phase, chunk_index) REFERENCES controller_sender_operations(transfer_id, phase, chunk_index)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
