@@ -12,7 +12,11 @@ import (
 
 func TestSystemdCredentialHostKeyRejectsUnsafeDirectory(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "credentials")
-	if err := os.Mkdir(directory, 0o755); err != nil {
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G302 -- this fixture must deliberately be unsafe.
+	if err := os.Chmod(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	key := make([]byte, 32)

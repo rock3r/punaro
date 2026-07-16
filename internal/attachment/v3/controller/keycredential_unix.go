@@ -24,6 +24,7 @@ type SystemdCredentialHostKeyProvider struct {
 	CredentialName      string
 }
 
+// SenderKeyEncryptionKey returns the credential's decoded 32-byte wrapping key.
 func (p SystemdCredentialHostKeyProvider) SenderKeyEncryptionKey(context.Context) ([32]byte, error) {
 	var key [32]byte
 	raw, err := p.readCredential()
@@ -38,6 +39,8 @@ func (p SystemdCredentialHostKeyProvider) SenderKeyEncryptionKey(context.Context
 	return key, nil
 }
 
+// SenderKeyEncryptionKeyID returns the domain-separated identifier of the
+// current sender-key wrapping credential.
 func (p SystemdCredentialHostKeyProvider) SenderKeyEncryptionKeyID(ctx context.Context) ([32]byte, error) {
 	key, err := p.SenderKeyEncryptionKey(ctx)
 	if err != nil {
@@ -66,7 +69,7 @@ func (p SystemdCredentialHostKeyProvider) readCredential() ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("systemd sender key credential is unavailable")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("systemd sender key credential is unavailable")
