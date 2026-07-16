@@ -87,6 +87,12 @@ func TestRecipientDownloadWorkerPersistsVerifiedCiphertextAndPublishesAfterCompl
 	if transport.operationCalls != calls {
 		t.Fatalf("completed receipt retried remotely: before=%d after=%d", calls, transport.operationCalls)
 	}
+	if _, err := worker.Receive(context.Background(), inbound, filepath.Join(t.TempDir(), "different.bin")); err == nil {
+		t.Fatal("same message accepted a changed output destination")
+	}
+	if transport.operationCalls != calls {
+		t.Fatalf("changed destination contacted relay: before=%d after=%d", calls, transport.operationCalls)
+	}
 	if fileKey == [32]byte{} {
 		t.Fatal("test file key was lost")
 	}

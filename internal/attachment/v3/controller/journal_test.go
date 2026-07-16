@@ -156,6 +156,38 @@ func TestJournalRequiresExplicitReceiptApprovalAfterFreshBinding(t *testing.T) {
 	}
 }
 
+func TestApprovedInboundOfferRequiresMatchingImmutableApproval(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	mapping := Mapping{RelayConversationID: "relay-approved", ConversationID: bytes16(61), SenderDeviceID: bytes16(62), SenderGeneration: 1, RecipientDeviceID: bytes16(63), RecipientGeneration: 1, MembershipCommitment: bytes32(64)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	inbound := InboundOffer{PunaroMessageID: "approved-message", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err == nil {
+		t.Fatal("unapproved offer was returned")
+	}
+	if approved, err := journal.ApproveInboundOffer(inbound.PunaroMessageID, time.Unix(100, 0)); err != nil || !approved {
+		t.Fatalf("approved=%t err=%v", approved, err)
+	}
+	if got, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err != nil || got.PunaroMessageID != inbound.PunaroMessageID || got.RelayConversationID != inbound.RelayConversationID || got.Body == "" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	tampered := bytes32(99)
+	if _, err := journal.db.Exec(`UPDATE controller_receipt_approvals SET offer_commitment=? WHERE punaro_message_id=?`, tampered[:], inbound.PunaroMessageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err == nil {
+		t.Fatal("tampered approval commitment was accepted")
+	}
+}
+
 func TestReceiptApprovalSurvivesRestartButRejectsChangedDelivery(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "private", "controller.db")
