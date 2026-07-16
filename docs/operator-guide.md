@@ -142,6 +142,27 @@ including bounded route and idempotency fields) without evicting an
 undelivered record. If it fills, restore relay connectivity and let the adapter
 drain it; do not delete pending rows to make space.
 
+### Local v3 receipt controller
+
+`punaro-attachment` is the local-only control surface for v3 offer discovery.
+It owns an immutable controller journal and must run with a recipient identity
+already assigned to this machine. Set these non-repository environment values
+through the normal service-secret mechanism (for example a service-manager
+environment file or `op run`):
+
+- `PUNARO_ATTACHMENT_CONTROLLER_JOURNAL`: absolute private SQLite path.
+- `PUNARO_ATTACHMENT_RECIPIENT_ID`: canonical raw-base64url 16-byte local
+  attachment device ID.
+- `PUNARO_ATTACHMENT_RECIPIENT_GENERATION`: its non-zero directory generation.
+
+An operator first provisions the directory-to-relay relationship with
+`punaro-attachment map`. A delivered typed mailbox offer is then recorded with
+`punaro-attachment record`, and only a deliberate
+`punaro-attachment approve --message-id …` can mark that exact canonical offer
+for a future receipt worker. Approval is not acceptance, download, or
+decryption. The controller never accepts arbitrary permit records, URLs,
+Access headers, or device keys on its command line.
+
 V3 uses the conservative finite source limits compiled into the current
 runtime (64 MiB artifact, 4096 chunks, 256 KiB plaintext chunk; finite sender,
 recipient, conversation, and relay reservations). It is a singleton SQLite
