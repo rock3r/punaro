@@ -367,7 +367,7 @@ func writeNewPrivateFile(path string, private []byte) error {
 	if err != nil {
 		return err
 	}
-	_, err = f.WriteString(base64.RawURLEncoding.EncodeToString(private) + "\n")
+	_, err = f.WriteString(base64.RawURLEncoding.EncodeToString(private))
 	closeErr := f.Close()
 	if err != nil {
 		return err

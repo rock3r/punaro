@@ -99,6 +99,25 @@ func TestPrivateOutputsRequirePrivateParentAndNeverOverwrite(t *testing.T) {
 	}
 }
 
+func TestKeygenOutputIsAcceptedByDirectoryPrivateKeyLoader(t *testing.T) {
+	private := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(private, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{7}, ed25519.SeedSize))
+	path := filepath.Join(private, "root.key")
+	if err := writeNewPrivateFile(path, key); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := attachmentv2.LoadPrivateEd25519KeyFile(path)
+	if err != nil {
+		t.Fatalf("keygen output must be consumable by the directory loader: %v", err)
+	}
+	if !bytes.Equal(loaded, key) {
+		t.Fatal("loaded key differs from generated key")
+	}
+}
+
 func TestDirectoryManifestRejectsUnknownAndDuplicateSecurityFields(t *testing.T) {
 	for _, raw := range [][]byte{
 		[]byte(`{"revoked":false,"revoked":true}`),

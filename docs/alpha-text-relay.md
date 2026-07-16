@@ -101,6 +101,19 @@ continue serving after logout. Verify the service is active and the relay
 readiness endpoint is healthy. Never reuse the machine key or Access pair on
 another machine.
 
+For a macOS agent machine, install the reviewed
+`deploy/launchd/punaro-adapter.plist` template as
+`~/Library/LaunchAgents/org.punaro.adapter.plist`. It sources the same
+owner-only `~/.config/punaro/adapter.env` rather than embedding credentials in
+the plist. Validate it with `plutil -lint`, then bootstrap it as the interactive
+user with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.punaro.adapter.plist`.
+Use `launchctl print gui/$(id -u)/org.punaro.adapter` to verify it is running.
+Keep adapter logs in an owner-only state directory configured by the process,
+not a shared temporary directory. Boot it out with
+`launchctl bootout gui/$(id -u)/org.punaro.adapter` before replacing the
+plist. The same per-machine key, Access pair, and mailbox namespace rules
+apply; never copy this owner-only environment file to another Mac.
+
 ## Onboard and revoke a machine
 
 Every machine gets one distinct relay enrollment record, one private machine

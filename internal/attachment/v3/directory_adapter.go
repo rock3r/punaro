@@ -84,6 +84,17 @@ type directoryAuthorityView struct {
 	resolver *attachmentv2.DirectorySnapshotResolver
 }
 
+// ResolveTransferBinding projects the exact caller-selected relationship from
+// the same freshly verified snapshot. This lets the view satisfy the narrow
+// sender-delivery authority contract without giving callers a general device
+// or membership discovery API.
+func (v directoryAuthorityView) ResolveTransferBinding(_ context.Context, conversationID, senderID [16]byte, senderGeneration uint64, recipientID [16]byte, recipientGeneration uint64, membershipCommitment [32]byte, now time.Time) (attachmentv2.DirectoryTransferBinding, error) {
+	if v.resolver == nil {
+		return attachmentv2.DirectoryTransferBinding{}, errors.New("invalid v3 directory authority")
+	}
+	return v.resolver.ResolveTransferBinding(conversationID, senderID, senderGeneration, recipientID, recipientGeneration, membershipCommitment, now)
+}
+
 func (v directoryAuthorityView) ValidateManifestAuthority(m Manifest, now time.Time) (ed25519.PublicKey, error) {
 	return v.resolver.ValidateV3ManifestAdmissionAuthority(attachmentv2.Manifest{Audience: m.Audience, TransferID: m.TransferID, ConversationID: m.ConversationID, SenderDeviceID: m.SenderDeviceID, SenderGeneration: m.SenderGeneration, RecipientDeviceID: m.RecipientDeviceID, RecipientGeneration: m.RecipientGeneration, DirectoryHead: m.DirectoryHead, MembershipCommitment: m.MembershipCommitment, RevocationEpoch: m.RevocationEpoch, IssuedAt: m.IssuedAt, ExpiresAt: m.ExpiresAt, ContentSalt: m.ContentSalt, PlaintextCommitment: m.PlaintextCommitment, ChunkSize: m.ChunkSize, ChunkCount: m.ChunkCount, PlaintextSize: m.PlaintextSize, SignerKeyID: m.SignerKeyID}, now)
 }

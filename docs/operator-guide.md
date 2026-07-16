@@ -268,6 +268,18 @@ separate from the relay runtime; only the issuer key belongs in the relay's
 private credential directory. Never place device private keys, root keys, or
 issuer keys in the manifest, an environment file, or source control.
 
+For a Proxmox-contained relay, use
+[`scripts/publish-directory-snapshot.sh`](../scripts/publish-directory-snapshot.sh)
+from the separate root-key host. It builds one fresh 30-second snapshot and
+copies only that signed snapshot through the Proxmox host, then changes mode
+and atomically renames it inside the target container. Put its environment in
+an owner-only service configuration and schedule the next publication only
+after the prior 30-second snapshot and every permit it could have issued have
+expired (for example, a 31-second interval). Do not rotate a still-valid head:
+permits bind to that exact signed head. Do not run it on the relay or copy the
+root key into the container. If a publish fails, let the relay become unready
+rather than extending an old snapshot's lifetime.
+
 Directory history is append-only. For an update, retain every existing entry
 in the same order, append new/revocation entries, increment `sequence`, and
 keep `revocation_epoch` monotonic. The tool emits the required full bounded

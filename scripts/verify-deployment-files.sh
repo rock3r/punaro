@@ -3,13 +3,53 @@ set -eu
 
 unit=deploy/systemd/user/punaro-adapter.service
 example=deploy/systemd/user/punaro-adapter.env.example
+launch_agent=deploy/launchd/punaro-adapter.plist
+snapshot_publisher=scripts/publish-directory-snapshot.sh
 
-for path in "$unit" "$example"; do
+for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher"; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
+
+for expected in \
+	'<key>Label</key>' \
+	'<string>org.punaro.adapter</string>' \
+	'<key>KeepAlive</key>' \
+	'<true/>' \
+	'<string>set -a; . "$HOME/.config/punaro/adapter.env"; set +a; exec "$HOME/.local/bin/punaro-adapter"</string>'; do
+	if ! grep -Fq "$expected" "$launch_agent"; then
+		printf '%s\n' "adapter LaunchAgent is missing required setting: $expected" >&2
+		exit 1
+	fi
+done
+
+if grep -Eq 'PUNARO_CF_ACCESS_CLIENT_(ID|SECRET)=' "$launch_agent"; then
+	printf '%s\n' 'adapter LaunchAgent must not contain Access credentials' >&2
+	exit 1
+fi
+
+for expected in \
+	'PUNARO_DIRECTORY_ROOT_PRIVATE_KEY' \
+	'PUNARO_PVE_SSH_TARGET' \
+	'PUNARO_PVE_CONTAINER_ID' \
+	'PUNARO_PVE_SSH_IDENTITY_FILE' \
+	'BatchMode=yes' \
+	'--ttl 30s' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE contains unsafe characters' \
+	'directory_snapshot_published'; do
+	if ! grep -Fq -- "$expected" "$snapshot_publisher"; then
+		printf '%s\n' "snapshot publisher is missing required safety setting: $expected" >&2
+		exit 1
+	fi
+done
+
+if grep -Fq 'PUNARO_DIRECTORY_ROOT_PRIVATE_KEY=' "$snapshot_publisher"; then
+	printf '%s\n' 'snapshot publisher must not embed a root key value' >&2
+	exit 1
+fi
 
 for expected in \
 	'NoNewPrivileges=yes' \
