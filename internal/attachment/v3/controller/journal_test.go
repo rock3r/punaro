@@ -111,6 +111,43 @@ func TestJournalRequiresExplicitReceiptApprovalAfterFreshBinding(t *testing.T) {
 	}
 }
 
+func TestReceiptApprovalSurvivesRestartButRejectsChangedDelivery(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "private", "controller.db")
+	journal, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(41), SenderDeviceID: bytes16(42), SenderGeneration: 1, RecipientDeviceID: bytes16(43), RecipientGeneration: 1, MembershipCommitment: bytes32(44)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	if _, err := journal.ApproveInboundOffer(inbound.PunaroMessageID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journal, err = OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	resolver := &bindingResolverStub{binding: testCurrentBinding(mapping, 101)}
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err != nil {
+		t.Fatalf("approved receipt did not recover after restart: %v", err)
+	}
+	inbound.Body += "x"
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err == nil {
+		t.Fatal("changed delivery was accepted after restart")
+	}
+}
+
 func testCurrentBinding(mapping Mapping, expiresAt uint64) attachmentv2.DirectoryTransferBinding {
 	return attachmentv2.DirectoryTransferBinding{
 		Permit:     attachmentv2.DirectoryPermitBinding{Audience: bytes32(31), DirectoryHead: bytes32(32), RevocationEpoch: 1, ExpiresAt: expiresAt},
