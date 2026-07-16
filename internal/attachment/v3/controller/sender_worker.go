@@ -1,0 +1,743 @@
+package controller
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"database/sql"
+	"errors"
+	"fmt"
+	"time"
+
+	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/zeebo/blake3"
+)
+
+// SenderDeliveryAuthority is one root-verified directory snapshot for an
+// outbound source transition. It intentionally combines source verification,
+// permit verification and the holder key in one view, preventing a locally
+// staged source from being sent under incompatible directory facts.
+type SenderDeliveryAuthority interface {
+	TransferBindingResolver
+	attachmentv3.EnvelopeDirectoryKeyResolver
+	attachmentv3.PermitAuthorityResolver
+	attachmentv3.OperationHolderResolver
+}
+
+type SenderDeliveryAuthorityProvider interface {
+	ResolveSenderDeliveryAuthority(context.Context, time.Time) (SenderDeliveryAuthority, error)
+}
+
+// SenderOperationSigner is deliberately limited to sender permits and the
+// three outbound lifecycle operations. It is not a generic signing oracle.
+type SenderOperationSigner interface {
+	SignSenderPermit(*attachmentv3.PermitRequest) error
+	BuildSenderOperation(attachmentv3.Permit, string, string, []byte, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error)
+}
+
+// SenderEnvelopeSealer confines host-unwrapped file-key use to construction
+// of the one recipient envelope for a fully staged source.
+type SenderEnvelopeSealer interface {
+	SealSenderEnvelope(attachmentv3.VerifiedSource, attachmentv3.EnvelopeDirectoryKeyResolver, [32]byte, time.Time) (attachmentv3.Envelope, error)
+}
+
+type localSenderOperationSigner struct {
+	sender  SenderIdentity
+	private ed25519.PrivateKey
+}
+
+func NewLocalSenderOperationSigner(sender SenderIdentity, private ed25519.PrivateKey) *localSenderOperationSigner {
+	return &localSenderOperationSigner{sender: sender, private: append(ed25519.PrivateKey(nil), private...)}
+}
+
+func validSenderOperation(operation uint64) bool {
+	return operation == attachmentv3.PermitOperationSourceInit || operation == attachmentv3.PermitOperationSourceUpload || operation == attachmentv3.PermitOperationOffer
+}
+
+func (s *localSenderOperationSigner) SignSenderPermit(request *attachmentv3.PermitRequest) error {
+	if s == nil || !s.sender.valid() || len(s.private) != ed25519.PrivateKeySize || request == nil || request.HolderDeviceID != s.sender.DeviceID || request.HolderGeneration != s.sender.Generation || request.HolderRole != attachmentv3.PermitHolderSender || request.AttemptGeneration != 0 || !validSenderOperation(request.Operation) {
+		return errors.New("invalid local sender permit signing request")
+	}
+	return attachmentv3.SignPermitRequest(request, s.private)
+}
+
+func (s *localSenderOperationSigner) BuildSenderOperation(permit attachmentv3.Permit, method, path string, body []byte, operationID [16]byte, idempotencyKey [32]byte, issuedAt, expiresAt uint64) (attachmentv3.OperationRecord, error) {
+	if s == nil || !s.sender.valid() || len(s.private) != ed25519.PrivateKeySize || permit.HolderDeviceID != s.sender.DeviceID || permit.HolderGeneration != s.sender.Generation || permit.HolderRole != attachmentv3.PermitHolderSender || permit.AttemptGeneration != 0 || !validSenderOperation(permit.Operation) {
+		return attachmentv3.OperationRecord{}, errors.New("invalid local sender operation")
+	}
+	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, body, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
+}
+
+func (s *localSenderOperationSigner) SealSenderEnvelope(source attachmentv3.VerifiedSource, directory attachmentv3.EnvelopeDirectoryKeyResolver, fileKey [32]byte, now time.Time) (attachmentv3.Envelope, error) {
+	if s == nil || !s.sender.valid() || len(s.private) != ed25519.PrivateKeySize || directory == nil || fileKey == [32]byte{} {
+		return attachmentv3.Envelope{}, errors.New("invalid local sender envelope request")
+	}
+	return attachmentv3.SealRecipientEnvelope(source, directory, fileKey, s.private, now)
+}
+
+type SenderSourceInitializerOptions struct {
+	Journal           *Journal
+	AuthorityProvider SenderDeliveryAuthorityProvider
+	Signer            SenderOperationSigner
+	Transport         RecipientAttachmentTransport
+	Now               func() time.Time
+	NewID             func() ([16]byte, error)
+	NewIdempotencyKey func() ([32]byte, error)
+}
+
+// SenderSourceInitializer advances a locally staged immutable source through
+// the one bootstrap operation. It never handles plaintext and persists the
+// exact holder-signed capability before the remote mutation is attempted.
+type SenderSourceInitializer struct {
+	options SenderSourceInitializerOptions
+}
+
+type SenderOfferWorkerOptions struct {
+	Source             *SenderSourceInitializer
+	FileKeyProtector   SenderFileKeyProtector
+	NewAcceptanceNonce func() ([32]byte, error)
+}
+
+// SenderOfferWorker exposes a complete encrypted source through the relay
+// only after it has sealed and durably retained the recipient-specific offer.
+type SenderOfferWorker struct {
+	options SenderOfferWorkerOptions
+	sealer  SenderEnvelopeSealer
+}
+
+func NewSenderOfferWorker(options SenderOfferWorkerOptions) (*SenderOfferWorker, error) {
+	if options.Source == nil || options.Source.options.Journal == nil || options.FileKeyProtector == nil || options.NewAcceptanceNonce == nil {
+		return nil, errors.New("invalid sender offer worker")
+	}
+	sealer, ok := options.Source.options.Signer.(SenderEnvelopeSealer)
+	if !ok || sealer == nil {
+		return nil, errors.New("sender operation signer cannot seal envelopes")
+	}
+	return &SenderOfferWorker{options: options, sealer: sealer}, nil
+}
+
+func NewSenderSourceInitializer(options SenderSourceInitializerOptions) (*SenderSourceInitializer, error) {
+	if options.Journal == nil || options.Journal.db == nil || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
+		return nil, errors.New("invalid sender source initializer")
+	}
+	if options.Now == nil {
+		options.Now = time.Now
+	}
+	return &SenderSourceInitializer{options: options}, nil
+}
+
+// Initialize performs source-init exactly once for a staged transfer. If a
+// prior submission is ambiguous and its capability has expired, it fails
+// closed; a later outcome-reconciliation worker is the only valid recovery
+// route and must not mint a different source-init operation.
+func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16]byte) (attachmentv3.TransferResult, error) {
+	if w == nil || transferID == [16]byte{} {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender source initialization")
+	}
+	w.options.Journal.senderMu.Lock()
+	defer w.options.Journal.senderMu.Unlock()
+	now := w.options.Now().UTC()
+	if now.Unix() < 0 {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender source initialization clock")
+	}
+	authority, err := w.options.AuthorityProvider.ResolveSenderDeliveryAuthority(ctx, now)
+	if err != nil || authority == nil {
+		return attachmentv3.TransferResult{}, errors.New("fresh sender delivery authority is unavailable")
+	}
+	transfer, err := w.options.Journal.senderTransfer(transferID)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	mapping, found, err := w.options.Journal.mapping(transfer.relayConversationID)
+	if err != nil || !found || !mapping.valid() {
+		return attachmentv3.TransferResult{}, errors.New("sender source mapping is unavailable")
+	}
+	binding, err := authority.ResolveTransferBinding(ctx, mapping.ConversationID, mapping.SenderDeviceID, mapping.SenderGeneration, mapping.RecipientDeviceID, mapping.RecipientGeneration, mapping.MembershipCommitment, now)
+	if err != nil || !exactTransferBinding(mapping, binding, now) {
+		return attachmentv3.TransferResult{}, errors.New("fresh sender source binding is unavailable")
+	}
+	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	manifest, manifestErr := attachmentv3.DecodeManifest(transfer.manifest)
+	if err != nil || manifestErr != nil || verified.ManifestCommitment() != transfer.commitment || !exactStagedManifest(manifest, mapping, binding, now) {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable sender source")
+	}
+	record, err := w.options.Journal.ensureSenderOperation(transfer, senderPhaseSourceInit, 0, uint64(len(transfer.manifest)), now, w.options.Signer, w.options.NewID, w.options.NewIdempotencyKey)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	if len(record.result) != 0 {
+		return exactSenderResult(record.result, transfer, attachmentv3.TransferStateSourceUploading)
+	}
+	permit, operation, err := w.credentials(ctx, transfer, senderPhaseSourceInit, 0, record, transfer.manifest, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	raw, err := w.options.Transport.DoV3Attachment(ctx, "POST", sourceInitPath(transfer.transferID), transfer.manifest, permit, operation)
+	if err != nil {
+		return attachmentv3.TransferResult{}, fmt.Errorf("submit sender source initialization: %w", err)
+	}
+	result, err := exactSenderResult(raw, transfer, attachmentv3.TransferStateSourceUploading)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	if err := w.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseSourceInit, 0, raw); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	return result, nil
+}
+
+// UploadAll sends each durable ciphertext frame through a separately
+// persisted, exactly route-bound operation. The plaintext and file key stay
+// out of this worker; it reads only immutable local ciphertext.
+func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]byte) (attachmentv3.TransferResult, error) {
+	if _, err := w.Initialize(ctx, transferID); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	var last attachmentv3.TransferResult
+	for index := uint64(0); ; index++ {
+		w.options.Journal.senderMu.Lock()
+		result, done, err := w.uploadOne(ctx, transferID, index)
+		w.options.Journal.senderMu.Unlock()
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		last = result
+		if done {
+			return last, nil
+		}
+	}
+}
+
+func (w *SenderSourceInitializer) uploadOne(ctx context.Context, transferID [16]byte, index uint64) (attachmentv3.TransferResult, bool, error) {
+	now := w.options.Now().UTC()
+	if now.Unix() < 0 {
+		return attachmentv3.TransferResult{}, false, errors.New("invalid sender upload clock")
+	}
+	authority, err := w.options.AuthorityProvider.ResolveSenderDeliveryAuthority(ctx, now)
+	if err != nil || authority == nil {
+		return attachmentv3.TransferResult{}, false, errors.New("fresh sender delivery authority is unavailable")
+	}
+	transfer, manifest, err := w.freshSenderTransfer(ctx, transferID, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	if index >= manifest.ChunkCount {
+		return attachmentv3.TransferResult{}, false, errors.New("invalid sender upload index")
+	}
+	chunk, err := w.options.Journal.senderChunk(transfer.transferID, manifest, index)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	record, err := w.options.Journal.ensureSenderOperation(transfer, senderPhaseSourceUpload, index, uint64(len(chunk)), now, w.options.Signer, w.options.NewID, w.options.NewIdempotencyKey)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	expected := attachmentv3.TransferStateSourceUploading
+	done := index+1 == manifest.ChunkCount
+	if done {
+		expected = attachmentv3.TransferStateSourceReady
+	}
+	if len(record.result) != 0 {
+		result, err := exactSenderResult(record.result, transfer, expected)
+		return result, done, err
+	}
+	permit, operation, err := w.credentials(ctx, transfer, senderPhaseSourceUpload, index, record, chunk, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	_, _, path, err := senderOperationSpec(transfer.transferID, senderPhaseSourceUpload, index)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	raw, err := w.options.Transport.DoV3Attachment(ctx, "PUT", path, chunk, permit, operation)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, fmt.Errorf("submit sender source upload: %w", err)
+	}
+	result, err := exactSenderResult(raw, transfer, expected)
+	if err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	if err := w.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseSourceUpload, index, raw); err != nil {
+		return attachmentv3.TransferResult{}, false, err
+	}
+	return result, done, nil
+}
+
+func (w *SenderSourceInitializer) freshSenderTransfer(ctx context.Context, transferID [16]byte, authority SenderDeliveryAuthority, now time.Time) (senderTransferRecord, attachmentv3.Manifest, error) {
+	transfer, err := w.options.Journal.senderTransfer(transferID)
+	if err != nil {
+		return senderTransferRecord{}, attachmentv3.Manifest{}, err
+	}
+	mapping, found, err := w.options.Journal.mapping(transfer.relayConversationID)
+	if err != nil || !found || !mapping.valid() {
+		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("sender source mapping is unavailable")
+	}
+	binding, err := authority.ResolveTransferBinding(ctx, mapping.ConversationID, mapping.SenderDeviceID, mapping.SenderGeneration, mapping.RecipientDeviceID, mapping.RecipientGeneration, mapping.MembershipCommitment, now)
+	if err != nil || !exactTransferBinding(mapping, binding, now) {
+		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("fresh sender source binding is unavailable")
+	}
+	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	manifest, decodeErr := attachmentv3.DecodeManifest(transfer.manifest)
+	if err != nil || decodeErr != nil || verified.ManifestCommitment() != transfer.commitment || !exactStagedManifest(manifest, mapping, binding, now) {
+		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("invalid durable sender source")
+	}
+	return transfer, manifest, nil
+}
+
+// Offer publishes the recipient envelope and acceptance nonce only after the
+// source has reached source-ready. Every retry re-verifies the exact durable
+// offer against the current directory before reusing it.
+func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (attachmentv3.TransferResult, error) {
+	if w == nil || transferID == [16]byte{} {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender offer request")
+	}
+	if _, err := w.options.Source.UploadAll(ctx, transferID); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	sourceWorker := w.options.Source
+	sourceWorker.options.Journal.senderMu.Lock()
+	defer sourceWorker.options.Journal.senderMu.Unlock()
+	now := sourceWorker.options.Now().UTC()
+	if now.Unix() < 0 {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender offer clock")
+	}
+	authority, err := sourceWorker.options.AuthorityProvider.ResolveSenderDeliveryAuthority(ctx, now)
+	if err != nil || authority == nil {
+		return attachmentv3.TransferResult{}, errors.New("fresh sender delivery authority is unavailable")
+	}
+	transfer, manifest, err := sourceWorker.freshSenderTransfer(ctx, transferID, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	if err != nil || verified.ManifestCommitment() != transfer.commitment {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable sender source")
+	}
+	offer, err := w.ensureOffer(ctx, transfer, manifest, verified, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	record, err := sourceWorker.options.Journal.ensureSenderOperation(transfer, senderPhaseOffer, 0, uint64(len(offer)), now, sourceWorker.options.Signer, sourceWorker.options.NewID, sourceWorker.options.NewIdempotencyKey)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	if len(record.result) != 0 {
+		return exactSenderResult(record.result, transfer, attachmentv3.TransferStateOffered)
+	}
+	permit, operation, err := sourceWorker.credentials(ctx, transfer, senderPhaseOffer, 0, record, offer, authority, now)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	_, _, path, err := senderOperationSpec(transfer.transferID, senderPhaseOffer, 0)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	raw, err := sourceWorker.options.Transport.DoV3Attachment(ctx, "POST", path, offer, permit, operation)
+	if err != nil {
+		return attachmentv3.TransferResult{}, fmt.Errorf("submit sender offer: %w", err)
+	}
+	result, err := exactSenderResult(raw, transfer, attachmentv3.TransferStateOffered)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	if err := sourceWorker.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseOffer, 0, raw); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	return result, nil
+}
+
+func (w *SenderOfferWorker) ensureOffer(ctx context.Context, transfer senderTransferRecord, manifest attachmentv3.Manifest, source attachmentv3.VerifiedSource, authority SenderDeliveryAuthority, now time.Time) ([]byte, error) {
+	if existing, found, err := w.options.Source.options.Journal.senderOffer(transfer.transferID); err != nil || found {
+		if err != nil || !found {
+			return nil, errors.New("invalid durable sender offer")
+		}
+		noticeBody, err := attachmentv3.EncodeOfferNotice(existing.offer)
+		notice, decodeErr := attachmentv3.DecodeOfferNotice(noticeBody)
+		if err != nil || decodeErr != nil || !bytes.Equal(notice.ManifestRaw, transfer.manifest) || notice.Manifest.TransferID != transfer.transferID || blake3.Sum256(notice.ManifestRaw) != transfer.commitment {
+			return nil, errors.New("invalid durable sender offer")
+		}
+		if _, _, err := attachmentv3.VerifyOfferNotice(notice, authority, now); err != nil {
+			return nil, errors.New("invalid durable sender offer")
+		}
+		return existing.offer, nil
+	}
+	fileKey, err := w.options.FileKeyProtector.OpenSenderFileKey(ctx, transfer.wrappedFileKey, senderKeyAAD(transfer.transferID, transfer.commitment))
+	if err != nil || fileKey == [32]byte{} {
+		return nil, errors.New("open sender file key")
+	}
+	envelope, err := w.sealer.SealSenderEnvelope(source, authority, fileKey, now)
+	if err != nil {
+		return nil, errors.New("seal recipient envelope")
+	}
+	nonce, err := w.options.NewAcceptanceNonce()
+	if err != nil || nonce == [32]byte{} {
+		return nil, errors.New("generate sender acceptance nonce")
+	}
+	offer, err := attachmentv3.EncodeOfferPayload(manifest, envelope, nonce)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := w.options.Source.options.Journal.storeSenderOffer(transfer.transferID, envelope, offer, nonce)
+	if err != nil {
+		return nil, err
+	}
+	return stored.offer, nil
+}
+
+type senderOfferRecord struct {
+	envelope, offer []byte
+	nonce           [32]byte
+}
+
+func (j *Journal) senderOffer(transferID [16]byte) (senderOfferRecord, bool, error) {
+	var out senderOfferRecord
+	var nonce []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT envelope,offer,offer_nonce FROM controller_sender_transfers WHERE transfer_id=?`, transferID[:]).Scan(&out.envelope, &out.offer, &nonce)
+	if err != nil || (out.envelope == nil && out.offer == nil && nonce == nil) {
+		if errors.Is(err, sql.ErrNoRows) {
+			return senderOfferRecord{}, false, nil
+		}
+		if err == nil {
+			return senderOfferRecord{}, false, nil
+		}
+		return senderOfferRecord{}, false, errors.New("invalid durable sender offer")
+	}
+	if len(out.envelope) == 0 || len(out.offer) == 0 || len(nonce) != 32 {
+		return senderOfferRecord{}, false, errors.New("invalid durable sender offer")
+	}
+	copy(out.nonce[:], nonce)
+	return out, true, nil
+}
+
+func (j *Journal) storeSenderOffer(transferID [16]byte, envelope attachmentv3.Envelope, offer []byte, nonce [32]byte) (senderOfferRecord, error) {
+	rawEnvelope, err := attachmentv3.EncodeEnvelope(envelope)
+	if err != nil {
+		return senderOfferRecord{}, err
+	}
+	if len(offer) == 0 || nonce == [32]byte{} {
+		return senderOfferRecord{}, errors.New("invalid sender offer")
+	}
+	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_sender_transfers SET envelope=?,offer=?,offer_nonce=? WHERE transfer_id=? AND envelope IS NULL AND offer IS NULL AND offer_nonce IS NULL`, rawEnvelope, offer, nonce[:], transferID[:])
+	if err != nil {
+		return senderOfferRecord{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return senderOfferRecord{}, err
+	}
+	stored, found, err := j.senderOffer(transferID)
+	if err != nil || !found || (changed == 0 && (!bytes.Equal(stored.envelope, rawEnvelope) || !bytes.Equal(stored.offer, offer) || stored.nonce != nonce)) {
+		return senderOfferRecord{}, errors.New("changed durable sender offer")
+	}
+	return stored, nil
+}
+
+type senderPhase string
+
+const (
+	senderPhaseSourceInit   senderPhase = "source-init"
+	senderPhaseSourceUpload senderPhase = "source-upload"
+	senderPhaseOffer        senderPhase = "offer"
+)
+
+type senderTransferRecord struct {
+	transferID          [16]byte
+	relayConversationID string
+	manifest            []byte
+	commitment          [32]byte
+	wrappedFileKey      []byte
+}
+
+func (j *Journal) senderTransfer(transferID [16]byte) (senderTransferRecord, error) {
+	var out senderTransferRecord
+	var id, commitment []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT transfer_id,relay_conversation_id,manifest,manifest_commitment,wrapped_file_key FROM controller_sender_transfers WHERE transfer_id=?`, transferID[:]).Scan(&id, &out.relayConversationID, &out.manifest, &commitment, &out.wrappedFileKey)
+	if err != nil || len(id) != 16 || !bytes.Equal(id, transferID[:]) || !validRelayIdentifier(out.relayConversationID) || len(out.manifest) == 0 || len(commitment) != 32 || len(out.wrappedFileKey) == 0 {
+		return senderTransferRecord{}, errors.New("durable sender transfer is unavailable")
+	}
+	copy(out.transferID[:], id)
+	copy(out.commitment[:], commitment)
+	if blake3.Sum256(out.manifest) != out.commitment {
+		return senderTransferRecord{}, errors.New("invalid durable sender transfer")
+	}
+	return out, nil
+}
+
+func (j *Journal) senderChunk(transferID [16]byte, manifest attachmentv3.Manifest, index uint64) ([]byte, error) {
+	var ciphertext, commitment []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT ciphertext,ciphertext_commitment FROM controller_sender_chunks WHERE transfer_id=? AND chunk_index=?`, transferID[:], index).Scan(&ciphertext, &commitment)
+	if err != nil || len(commitment) != 32 || len(ciphertext) == 0 || senderCiphertextCommitment(ciphertext) != bytesTo32(commitment) {
+		return nil, errors.New("invalid durable sender ciphertext")
+	}
+	plaintextLength := manifest.ChunkSize
+	if index+1 == manifest.ChunkCount {
+		plaintextLength = manifest.PlaintextSize - index*manifest.ChunkSize
+	}
+	if plaintextLength == 0 || uint64(len(ciphertext)) != plaintextLength+16 {
+		return nil, errors.New("invalid durable sender ciphertext")
+	}
+	return append([]byte(nil), ciphertext...), nil
+}
+
+func bytesTo32(raw []byte) [32]byte { var out [32]byte; copy(out[:], raw); return out }
+
+func senderCiphertextCommitment(ciphertext []byte) [32]byte {
+	return blake3.Sum256(append([]byte("punaro/attachment/ciphertext/v3\x00"), ciphertext...))
+}
+
+type senderOperationRecord struct {
+	request           attachmentv3.PermitRequest
+	operationID       [16]byte
+	idempotencyKey    [32]byte
+	permit, operation []byte
+	result            []byte
+}
+
+func senderOperationPath(transfer [16]byte, phase senderPhase, chunk uint64) (string, string, error) {
+	switch phase {
+	case senderPhaseSourceInit:
+		if chunk == 0 {
+			return "POST", sourceInitPath(transfer), nil
+		}
+	case senderPhaseSourceUpload:
+		return "PUT", fmt.Sprintf("/v3/attachments/%x/source/chunks/%d", transfer, chunk), nil
+	case senderPhaseOffer:
+		if chunk == 0 {
+			return "POST", fmt.Sprintf("/v3/attachments/%x/offer", transfer), nil
+		}
+	}
+	return "", "", errors.New("invalid sender operation phase")
+}
+
+func sourceInitPath(transfer [16]byte) string {
+	return fmt.Sprintf("/v3/attachments/%x/source", transfer)
+}
+
+func (j *Journal) ensureSenderOperation(transfer senderTransferRecord, phase senderPhase, chunk, bodyBytes uint64, now time.Time, signer SenderOperationSigner, newID func() ([16]byte, error), newKey func() ([32]byte, error)) (senderOperationRecord, error) {
+	if j == nil || j.db == nil || signer == nil || transfer.transferID == [16]byte{} || transfer.commitment == [32]byte{} || now.Unix() < 0 {
+		return senderOperationRecord{}, errors.New("invalid sender operation intent")
+	}
+	if existing, found, err := j.senderOperation(transfer.transferID, phase, chunk); err != nil || found {
+		if err != nil || !found {
+			return senderOperationRecord{}, errors.New("invalid durable sender operation")
+		}
+		return existing, nil
+	}
+	requestID, err := newID()
+	if err != nil || requestID == [16]byte{} {
+		return senderOperationRecord{}, errors.New("generate sender permit request identity")
+	}
+	opID, err := newID()
+	if err != nil || opID == [16]byte{} {
+		return senderOperationRecord{}, errors.New("generate sender operation identity")
+	}
+	idempotency, err := newKey()
+	if err != nil || idempotency == [32]byte{} {
+		return senderOperationRecord{}, errors.New("generate sender idempotency identity")
+	}
+	manifest, err := attachmentv3.DecodeManifest(transfer.manifest)
+	if err != nil {
+		return senderOperationRecord{}, errors.New("invalid durable sender manifest")
+	}
+	expires := now.Add(20 * time.Second).Unix()
+	if uint64(expires) > manifest.ExpiresAt {
+		expires = int64(manifest.ExpiresAt)
+	}
+	if expires <= now.Unix() {
+		return senderOperationRecord{}, errors.New("expired sender source")
+	}
+	operation, _, _, err := senderOperationSpec(transfer.transferID, phase, chunk)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	maxBytes, maxChunks := senderPermitBounds(manifest, phase, bodyBytes)
+	if maxBytes == 0 || maxChunks == 0 {
+		return senderOperationRecord{}, errors.New("invalid sender source size")
+	}
+	record := senderOperationRecord{operationID: opID, idempotencyKey: idempotency}
+	record.request = attachmentv3.PermitRequest{RequestID: requestID, HolderDeviceID: manifest.SenderDeviceID, HolderGeneration: manifest.SenderGeneration, HolderRole: attachmentv3.PermitHolderSender, TransferID: manifest.TransferID, ConversationID: manifest.ConversationID, SenderDeviceID: manifest.SenderDeviceID, SenderGeneration: manifest.SenderGeneration, RecipientDeviceID: manifest.RecipientDeviceID, RecipientGeneration: manifest.RecipientGeneration, Operation: operation, MembershipCommitment: manifest.MembershipCommitment, StagedManifestCommitment: transfer.commitment, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(expires), MaxBytes: maxBytes, MaxChunks: maxChunks, MaxOperations: 1}
+	if err := signer.SignSenderPermit(&record.request); err != nil {
+		return senderOperationRecord{}, err
+	}
+	rawRequest, err := attachmentv3.EncodePermitRequest(record.request)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_sender_operations(transfer_id,phase,chunk_index,permit_request,operation_id,idempotency_key) VALUES (?,?,?,?,?,?) ON CONFLICT(transfer_id,phase,chunk_index) DO NOTHING`, transfer.transferID[:], string(phase), chunk, rawRequest, opID[:], idempotency[:])
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	stored, found, err := j.senderOperation(transfer.transferID, phase, chunk)
+	if err != nil || !found || (inserted == 1 && (stored.operationID != opID || stored.idempotencyKey != idempotency)) {
+		return senderOperationRecord{}, errors.New("changed durable sender operation")
+	}
+	return stored, nil
+}
+
+func (j *Journal) senderOperation(transferID [16]byte, phase senderPhase, chunk uint64) (senderOperationRecord, bool, error) {
+	var out senderOperationRecord
+	var opID, key, request []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT permit_request,operation_id,idempotency_key,permit,operation,result FROM controller_sender_operations WHERE transfer_id=? AND phase=? AND chunk_index=?`, transferID[:], string(phase), chunk).Scan(&request, &opID, &key, &out.permit, &out.operation, &out.result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return senderOperationRecord{}, false, nil
+	}
+	if err != nil || len(opID) != 16 || len(key) != 32 {
+		return senderOperationRecord{}, false, errors.New("invalid durable sender operation")
+	}
+	var decodeErr error
+	out.request, decodeErr = attachmentv3.DecodePermitRequest(request)
+	if decodeErr != nil {
+		return senderOperationRecord{}, false, errors.New("invalid durable sender permit request")
+	}
+	copy(out.operationID[:], opID)
+	copy(out.idempotencyKey[:], key)
+	return out, true, nil
+}
+
+func (w *SenderSourceInitializer) credentials(ctx context.Context, transfer senderTransferRecord, phase senderPhase, chunk uint64, record senderOperationRecord, body []byte, authority SenderDeliveryAuthority, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
+	operationKind, method, path, err := senderOperationSpec(transfer.transferID, phase, chunk)
+	if err != nil || record.request.Operation != operationKind {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid sender operation phase")
+	}
+	if len(record.permit) != 0 || len(record.operation) != 0 {
+		if len(record.permit) == 0 || len(record.operation) == 0 {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("incomplete durable sender credentials")
+		}
+		permit, err := attachmentv3.DecodePermit(record.permit)
+		if err != nil || !exactSenderPermit(permit, record.request, transfer, operationKind, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable sender permit")
+		}
+		op, err := attachmentv3.DecodeOperation(record.operation)
+		if err != nil || op.OperationID != record.operationID || op.IdempotencyKey != record.idempotencyKey || verifySenderOperation(op, permit, method, path, body, authority, now) != nil {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable sender operation")
+		}
+		return permit, op, nil
+	}
+	permit, err := w.options.Transport.IssueV3Permit(ctx, record.request)
+	if err != nil || !exactSenderPermit(permit, record.request, transfer, operationKind, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit is unavailable")
+	}
+	issued := uint64(now.Unix())
+	if issued < permit.IssuedAt {
+		issued = permit.IssuedAt
+	}
+	op, err := w.options.Signer.BuildSenderOperation(permit, method, path, body, record.operationID, record.idempotencyKey, issued, permit.ExpiresAt)
+	if err != nil || verifySenderOperation(op, permit, method, path, body, authority, now) != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source operation is unavailable")
+	}
+	stored, err := w.options.Journal.storeSenderCredentials(transfer.transferID, phase, chunk, permit, op)
+	if err != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
+	}
+	return w.credentials(ctx, transfer, phase, chunk, stored, body, authority, now)
+}
+
+func (j *Journal) storeSenderCredentials(transfer [16]byte, phase senderPhase, chunk uint64, permit attachmentv3.Permit, operation attachmentv3.OperationRecord) (senderOperationRecord, error) {
+	p, err := attachmentv3.EncodePermit(permit)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	o, err := attachmentv3.EncodeOperation(operation)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_sender_operations SET permit=?,operation=? WHERE transfer_id=? AND phase=? AND chunk_index=? AND permit IS NULL AND operation IS NULL`, p, o, transfer[:], string(phase), chunk)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	stored, found, err := j.senderOperation(transfer, phase, chunk)
+	if err != nil || !found || len(stored.permit) == 0 || len(stored.operation) == 0 || (changed == 0 && (!bytes.Equal(stored.permit, p) || !bytes.Equal(stored.operation, o))) {
+		return senderOperationRecord{}, errors.New("changed durable sender credentials")
+	}
+	return stored, nil
+}
+
+func (j *Journal) storeSenderOperationResult(transfer [16]byte, phase senderPhase, chunk uint64, raw []byte) error {
+	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_sender_operations SET result=? WHERE transfer_id=? AND phase=? AND chunk_index=? AND result IS NULL`, raw, transfer[:], string(phase), chunk)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	stored, found, err := j.senderOperation(transfer, phase, chunk)
+	if err != nil || !found || len(stored.result) == 0 || (changed == 0 && !bytes.Equal(stored.result, raw)) {
+		return errors.New("changed durable sender operation result")
+	}
+	return nil
+}
+
+func exactSenderPermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, transfer senderTransferRecord, operation uint64, now time.Time) bool {
+	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil || request.Operation != operation || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderSender || permit.TransferID != transfer.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != operation || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != transfer.commitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+		return false
+	}
+	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+}
+
+func verifySenderOperation(operation attachmentv3.OperationRecord, permit attachmentv3.Permit, method, path string, body []byte, authority SenderDeliveryAuthority, now time.Time) error {
+	route, request, err := attachmentv3.NewAttachmentOperationRequest(method, path, body, nil)
+	if err != nil {
+		return errors.New("invalid sender operation")
+	}
+	if _, _, err := attachmentv3.VerifyAttachmentOperationRequest(operation, permit, authority, route, request, now); err != nil {
+		return errors.New("invalid sender operation")
+	}
+	return nil
+}
+
+func senderOperationSpec(transfer [16]byte, phase senderPhase, chunk uint64) (uint64, string, string, error) {
+	method, path, err := senderOperationPath(transfer, phase, chunk)
+	if err != nil {
+		return 0, "", "", err
+	}
+	switch phase {
+	case senderPhaseSourceInit:
+		return attachmentv3.PermitOperationSourceInit, method, path, nil
+	case senderPhaseSourceUpload:
+		return attachmentv3.PermitOperationSourceUpload, method, path, nil
+	case senderPhaseOffer:
+		return attachmentv3.PermitOperationOffer, method, path, nil
+	default:
+		return 0, "", "", errors.New("invalid sender operation phase")
+	}
+}
+
+func senderPermitBounds(manifest attachmentv3.Manifest, phase senderPhase, bodyBytes uint64) (uint64, uint64) {
+	switch phase {
+	case senderPhaseSourceInit:
+		bytes := manifest.PlaintextSize + manifest.ChunkCount*16
+		if bytes < manifest.PlaintextSize {
+			return 0, 0
+		}
+		return bytes, manifest.ChunkCount
+	case senderPhaseSourceUpload:
+		if bodyBytes == 0 || bodyBytes > 256<<10+16 {
+			return 0, 0
+		}
+		return bodyBytes, 1
+	case senderPhaseOffer:
+		if bodyBytes == 0 || bodyBytes > 24555 {
+			return 0, 0
+		}
+		return bodyBytes, 1
+	default:
+		return 0, 0
+	}
+}
+
+func exactSenderResult(raw []byte, transfer senderTransferRecord, state attachmentv3.TransferState) (attachmentv3.TransferResult, error) {
+	result, err := attachmentv3.DecodeTransferResult(raw)
+	if err != nil || result.TransferID != transfer.transferID || result.ManifestCommitment != transfer.commitment || result.State != state || result.AttemptGeneration != 0 {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender source result")
+	}
+	return result, nil
+}

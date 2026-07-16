@@ -23,6 +23,7 @@ type Journal struct {
 	db        *sql.DB
 	recipient RecipientIdentity
 	acceptMu  sync.Mutex
+	senderMu  sync.Mutex
 }
 
 // RecipientIdentity pins this controller to its own enrolled attachment
