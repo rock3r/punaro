@@ -50,10 +50,11 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 	if originErr != nil {
 		return nil, false, originErr
 	}
-	sourceExists, admitted := false, false
+	sourceExists, admitted, knownOriginal := false, false, false
 	var originalResult []byte
 	err = tx.QueryRowContext(ctx, `SELECT result FROM v3_redeemed_operations WHERE permit_serial = ?`, original.Serial[:]).Scan(&originalResult)
 	if err == nil {
+		knownOriginal = true
 		var present uint64
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM v3_transfers WHERE transfer_id = ? AND manifest_commitment = ?`, permit.TransferID[:], permit.StagedManifestCommitment[:]).Scan(&present); err != nil {
 			return nil, false, err
@@ -118,7 +119,7 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 	}
 	if sourceExists && !admitted {
 		spec, found, err := loadSpecTx(ctx, tx, permit.TransferID)
-		if err != nil || !found || spec.ManifestCommitment != permit.StagedManifestCommitment || s.admitLedgerOperationTx(ctx, tx, spec, uint64(maxOperationResultBytes), now) != nil {
+		if err != nil || (found && (spec.ManifestCommitment != permit.StagedManifestCommitment || s.admitLedgerOperationTx(ctx, tx, spec, uint64(maxOperationResultBytes), now) != nil)) || (!found && !knownOriginal) {
 			return nil, false, errors.New("cannot admit v3 outcome operation")
 		}
 	}

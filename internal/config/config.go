@@ -178,7 +178,7 @@ func Load(explicitEnvFile string) (Config, error) {
 		if maxOperations, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_OPERATIONS", permitMaxOperations, 4096); decodeErr != nil {
 			return Config{}, decodeErr
 		}
-		if maxActive, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_ACTIVE", permitMaxActive, 4096); decodeErr != nil {
+		if maxActive, decodeErr = parsePositiveUint64("PUNARO_PERMIT_MAX_ACTIVE", permitMaxActive, 3*4096); decodeErr != nil {
 			return Config{}, decodeErr
 		}
 	}

@@ -58,9 +58,8 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	var outcomeOrigin Permit
 	if permit.Operation == permitOperationOutcome {
-		outcomeOrigin, err = outcomeOriginPermitTx(ctx, tx, permit, now)
+		_, err = outcomeOriginPermitTx(ctx, tx, permit, now)
 		if err != nil {
 			return err
 		}
@@ -74,9 +73,6 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	// outcome handler will atomically either observe the source or terminalize
 	// the bootstrap fence before it can be resurrected.
 	if !found {
-		if outcomeOrigin.Operation != permitOperationSourceInit {
-			return errors.New("missing v3 outcome source")
-		}
 		if err := insertIssuedPermitTx(ctx, tx, s, permit, raw, permitExpiry, now); err != nil {
 			return err
 		}

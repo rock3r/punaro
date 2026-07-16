@@ -107,7 +107,7 @@ func TestLoadRequiresCompletePermitIssuanceTrustAndExplicitLimits(t *testing.T) 
 	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 || cfg.PermitMaxActive != 8 {
 		t.Fatalf("config=%#v err=%v", cfg, err)
 	}
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "4097")
+	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "12289")
 	if _, err := Load(""); err == nil {
 		t.Fatal("permit issuance accepted an unbounded active permit ceiling")
 	}

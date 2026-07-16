@@ -173,6 +173,41 @@ func TestPermitIssuerBoundsRetainedRequestJournal(t *testing.T) {
 	}
 }
 
+func TestPermitIssuerReturnsOriginalExpiredReceiptForRecovery(t *testing.T) {
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderPublic, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 16, 3, 0, 0, 0, time.UTC)
+	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	request := testPermitRequest(clock)
+	if err := SignPermitRequest(&request, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(time.Minute).Unix())}}
+	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, replayed, err := issuer.Issue(context.Background(), request, authority)
+	if err != nil || replayed {
+		t.Fatalf("issued=%+v replayed=%t err=%v", issued, replayed, err)
+	}
+	clock = clock.Add(21 * time.Second)
+	recovered, replayed, err := issuer.Issue(context.Background(), request, authority)
+	if err != nil || !replayed || recovered != issued {
+		t.Fatalf("recovered=%+v issued=%+v replayed=%t err=%v", recovered, issued, replayed, err)
+	}
+}
+
 func requestIssuerID() [32]byte { return testHash(3) }
 
 func testPermitRequest(now time.Time) PermitRequest {

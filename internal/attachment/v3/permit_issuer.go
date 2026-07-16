@@ -16,6 +16,7 @@ import (
 const (
 	maxPermitRequestEncodedBytes = 4 << 10
 	permitRequestSignatureDomain = "punaro/attachment/permit-request/v3\x00"
+	maxRetainedPermitRequests    = 3 * 4096
 )
 
 // PermitRequest is a holder-signed, retry-stable request for exactly one v3
@@ -154,7 +155,7 @@ type PermitIssuer struct {
 }
 
 func NewPermitIssuer(options PermitIssuerOptions) (*PermitIssuer, error) {
-	if options.Store == nil || options.Store.db == nil || options.IssuerKeyID == [32]byte{} || len(options.PrivateKey) != ed25519.PrivateKeySize || options.MaxLifetime <= 0 || options.MaxLifetime > 30*time.Second || options.MaxBytes == 0 || options.MaxBytes > maxPermitCiphertextBytes || options.MaxChunks == 0 || options.MaxChunks > 4096 || options.MaxOperations == 0 || options.MaxOperations > 4096 || options.MaxActive == 0 || options.MaxActive > 4096 {
+	if options.Store == nil || options.Store.db == nil || options.IssuerKeyID == [32]byte{} || len(options.PrivateKey) != ed25519.PrivateKeySize || options.MaxLifetime <= 0 || options.MaxLifetime > 30*time.Second || options.MaxBytes == 0 || options.MaxBytes > maxPermitCiphertextBytes || options.MaxChunks == 0 || options.MaxChunks > 4096 || options.MaxOperations == 0 || options.MaxOperations > 4096 || options.MaxActive == 0 || options.MaxActive > maxRetainedPermitRequests {
 		return nil, errors.New("invalid v3 permit issuer configuration")
 	}
 	if options.Now == nil {
@@ -172,8 +173,8 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	}
 	now := i.now().UTC()
 	nowUnix := now.Unix()
-	if nowUnix < 0 || request.IssuedAt > uint64(nowUnix) || request.ExpiresAt <= uint64(nowUnix) {
-		return Permit{}, false, errors.New("expired v3 permit request")
+	if nowUnix < 0 || request.IssuedAt > uint64(nowUnix) {
+		return Permit{}, false, errors.New("invalid v3 permit request time")
 	}
 	holder, err := authority.CurrentDeviceSigningKey(request.HolderDeviceID, request.HolderGeneration)
 	if err != nil || len(holder) != ed25519.PublicKeySize {
@@ -182,6 +183,25 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	payload, err := request.signedBytes()
 	if err != nil || !ed25519.Verify(holder, payload, request.Signature[:]) {
 		return Permit{}, false, errors.New("invalid v3 permit request signature")
+	}
+	rawRequest, err := EncodePermitRequest(request)
+	if err != nil {
+		return Permit{}, false, err
+	}
+	// A request ID is an immutable issuance receipt. After a crash between
+	// relay issuance and local persistence, returning the original (possibly
+	// expired) permit gives the controller the precise serial needed for an
+	// outcome query. Replacing it with a fresh serial would strand a committed
+	// source-init behind an unrecoverable ambiguity.
+	if request.ExpiresAt <= uint64(nowUnix) {
+		stored, found, err := i.existingRequest(ctx, request.RequestID, rawRequest)
+		if err != nil {
+			return Permit{}, false, err
+		}
+		if found {
+			return stored, true, nil
+		}
+		return Permit{}, false, errors.New("expired v3 permit request")
 	}
 	binding, err := authority.CurrentPermitBinding(now)
 	if err != nil {
@@ -198,10 +218,6 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	expiresAt := minPermitExpiry(request.ExpiresAt, binding.ExpiresAt, uint64(issuerExpiry))
 	if expiresAt <= uint64(nowUnix) || request.MaxBytes > i.maxBytes || request.MaxChunks > i.maxChunks || request.MaxOperations > i.maxOperations {
 		return Permit{}, false, errors.New("v3 permit request exceeds issuer policy")
-	}
-	rawRequest, err := EncodePermitRequest(request)
-	if err != nil {
-		return Permit{}, false, err
 	}
 	for attempt := 0; attempt < 8; attempt++ {
 		var serial [16]byte
@@ -251,25 +267,7 @@ func (i *PermitIssuer) persistRequest(ctx context.Context, request PermitRequest
 		if decodeErr != nil {
 			return Permit{}, false, false, errors.New("invalid stored v3 permit")
 		}
-		if VerifyPermit(previous, authority, now) == nil {
-			return previous, true, false, tx.Commit()
-		}
-		var issued []byte
-		lookupErr := tx.QueryRowContext(ctx, `SELECT permit FROM v3_issued_permits WHERE serial = ?`, permit.Serial[:]).Scan(&issued)
-		if lookupErr == nil || !errors.Is(lookupErr, sql.ErrNoRows) && lookupErr != nil {
-			if lookupErr != nil {
-				return Permit{}, false, false, lookupErr
-			}
-			return Permit{}, false, true, nil
-		}
-		retainUntil, err := permitRequestRetention(i.store, permit, now)
-		if err != nil {
-			return Permit{}, false, false, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE v3_permit_requests SET permit = ?, permit_serial = ?, holder_device_id = ?, expires_at = ?, retain_until = ? WHERE request_id = ?`, rawPermit, permit.Serial[:], request.HolderDeviceID[:], permit.ExpiresAt, retainUntil, request.RequestID[:]); err != nil {
-			return Permit{}, false, false, fmt.Errorf("refresh v3 permit issuance: %w", err)
-		}
-		return permit, false, false, tx.Commit()
+		return previous, true, false, tx.Commit()
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Permit{}, false, false, err
@@ -300,6 +298,25 @@ func (i *PermitIssuer) persistRequest(ctx context.Context, request PermitRequest
 		return Permit{}, false, false, fmt.Errorf("record v3 permit issuance: %w", err)
 	}
 	return permit, false, false, tx.Commit()
+}
+
+func (i *PermitIssuer) existingRequest(ctx context.Context, requestID [16]byte, rawRequest []byte) (Permit, bool, error) {
+	var storedRequest, storedPermit []byte
+	err := i.store.db.QueryRowContext(ctx, `SELECT request, permit FROM v3_permit_requests WHERE request_id = ?`, requestID[:]).Scan(&storedRequest, &storedPermit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Permit{}, false, nil
+	}
+	if err != nil || !bytes.Equal(storedRequest, rawRequest) {
+		if err != nil {
+			return Permit{}, false, err
+		}
+		return Permit{}, false, errors.New("changed v3 permit issuance request")
+	}
+	permit, err := DecodePermit(storedPermit)
+	if err != nil {
+		return Permit{}, false, errors.New("invalid stored v3 permit")
+	}
+	return permit, true, nil
 }
 
 func permitRequestRetention(store *sourceStore, permit Permit, now time.Time) (int64, error) {

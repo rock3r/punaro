@@ -209,8 +209,12 @@ func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16
 // persisted, exactly route-bound operation. The plaintext and file key stay
 // out of this worker; it reads only immutable local ciphertext.
 func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]byte) (attachmentv3.TransferResult, error) {
-	if _, err := w.Initialize(ctx, transferID); err != nil {
+	initialized, err := w.Initialize(ctx, transferID)
+	if err != nil {
 		return attachmentv3.TransferResult{}, err
+	}
+	if initialized.State != attachmentv3.TransferStateSourceUploading {
+		return initialized, nil
 	}
 	transfer, err := w.options.Journal.senderTransfer(transferID)
 	if err != nil {
@@ -258,6 +262,7 @@ func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]
 	}()
 	go func() { workers.Wait(); close(results) }()
 	var ready attachmentv3.TransferResult
+	var terminal attachmentv3.TransferResult
 	var firstErr error
 	for item := range results {
 		if item.err != nil && firstErr == nil {
@@ -266,10 +271,16 @@ func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]
 		}
 		if item.result.State == attachmentv3.TransferStateSourceReady {
 			ready = item.result
+		} else if item.result.State == attachmentv3.TransferStateCancelled || item.result.State == attachmentv3.TransferStateExpired || item.result.State == attachmentv3.TransferStateRevoked {
+			cancel()
+			terminal = item.result
 		}
 	}
 	if firstErr != nil {
 		return attachmentv3.TransferResult{}, firstErr
+	}
+	if terminal.TransferID != [16]byte{} {
+		return terminal, nil
 	}
 	if ready.TransferID == [16]byte{} {
 		return attachmentv3.TransferResult{}, errors.New("sender uploads did not reach source ready")
@@ -623,7 +634,7 @@ func (w *SenderOutcomeWorker) Reconcile(ctx context.Context, transferID [16]byte
 		return attachmentv3.TransferResult{}, err
 	}
 	original, found, err := w.source.options.Journal.senderOperation(transferID, phase, chunk)
-	if err != nil || !found || len(original.result) != 0 || len(original.permit) == 0 || len(original.operation) == 0 {
+	if err != nil || !found || len(original.result) != 0 || len(original.permit) == 0 {
 		return attachmentv3.TransferResult{}, errors.New("sender operation is not reconcilable")
 	}
 	originalPermit, err := attachmentv3.DecodePermit(original.permit)
@@ -851,7 +862,13 @@ func (j *Journal) newSenderOutcomeAttempt(transfer senderTransferRecord, phase s
 	request.MaxOperations = 1
 	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(senderOutcomeLifetime).Unix())
 	manifest, err := attachmentv3.DecodeManifest(transfer.manifest)
-	if err != nil || request.ExpiresAt > manifest.ExpiresAt || request.ExpiresAt <= request.IssuedAt {
+	if err != nil {
+		return senderOutcomeAttempt{}, errors.New("invalid sender outcome source")
+	}
+	if request.ExpiresAt > manifest.ExpiresAt {
+		request.ExpiresAt = manifest.ExpiresAt
+	}
+	if request.ExpiresAt <= request.IssuedAt {
 		return senderOutcomeAttempt{}, errors.New("expired sender outcome source")
 	}
 	if err := signer.SignSenderPermit(&request); err != nil {
@@ -865,11 +882,11 @@ func (j *Journal) newSenderOutcomeAttempt(transfer senderTransferRecord, phase s
 	if found {
 		index = previous.index + 1
 	}
-	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_sender_outcome_attempts(transfer_id,phase,chunk_index,attempt_index,permit_request,operation_id,idempotency_key) VALUES(?,?,?,?,?,?,?)`, transfer.transferID[:], string(phase), chunk, index, raw, opID[:], key[:])
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_sender_outcome_attempts(transfer_id,phase,chunk_index,attempt_index,permit_request,operation_id,idempotency_key) VALUES(?,?,?,?,?,?,?) ON CONFLICT(transfer_id,phase,chunk_index,attempt_index) DO NOTHING`, transfer.transferID[:], string(phase), chunk, index, raw, opID[:], key[:])
 	if err != nil {
 		return senderOutcomeAttempt{}, err
 	}
-	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+	if _, err := result.RowsAffected(); err != nil {
 		return senderOutcomeAttempt{}, errors.New("record sender outcome attempt")
 	}
 	stored, storedFound, err := j.latestSenderOutcomeAttempt(transfer.transferID, phase, chunk)
@@ -973,7 +990,16 @@ func (w *SenderSourceInitializer) credentials(ctx context.Context, transfer send
 		return permit, op, nil
 	}
 	permit, err := w.options.Transport.IssueV3Permit(ctx, record.request)
-	if err != nil || !exactSenderPermit(permit, record.request, transfer, operationKind, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+	if err != nil || !exactSenderPermitFields(permit, record.request, transfer, operationKind) {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit is unavailable")
+	}
+	if attachmentv3.VerifyPermit(permit, authority, now) != nil {
+		if permit.ExpiresAt <= uint64(now.Unix()) {
+			if _, storeErr := w.options.Journal.storeSenderPermit(transfer.transferID, phase, chunk, permit); storeErr != nil {
+				return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, storeErr
+			}
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit expired before local persistence")
+		}
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit is unavailable")
 	}
 	issued := uint64(now.Unix())
@@ -992,7 +1018,7 @@ func (w *SenderSourceInitializer) credentials(ctx context.Context, transfer send
 }
 
 func (w *SenderSourceInitializer) reconcileExpired(ctx context.Context, transferID [16]byte, phase senderPhase, chunk uint64, record senderOperationRecord, now time.Time) (attachmentv3.TransferResult, error) {
-	if len(record.permit) == 0 || len(record.operation) == 0 || now.Unix() < 0 {
+	if len(record.permit) == 0 || now.Unix() < 0 {
 		return attachmentv3.TransferResult{}, errors.New("sender operation has no expired durable credentials")
 	}
 	permit, err := attachmentv3.DecodePermit(record.permit)
@@ -1030,6 +1056,26 @@ func (j *Journal) storeSenderCredentials(transfer [16]byte, phase senderPhase, c
 	return stored, nil
 }
 
+func (j *Journal) storeSenderPermit(transfer [16]byte, phase senderPhase, chunk uint64, permit attachmentv3.Permit) (senderOperationRecord, error) {
+	raw, err := attachmentv3.EncodePermit(permit)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_sender_operations SET permit=? WHERE transfer_id=? AND phase=? AND chunk_index=? AND permit IS NULL`, raw, transfer[:], string(phase), chunk)
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return senderOperationRecord{}, err
+	}
+	stored, found, err := j.senderOperation(transfer, phase, chunk)
+	if err != nil || !found || len(stored.permit) == 0 || (changed == 0 && !bytes.Equal(stored.permit, raw)) {
+		return senderOperationRecord{}, errors.New("changed durable sender permit")
+	}
+	return stored, nil
+}
+
 func (j *Journal) storeSenderOperationResult(transfer [16]byte, phase senderPhase, chunk uint64, raw []byte) error {
 	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_sender_operations SET result=? WHERE transfer_id=? AND phase=? AND chunk_index=? AND result IS NULL`, raw, transfer[:], string(phase), chunk)
 	if err != nil {
@@ -1047,10 +1093,17 @@ func (j *Journal) storeSenderOperationResult(transfer [16]byte, phase senderPhas
 }
 
 func exactSenderPermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, transfer senderTransferRecord, operation uint64, now time.Time) bool {
-	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil || request.Operation != operation || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderSender || permit.TransferID != transfer.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != operation || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != transfer.commitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+	if !exactSenderPermitFields(permit, request, transfer, operation) {
 		return false
 	}
 	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+}
+
+func exactSenderPermitFields(permit attachmentv3.Permit, request attachmentv3.PermitRequest, transfer senderTransferRecord, operation uint64) bool {
+	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil || request.Operation != operation || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderSender || permit.TransferID != transfer.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != operation || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != transfer.commitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+		return false
+	}
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt
 }
 
 func exactSenderOutcomeRequest(request attachmentv3.PermitRequest, original senderOperationRecord, transfer senderTransferRecord, now time.Time) bool {
