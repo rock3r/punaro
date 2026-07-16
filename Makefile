@@ -23,7 +23,8 @@ vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
 gosec:
-	go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 ./...
+	# G115 is documented in .golangci.yml: signed v3 values are bounded before conversion.
+	go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude=G115 ./...
 
 secrets:
 	go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git

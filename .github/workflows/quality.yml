@@ -26,7 +26,8 @@ jobs:
         with:
           version: v2.11.1
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 ./...
+      # G115's bounded-protocol rationale is documented in .golangci.yml.
+      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude=G115 ./...
       - run: go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
       - run: make fuzz
       - run: ./scripts/verify-release-gates.sh

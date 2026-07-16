@@ -428,25 +428,14 @@ func (j *Journal) storeReceiptDownloadPermit(record receiptDownloadRecord, opera
 	if err != nil {
 		return receiptDownloadOperation{}, err
 	}
-	table, where := "controller_receipt_download_operations", "punaro_message_id=? AND phase=? AND chunk_index=?"
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	query := `UPDATE controller_receipt_download_operations SET permit=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND permit IS NULL`
 	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
-		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
-		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
-		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
-		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
-		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
-		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		query = `UPDATE controller_receipt_download_operation_retries SET permit=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND permit IS NULL`
 		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
 		args = append(args, int64(operation.attempt))
 	}
-	result, err := j.db.ExecContext(context.Background(), `UPDATE `+table+` SET permit=? WHERE `+where+` AND permit IS NULL`, args...)
+	result, err := j.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
 		return receiptDownloadOperation{}, err
 	}
@@ -466,14 +455,14 @@ func (j *Journal) storeReceiptDownloadOperationSignature(record receiptDownloadR
 	if err != nil {
 		return receiptDownloadOperation{}, err
 	}
-	table, where := "controller_receipt_download_operations", "punaro_message_id=? AND phase=? AND chunk_index=?"
+	query := `UPDATE controller_receipt_download_operations SET operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation IS NULL`
 	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
-		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
+		query = `UPDATE controller_receipt_download_operation_retries SET operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND operation IS NULL`
 		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
 		args = append(args, int64(operation.attempt))
 	}
-	result, err := j.db.ExecContext(context.Background(), `UPDATE `+table+` SET operation=? WHERE `+where+` AND operation IS NULL`, args...)
+	result, err := j.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
 		return receiptDownloadOperation{}, err
 	}
@@ -492,14 +481,13 @@ func (j *Journal) storeReceiptDownloadResult(record receiptDownloadRecord, opera
 	if len(result) == 0 {
 		return errors.New("invalid receipt download result")
 	}
-	table, where := "controller_receipt_download_operations", "punaro_message_id=? AND phase=? AND chunk_index=?"
-	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	query := `UPDATE controller_receipt_download_operations SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND result IS NULL`
 	args := []any{result, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
-		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
+		query = `UPDATE controller_receipt_download_operation_retries SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND result IS NULL`
 		args = append(args, int64(operation.attempt))
 	}
-	changed, err := j.db.ExecContext(context.Background(), `UPDATE `+table+` SET result=? WHERE `+where+` AND result IS NULL`, args...)
+	changed, err := j.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
 		return err
 	}
