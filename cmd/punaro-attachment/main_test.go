@@ -21,3 +21,10 @@ func TestFixedIdentifierParsingRejectsNonCanonicalValues(t *testing.T) {
 		t.Fatal("wrong identifier length accepted")
 	}
 }
+
+func TestReceiveConfigurationFailsClosedWithoutLocalCredentials(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENT_RELAY_URL", "")
+	if _, err := loadReceiveConfig(); err == nil {
+		t.Fatal("receive accepted missing local credentials")
+	}
+}

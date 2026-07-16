@@ -78,7 +78,10 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 	}
 	if existing, found, err := journal.receiptDownload(inbound.PunaroMessageID); err != nil {
 		return attachmentv3.TransferResult{}, err
-	} else if found && existing.outputPath == destination {
+	} else if found {
+		if existing.outputPath != destination {
+			return attachmentv3.TransferResult{}, errors.New("changed receipt download destination")
+		}
 		if existing.state == receiptDownloadWritten {
 			return w.completedResult(existing)
 		}
@@ -92,6 +95,9 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 			}
 			return w.completedResult(existing)
 		}
+	}
+	if err := validateReceiptOutputDestination(destination); err != nil {
+		return attachmentv3.TransferResult{}, err
 	}
 	accepted, err := w.options.Acceptance.Accept(ctx, inbound)
 	if err != nil {

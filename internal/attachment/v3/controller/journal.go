@@ -13,6 +13,7 @@ import (
 	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/zeebo/blake3"
 	_ "modernc.org/sqlite"
 )
 
@@ -32,6 +33,46 @@ type Journal struct {
 type RecipientIdentity struct {
 	DeviceID   [16]byte
 	Generation uint64
+}
+
+// InboundOffer returns an immutable, previously recorded discovery notice for
+// a locally selected message. It does not approve, accept, or otherwise grant
+// authority to the offer; callers must still use the receipt worker's fresh
+// directory checks.
+func (j *Journal) InboundOffer(messageID string) (InboundOffer, error) {
+	if j == nil || j.db == nil || !validRelayIdentifier(messageID) {
+		return InboundOffer{}, errors.New("invalid recorded inbound offer")
+	}
+	var offer []byte
+	var relayConversationID string
+	err := j.db.QueryRowContext(context.Background(), `SELECT relay_conversation_id,offer FROM controller_inbound_offers WHERE punaro_message_id=?`, messageID).Scan(&relayConversationID, &offer)
+	if errors.Is(err, sql.ErrNoRows) {
+		return InboundOffer{}, errors.New("recorded inbound offer is unavailable")
+	}
+	if err != nil || !validRelayIdentifier(relayConversationID) || len(offer) == 0 || len(offer) > maxPendingOfferBytes {
+		return InboundOffer{}, errors.New("invalid recorded inbound offer")
+	}
+	return InboundOffer{PunaroMessageID: messageID, RelayConversationID: relayConversationID, Body: string(offer)}, nil
+}
+
+// ApprovedInboundOffer returns only a discovery notice whose immutable local
+// approval still matches the exact recorded offer. It avoids triggering any
+// directory or relay traffic for an unapproved mailbox delivery.
+func (j *Journal) ApprovedInboundOffer(messageID string) (InboundOffer, error) {
+	if j == nil || j.db == nil || !validRelayIdentifier(messageID) {
+		return InboundOffer{}, errors.New("invalid approved inbound offer")
+	}
+	var offer, approval []byte
+	var relayConversationID string
+	err := j.db.QueryRowContext(context.Background(), `SELECT inbound.relay_conversation_id,inbound.offer,approval.offer_commitment FROM controller_inbound_offers AS inbound JOIN controller_receipt_approvals AS approval ON approval.punaro_message_id=inbound.punaro_message_id WHERE inbound.punaro_message_id=?`, messageID).Scan(&relayConversationID, &offer, &approval)
+	if err != nil || !validRelayIdentifier(relayConversationID) || len(offer) == 0 || len(offer) > maxPendingOfferBytes || len(approval) != 32 {
+		return InboundOffer{}, errors.New("approved inbound offer is unavailable")
+	}
+	commitment := blake3.Sum256(offer)
+	if !bytes.Equal(approval, commitment[:]) {
+		return InboundOffer{}, errors.New("approved inbound offer is unavailable")
+	}
+	return InboundOffer{PunaroMessageID: messageID, RelayConversationID: relayConversationID, Body: string(offer)}, nil
 }
 
 func (r RecipientIdentity) valid() bool { return r.DeviceID != [16]byte{} && r.Generation != 0 }

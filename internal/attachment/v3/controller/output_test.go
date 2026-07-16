@@ -60,3 +60,20 @@ func TestWriteCompletedReceiptAtomicallyPublishesOnlyVerifiedPlaintext(t *testin
 		t.Fatal("existing output was overwritten")
 	}
 }
+
+func TestValidateReceiptOutputDestinationRejectsExistingOrUnsafePath(t *testing.T) {
+	parent := t.TempDir()
+	destination := filepath.Join(parent, "receipt.bin")
+	if err := validateReceiptOutputDestination(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(destination, []byte("already here"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReceiptOutputDestination(destination); err == nil {
+		t.Fatal("existing output accepted")
+	}
+	if err := validateReceiptOutputDestination(filepath.Join(parent, "missing", "receipt.bin")); err == nil {
+		t.Fatal("missing parent accepted")
+	}
+}
