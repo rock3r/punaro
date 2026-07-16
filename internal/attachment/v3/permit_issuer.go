@@ -16,7 +16,7 @@ import (
 const (
 	maxPermitRequestEncodedBytes = 4 << 10
 	permitRequestSignatureDomain = "punaro/attachment/permit-request/v3\x00"
-	maxRetainedPermitRequests    = 3 * 4096
+	maxRetainedPermitRequests    = 3*4096 + 16
 )
 
 // PermitRequest is a holder-signed, retry-stable request for exactly one v3

@@ -15,7 +15,11 @@ const (
 	// per upload and an exact recipient permit per download, plus lifecycle
 	// and bounded reconciliation permits. This is a per-source storage bound,
 	// not a per-permit operation quota.
-	maxActivePermitsPerSource = 3 * 4096
+	// A normal maximum-size lifecycle consumes source-init, 4096 uploads,
+	// offer/accept/begin/complete, and 4096 recipient downloads. The remaining
+	// chunk-count budget permits bounded crash recovery without allowing an
+	// unbounded relay-operation journal.
+	maxActivePermitsPerSource = 3*4096 + 16
 )
 
 type permitMutation func(context.Context, *sql.Tx) ([]byte, error)
@@ -231,8 +235,8 @@ func (s *sourceStore) redeemPermitOperation(ctx context.Context, permit Permit, 
 }
 
 func (s *sourceStore) admitLedgerOperationTx(ctx context.Context, tx *sql.Tx, spec sourceSpec, resultBytes uint64, now time.Time) error {
-	maxOperations := spec.ChunkCount + 16
-	if maxOperations < spec.ChunkCount || resultBytes > maxOperationResultBytes || maxOperations > 4112 {
+	maxOperations := 3*spec.ChunkCount + 16
+	if maxOperations < spec.ChunkCount || resultBytes > maxOperationResultBytes || maxOperations > maxActivePermitsPerSource {
 		return errors.New("invalid v3 ledger admission")
 	}
 	var commitmentRaw []byte
