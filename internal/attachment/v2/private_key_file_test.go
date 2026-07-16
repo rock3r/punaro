@@ -37,6 +37,27 @@ func TestLoadPrivateEd25519KeyFileAcceptsOnlyPrivateCanonicalKey(t *testing.T) {
 	}
 }
 
+func TestLoadPrivateEd25519KeyFileAllowsServiceGroupTraversal(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(directory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0o2750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "key")
+	if err := os.WriteFile(path, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPrivateEd25519KeyFile(path); err != nil {
+		t.Fatalf("service-group traversal rejected: %v", err)
+	}
+}
+
 func TestLoadPrivateEd25519KeyFileRejectsInconsistentKey(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {

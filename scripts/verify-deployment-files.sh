@@ -5,8 +5,9 @@ unit=deploy/systemd/user/punaro-adapter.service
 example=deploy/systemd/user/punaro-adapter.env.example
 launch_agent=deploy/launchd/punaro-adapter.plist
 snapshot_publisher=scripts/publish-directory-snapshot.sh
+snapshot_publisher_test=scripts/test-publish-directory-snapshot.sh
 
-for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher"; do
+for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test"; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
@@ -30,12 +31,24 @@ if grep -Eq 'PUNARO_CF_ACCESS_CLIENT_(ID|SECRET)=' "$launch_agent"; then
 	exit 1
 fi
 
+"$snapshot_publisher_test"
+
 for expected in \
 	'PUNARO_DIRECTORY_ROOT_PRIVATE_KEY' \
 	'PUNARO_PVE_SSH_TARGET' \
 	'PUNARO_PVE_CONTAINER_ID' \
 	'PUNARO_PVE_SSH_IDENTITY_FILE' \
 	'BatchMode=yes' \
+	'.punaro-directory-publish.lock' \
+	'directory_snapshot_publish_already_running' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' \
+	'/root/.punaro-directory-stage' \
+	'install -d -o root -g punaro -m 2750 /var/lib/punaro/private' \
+	'chown root:punaro' \
+	'[ ! -L' \
+	'stat -c %d' \
 	'--ttl 30s' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE contains unsafe characters' \

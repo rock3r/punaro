@@ -293,6 +293,15 @@ accepted view; root pinning and the private checkpoint store remain the only
 sources of directory trust. Attachment operation routes remain unmounted
 because runtime capacity quotas and reaper scheduling, adapter transport
 integration, end-to-end transfer drills, and release evidence are incomplete.
+Where a separately privileged publisher supplies that snapshot, the publication
+directory is root-owned and non-writable by the relay (`root:service-group`,
+mode `2750`), and the atomically replaced snapshot is group-readable but
+non-writable (`root:service-group`, mode `0640`). The relay may only belong to
+that narrowly reserved service group. The publisher creates each staging file
+inside a root-only container directory, verifies it is a regular non-symlink,
+then uses a same-filesystem rename; the relay cannot redirect the privileged
+copy or replace a newer head. Issuer private keys under that parent stay
+owner-only (`0600`).
 The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted

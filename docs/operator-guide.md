@@ -39,11 +39,15 @@ The v2 file-transfer API is disabled. A deployment may, however, exercise
 the prerequisite signed directory distribution independently by setting
 `PUNARO_DIRECTORY_ENABLED=true` and an absolute
 `PUNARO_DIRECTORY_SNAPSHOT_FILE`. The relay must also be enabled with its
-normal machine enrollment set. The snapshot parent and file must be private
-(`0700` directory, `0600` regular non-symlinked file); the daemon validates the
-complete canonical CBOR snapshot on every request and returns no cached
-fallback. Publish an updated snapshot by atomically replacing the configured
-file. The only endpoint is authenticated `GET /v2/directory`; it requires both
+normal machine enrollment set. For a separately privileged publisher, make the
+snapshot parent `root:punaro` mode `2750` and the published regular,
+non-symlinked file `root:punaro` mode `0640`: the relay needs only group read
+access, never write access to either path. Keep that service group limited to
+the relay; issuer keys in the same parent remain owner-only `0600` files. The
+daemon validates the complete canonical CBOR snapshot on every request and
+returns no cached fallback.
+Publish an updated snapshot by atomically replacing the configured file. The
+only endpoint is authenticated `GET /v2/directory`; it requires both
 the enrolled machine's signed request and, when configured, Cloudflare Access.
 
 The directory endpoint is a validation aid for enrollment, directory
@@ -277,8 +281,12 @@ an owner-only service configuration and schedule the next publication only
 after the prior 30-second snapshot and every permit it could have issued have
 expired (for example, a 31-second interval). Do not rotate a still-valid head:
 permits bind to that exact signed head. Do not run it on the relay or copy the
-root key into the container. If a publish fails, let the relay become unready
-rather than extending an old snapshot's lifetime.
+root key into the container. This deliberately creates a brief unready
+rollover boundary; callers must retry a fresh operation after it. If a publish
+fails, that unready state continues rather than extending an old snapshot's
+lifetime. Serialize publisher invocations and use a unique private staging
+filename for every attempt; an older invocation must never overwrite a newer
+snapshot.
 
 Directory history is append-only. For an update, retain every existing entry
 in the same order, append new/revocation entries, increment `sequence`, and

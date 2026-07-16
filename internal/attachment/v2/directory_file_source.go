@@ -26,11 +26,11 @@ func OpenDirectorySnapshotFileSource(path string) (*DirectorySnapshotFileSource,
 	}
 	parent := filepath.Dir(path)
 	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeDirectorySnapshotParent(info) {
 		return nil, errors.New("directory snapshot parent must be private and non-symlinked")
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !safeDirectorySnapshotFile(info) {
 			return nil, errors.New("directory snapshot file must be private and non-symlinked")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -48,11 +48,11 @@ func (s *DirectorySnapshotFileSource) CurrentDirectorySnapshot() ([]byte, error)
 		return nil, errors.New("directory snapshot source is unavailable")
 	}
 	parent, err := os.Lstat(filepath.Dir(s.path))
-	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeDirectorySnapshotParent(parent) {
 		return nil, errors.New("directory snapshot source is unavailable")
 	}
 	info, err := os.Lstat(s.path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeDirectorySnapshotFile(info) {
 		return nil, errors.New("directory snapshot source is unavailable")
 	}
 	// #nosec G304,G703 -- the path was explicitly configured locally and is
@@ -74,6 +74,18 @@ func (s *DirectorySnapshotFileSource) CurrentDirectorySnapshot() ([]byte, error)
 		return nil, errors.New("directory snapshot source is unavailable")
 	}
 	return append([]byte(nil), raw...), nil
+}
+
+// A separately privileged publisher may own the path while the relay runs in
+// its non-writable service group. Group read/execute on the directory and
+// group read on the snapshot are therefore safe; writes and all world access
+// would let an untrusted account replace or probe the configured authority.
+func safeDirectorySnapshotParent(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o027 == 0
+}
+
+func safeDirectorySnapshotFile(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o037 == 0
 }
 
 // FetchDirectorySnapshot makes the private publisher usable as the daemon's

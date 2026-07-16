@@ -21,7 +21,9 @@ func LoadPrivateEd25519KeyFile(path string) (ed25519.PrivateKey, error) {
 	}
 	parent := filepath.Dir(path)
 	parentInfo, err := os.Lstat(parent)
-	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o077 != 0 {
+	// A root-owned publisher directory can grant its service group traversal
+	// without granting it write access. The key itself remains owner-only.
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o027 != 0 {
 		return nil, errors.New("private key parent must be private and non-symlinked")
 	}
 	info, err := os.Lstat(path)
