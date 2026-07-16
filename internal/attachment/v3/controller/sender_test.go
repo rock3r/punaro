@@ -158,6 +158,12 @@ func TestSenderStagerStageIDIsStableAndRejectsChangedPlaintext(t *testing.T) {
 	if err != nil || third != first {
 		t.Fatalf("crash-recovered stage=%+v err=%v", third, err)
 	}
+	if _, err := journal.db.Exec(`UPDATE controller_sender_chunks SET ciphertext=x'00' WHERE transfer_id=? AND chunk_index=0`, first.TransferID[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stager.Stage(context.Background(), stageID, mapping.RelayConversationID, []byte("stable staged plaintext")); err == nil {
+		t.Fatal("corrupt persisted ciphertext was accepted")
+	}
 	if _, err := stager.Stage(context.Background(), stageID, mapping.RelayConversationID, []byte("changed staged plaintext")); err == nil {
 		t.Fatal("same stage ID accepted changed plaintext")
 	}

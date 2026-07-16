@@ -7,8 +7,10 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
+	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/zeebo/blake3"
 )
@@ -83,6 +85,9 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 	if binding.Sender.SigningKeyID == [32]byte{} || len(public) != ed25519.PublicKeySize || !bytes.Equal(public, binding.Sender.SigningPublicKey[:]) {
 		return attachmentv3.Manifest{}, errors.New("fresh sender signing identity is unavailable")
 	}
+	if _, err := s.options.Journal.ReapExpiredSenderStages(now, maxPendingSenderStages); err != nil {
+		return attachmentv3.Manifest{}, fmt.Errorf("reap expired sender stages: %w", err)
+	}
 	intent, found, err := s.options.Journal.senderStageIntent(stageID)
 	if err != nil {
 		return attachmentv3.Manifest{}, err
@@ -118,7 +123,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 		return attachmentv3.Manifest{}, errors.New("changed sender stage mapping")
 	}
 	manifest, err := attachmentv3.DecodeManifest(intent.manifest)
-	if err != nil || manifest.TransferID != intent.transferID || blake3.Sum256(intent.manifest) != intent.manifestCommitment {
+	if err != nil || manifest.TransferID != intent.transferID || blake3.Sum256(intent.manifest) != intent.manifestCommitment || !exactStagedManifest(manifest, mapping, binding, now) {
 		return attachmentv3.Manifest{}, errors.New("invalid durable sender stage intent")
 	}
 	fileKey, err := s.options.FileKeyProtector.OpenSenderFileKey(ctx, intent.wrappedFileKey, senderKeyAAD(manifest.TransferID, intent.manifestCommitment))
@@ -133,6 +138,10 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 		return attachmentv3.Manifest{}, err
 	}
 	return artifact.Manifest, nil
+}
+
+func exactStagedManifest(manifest attachmentv3.Manifest, mapping Mapping, binding attachmentv2.DirectoryTransferBinding, now time.Time) bool {
+	return now.Unix() >= 0 && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.DirectoryHead == binding.Permit.DirectoryHead && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.RevocationEpoch == binding.Permit.RevocationEpoch && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= binding.Permit.ExpiresAt
 }
 
 func newSourceArtifactMaterial() (attachmentv3.SourceArtifactMaterial, error) {
@@ -274,10 +283,28 @@ func (s *SenderStager) persistStaged(mapping Mapping, raw []byte, artifact attac
 		return err
 	}
 	if inserted == 0 {
-		var stored []byte
-		err := tx.QueryRowContext(context.Background(), `SELECT manifest FROM controller_sender_transfers WHERE transfer_id=?`, artifact.Manifest.TransferID[:]).Scan(&stored)
-		if err != nil || !bytes.Equal(stored, raw) {
+		var relay string
+		var stored, commitment, key []byte
+		err := tx.QueryRowContext(context.Background(), `SELECT relay_conversation_id,manifest,manifest_commitment,wrapped_file_key FROM controller_sender_transfers WHERE transfer_id=?`, artifact.Manifest.TransferID[:]).Scan(&relay, &stored, &commitment, &key)
+		if err != nil || relay != mapping.RelayConversationID || !bytes.Equal(stored, raw) || !bytes.Equal(commitment, artifact.ManifestCommitment[:]) || !bytes.Equal(key, wrappedKey) {
 			return errors.New("changed durable sender transfer")
+		}
+		rows, err := tx.QueryContext(context.Background(), `SELECT chunk_index,ciphertext,ciphertext_commitment FROM controller_sender_chunks WHERE transfer_id=? ORDER BY chunk_index`, artifact.Manifest.TransferID[:])
+		if err != nil {
+			return err
+		}
+		defer func() { _ = rows.Close() }()
+		index := 0
+		for rows.Next() {
+			var chunkIndex uint64
+			var ciphertext, chunkCommitment []byte
+			if err := rows.Scan(&chunkIndex, &ciphertext, &chunkCommitment); err != nil || index >= len(artifact.Chunks) || chunkIndex != artifact.Chunks[index].Index || !bytes.Equal(ciphertext, artifact.Chunks[index].Ciphertext) || !bytes.Equal(chunkCommitment, artifact.Chunks[index].CiphertextCommitment[:]) {
+				return errors.New("changed durable sender ciphertext")
+			}
+			index++
+		}
+		if err := rows.Err(); err != nil || index != len(artifact.Chunks) {
+			return errors.New("incomplete durable sender ciphertext")
 		}
 		return tx.Commit()
 	}

@@ -427,7 +427,7 @@ func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
 
 func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, now time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
 	result, err := attachmentv3.DecodeTransferResult(raw)
-	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.State != attachmentv3.TransferStateAccepted {
+	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.State != attachmentv3.TransferStateAccepted || result.AttemptGeneration != 0 {
 		return terminal()
 	}
 	if err := w.options.Journal.storeReceiptAcceptanceResult(messageID, raw); err != nil {
@@ -664,7 +664,7 @@ func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitR
 	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
-	return permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
 }
 func mustEncodePermit(permit attachmentv3.Permit) []byte {
 	raw, err := attachmentv3.EncodePermit(permit)

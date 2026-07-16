@@ -264,6 +264,25 @@ func TestRecipientAcceptanceRejectsOutcomePermitForAnotherTransferBeforeTranspor
 	}
 }
 
+func TestRecipientAcceptanceRejectsOutcomeAcceptedResultAtDownloadAttempt(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	notice, err := attachmentv3.DecodeOfferNotice(inbound.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.operationErr = errTest("accept response lost")
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("ambiguous acceptance failure was accepted")
+	}
+	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
+	transport.operationErr = nil
+	transport.result = acceptedTransferResultWithAttempt(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120, 1)
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("outcome accepted at attempt one")
+	}
+}
+
 type changedAcceptanceSigner struct{ RecipientOperationSigner }
 
 func (changedAcceptanceSigner) SignReceiptPermit(*attachmentv3.PermitRequest) error { return nil }
@@ -559,12 +578,15 @@ func (s *acceptanceTransportStub) DoV3Attachment(_ context.Context, method, path
 }
 
 func acceptedTransferResult(t *testing.T, transfer [16]byte, commitment [32]byte, expires int64) []byte {
+	return acceptedTransferResultWithAttempt(t, transfer, commitment, expires, 0)
+}
+func acceptedTransferResultWithAttempt(t *testing.T, transfer [16]byte, commitment [32]byte, expires int64, attempt uint64) []byte {
 	t.Helper()
 	mode, err := cbor.CanonicalEncOptions().EncMode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := mode.Marshal(map[uint64]any{1: uint64(3), 2: transfer, 3: commitment, 4: uint64(attachmentv3.TransferStateAccepted), 5: uint64(0), 6: expires})
+	raw, err := mode.Marshal(map[uint64]any{1: uint64(3), 2: transfer, 3: commitment, 4: uint64(attachmentv3.TransferStateAccepted), 5: attempt, 6: expires})
 	if err != nil {
 		t.Fatal(err)
 	}
