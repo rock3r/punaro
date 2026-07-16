@@ -71,6 +71,37 @@ func TestRecipientEnvelopeSealAndOpenV3(t *testing.T) {
 	if err != nil || got != fileKey {
 		t.Fatalf("key=%x err=%v", got, err)
 	}
+	offer, err := EncodeOfferPayload(manifest, envelope, testHash(73))
+	if err != nil {
+		t.Fatal(err)
+	}
+	noticeBody, err := EncodeOfferNotice(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notice, err := DecodeOfferNotice(noticeBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verified, _, err := VerifyOfferNotice(notice, directory, now); err != nil || verified.ManifestCommitment() != source.ManifestCommitment() {
+		t.Fatalf("offer verification commitment=%x err=%v", verified.ManifestCommitment(), err)
+	}
+	notice.Envelope.Signature[0] ^= 1
+	changedOffer, err := EncodeOfferPayload(notice.Manifest, notice.Envelope, notice.AcceptanceNonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedBody, err := EncodeOfferNotice(changedOffer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedNotice, err := DecodeOfferNotice(changedBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := VerifyOfferNotice(changedNotice, directory, now); err == nil {
+		t.Fatal("verified offer with a changed envelope signature")
+	}
 	envelope.RecipientHPKEKeyID[0] ^= 1
 	changed, err := EncodeEnvelope(envelope)
 	if err != nil {

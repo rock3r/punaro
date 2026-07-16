@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func TestJournalRequiresExplicitReceiptApprovalAfterFreshBinding(t *testing.T) {
 	}
 	now := time.Unix(100, 0).UTC()
 	resolver := &bindingResolverStub{binding: testCurrentBinding(mapping, 101)}
-	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err == nil {
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, testOfferDirectory(t), now); err == nil {
 		t.Fatal("receipt progressed without an explicit approval")
 	}
 	if approved, err := journal.ApproveInboundOffer("unknown", now); err == nil || approved {
@@ -102,11 +103,11 @@ func TestJournalRequiresExplicitReceiptApprovalAfterFreshBinding(t *testing.T) {
 	if approved, err := journal.ApproveInboundOffer(inbound.PunaroMessageID, now); err != nil || approved {
 		t.Fatalf("idempotent approval=%t err=%v", approved, err)
 	}
-	if notice, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err != nil || notice.Manifest.TransferID == [16]byte{} {
+	if notice, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, testOfferDirectory(t), now); err != nil || notice.Manifest.TransferID == [16]byte{} {
 		t.Fatalf("approved receipt notice=%+v err=%v", notice, err)
 	}
 	resolver.binding.Membership.Revoked = true
-	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err == nil {
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, testOfferDirectory(t), now); err == nil {
 		t.Fatal("revoked relationship progressed after approval")
 	}
 }
@@ -139,12 +140,38 @@ func TestReceiptApprovalSurvivesRestartButRejectsChangedDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 	resolver := &bindingResolverStub{binding: testCurrentBinding(mapping, 101)}
-	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err != nil {
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, testOfferDirectory(t), now); err != nil {
 		t.Fatalf("approved receipt did not recover after restart: %v", err)
 	}
 	inbound.Body += "x"
-	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, now); err == nil {
+	if _, err := journal.PrepareApprovedReceipt(context.Background(), inbound, resolver, testOfferDirectory(t), now); err == nil {
 		t.Fatal("changed delivery was accepted after restart")
+	}
+}
+
+func TestJournalAcceptsConcurrentExactMappingRetries(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(51), SenderDeviceID: bytes16(52), SenderGeneration: 1, RecipientDeviceID: bytes16(53), RecipientGeneration: 1, MembershipCommitment: bytes32(54)}
+	const workers = 16
+	errs := make(chan error, workers)
+	var group sync.WaitGroup
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			errs <- journal.AddMapping(mapping)
+		}()
+	}
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent exact mapping retry rejected: %v", err)
+		}
 	}
 }
 

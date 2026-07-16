@@ -1,7 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdh"
+	"crypto/ed25519"
 	"errors"
 	"testing"
 	"time"
@@ -88,6 +91,7 @@ func (s *bindingResolverStub) ResolveTransferBinding(_ context.Context, conversa
 
 func testOfferNotice(t *testing.T, mapping Mapping) string {
 	t.Helper()
+	_, signer := testOfferSigner()
 	manifest := attachmentv3.Manifest{
 		Audience:             bytes32(5),
 		TransferID:           bytes16(6),
@@ -108,6 +112,9 @@ func testOfferNotice(t *testing.T, mapping Mapping) string {
 		PlaintextSize:        0,
 		SignerKeyID:          bytes32(10),
 	}
+	if err := attachmentv3.SignManifest(&manifest, signer); err != nil {
+		t.Fatal(err)
+	}
 	manifestRaw, err := attachmentv3.EncodeManifest(manifest)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +133,9 @@ func testOfferNotice(t *testing.T, mapping Mapping) string {
 		Ciphertext:          make([]byte, 16),
 		SignerKeyID:         manifest.SignerKeyID,
 	}
+	if err := attachmentv3.SignEnvelope(&envelope, signer); err != nil {
+		t.Fatal(err)
+	}
 	raw, err := attachmentv3.EncodeOfferPayload(manifest, envelope, bytes32(13))
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +145,39 @@ func testOfferNotice(t *testing.T, mapping Mapping) string {
 		t.Fatal(err)
 	}
 	return notice
+}
+
+type offerDirectoryStub struct {
+	signer    ed25519.PublicKey
+	recipient *ecdh.PublicKey
+}
+
+func (d offerDirectoryStub) ValidateManifestAuthority(attachmentv3.Manifest, time.Time) (ed25519.PublicKey, error) {
+	return d.signer, nil
+}
+func (d offerDirectoryStub) CurrentRecipientHPKEKey([16]byte, uint64) ([32]byte, *ecdh.PublicKey, error) {
+	return bytes32(11), d.recipient, nil
+}
+func (d offerDirectoryStub) ResolveRecipientHPKEKey(_ [16]byte, _ uint64, id [32]byte) (*ecdh.PublicKey, error) {
+	if id != bytes32(11) {
+		return nil, errors.New("unknown key")
+	}
+	return d.recipient, nil
+}
+
+func testOfferSigner() (ed25519.PublicKey, ed25519.PrivateKey) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{90}, ed25519.SeedSize))
+	return private.Public().(ed25519.PublicKey), private
+}
+
+func testOfferDirectory(t *testing.T) offerDirectoryStub {
+	t.Helper()
+	private, err := ecdh.X25519().NewPrivateKey(bytes.Repeat([]byte{91}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, _ := testOfferSigner()
+	return offerDirectoryStub{signer: public, recipient: private.PublicKey()}
 }
 
 func bytes16(value byte) [16]byte {

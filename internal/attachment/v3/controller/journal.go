@@ -108,21 +108,28 @@ func (j *Journal) AddMapping(mapping Mapping) error {
 	if j == nil || j.db == nil || !mapping.valid() {
 		return errors.New("invalid controller mapping")
 	}
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_mappings(
+		relay_conversation_id, conversation_id, sender_device_id, sender_generation,
+		recipient_device_id, recipient_generation, membership_commitment
+	) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(relay_conversation_id) DO NOTHING`, mapping.RelayConversationID, mapping.ConversationID[:], mapping.SenderDeviceID[:], mapping.SenderGeneration, mapping.RecipientDeviceID[:], mapping.RecipientGeneration, mapping.MembershipCommitment[:])
+	if err != nil {
+		return err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if inserted == 1 {
+		return nil
+	}
 	existing, found, err := j.mapping(mapping.RelayConversationID)
 	if err != nil {
 		return err
 	}
-	if found {
-		if existing != mapping {
-			return errors.New("controller mapping is immutable")
-		}
-		return nil
+	if !found || existing != mapping {
+		return errors.New("controller mapping is immutable")
 	}
-	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_mappings(
-		relay_conversation_id, conversation_id, sender_device_id, sender_generation,
-		recipient_device_id, recipient_generation, membership_commitment
-	) VALUES (?, ?, ?, ?, ?, ?, ?)`, mapping.RelayConversationID, mapping.ConversationID[:], mapping.SenderDeviceID[:], mapping.SenderGeneration, mapping.RecipientDeviceID[:], mapping.RecipientGeneration, mapping.MembershipCommitment[:])
-	return err
+	return nil
 }
 
 // RecordInboundOffer validates an inert relay delivery against its stored

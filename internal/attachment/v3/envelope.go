@@ -214,6 +214,33 @@ func OpenRecipientEnvelope(rawEnvelope []byte, source VerifiedSource, directory 
 	return decoded.FileKey, nil
 }
 
+// VerifyOfferNotice proves that a canonical offer's manifest and outer
+// recipient envelope are both current-directory authenticated without
+// releasing its file key. Controllers use this before creating an approval
+// prompt; decryption remains a separate recipient-only action.
+func VerifyOfferNotice(notice OfferNotice, directory EnvelopeDirectoryKeyResolver, now time.Time) (VerifiedSource, Envelope, error) {
+	if directory == nil {
+		return VerifiedSource{}, Envelope{}, errors.New("missing v3 offer directory")
+	}
+	source, err := DecodeAndVerifySourceInit(notice.ManifestRaw, directory, now)
+	if err != nil {
+		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer manifest")
+	}
+	envelope, err := DecodeEnvelope(notice.EnvelopeRaw)
+	if err != nil {
+		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer envelope")
+	}
+	signer, err := directory.ValidateManifestAuthority(notice.Manifest, now.UTC())
+	if err != nil || !verifyEnvelope(envelope, notice.Manifest, notice.ManifestRaw, signer) {
+		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer envelope")
+	}
+	recipient, err := directory.ResolveRecipientHPKEKey(envelope.RecipientDeviceID, envelope.RecipientGeneration, envelope.RecipientHPKEKeyID)
+	if err != nil || recipient == nil {
+		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 recipient directory key")
+	}
+	return source, envelope, nil
+}
+
 func EncodeEnvelope(e Envelope) ([]byte, error) {
 	if err := validateEnvelope(e); err != nil {
 		return nil, err

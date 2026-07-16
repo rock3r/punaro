@@ -51,7 +51,7 @@ func (j *Journal) ApproveInboundOffer(punaroMessageID string, now time.Time) (ap
 // explicit local approval and a new exact directory verification. It is the
 // last discovery-stage boundary before a future recipient transfer worker may
 // obtain permits or touch an output path.
-func (j *Journal) PrepareApprovedReceipt(ctx context.Context, inbound InboundOffer, resolver TransferBindingResolver, now time.Time) (attachmentv3.OfferNotice, error) {
+func (j *Journal) PrepareApprovedReceipt(ctx context.Context, inbound InboundOffer, resolver TransferBindingResolver, directory attachmentv3.EnvelopeDirectoryKeyResolver, now time.Time) (attachmentv3.OfferNotice, error) {
 	if j == nil || j.db == nil {
 		return attachmentv3.OfferNotice{}, errors.New("controller journal is unavailable")
 	}
@@ -62,6 +62,9 @@ func (j *Journal) PrepareApprovedReceipt(ctx context.Context, inbound InboundOff
 	mapping, found, err := j.mapping(inbound.RelayConversationID)
 	if err != nil || !found || VerifyFreshMapping(ctx, mapping, resolver, now) != nil {
 		return attachmentv3.OfferNotice{}, errors.New("fresh v3 receipt directory binding is unavailable")
+	}
+	if _, _, err := attachmentv3.VerifyOfferNotice(notice, directory, now); err != nil {
+		return attachmentv3.OfferNotice{}, errors.New("fresh v3 receipt offer verification is unavailable")
 	}
 	if !j.receiptApproved(inbound.PunaroMessageID, notice.Raw) {
 		return attachmentv3.OfferNotice{}, errors.New("v3 receipt requires explicit approval")
