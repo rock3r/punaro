@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestDirectorySnapshotFileSourceReadsFreshCanonicalSnapshot(t *testing.T) {
@@ -40,7 +42,7 @@ func TestDirectorySnapshotFileSourceReadsFreshCanonicalSnapshot(t *testing.T) {
 	}
 }
 
-func TestDirectorySnapshotFileSourceAllowsReadOnlyServiceGroup(t *testing.T) {
+func TestDirectorySnapshotFileSourceRejectsRelayOwnedServiceGroupPath(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(parent, 0o750); err != nil {
@@ -57,11 +59,14 @@ func TestDirectorySnapshotFileSourceAllowsReadOnlyServiceGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := OpenDirectorySnapshotFileSource(path)
-	if err != nil {
-		t.Fatalf("read-only service group snapshot rejected: %v", err)
+	if err == nil || source != nil {
+		t.Fatal("relay-owned service-group snapshot accepted")
 	}
-	if _, err := source.CurrentDirectorySnapshot(); err != nil {
-		t.Fatalf("read-only service group snapshot unavailable: %v", err)
+	if !safeDirectorySnapshotParent(directorySnapshotTestInfo{mode: os.ModeDir | 0o2750, uid: 0}) {
+		t.Fatal("root-owned service-group parent rejected")
+	}
+	if !safeDirectorySnapshotFile(directorySnapshotTestInfo{mode: 0o640, uid: 0}) {
+		t.Fatal("root-owned service-group snapshot rejected")
 	}
 }
 
@@ -123,3 +128,15 @@ func testDirectorySnapshot(t *testing.T, marker byte) []byte {
 	}
 	return raw
 }
+
+type directorySnapshotTestInfo struct {
+	mode os.FileMode
+	uid  uint32
+}
+
+func (i directorySnapshotTestInfo) Name() string       { return "snapshot" }
+func (i directorySnapshotTestInfo) Size() int64        { return 0 }
+func (i directorySnapshotTestInfo) Mode() os.FileMode  { return i.mode }
+func (i directorySnapshotTestInfo) ModTime() time.Time { return time.Time{} }
+func (i directorySnapshotTestInfo) IsDir() bool        { return i.mode.IsDir() }
+func (i directorySnapshotTestInfo) Sys() any           { return &syscall.Stat_t{Uid: i.uid} }

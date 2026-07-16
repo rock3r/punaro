@@ -39,8 +39,11 @@ for expected in \
 	'PUNARO_PVE_CONTAINER_ID' \
 	'PUNARO_PVE_SSH_IDENTITY_FILE' \
 	'BatchMode=yes' \
-	'.punaro-directory-publish.lock' \
+	'.punaro-directory-publish.lockfile' \
 	'directory_snapshot_publish_already_running' \
+	'PUNARO_PUBLISH_LOCK_HELD' \
+	'fcntl.flock' \
+	'os.set_inheritable' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' \
@@ -48,6 +51,7 @@ for expected in \
 	'install -d -o root -g punaro -m 2750 /var/lib/punaro/private' \
 	'chown root:punaro' \
 	'[ ! -L' \
+	'[ ! -L \"\$parent\" ]' \
 	'stat -c %d' \
 	'--ttl 30s' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' \

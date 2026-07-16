@@ -286,7 +286,9 @@ rollover boundary; callers must retry a fresh operation after it. If a publish
 fails, that unready state continues rather than extending an old snapshot's
 lifetime. Serialize publisher invocations and use a unique private staging
 filename for every attempt; an older invocation must never overwrite a newer
-snapshot.
+snapshot. The supplied publisher uses a local advisory lock (via the standard
+`python3` `fcntl` module) that is released by the kernel after a crash or
+reboot; its persistent lockfile is not itself a failure condition.
 
 Directory history is append-only. For an update, retain every existing entry
 in the same order, append new/revocation entries, increment `sequence`, and

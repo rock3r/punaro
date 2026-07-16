@@ -34,19 +34,37 @@ case "$container_snapshot_file/" in *'/../'*) printf '%s\n' 'PUNARO_CONTAINER_SN
 container_snapshot_parent=$(dirname "$container_snapshot_file")
 [ "$container_snapshot_parent" = /var/lib/punaro/private ] || { printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' >&2; exit 2; }
 
-lock_dir="$(dirname "$PUNARO_DIRECTORY_MANIFEST")/.punaro-directory-publish.lock"
-if ! mkdir "$lock_dir" 2>/dev/null; then
-	printf '%s\n' 'directory_snapshot_publish_already_running' >&2
-	exit 75
+# Keep an advisory lock across exec, so the kernel releases it after a crash,
+# kill -9, or reboot. The file itself may persist safely; only its live lock
+# state controls publication.
+lock_file="$(dirname "$PUNARO_DIRECTORY_MANIFEST")/.punaro-directory-publish.lockfile"
+if [ "${PUNARO_PUBLISH_LOCK_HELD-}" != 1 ]; then
+	command -v python3 >/dev/null 2>&1 || { printf '%s\n' 'python3 is required for crash-safe publisher locking' >&2; exit 2; }
+	exec python3 - "$lock_file" "$0" "$@" <<'PY'
+import fcntl
+import os
+import sys
+
+lock_path, program, *program_args = sys.argv[1:]
+fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("directory_snapshot_publish_already_running", file=sys.stderr)
+    raise SystemExit(75)
+os.set_inheritable(fd, True)
+environment = os.environ.copy()
+environment["PUNARO_PUBLISH_LOCK_HELD"] = "1"
+os.execvpe(program, [program, *program_args], environment)
+PY
 fi
-work_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-directory.XXXXXXXX") || { rmdir "$lock_dir"; exit 1; }
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-directory.XXXXXXXX")
 remote_stage=
 container_stage=
 cleanup() {
 	[ -z "$remote_stage" ] || ssh_pve "$PUNARO_PVE_SSH_TARGET" rm -f -- "$remote_stage" >/dev/null 2>&1 || true
 	[ -z "$container_stage" ] || ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- rm -f -- '$container_stage'" >/dev/null 2>&1 || true
 	rm -rf -- "$work_dir"
-	rmdir "$lock_dir" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
 
@@ -66,7 +84,7 @@ container_stage=$(ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAIN
 case "$container_stage" in /root/.punaro-directory-stage/snapshot.*) ;; *) printf '%s\n' 'container returned an unsafe staging path' >&2; exit 1;; esac
 case "$container_stage" in *[!A-Za-z0-9_./-]*) printf '%s\n' 'container returned an unsafe staging path' >&2; exit 1;; esac
 ssh_pve "$PUNARO_PVE_SSH_TARGET" pct push "$PUNARO_PVE_CONTAINER_ID" "$remote_stage" "$container_stage"
-ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$1; target=\$2; parent=\$(dirname \"\$target\"); [ \"\$parent\" = /var/lib/punaro/private ]; [ -f \"\$stage\" ]; [ ! -L \"\$stage\" ]; [ \"\$(stat -c %U \"\$parent\")\" = root ]; [ \"\$(stat -c %G \"\$parent\")\" = punaro ]; [ \"\$(stat -c %a \"\$parent\")\" = 2750 ]; [ \"\$(stat -c %d /root/.punaro-directory-stage)\" = \"\$(stat -c %d \"\$parent\")\" ]; chown root:punaro \"\$stage\"; chmod 640 \"\$stage\"; mv -f -- \"\$stage\" \"\$target\"' sh '$container_stage' '$container_snapshot_file'"
+ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$1; target=\$2; parent=\$(dirname \"\$target\"); [ \"\$parent\" = /var/lib/punaro/private ]; [ ! -L \"\$parent\" ]; [ -f \"\$stage\" ]; [ ! -L \"\$stage\" ]; [ \"\$(stat -c %U \"\$parent\")\" = root ]; [ \"\$(stat -c %G \"\$parent\")\" = punaro ]; [ \"\$(stat -c %a \"\$parent\")\" = 2750 ]; [ \"\$(stat -c %d /root/.punaro-directory-stage)\" = \"\$(stat -c %d \"\$parent\")\" ]; chown root:punaro \"\$stage\"; chmod 640 \"\$stage\"; mv -f -- \"\$stage\" \"\$target\"' sh '$container_stage' '$container_snapshot_file'"
 container_stage=
 ssh_pve "$PUNARO_PVE_SSH_TARGET" rm -f -- "$remote_stage"
 remote_stage=

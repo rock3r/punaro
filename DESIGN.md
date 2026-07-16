@@ -300,7 +300,9 @@ non-writable (`root:service-group`, mode `0640`). The relay may only belong to
 that narrowly reserved service group. The publisher creates each staging file
 inside a root-only container directory, verifies it is a regular non-symlink,
 then uses a same-filesystem rename; the relay cannot redirect the privileged
-copy or replace a newer head. Issuer private keys under that parent stay
+copy or replace a newer head. A kernel-released advisory lock serializes
+publisher instances, so a crash cannot leave a stale lock that blocks
+republication. Issuer private keys under that parent stay
 owner-only (`0600`).
 The v2 core also has a strict, non-secret
 transfer lifecycle model with one fenced attempt and no transition out of a

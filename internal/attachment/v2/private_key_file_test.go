@@ -37,7 +37,7 @@ func TestLoadPrivateEd25519KeyFileAcceptsOnlyPrivateCanonicalKey(t *testing.T) {
 	}
 }
 
-func TestLoadPrivateEd25519KeyFileAllowsServiceGroupTraversal(t *testing.T) {
+func TestLoadPrivateEd25519KeyFileRejectsRelayOwnedServiceGroupTraversal(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -53,8 +53,11 @@ func TestLoadPrivateEd25519KeyFileAllowsServiceGroupTraversal(t *testing.T) {
 	if err := os.WriteFile(path, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadPrivateEd25519KeyFile(path); err != nil {
-		t.Fatalf("service-group traversal rejected: %v", err)
+	if _, err := LoadPrivateEd25519KeyFile(path); err == nil {
+		t.Fatal("relay-owned service-group traversal accepted")
+	}
+	if !safePrivateKeyParent(directorySnapshotTestInfo{mode: os.ModeDir | 0o2750, uid: 0}) {
+		t.Fatal("root-owned service-group key parent rejected")
 	}
 }
 
