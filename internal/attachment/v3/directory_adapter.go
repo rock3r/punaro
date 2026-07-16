@@ -57,6 +57,24 @@ func (a *DirectoryAuthorityAdapter) ResolvePermitIssuanceAuthority(ctx context.C
 	return directoryAuthorityView{resolver: resolver}, nil
 }
 
+// ResolveTransferBinding fetches a new root-verified directory snapshot and
+// returns only the exact locally selected relationship. It must never be used
+// to discover a recipient or replace an existing local conversation mapping.
+func (a *DirectoryAuthorityAdapter) ResolveTransferBinding(ctx context.Context, conversationID, senderID [16]byte, senderGeneration uint64, recipientID [16]byte, recipientGeneration uint64, membershipCommitment [32]byte, now time.Time) (attachmentv2.DirectoryTransferBinding, error) {
+	if a == nil || a.provider == nil {
+		return attachmentv2.DirectoryTransferBinding{}, errors.New("missing v3 directory provider")
+	}
+	authority, err := a.provider.ResolveAttachmentAuthority(ctx, now)
+	if err != nil {
+		return attachmentv2.DirectoryTransferBinding{}, errors.New("fresh v3 directory authority is unavailable")
+	}
+	resolver, ok := authority.(*attachmentv2.DirectorySnapshotResolver)
+	if !ok || resolver == nil {
+		return attachmentv2.DirectoryTransferBinding{}, errors.New("invalid v3 directory authority")
+	}
+	return resolver.ResolveTransferBinding(conversationID, senderID, senderGeneration, recipientID, recipientGeneration, membershipCommitment, now)
+}
+
 type directoryAuthorityView struct {
 	resolver *attachmentv2.DirectorySnapshotResolver
 }
