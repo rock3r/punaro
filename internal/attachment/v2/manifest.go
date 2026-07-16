@@ -109,7 +109,7 @@ func validateManifest(m Manifest) error {
 	if isZero16(m.TransferID) || isZero16(m.ConversationID) || isZero16(m.SenderDeviceID) || isZero16(m.RecipientDeviceID) || isZero32(m.Audience) || isZero32(m.DirectoryHead) || isZero32(m.MembershipCommitment) || isZero32(m.ContentSalt) || isZero32(m.PlaintextCommitment) || isZero32(m.SignerKeyID) {
 		return errors.New("missing manifest binding")
 	}
-	if m.SenderGeneration == 0 || m.RecipientGeneration == 0 || m.ExpiresAt <= m.IssuedAt || m.ChunkSize == 0 || m.ChunkSize > 256<<10 || m.ChunkCount == 0 || m.ChunkCount > 4096 || m.PlaintextSize > 64<<20 {
+	if m.SenderGeneration == 0 || m.RecipientGeneration == 0 || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt-m.IssuedAt > 30 || m.ChunkSize == 0 || m.ChunkSize > 256<<10 || m.ChunkCount == 0 || m.ChunkCount > 4096 || m.PlaintextSize > 64<<20 {
 		return errors.New("invalid manifest bounds")
 	}
 	fullChunksBeforeLast := m.ChunkSize * (m.ChunkCount - 1)

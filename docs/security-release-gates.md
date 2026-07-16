@@ -14,9 +14,10 @@ current attachment gate is intentionally **closed**.
 
 ## Current source assertions (not release evidence)
 
-- The source rejects every non-literal-loopback listener and tests attachment
-  startup refusal before a listener is constructed.
-- `punarod` has no attachment import, route mount, or WebRTC constructor.
+- The source rejects every non-literal-loopback listener. V2 attachment
+  switches fail closed; v3 has a separate, explicit, machine-authenticated
+  validation runtime and remains subject to the v3 gates below.
+- `punarod` has no v2 attachment-operation route mount or WebRTC constructor.
 - The container context is allow-listed; Compose has no `.env`, port, or network
   and has a read-only root with no Linux capabilities.
 - CI source pins Actions and OCI lint/build inputs to immutable revisions.
@@ -43,6 +44,21 @@ checked.
       direct-origin tests; produce an SBOM and scanned, attested release image.
 - [ ] Complete an independent cryptography/protocol review and an operator
       restore/revocation exercise against the release candidate.
+
+## Attachment v3 controlled runtime (not released)
+
+- [ ] Add fixed positive and negative v3 vectors for permit requests, permits,
+      operations, manifests, envelopes, offers, and every strict HTTP route;
+      add decoder and route fuzzing with corpus retention.
+- [ ] Demonstrate end-to-end sender/recipient offer delivery, acceptance,
+      fenced download, decryption, completion, cancellation, expiry, and
+      fresh-directory revocation with restart and recovery boundaries.
+- [ ] Complete independent protocol/cryptography, adversarial, and operations
+      reviews against the final release candidate, not only implementation
+      slices.
+- [ ] Produce restore, disk-pressure, singleton-writer, Cloudflare Access,
+      origin-isolation, and machine/device revocation drills with committed
+      evidence before any sensitive production file is admitted.
 
 ## Public relay and operations (closed)
 

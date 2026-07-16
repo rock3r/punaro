@@ -47,10 +47,63 @@ offline grace period.  Two valid heads for the same audience and sequence with
 different roots are equivocation: freeze that audience, retain the evidence,
 and issue or accept no permit until an operator-approved recovery head arrives.
 
+### Directory head and consistency proof encoding
+
+The directory-head record is CDE map `{1=version,2=audience,3=root_key_id,
+4=tree_size,5=tree_root,6=sequence,7=issued_at,8=expires_at,
+9=revocation_epoch,99=signature}`. `version` is exactly `2`; audience, both
+key IDs, and tree root are 32-byte strings; tree size and sequence are non-zero
+unsigned integers. Its signature preimage is ASCII
+`punaro/attachment/directory-head/v2`, one NUL byte, followed by CDE encoding
+of the same map without field `99`. The encoded head is at most 4 KiB.
+
+The initial bounded deployment uses a full consistency proof: an ordered array
+of exactly `tree_size` 32-byte leaf hashes, limited to 4096 leaves. The tree
+root is the sole leaf hash for a one-leaf tree. Each internal node is
+BLAKE3-256 of ASCII `punaro/attachment/directory-node/v2`, one NUL byte,
+followed by its left and right child hashes; an odd final node is promoted
+unchanged. To advance a checkpoint, a verifier recomputes both the old prefix
+root and new full root from this proof. A compact proof format may replace this
+only in a future version with equivalent vectors and review; accepting an
+underspecified compact proof is forbidden.
+
 Request signatures bind an immutable relay audience/instance ID, protocol
 version, method, canonical path, body commitment, device generation, request
 nonce, and request expiry.  Replay consumption is durable and shared by every
 replica for the audience.  Device keys are never reused across audiences.
+
+### Directory snapshot entries
+
+Every snapshot is an ordered list whose leaf hash is BLAKE3-256 of ASCII
+`punaro/attachment/directory-leaf/v2`, one NUL byte, followed by its CDE entry.
+The verifier recomputes the entire ordered tree from these leaves and requires
+an exact match with the signed head before it writes any anti-rollback
+checkpoint. A signed head without its matching snapshot is therefore unusable
+and cannot poison a local checkpoint.
+
+A device entry is CDE map `{1=1,2=device_id,3=generation,4=signing_key_id,
+5=signing_public_key,6=hpke_key_id,7=hpke_public_key,8=revoked}`. Device IDs
+are 16-byte strings; both public keys and key IDs are 32-byte strings; and the
+generation is a non-zero unsigned integer. A device generation first appears
+unrevoked. A later entry for that exact device generation may only change
+`revoked` from false to true: it must reproduce every key field verbatim and
+may never revive the generation.
+
+A membership entry is CDE map `{1=2,2=conversation_id,3=sender_device_id,
+4=sender_generation,5=recipient_device_id,6=recipient_generation,
+7=membership_commitment,8=revoked}`. Conversation and device IDs are 16-byte strings;
+generations are non-zero unsigned integers; and the commitment is 32 bytes.
+The `(conversation, sender device/generation, recipient device/generation,
+membership commitment)` tuple first appears unrevoked. A later identical entry
+may only change `revoked` from false to true. This tombstone is required when a
+membership is removed or replaced; an unrevoked historic grant is not active
+after its tombstone. A manifest is authorized only when its audience,
+directory-head commitment, revocation epoch, signer key ID, sender generation,
+recipient generation, and membership commitment all match this fresh, active
+snapshot. For each device ID, only the highest directory generation is active;
+older generations are superseded even before an explicit tombstone. The
+recipient's HPKE key is resolved from that same current, non-revoked device
+record.
 
 ## Immutable records
 
@@ -136,8 +189,15 @@ the first 12 bytes of BLAKE3-256 over ASCII
 `manifest_commitment`, and `i`.  The chunk AAD is CDE map
 `{1=version,2=transfer_id,3=manifest_commitment,4=chunk_index,5=chunk_count,6=plaintext_length}`.
 Every value must equal the Manifest; `plaintext_length` is the actual chunk
-length.  Implementations reserve this nonce tuple and the file-key commitment
-durably before encryption and never reuse either, including after crashes.
+length. Before encryption, implementations atomically reserve the file-key
+commitment, content-salt commitment, and every nonce tuple for the complete
+artifact. The file-key commitment is BLAKE3-256 of ASCII
+`punaro/attachment/file-key/v2`, one NUL byte, and the 32-byte file key. The
+content-salt commitment is BLAKE3-256 of ASCII
+`punaro/attachment/content-salt/v2`, one NUL byte, and the 32-byte content
+salt. The nonce tuple is `(transfer_id, manifest_commitment, chunk_index)`.
+These reservations must be in one durable transaction and are never reused,
+including after crashes, cancellation, or artifact-upload failure.
 
 The Manifest body is the following required map; its signature is field `99`.
 The signature preimage is ASCII `punaro/attachment/manifest/v2`, one NUL byte,
@@ -218,7 +278,10 @@ dependency/toolchain update must pass it plus decoder fuzzing.
 `created -> source-ready -> offered -> accepted -> transferring -> completed`
 is the only successful path.  `expired`, `cancelled`, and `revoked` are
 terminal.  Source readiness is atomic: the complete immutable artifact and
-manifest must exist before an offer can be accepted.
+manifest must exist before an offer can be accepted. When a relay stores
+ciphertext, every exact-sized chunk and its ciphertext commitment must already
+be durable there before the `offered` transition; a relay may not advertise a
+partial source and rely on later upload completion.
 
 The directory authorizes the sender, conversation, recipient snapshot, and
 operation.  A relay-signed, short-lived permit is required for every operation.
@@ -243,13 +306,168 @@ permit itself invalid.  Each authorized request instead includes a CSPRNG
 `operation_id`, canonical operation/path/target commitment, body commitment,
 and idempotency key; all are covered by the holder signature and must match the
 permit's allowed operation and quota.  `redeemed_operations` is keyed by
-`(permit serial, operation_id)` and atomically transitions `pending` to
+`(permit serial, operation_id)` with a second unique key on
+`(permit serial, idempotency key)`, and atomically transitions `pending` to
 `succeeded` with the state mutation.  An identical retry returns the recorded
 result.  A different body, target, operation, or idempotency key for a redeemed
 operation is rejected.  A permit cannot be used after expiry, for a different
 attempt, or beyond its byte/chunk/operation quota.  Conformance vectors must
 cover issuance collision, valid retry, changed-body retry, cross-path replay,
 expired permit, and exhausted quota.
+
+Before an issuer creates a permit, the intended holder submits a separate
+canonical, holder-signed permit request. It carries a CSPRNG `request_id`, the
+holder device/generation/role, transfer and conversation bindings, sender and
+recipient generations, attempt, operation, membership commitment, requested
+limits, and a short request validity interval. The request contains neither a
+directory head nor a revocation epoch: the issuer obtains those only from its
+fresh root-verified directory view. The issuer resolves the holder's active
+device signing key from that same view, verifies the request signature, applies
+server-side quota limits, ensures its own issuer key is active in that view,
+and clamps permit expiry to the request, directory-head, and issuer limits.
+`request_id` is durable idempotency: an identical retry returns the exact
+stored permit; changed bytes for an existing ID are rejected. Issuance records
+the request and permit serial atomically.
+
+The pre-release issuer endpoint, when exercised for authorization drills, is
+`POST /v2/permits`. It is admitted by the normal optional Access layer and a
+durably replay-protected enrolled-machine request signature before the holder
+request is parsed. The deployment configuration binds each issuer-capable
+machine credential to exactly one 16-byte directory device ID, and the route
+requires that binding to equal the holder ID in the signed permit request.
+This is an independent admission check: possession of a copied holder
+signature never authorizes another enrolled machine to submit it. The endpoint
+must fetch and verify one complete fresh directory snapshot per request and
+must not mount any transfer, signaling, or chunk route merely because permit
+issuance is enabled.
+
+The relay derives the signed path, target, and body commitments from the
+canonical decoded HTTP request; it never accepts client-supplied commitment
+values or usage counters. Upload redemption covers the received non-empty
+ciphertext chunk. Download redemption covers the exact non-empty ciphertext
+chunk selected from immutable relay storage for its response, while its signed
+request body remains empty. Each consumes one chunk and its exact ciphertext
+length. Other operations consume zero ciphertext bytes and chunks. The ledger
+totals these derived values in the same transaction as
+the state mutation and redemption result; it rejects a request before that
+mutation if any permit bound would be exceeded.
+
+### Permit and operation-record encoding
+
+Permit issuer keys are directory entries with CDE map
+`{1=3,2=issuer_key_id,3=issuer_public_key,4=revoked}`. Both fields are 32-byte
+strings. An issuer key first appears unrevoked; a later identical entry may
+only change `revoked` to true. A recipient verifies a permit only through a
+fresh, current directory snapshot containing the active issuer key, exact
+sender and recipient device generations, and the exact active membership
+tuple. It also verifies the audience, directory-head commitment, revocation
+epoch, and that permit expiry does not outlive that head. This deliberately
+separates root-authorized permit issuers from device signing keys.
+
+The permit signature preimage is ASCII `punaro/attachment/permit/v2`, one NUL
+byte, followed by the map below without field `99`; the signature is Ed25519
+and exactly 64 bytes. `holder_role` is `1=sender`, `2=recipient`, or
+`3=relay`; `operation` is `1=offer`, `2=accept`, `3=upload`, `4=download`,
+`5=signal`, or `6=complete`. There is no wildcard operation, role, recipient,
+or attempt. The current client HTTP routes bind `offer`, `upload`, and
+`signal` to the sender role; `accept`, `download`, and `complete` to the
+recipient role. Relay-held permits are reserved for a future relay-only route
+and are invalid on every current client HTTP route.
+
+| Key | Field | Type / constraint |
+| --- | --- | --- |
+| 1 | version | unsigned; exactly `2` |
+| 2 | audience | bstr(32) |
+| 3 | serial | bstr(16) |
+| 4 | issuer_key_id | bstr(32) |
+| 5 | holder_device_id | bstr(16) |
+| 6 | holder_generation | unsigned, non-zero |
+| 7 | holder_role | unsigned, `1..3` |
+| 8 | transfer_id | bstr(16) |
+| 9 | conversation_id | bstr(16) |
+| 10 | sender_device_id | bstr(16) |
+| 11 | sender_generation | unsigned, non-zero |
+| 12 | recipient_device_id | bstr(16) |
+| 13 | recipient_generation | unsigned, non-zero |
+| 14 | attempt_generation | unsigned, non-zero |
+| 15 | operation | unsigned, `1..6` |
+| 16 | directory_head | bstr(32) |
+| 17 | membership_commitment | bstr(32) |
+| 18 | revocation_epoch | unsigned |
+| 19 | issued_at | unsigned |
+| 20 | expires_at | unsigned; at most 60 seconds after issue and never later than directory head expiry |
+| 21 | max_bytes | unsigned; at most 64 MiB |
+| 22 | max_chunks | unsigned; at most 4096 |
+| 23 | max_operations | unsigned, `1..4096` |
+| 99 | signature | bstr(64) |
+
+An operation record is CDE map `{1=2,2=permit_serial,3=operation_id,
+4=operation,5=method,6=path_commitment,7=target_commitment,
+8=body_commitment,9=idempotency_key,10=issued_at,11=expires_at,99=signature}`.
+All commitments and idempotency-key values are 32-byte strings; `method` is
+the fixed unsigned method identifier from the versioned HTTP schema. Its
+signature preimage is ASCII `punaro/attachment/operation/v2`, one NUL byte,
+plus the map without field `99`. The holder signature is required before any
+database lookup. A permit verifier must require every field to match the
+concrete canonical HTTP operation and body before atomically redeeming it. The
+path has no query or fragment, the target is bounded canonical identifier
+bytes, and the raw body has the operation's bounded schema size.
+
+### HTTP operation schema
+
+The only version-two relay routes are below. `transfer_id` is exactly 16 bytes
+encoded as 32 lowercase hexadecimal characters; `index` and `attempt` are
+canonical decimal unsigned integers (no sign or leading zero). The request
+target is CDE map `{1=2,2=transfer_id,3=operation}` with `4=index` for a chunk
+or `5=attempt` for an attempt start. The relay derives it from the parsed route;
+the client does not submit it as a separate field.
+
+| HTTP method | Route | Operation |
+| --- | --- | --- |
+| `POST` | `/v2/attachments/{transfer_id}/offer` | `offer` |
+| `POST` | `/v2/attachments/{transfer_id}/accept` | `accept` |
+| `PUT` | `/v2/attachments/{transfer_id}/chunks/{index}` | `upload` |
+| `GET` | `/v2/attachments/{transfer_id}/chunks/{index}` | `download` |
+| `POST` | `/v2/attachments/{transfer_id}/attempts/{attempt}/begin` | `signal` |
+| `POST` | `/v2/attachments/{transfer_id}/complete` | `complete` |
+
+No query string, fragment, alternate encoding, extra path segment, or other
+HTTP method is valid. For a lifecycle route, the parsed transfer ID and
+operation must exactly equal the permit; an attempt-start route must also equal
+the permit attempt generation before signature verification or a state lookup.
+Each request has exactly one `X-Punaro-Attachment-Permit` and exactly one
+`X-Punaro-Attachment-Operation` header. Each is the unpadded base64url
+encoding of the complete canonical permit or operation record respectively.
+Duplicate, padded, non-canonical, or oversized header values are rejected.
+The relay rejects a body with a content encoding, a request body larger than
+one encrypted frame plus its AEAD tag, and any request whose URL parser exposes
+an escaped-path form. It obtains a fresh directory authority view for every
+request; cache freshness is not an authorization grace period. For downloads,
+it verifies the permit and holder signature before reading a stored ciphertext,
+then verifies the complete path, target, body, and response-ciphertext binding
+before returning bytes.
+
+A directory consumer fetches a complete `{head, consistency proof, ordered
+entries}` view for every attachment request and runs the complete root-signature,
+snapshot-root, freshness, checkpoint, and equivocation checks before using it.
+An unavailable, malformed, stale, or unverifiable refresh is a hard failure;
+the last accepted view must not be used as a grace fallback.
+
+The transport representation of this complete view is a bounded canonical
+version-two CBOR envelope. It carries the exact encoded head, the ordered full
+consistency leaf hashes (or an empty proof for an initial checkpoint), and the
+complete ordered directory entries. A consumer decodes, re-encodes, and
+requires byte-for-byte equality before snapshot verification; a relay never
+constructs a verifier input from partially decoded JSON or caller-selected key
+maps.
+
+An offer body is CDE map `{1=2,2=manifest,3=envelope,4=acceptance_nonce}`.
+`manifest` and `envelope` are their complete canonical encodings and
+`acceptance_nonce` is a fresh 32-byte random value. The recipient's accept body
+is exactly that 32-byte nonce. The relay stores it with the immutable offer and
+uses a compare-and-set update to consume it in the same transaction as the
+recipient-signed `offered -> accepted` transition. A retry returns the original
+redemption result; a distinct operation cannot consume the nonce again.
 
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
 signaling immediately after a fresh directory view.  Direct transport closes

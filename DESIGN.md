@@ -5,18 +5,23 @@ agents on several computers and a human operator through Telegram. It does **not
 or share a machine's local `agent_mailbox` state. Each computer retains its
 local mailbox; a local adapter translates between that mailbox and Punaro.
 
-The first production target is a dedicated Proxmox LXC on the NUC. The relay is
+The first production target is a dedicated unprivileged Linux LXC. The relay is
 written in Go. Go matches the existing `agent-mailbox` toolchain, produces a
 single static-ish service binary, and keeps the runtime small and auditable.
 
 ## Implementation status
 
-This document describes the target architecture, not a released service.  The
-current `punarod` binary is a local, loopback-only health daemon.  It has no
-message, adapter, Telegram, public-ingress, WebSocket, or attachment runtime.
-The attachment package is a testable foundation only and attachment enablement
-fails closed before listening.  The authoritative security release conditions
-are in [`docs/security-release-gates.md`](docs/security-release-gates.md).
+This document describes the target architecture, not a released service. The
+current `punarod` binary provides a loopback-only alpha text relay: explicit
+machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
+advertising, and payload-free WebSocket wake hints. A local adapter bridges
+this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
+adds explicit Telegram topic routing and a restricted Bot API client. The full
+attachment data plane remains a testable foundation and enablement fails closed
+before listening. A separately opt-in permit issuer exists only for
+directory/authorization drills; it does not mount a transfer route. The
+authoritative release conditions are in
+[`docs/security-release-gates.md`](docs/security-release-gates.md).
 
 ## Goals
 
@@ -83,7 +88,9 @@ Punaro separates three principals:
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
 can only advertise endpoints in its configured namespace (for example,
-`agent/`) and only after local attachment is confirmed.
+`agent/`) and only after local attachment is confirmed. A machine may instead
+be enrolled for a named exact legacy endpoint; exact enrollment is equality
+only, never an implicit client-wide namespace.
 
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. The Telegram gateway is a distinct principal; only
@@ -98,7 +105,15 @@ prompt, repository, or mailbox body.
 
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
-only through the tunnel. It requires a valid machine credential for every
+only through the tunnel. Both the issuer and JWKS endpoint must be
+unambiguous HTTPS URLs (no credentials, query, or fragment), and the bounded
+JWKS fetcher rejects redirects so configuration validation cannot be bypassed
+by a later hop. A systemd deployment instead consumes a fresh, root-managed
+local JWKS snapshot; this keeps the daemon's egress deny-list intact while a
+separate, constrained refresh unit is the only component permitted to fetch
+the configured HTTPS URL. The daemon warms and revalidates that source for
+startup and `/readyz`, so it cannot advertise readiness with a missing, stale,
+or unparsable Access boundary. It requires a valid machine credential for every
 adapter request. Use an enrolled Ed25519 device key with request signatures
 (method, path, body hash, timestamp, and nonce), or mTLS client certificates;
 the exact choice is an implementation decision, not an optional security
@@ -108,10 +123,13 @@ authorization.
 
 ## Delivery model
 
-Messages are immutable rows. A relay-assigned UUID is the message identity;
-the sender supplies a separate idempotency key scoped to its machine. Each
-conversation has a monotonically increasing `sequence` assigned transactionally
-at acceptance. The guarantee is **at-least-once delivery**: a crash after a
+Conversation creation and messages use separate idempotency records, each
+scoped to the signed machine and bound to the normalized request. Retrying a
+create returns the original conversation; changing the request under the same
+key is a conflict. Messages are immutable rows. A relay-assigned UUID is the
+message identity; the sender supplies a separate idempotency key scoped to its
+machine. Each conversation has a monotonically increasing `sequence` assigned
+transactionally at acceptance. The guarantee is **at-least-once delivery**: a crash after a
 local mailbox injection but before the relay receives the acknowledgement can
 produce a redelivery.
 
@@ -176,17 +194,18 @@ WebSocket reconnect never alters delivery cursors.
 
 ## Minimal HTTP surface
 
-All requests use HTTPS and require both Cloudflare Access validation and Punaro
-machine authentication, except the Telegram gateway's loopback-only endpoint.
+All remote requests use HTTPS and require Punaro machine authentication.
+Cloudflare Access JWT validation is additionally enabled when all three Access
+verifier configuration values are set. The Telegram process is an outbound Bot
+API client and reaches the relay using its own enrolled machine credential.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/machines/heartbeat` | Renew machine and endpoint leases. |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
-| `POST` | `/v1/conversations` | Create a conversation with explicit members. |
+| `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
-| `GET` | `/v1/deliveries` | Lease durable deliveries, optionally for one topic. |
+| `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
 | `GET` | `/v1/notifications` | Best-effort WebSocket wake-up stream. |
 
@@ -197,19 +216,19 @@ cover client retry windows.
 
 ## Telegram integration
 
-The Telegram gateway converts an explicitly selected allowed private-chat topic
-into one Punaro conversation. It verifies every configured allowed Telegram
-user ID on each update, records `update_id` idempotently, prevents concurrent pollers, and
-stores short-lived opaque callback references server-side rather than exposing
-endpoint addresses in callback data. A topic's target picker lists only active,
-authorized endpoints. Selecting a target creates or updates explicit
-conversation membership rather than a hidden global route.
+The Telegram gateway converts one explicitly configured topic into one Punaro
+conversation. It verifies the configured allowed Telegram user ID on every
+update. It persists `update_id` only after the relay append succeeds; retrying
+an unrecorded update uses the same relay idempotency key, so crashes or
+transient relay failures do not silently lose user input.
 
-For inbound Telegram messages, the gateway appends a normal Punaro message to
-the selected conversation. For outbound messages, it consumes a durable gateway
-delivery and posts using Telegram's `message_thread_id`. Store the Telegram
-chat ID, topic ID, and reply-to message ID as gateway metadata; do not infer a
-topic and never silently fall back to the main chat.
+For outbound messages, it leases a durable gateway delivery and posts it using
+the exact stored `message_thread_id`. One durable unique route prevents a
+conversation from fanning out to multiple topics. There is no topic picker,
+callback data, or main-chat fallback. The Bot API does not expose a send
+idempotency key, so a crash after an accepted Telegram send and before relay
+acknowledgement is deliberately at-least-once. Agent text is rendered as
+escaped rich HTML with entity detection disabled and content protection set.
 
 An optional major-update adapter action resolves the registered
 conversation/topic and submits a concise milestone or blocker message. It must
@@ -232,21 +251,153 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 
 Attachment transfer uses a separate encrypted data plane; it never puts file
 bytes, file keys, or recipient redemption material in a normal Punaro message
-or WebSocket hint. The current code is a testable protocol foundation only;
-`punarod` deliberately refuses to mount its HTTP surface even when attachment
-configuration is present. It will remain fail-closed until all gates in the
+or WebSocket hint. The current code includes an unmounted strict HTTP handler;
+`punarod` deliberately refuses to mount it even when attachment configuration
+is present. It will remain fail-closed until all gates in the
 [attachment RFC](docs/attachments-v2-rfc.md) and
 [security release checklist](docs/security-release-gates.md) are complete.
 
-`internal/attachment/v2` currently provides an offline-only, strict canonical
-CBOR record core: verified signed manifests, manifest commitments, and
-recipient-bound HPKE envelopes.  It has no daemon import, persistence, HTTP
-parser, relay storage, directory client, or transport integration.  In
-particular, it does **not** make attachments usable, establish a fresh
-directory key binding itself, reserve key/salt uniqueness durably, or satisfy
-the vector/fuzz/review release gates.  Callers must only construct its verified
-manifest input after fresh directory verification; the runtime needed to do
-that does not exist yet.
+`internal/attachment/v2` currently provides a strict canonical
+CBOR record core: verified signed manifests, manifest commitments,
+recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
+resolver with a durable anti-rollback checkpoint, and a source-artifact helper
+that reserves file-key/content-salt/nonce uniqueness before encryption. It has
+canonical permits whose issuer, sender/recipient membership, device
+generations, directory head, epoch, and expiry are all checked against the
+same fresh directory snapshot, plus a private SQLite serial and
+operation-redemption ledger. Permit issuance now starts with a separately
+holder-signed, retry-stable request; the issuer verifies that holder and its
+own public key against the same fresh directory, derives the head/epoch rather
+than accepting caller values, clamps every requested limit, and atomically
+persists the request-to-permit mapping. The ledger accepts only a fully verified exact
+operation and runs its SQL state mutation in the same transaction as recording
+the idempotent result. Its handler accepts only the versioned routes and exact
+canonical permit/operation headers, resolves fresh directory authority for
+every request, and derives all commitments from the request. A separately
+gated `/v2/directory` endpoint now serves only complete canonical snapshots to
+an enrolled, replay-protected machine request; it reads and validates a fresh
+private snapshot file for every request and is covered by the same optional
+Access middleware as the text relay. A separately gated `POST /v2/permits`
+uses the same fresh provider, but only after an enrolled machine's
+replay-protected request is explicitly bound to the request holder's 16-byte
+directory device ID; a directory device cannot be bound to multiple machine
+credentials. Its issuer key comes only from a private, non-symlinked,
+canonical-key file and its lifetime and quotas are explicit configuration,
+with an explicit global live-permit ceiling. The ledger transactionally reaps
+expired permits together with their issuance and redemption rows before
+admitting a new permit, while an exact live request retry remains idempotent at
+that ceiling.
+The authority provider fetches a complete
+signed snapshot for every attachment request and never falls back to a stale
+accepted view; root pinning and the private checkpoint store remain the only
+sources of directory trust. Attachment operation routes remain unmounted
+because runtime capacity quotas and reaper scheduling, adapter transport
+integration, end-to-end transfer drills, and release evidence are incomplete.
+Where a separately privileged publisher supplies that snapshot, the publication
+directory is root-owned and non-writable by the relay (`root:service-group`,
+mode `2750`), and the atomically replaced snapshot is group-readable but
+non-writable (`root:service-group`, mode `0640`). The relay may only belong to
+that narrowly reserved service group. The publisher creates each staging file
+inside a root-only container directory, verifies it is a regular non-symlink,
+then uses a same-filesystem rename; the relay cannot redirect the privileged
+copy or replace a newer head. A kernel-released advisory lock serializes
+publisher instances, so a crash cannot leave a stale lock that blocks
+republication. Issuer private keys under that parent stay
+owner-only (`0600`).
+The v2 core also has a strict, non-secret
+transfer lifecycle model with one fenced attempt and no transition out of a
+terminal state, plus a private SQLite store that writes its permitted
+transitions in the same transaction as durable permit redemption and refuses
+obsolete table layouts rather than attempting a lossy migration. It is not
+mounted yet. Its strict route parser derives operation bindings only from the
+fixed versioned HTTP schema and prevents a permit from crossing into another
+transfer route; sender-only actions are offer/upload/begin, recipient-only
+actions are accept/download/complete, and no current client route accepts a
+relay-holder permit. Offers contain a one-time recipient acceptance nonce that is
+consumed with the accepted transition, rather than treating a state change
+alone as acceptance evidence. The v2 core
+also has an immutable source-ready store which atomically persists a freshly
+verified manifest, recipient envelope, and all ciphertext chunks before an
+offer can reference it. Its withheld relay store independently refuses to
+make an offer recipient-visible unless it already contains every exact-sized,
+commitment-verified ciphertext chunk for that Manifest; a partial source is a
+hard failure, not a pending offer. In
+particular, it does **not** make
+attachments usable, or satisfy the vector/fuzz/review release gates. Callers
+must only construct its verified-manifest input after fresh directory
+verification; the directory-distribution prerequisite now exists, but the
+remaining attachment runtime does not.
+
+## Attachment-transfer v3 controlled runtime
+
+V3 is a distinct record, signature, and route namespace that solves the v2
+source-staging bootstrap cycle. It does not reinterpret any v2 manifest,
+permit, operation, or envelope. Its explicit runtime is constructed only when
+all of these are present: a private shared source store, a fresh root-verified
+directory adapter, an authorized issuer key, an independently authenticated
+machine-to-directory-device binding for permit issuance, and the equivalent
+binding for every attachment operation. It mounts `/v3/permits` and the strict
+`/v3/attachments/...` routes together; the runtime owns one SQLite source
+store, so issuance and redemption cannot accidentally use different ledgers.
+
+The source-init exception is deliberate and narrow. A sender must first obtain
+a holder-signed v3 source-init permit. The issuer journals the exact request
+and permit; source init verifies that journal entry, verifies the fresh signed
+Manifest body, records both the source and issued permit, and records the
+operation result in one transaction. Later permits are registered against the
+current lifecycle before they are returned. Exact issuance retries remain
+available after lifecycle advance only after fresh issuer/revocation
+validation; retained request identities are bounded per holder and expire only
+after tombstone retention. This prevents bootstrap by an arbitrary valid
+issuer signature, request-ID replacement after short permit expiry, and
+retry failure after normal source cleanup.
+
+The local sender command opens a sender-only journal and requires its pinned
+source identity to match the pre-approved relationship before staging. It
+creates encrypted artifacts only after a local private artifact store has
+reserved file-key, salt, and nonce tuples; the file key is wrapped by the
+machine Keychain or a private systemd credential and is never placed in that
+journal. It issues holder-signed v3 permits and submits permit/operation-bound
+bytes through the same replay-protected machine transport as text. Every send
+requires a caller-retained stage ID: retries reuse only the exact immutable
+staged transfer, never newly generated source material. Once an expired stage
+is reaped, its ID is retained as a bounded tombstone and is rejected forever;
+the local caller must use a new ID rather than silently creating a second
+transfer. Before the source is allowed to reach `offer`, the sender reserves
+bounded durable capacity for the exact canonical offer in the adapter-owned
+`OfferNoticeOutbox`; held rows are not visible to the relay sync loop. Only
+after the successful `offer` result is durable does it activate that row for
+delivery. An inactive row is never age-reaped: an offer may have been accepted
+immediately before a sender crash, so only sender recovery within the signed
+manifest and outcome-capability lifetime may activate it. Once those records
+expire, the hold is a deliberate fail-closed quarantine rather than a
+recoverable transfer; it remains bounded local capacity until an audited
+operator incident procedure resolves it. A crash after relay acceptance but
+before local deletion merely retries the stable
+relay idempotency key. The notice is discovery data only: it is neither
+a download URL nor an authorization grant; the recipient must fresh-verify its
+manifest/envelope, use its local HPKE key, and obtain recipient-held permits
+before it can accept or download. A bounded reaper runs in the daemon and is
+stopped before its SQLite stores close.
+
+The implementation does not expose a mailbox database, accept public links,
+move file bytes through Telegram, or decrypt at the relay. Recipient-side
+orchestration, recovery drills, vectors/fuzzing, and release evidence remain
+required; the runtime is a controlled validation surface, not a production
+attachment release.
+
+The local v3 controller binds each text-relay conversation to one exact,
+operator-approved directory conversation, sender generation, recipient
+generation, and membership commitment. It persists the canonical inbound offer
+under its relay message ID, deduplicates only byte-identical retries, and
+requires a separate explicit local receipt approval. Before any future
+recipient permit, acceptance, download, or decrypt action, the controller
+must re-fetch and root-verify that exact directory relationship; a notice
+cannot discover a new member or override the binding. The recipient validates
+that the requested output destination is a new regular path before acceptance,
+then uses an atomic no-replace finalization after decryption. Merely receiving
+a typed mailbox offer therefore never starts a data-plane action or writes an
+output.
 
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally
@@ -273,6 +424,10 @@ and static/container configuration checks.  The operator guide explicitly
 lists what is not yet a supported production operation.
 
 - TLS only; no HTTP listener exposed outside loopback/private LXC network.
+  Access issuer/JWKS metadata is HTTPS-only and its JWKS client must not follow
+  redirects. The daemon must either prove safe direct JWKS egress or, for the
+  systemd profile, consume a fresh root-managed local snapshot refreshed by a
+  separately constrained unit before reporting ready.
 - Firewall the LXC so only `cloudflared` reaches the relay listener. Strip
   incoming `CF-*` and forwarding headers before any reverse-proxy boundary;
   never treat a client-supplied identity header as authenticated.
@@ -306,7 +461,7 @@ lists what is not yet a supported production operation.
    it alongside the current bridge without changing production routing.
 3. Add Telegram gateway as a separate process and migrate one topic.
 4. Add the best-effort WebSocket notifier and reconnect/poll instrumentation.
-5. Deploy to the NUC LXC, configure Cloudflare Access/Tunnel, and run a
+5. Deploy to a dedicated LXC, configure Cloudflare Access/Tunnel, and run a
    restore, direct-origin-bypass, and credential-revocation drill before
    exposing it remotely.
 

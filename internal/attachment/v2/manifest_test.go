@@ -139,6 +139,14 @@ func TestManifestRejectsInconsistentChunkGeometry(t *testing.T) {
 	}
 }
 
+func TestManifestRejectsLifetimeLongerThanThirtySeconds(t *testing.T) {
+	manifest := sampleManifest()
+	manifest.ExpiresAt = manifest.IssuedAt + 31
+	if _, err := EncodeManifest(manifest); err == nil {
+		t.Fatal("EncodeManifest accepted a manifest lifetime longer than 30 seconds")
+	}
+}
+
 func TestManifestAllowsEmptyArtifactWithOneEmptyChunk(t *testing.T) {
 	manifest := sampleManifest()
 	manifest.ChunkCount = 1

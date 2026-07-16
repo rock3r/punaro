@@ -22,7 +22,6 @@ linters:
     - unconvert
     - unused
     - usestdlibvars
-
 formatters:
   enable:
     - gofmt

@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+: "${PUNARO_ACCESS_JWKS_URL:?PUNARO_ACCESS_JWKS_URL is required}"
+: "${PUNARO_ACCESS_JWKS_FILE:?PUNARO_ACCESS_JWKS_FILE is required}"
+
+case "$PUNARO_ACCESS_JWKS_URL" in
+	https://*) ;;
+	*) echo "JWKS URL must use HTTPS" >&2; exit 1 ;;
+esac
+
+case "$PUNARO_ACCESS_JWKS_FILE" in
+	/etc/punaro/jwks/*.json) ;;
+	*) echo "JWKS file must be beneath /etc/punaro/jwks" >&2; exit 1 ;;
+esac
+
+snapshot_dir=$(dirname "$PUNARO_ACCESS_JWKS_FILE")
+temporary=$(mktemp "$snapshot_dir/.jwks.XXXXXX")
+cleanup() { rm -f "$temporary"; }
+trap cleanup EXIT HUP INT TERM
+
+/usr/bin/curl --fail --silent --show-error --connect-timeout 5 --max-time 15 --proto '=https' --output "$temporary" "$PUNARO_ACCESS_JWKS_URL"
+bytes=$(wc -c <"$temporary" | tr -d '[:space:]')
+if [ "$bytes" -eq 0 ] || [ "$bytes" -gt 262144 ]; then
+	echo "JWKS response is empty or exceeds the configured maximum" >&2
+	exit 1
+fi
+
+chmod 0640 "$temporary"
+mv -f "$temporary" "$PUNARO_ACCESS_JWKS_FILE"
+trap - EXIT HUP INT TERM

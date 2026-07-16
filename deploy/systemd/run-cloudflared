@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+credential_dir=${CREDENTIALS_DIRECTORY:?systemd credential directory is required}
+token_file="$credential_dir/tunnel-token"
+
+if [ ! -s "$token_file" ]; then
+	echo "cloudflared tunnel credential is unavailable" >&2
+	exit 1
+fi
+
+exec /usr/bin/cloudflared tunnel --no-autoupdate run --token-file "$token_file"
