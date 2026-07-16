@@ -107,6 +107,8 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			offer BLOB NOT NULL, transfer_id BLOB NOT NULL,
 			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
 		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS controller_offer_transfer_identity
+			ON controller_inbound_offers(relay_conversation_id, transfer_id)`,
 		`CREATE TABLE IF NOT EXISTS controller_receipt_approvals (
 			punaro_message_id TEXT PRIMARY KEY, offer_commitment BLOB NOT NULL,
 			approved_at INTEGER NOT NULL,
@@ -180,10 +182,21 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 	if err != nil {
 		return attachmentv3.OfferNotice{}, false, err
 	}
+	var transferOffer []byte
+	err = j.db.QueryRowContext(context.Background(), `SELECT offer FROM controller_inbound_offers WHERE relay_conversation_id = ? AND transfer_id = ?`, inbound.RelayConversationID, notice.Manifest.TransferID[:]).Scan(&transferOffer)
+	if err == nil {
+		if bytes.Equal(transferOffer, notice.Raw) {
+			return notice, false, nil
+		}
+		return attachmentv3.OfferNotice{}, false, errors.New("conflicting v3 offer transfer")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return attachmentv3.OfferNotice{}, false, err
+	}
 	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id)
 		SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM controller_inbound_offers) < ?
 		AND (SELECT COALESCE(SUM(length(offer)), 0) FROM controller_inbound_offers) + ? <= ?
-		ON CONFLICT(punaro_message_id) DO NOTHING`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:], maxPendingOffers, len(notice.Raw), maxPendingOfferBytes)
+		ON CONFLICT DO NOTHING`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:], maxPendingOffers, len(notice.Raw), maxPendingOfferBytes)
 	if err != nil {
 		return attachmentv3.OfferNotice{}, false, err
 	}
@@ -202,6 +215,13 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 			return notice, false, nil
 		}
 		return attachmentv3.OfferNotice{}, false, errors.New("changed v3 offer retry")
+	}
+	err = j.db.QueryRowContext(context.Background(), `SELECT offer FROM controller_inbound_offers WHERE relay_conversation_id = ? AND transfer_id = ?`, inbound.RelayConversationID, notice.Manifest.TransferID[:]).Scan(&transferOffer)
+	if err == nil {
+		if bytes.Equal(transferOffer, notice.Raw) {
+			return notice, false, nil
+		}
+		return attachmentv3.OfferNotice{}, false, errors.New("conflicting v3 offer transfer")
 	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return attachmentv3.OfferNotice{}, false, errors.New("v3 offer discovery capacity exhausted")
