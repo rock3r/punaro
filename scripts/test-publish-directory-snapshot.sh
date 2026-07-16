@@ -62,9 +62,10 @@ set -e
 [ "$contender_output" = 'directory_snapshot_publish_already_running' ] || { printf '%s\n' 'concurrent publisher rejection was unexpected' >&2; exit 1; }
 wait "$holder" || true
 
-# The child kills the lock-owning shell exactly as a crash would. A later
-# invocation must acquire the advisory lock rather than inheriting a stale one.
-printf '%s\n' '#!/bin/sh' 'kill -9 "$PPID"' 'exit 1' > "$fixture_dir/binary"
+# The child kills the publisher shell exactly as a crash would while its own
+# child survives briefly. That lingering child must not retain the advisory
+# lock and block the next publisher.
+printf '%s\n' '#!/bin/sh' 'sleep 3 &' 'kill -9 "$PPID"' 'exit 1' > "$fixture_dir/binary"
 set +e
 publisher_env >/dev/null 2>&1
 set -e

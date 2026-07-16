@@ -43,6 +43,7 @@ if [ "${PUNARO_PUBLISH_LOCK_HELD-}" != 1 ]; then
 	exec python3 - "$lock_file" "$0" "$@" <<'PY'
 import fcntl
 import os
+import subprocess
 import sys
 
 lock_path, program, *program_args = sys.argv[1:]
@@ -52,10 +53,10 @@ try:
 except BlockingIOError:
     print("directory_snapshot_publish_already_running", file=sys.stderr)
     raise SystemExit(75)
-os.set_inheritable(fd, True)
 environment = os.environ.copy()
 environment["PUNARO_PUBLISH_LOCK_HELD"] = "1"
-os.execvpe(program, [program, *program_args], environment)
+completed = subprocess.run([program, *program_args], env=environment, close_fds=True)
+raise SystemExit(completed.returncode)
 PY
 fi
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-directory.XXXXXXXX")

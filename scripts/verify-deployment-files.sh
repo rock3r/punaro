@@ -43,7 +43,8 @@ for expected in \
 	'directory_snapshot_publish_already_running' \
 	'PUNARO_PUBLISH_LOCK_HELD' \
 	'fcntl.flock' \
-	'os.set_inheritable' \
+	'subprocess.run' \
+	'close_fds=True' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' \
