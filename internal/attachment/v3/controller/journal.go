@@ -19,6 +19,11 @@ import (
 // plaintext are intentionally not stored here.
 type Journal struct{ db *sql.DB }
 
+const (
+	maxPendingOffers     = 64
+	maxPendingOfferBytes = 2 << 20
+)
+
 // OpenJournal opens a private non-symlinked SQLite database. The parent is
 // created only with owner permissions and an existing weaker parent is
 // rejected rather than repaired implicitly.
@@ -147,22 +152,33 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 	if err != nil {
 		return attachmentv3.OfferNotice{}, false, err
 	}
-	var storedOffer, storedConversation []byte
-	err = j.db.QueryRowContext(context.Background(), `SELECT offer, relay_conversation_id FROM controller_inbound_offers WHERE punaro_message_id = ?`, inbound.PunaroMessageID).Scan(&storedOffer, &storedConversation)
-	if err == nil {
-		if string(storedConversation) != inbound.RelayConversationID || !bytes.Equal(storedOffer, notice.Raw) {
-			return attachmentv3.OfferNotice{}, false, errors.New("changed v3 offer retry")
-		}
-		return notice, false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return attachmentv3.OfferNotice{}, false, err
-	}
-	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id) VALUES (?, ?, ?, ?)`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:])
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id)
+		SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM controller_inbound_offers) < ?
+		AND (SELECT COALESCE(SUM(length(offer)), 0) FROM controller_inbound_offers) + ? <= ?
+		ON CONFLICT(punaro_message_id) DO NOTHING`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:], maxPendingOffers, len(notice.Raw), maxPendingOfferBytes)
 	if err != nil {
 		return attachmentv3.OfferNotice{}, false, err
 	}
-	return notice, true, nil
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return attachmentv3.OfferNotice{}, false, err
+	}
+	if inserted == 1 {
+		return notice, true, nil
+	}
+	var storedOffer []byte
+	var storedConversation string
+	err = j.db.QueryRowContext(context.Background(), `SELECT offer, relay_conversation_id FROM controller_inbound_offers WHERE punaro_message_id = ?`, inbound.PunaroMessageID).Scan(&storedOffer, &storedConversation)
+	if err == nil {
+		if storedConversation == inbound.RelayConversationID && bytes.Equal(storedOffer, notice.Raw) {
+			return notice, false, nil
+		}
+		return attachmentv3.OfferNotice{}, false, errors.New("changed v3 offer retry")
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return attachmentv3.OfferNotice{}, false, errors.New("v3 offer discovery capacity exhausted")
+	}
+	return attachmentv3.OfferNotice{}, false, err
 }
 
 func (j *Journal) mapping(relayConversationID string) (Mapping, bool, error) {

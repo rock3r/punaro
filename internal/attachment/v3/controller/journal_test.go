@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -172,6 +173,27 @@ func TestJournalAcceptsConcurrentExactMappingRetries(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent exact mapping retry rejected: %v", err)
 		}
+	}
+}
+
+func TestJournalBoundsUnapprovedOfferDiscovery(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(61), SenderDeviceID: bytes16(62), SenderGeneration: 1, RecipientDeviceID: bytes16(63), RecipientGeneration: 1, MembershipCommitment: bytes32(64)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	body := testOfferNotice(t, mapping)
+	for index := range maxPendingOffers {
+		if _, _, err := journal.RecordInboundOffer(InboundOffer{PunaroMessageID: fmt.Sprintf("message-%d", index), RelayConversationID: mapping.RelayConversationID, Body: body}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := journal.RecordInboundOffer(InboundOffer{PunaroMessageID: "overflow", RelayConversationID: mapping.RelayConversationID, Body: body}); err == nil {
+		t.Fatal("unbounded offer discovery was accepted")
 	}
 }
 
