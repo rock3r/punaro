@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -71,6 +73,48 @@ func TestOpenJournalRejectsUnsafeSQLiteSidecar(t *testing.T) {
 	}
 	if _, err := OpenJournal(path); err == nil {
 		t.Fatal("journal accepted unsafe SQLite sidecar")
+	}
+}
+
+func TestOpenJournalMigratesLegacyOfferExpiryWithoutGuessingIt(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "controller.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE controller_inbound_offers (
+		punaro_message_id TEXT PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
+		offer BLOB NOT NULL, transfer_id BLOB NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id) VALUES ('legacy', 'relay', x'01', x'02')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	// The migration does not derive a lifetime by parsing old relay bytes. It
+	// preserves recovery safety by retaining legacy records until an operator
+	// explicitly resolves them.
+	if reaped, err := journal.ReapExpiredUnapprovedOffers(time.Unix(1<<20, 0).UTC(), 1); err != nil || reaped != 0 {
+		t.Fatalf("legacy offer was guessed expired: reaped=%d err=%v", reaped, err)
+	}
+	var retained int
+	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_inbound_offers WHERE punaro_message_id = 'legacy'`).Scan(&retained); err != nil || retained != 1 {
+		t.Fatalf("legacy offer retained=%d err=%v", retained, err)
 	}
 }
 
@@ -175,6 +219,62 @@ func TestJournalAcceptsConcurrentExactMappingRetries(t *testing.T) {
 	}
 }
 
+func TestJournalAcceptsConcurrentExactReceiptApprovals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private", "controller.db")
+	journal, err := OpenJournal(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(55), SenderDeviceID: bytes16(56), SenderGeneration: 1, RecipientDeviceID: bytes16(57), RecipientGeneration: 1, MembershipCommitment: bytes32(58)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 16
+	approved := make(chan bool, workers)
+	errs := make(chan error, workers)
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for range workers {
+		peer, err := OpenJournal(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = peer.Close() })
+		group.Add(1)
+		go func(j *Journal) {
+			defer group.Done()
+			<-start
+			ok, err := j.ApproveInboundOffer(inbound.PunaroMessageID, time.Unix(100, 0).UTC())
+			approved <- ok
+			errs <- err
+		}(peer)
+	}
+	close(start)
+	group.Wait()
+	close(approved)
+	close(errs)
+	approvals := 0
+	for ok := range approved {
+		if ok {
+			approvals++
+		}
+	}
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent exact approval rejected: %v", err)
+		}
+	}
+	if approvals != 1 {
+		t.Fatalf("approvals=%d, want exactly one durable approval", approvals)
+	}
+}
+
 func TestJournalDeduplicatesTransferAcrossRelayMessages(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
 	if err != nil {
@@ -191,6 +291,42 @@ func TestJournalDeduplicatesTransferAcrossRelayMessages(t *testing.T) {
 	}
 	if _, created, err := journal.RecordInboundOffer(InboundOffer{PunaroMessageID: "message-2", RelayConversationID: mapping.RelayConversationID, Body: body}); err != nil || created {
 		t.Fatalf("duplicate transfer created=%t err=%v", created, err)
+	}
+}
+
+func TestJournalReapsOnlyExpiredUnapprovedOffers(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(65), SenderDeviceID: bytes16(66), SenderGeneration: 1, RecipientDeviceID: bytes16(67), RecipientGeneration: 1, MembershipCommitment: bytes32(68)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= maxPendingOffers; i++ {
+		inbound := InboundOffer{PunaroMessageID: fmt.Sprintf("message-%d", i), RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(byte(i)), 1, 2)}
+		if _, created, err := journal.RecordInboundOffer(inbound); err != nil || !created {
+			t.Fatalf("record %d created=%t err=%v", i, created, err)
+		}
+	}
+	protected := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(1), 1, 2)}
+	if approved, err := journal.ApproveInboundOffer(protected.PunaroMessageID, time.Unix(1, 0).UTC()); err != nil || !approved {
+		t.Fatalf("approved=%t err=%v", approved, err)
+	}
+	overflow := InboundOffer{PunaroMessageID: "message-overflow", RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(99), 1, 2)}
+	if _, _, err := journal.RecordInboundOffer(overflow); err == nil {
+		t.Fatal("unbounded pending offer discovery accepted")
+	}
+	reaped, err := journal.ReapExpiredUnapprovedOffers(time.Unix(3, 0).UTC(), maxPendingOffers)
+	if err != nil || reaped != maxPendingOffers-1 {
+		t.Fatalf("reaped=%d err=%v", reaped, err)
+	}
+	if _, created, err := journal.RecordInboundOffer(overflow); err != nil || !created {
+		t.Fatalf("record after reap created=%t err=%v", created, err)
+	}
+	if _, created, err := journal.RecordInboundOffer(protected); err != nil || created {
+		t.Fatalf("approved offer removed by reaper: created=%t err=%v", created, err)
 	}
 }
 

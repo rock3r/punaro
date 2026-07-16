@@ -29,22 +29,31 @@ func (j *Journal) ApproveInboundOffer(punaroMessageID string, now time.Time) (ap
 		return false, errors.New("invalid stored v3 offer")
 	}
 	commitment := blake3.Sum256(offer)
-	var previous []byte
-	err = j.db.QueryRowContext(context.Background(), `SELECT offer_commitment FROM controller_receipt_approvals WHERE punaro_message_id = ?`, punaroMessageID).Scan(&previous)
-	if err == nil {
-		if !bytes.Equal(previous, commitment[:]) {
-			return false, errors.New("changed v3 receipt approval")
-		}
-		return false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return false, err
-	}
-	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_approvals(punaro_message_id, offer_commitment, approved_at) VALUES (?, ?, ?)`, punaroMessageID, commitment[:], now.UTC().Unix())
+	// Do not split the idempotency check and insert: independent controller
+	// processes may approve the same message concurrently after a restart.
+	// The unique key elects exactly one writer; every other process verifies
+	// that it observed the same immutable offer commitment.
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_approvals(punaro_message_id, offer_commitment, approved_at)
+		VALUES (?, ?, ?) ON CONFLICT(punaro_message_id) DO NOTHING`, punaroMessageID, commitment[:], now.UTC().Unix())
 	if err != nil {
 		return false, err
 	}
-	return true, nil
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if inserted == 1 {
+		return true, nil
+	}
+	var previous []byte
+	err = j.db.QueryRowContext(context.Background(), `SELECT offer_commitment FROM controller_receipt_approvals WHERE punaro_message_id = ?`, punaroMessageID).Scan(&previous)
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(previous, commitment[:]) {
+		return false, errors.New("changed v3 receipt approval")
+	}
+	return false, nil
 }
 
 // PrepareApprovedReceipt returns a canonical discovered offer only after an

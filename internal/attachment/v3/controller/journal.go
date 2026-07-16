@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	_ "modernc.org/sqlite"
@@ -20,6 +22,7 @@ import (
 type Journal struct {
 	db        *sql.DB
 	recipient RecipientIdentity
+	acceptMu  sync.Mutex
 }
 
 // RecipientIdentity pins this controller to its own enrolled attachment
@@ -105,6 +108,7 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 		`CREATE TABLE IF NOT EXISTS controller_inbound_offers (
 			punaro_message_id TEXT PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
 			offer BLOB NOT NULL, transfer_id BLOB NOT NULL,
+			expires_at INTEGER NOT NULL DEFAULT 9223372036854775807,
 			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS controller_offer_transfer_identity
@@ -114,11 +118,26 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			approved_at INTEGER NOT NULL,
 			FOREIGN KEY(punaro_message_id) REFERENCES controller_inbound_offers(punaro_message_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS controller_receipt_acceptances (
+			punaro_message_id TEXT PRIMARY KEY, transfer_id BLOB NOT NULL,
+			manifest_commitment BLOB NOT NULL, acceptance_nonce BLOB NOT NULL, permit_request BLOB NOT NULL,
+			operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_inbound_offers(punaro_message_id)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("initialize controller journal: %w", err)
 		}
+	}
+	if err := ensureInboundOfferExpiryColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate controller journal: %w", err)
+	}
+	if err := ensureReceiptAcceptanceNonceColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate controller journal: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
@@ -193,10 +212,10 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 	if !errors.Is(err, sql.ErrNoRows) {
 		return attachmentv3.OfferNotice{}, false, err
 	}
-	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id)
-		SELECT ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM controller_inbound_offers) < ?
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id, expires_at)
+		SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM controller_inbound_offers) < ?
 		AND (SELECT COALESCE(SUM(length(offer)), 0) FROM controller_inbound_offers) + ? <= ?
-		ON CONFLICT DO NOTHING`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:], maxPendingOffers, len(notice.Raw), maxPendingOfferBytes)
+		ON CONFLICT DO NOTHING`, inbound.PunaroMessageID, inbound.RelayConversationID, notice.Raw, notice.Manifest.TransferID[:], int64(notice.Manifest.ExpiresAt), maxPendingOffers, len(notice.Raw), maxPendingOfferBytes)
 	if err != nil {
 		return attachmentv3.OfferNotice{}, false, err
 	}
@@ -227,6 +246,92 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 		return attachmentv3.OfferNotice{}, false, errors.New("v3 offer discovery capacity exhausted")
 	}
 	return attachmentv3.OfferNotice{}, false, err
+}
+
+// ReapExpiredUnapprovedOffers releases bounded discovery capacity without
+// revoking an explicit local decision or an in-progress durable acceptance.
+// It is intentionally invoked by a privileged maintenance loop rather than
+// on inbound delivery, so wall-clock drift cannot cause a delivery to erase a
+// just-recorded offer behind the caller's back.
+func (j *Journal) ReapExpiredUnapprovedOffers(now time.Time, limit int) (int, error) {
+	if j == nil || j.db == nil || now.UTC().Unix() < 0 || limit < 1 || limit > maxPendingOffers {
+		return 0, errors.New("invalid expired v3 offer reap")
+	}
+	result, err := j.db.ExecContext(context.Background(), `DELETE FROM controller_inbound_offers
+		WHERE punaro_message_id IN (
+			SELECT inbound.punaro_message_id FROM controller_inbound_offers AS inbound
+			WHERE inbound.expires_at <= ?
+				AND NOT EXISTS (SELECT 1 FROM controller_receipt_approvals AS approval WHERE approval.punaro_message_id = inbound.punaro_message_id)
+				AND NOT EXISTS (SELECT 1 FROM controller_receipt_acceptances AS acceptance WHERE acceptance.punaro_message_id = inbound.punaro_message_id)
+			ORDER BY inbound.expires_at, inbound.punaro_message_id
+			LIMIT ?
+		)`, now.UTC().Unix(), limit)
+	if err != nil {
+		return 0, err
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(deleted), nil
+}
+
+func ensureInboundOfferExpiryColumn(db *sql.DB) error {
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(controller_inbound_offers)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == "expires_at" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	// Legacy records were written before an expiry was persisted. Retaining
+	// them is safer than guessing their expiry from untrusted relay material.
+	_, err = db.ExecContext(context.Background(), `ALTER TABLE controller_inbound_offers ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 9223372036854775807`)
+	return err
+}
+
+// The acceptance table is introduced alongside this controller. The nullable
+// legacy migration is intentional: an old in-progress row lacks its exact
+// nonce and is rejected by receiptAcceptance rather than being reconstructed
+// from a changed relay delivery.
+func ensureReceiptAcceptanceNonceColumn(db *sql.DB) error {
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(controller_receipt_acceptances)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == "acceptance_nonce" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.ExecContext(context.Background(), `ALTER TABLE controller_receipt_acceptances ADD COLUMN acceptance_nonce BLOB`)
+	return err
 }
 
 func (j *Journal) mapping(relayConversationID string) (Mapping, bool, error) {

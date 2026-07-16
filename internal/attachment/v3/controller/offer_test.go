@@ -95,11 +95,15 @@ func (s *bindingResolverStub) ResolveTransferBinding(_ context.Context, conversa
 }
 
 func testOfferNotice(t *testing.T, mapping Mapping) string {
+	return testOfferNoticeWith(t, mapping, bytes16(6), 100, 120)
+}
+
+func testOfferNoticeWith(t *testing.T, mapping Mapping, transferID [16]byte, issuedAt, expiresAt uint64) string {
 	t.Helper()
 	_, signer := testOfferSigner()
 	manifest := attachmentv3.Manifest{
 		Audience:             bytes32(5),
-		TransferID:           bytes16(6),
+		TransferID:           transferID,
 		ConversationID:       mapping.ConversationID,
 		SenderDeviceID:       mapping.SenderDeviceID,
 		SenderGeneration:     mapping.SenderGeneration,
@@ -108,8 +112,8 @@ func testOfferNotice(t *testing.T, mapping Mapping) string {
 		DirectoryHead:        bytes32(7),
 		MembershipCommitment: mapping.MembershipCommitment,
 		RevocationEpoch:      1,
-		IssuedAt:             100,
-		ExpiresAt:            120,
+		IssuedAt:             issuedAt,
+		ExpiresAt:            expiresAt,
 		ContentSalt:          bytes32(8),
 		PlaintextCommitment:  bytes32(9),
 		ChunkSize:            1,
