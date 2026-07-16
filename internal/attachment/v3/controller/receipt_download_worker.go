@@ -124,25 +124,50 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 	if _, err := w.advance(ctx, record, receiptDownloadBegin, 0, 1, 1, attachmentv3.TransferStateTransferring, authority, now); err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	for index := uint64(0); index < notice.Manifest.ChunkCount; index++ {
-		if _, found, err := journal.receiptDownloadChunk(record, index); err != nil {
-			return attachmentv3.TransferResult{}, err
-		} else if found {
-			continue
+	downloadChunks := func() error {
+		for index := uint64(0); index < notice.Manifest.ChunkCount; index++ {
+			if _, found, err := journal.receiptDownloadChunk(record, index); err != nil {
+				return err
+			} else if found {
+				continue
+			}
+			maxBytes, err := receiptCiphertextLength(notice.Manifest, index)
+			if err != nil {
+				return err
+			}
+			if _, err := w.advance(ctx, record, receiptDownloadChunk, index, maxBytes, 1, attachmentv3.TransferStateTransferring, authority, now); err != nil {
+				return err
+			}
 		}
-		maxBytes, err := receiptCiphertextLength(notice.Manifest, index)
-		if err != nil {
-			return attachmentv3.TransferResult{}, err
-		}
-		if _, err := w.advance(ctx, record, receiptDownloadChunk, index, maxBytes, 1, attachmentv3.TransferStateTransferring, authority, now); err != nil {
-			return attachmentv3.TransferResult{}, err
-		}
+		return nil
 	}
-	completed, err := w.advance(ctx, record, receiptDownloadComplete, 0, 1, 1, attachmentv3.TransferStateCompleted, authority, now)
+	if err := downloadChunks(); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	// Do not terminalize the relay receipt based merely on journal hashes: a
+	// local disk fault can change both stored ciphertext and its local hash.
+	// Verify every encrypted frame before Complete; one reset/re-fetch pass is
+	// safe because the relay preserves immutable ciphertext for this recipient.
+	chunks, err := journal.receiptDownloadChunks(record, notice.Manifest.ChunkCount)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	chunks, err := journal.receiptDownloadChunks(record, notice.Manifest.ChunkCount)
+	if _, err := attachmentv3.OpenSourceArtifact(record.manifest, chunks, fileKey, authority, now); err != nil {
+		if err := journal.clearReceiptDownloadChunks(record); err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		if err := downloadChunks(); err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		chunks, err = journal.receiptDownloadChunks(record, notice.Manifest.ChunkCount)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		if _, err := attachmentv3.OpenSourceArtifact(record.manifest, chunks, fileKey, authority, now); err != nil {
+			return attachmentv3.TransferResult{}, errors.New("invalid recipient ciphertext after recovery")
+		}
+	}
+	completed, err := w.advance(ctx, record, receiptDownloadComplete, 0, 1, 1, attachmentv3.TransferStateCompleted, authority, now)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}

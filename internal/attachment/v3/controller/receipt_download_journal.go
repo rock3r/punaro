@@ -283,6 +283,14 @@ func (j *Journal) receiptDownloadChunks(record receiptDownloadRecord, count uint
 	return chunks, nil
 }
 
+func (j *Journal) clearReceiptDownloadChunks(record receiptDownloadRecord) error {
+	if j == nil || j.db == nil || record.messageID == "" {
+		return errors.New("invalid receipt ciphertext reset")
+	}
+	_, err := j.db.ExecContext(context.Background(), `DELETE FROM controller_receipt_download_chunks WHERE punaro_message_id=?`, record.messageID)
+	return err
+}
+
 func receiptCiphertextCommitment(ciphertext []byte) [32]byte {
 	return blake3.Sum256(append([]byte("punaro/attachment/ciphertext/v3\x00"), ciphertext...))
 }
