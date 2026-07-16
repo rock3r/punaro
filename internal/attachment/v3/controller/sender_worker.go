@@ -269,9 +269,10 @@ func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]
 			firstErr = item.err
 			continue
 		}
-		if item.result.State == attachmentv3.TransferStateSourceReady {
+		switch item.result.State {
+		case attachmentv3.TransferStateSourceReady:
 			ready = item.result
-		} else if item.result.State == attachmentv3.TransferStateCancelled || item.result.State == attachmentv3.TransferStateExpired || item.result.State == attachmentv3.TransferStateRevoked {
+		case attachmentv3.TransferStateCancelled, attachmentv3.TransferStateExpired, attachmentv3.TransferStateRevoked:
 			cancel()
 			terminal = item.result
 		}

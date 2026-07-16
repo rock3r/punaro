@@ -144,8 +144,8 @@ func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
 	commitment := attachmentCommitment(t, raw)
 	transport := &senderTransportStub{operationErr: errors.New("response lost"), results: map[string][]byte{outcomePath(manifest.TransferID): sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}}
 	authority := testSenderAuthority(t, mapping, senderPrivate).(senderAuthorityStub)
-	authority.bindingResolverStub.binding = testCurrentBinding(mapping, 130)
-	copy(authority.bindingResolverStub.binding.Sender.SigningPublicKey[:], senderPrivate.Public().(ed25519.PublicKey))
+	authority.binding = testCurrentBinding(mapping, 130)
+	copy(authority.binding.Sender.SigningPublicKey[:], senderPrivate.Public().(ed25519.PublicKey))
 	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: authority}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71), bytes16(72), bytes16(73)), NewIdempotencyKey: sequenceKey(bytes32(74), bytes32(75))})
 	if err != nil {
 		t.Fatal(err)

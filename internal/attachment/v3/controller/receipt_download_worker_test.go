@@ -108,16 +108,16 @@ type receiptDownloadTransport struct {
 func (s *receiptDownloadTransport) DoV3Attachment(ctx context.Context, method, path string, body []byte, permit attachmentv3.Permit, operation attachmentv3.OperationRecord) ([]byte, error) {
 	switch permit.Operation {
 	case attachmentv3.PermitOperationAccept:
-		s.acceptanceTransportStub.result = s.accepted
+		s.result = s.accepted
 	case attachmentv3.PermitOperationBegin:
-		s.acceptanceTransportStub.result = s.transferring
+		s.result = s.transferring
 	case attachmentv3.PermitOperationDownload:
 		if operation.Operation != attachmentv3.PermitOperationDownload || len(s.chunks) == 0 {
 			return nil, errTest("missing test ciphertext")
 		}
 		for _, candidate := range s.chunks {
 			if path == fmt.Sprintf("/v3/attachments/%x/chunks/%d", permit.TransferID, candidate.Index) {
-				s.acceptanceTransportStub.result = candidate.Ciphertext
+				s.result = candidate.Ciphertext
 				return s.acceptanceTransportStub.DoV3Attachment(ctx, method, path, body, permit, operation)
 			}
 		}

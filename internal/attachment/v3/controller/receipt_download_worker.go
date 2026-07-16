@@ -180,16 +180,15 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 	return completed, nil
 }
 
-func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk, maxBytes, maxChunks uint64, expected attachmentv3.TransferState, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.TransferResult, error) {
+func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk, maxBytes, maxChunks uint64, expected attachmentv3.TransferState, _ RecipientAcceptanceAuthority, _ time.Time) (attachmentv3.TransferResult, error) {
 	// Each remote capability is deliberately minted from a fresh clock and
 	// authority view. A large transfer must not reuse Receive's start time and
 	// accidentally issue already-expired permits after earlier chunks took time.
-	now = w.options.Now().UTC()
+	now := w.options.Now().UTC()
 	if now.Unix() < 0 {
 		return attachmentv3.TransferResult{}, errors.New("invalid recipient download clock")
 	}
-	var err error
-	authority, err = w.options.AuthorityProvider.ResolveRecipientAcceptanceAuthority(ctx, now)
+	authority, err := w.options.AuthorityProvider.ResolveRecipientAcceptanceAuthority(ctx, now)
 	if err != nil || authority == nil {
 		return attachmentv3.TransferResult{}, errors.New("fresh recipient download authority is unavailable")
 	}
