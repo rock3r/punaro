@@ -197,6 +197,22 @@ func TestJournalBoundsUnapprovedOfferDiscovery(t *testing.T) {
 	}
 }
 
+func TestRecipientBoundJournalRejectsOtherDeviceMappings(t *testing.T) {
+	journal, err := OpenJournalForRecipient(filepath.Join(t.TempDir(), "private", "controller.db"), RecipientIdentity{DeviceID: bytes16(71), Generation: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(72), SenderDeviceID: bytes16(73), SenderGeneration: 1, RecipientDeviceID: bytes16(74), RecipientGeneration: 1, MembershipCommitment: bytes32(75)}
+	if err := journal.AddMapping(mapping); err == nil {
+		t.Fatal("foreign recipient mapping was accepted")
+	}
+	mapping.RecipientDeviceID, mapping.RecipientGeneration = bytes16(71), 2
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatalf("local recipient mapping rejected: %v", err)
+	}
+}
+
 func testCurrentBinding(mapping Mapping, expiresAt uint64) attachmentv2.DirectoryTransferBinding {
 	return attachmentv2.DirectoryTransferBinding{
 		Permit:     attachmentv2.DirectoryPermitBinding{Audience: bytes32(31), DirectoryHead: bytes32(32), RevocationEpoch: 1, ExpiresAt: expiresAt},

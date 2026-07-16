@@ -17,7 +17,19 @@ import (
 // Journal is the controller's private, single-writer durable state. It holds
 // only immutable policy and discovery records at this layer; device keys and
 // plaintext are intentionally not stored here.
-type Journal struct{ db *sql.DB }
+type Journal struct {
+	db        *sql.DB
+	recipient RecipientIdentity
+}
+
+// RecipientIdentity pins this controller to its own enrolled attachment
+// device. It is local configuration, never selected from a relay message.
+type RecipientIdentity struct {
+	DeviceID   [16]byte
+	Generation uint64
+}
+
+func (r RecipientIdentity) valid() bool { return r.DeviceID != [16]byte{} && r.Generation != 0 }
 
 const (
 	maxPendingOffers     = 64
@@ -28,6 +40,19 @@ const (
 // created only with owner permissions and an existing weaker parent is
 // rejected rather than repaired implicitly.
 func OpenJournal(path string) (*Journal, error) {
+	return openJournal(path, RecipientIdentity{})
+}
+
+// OpenJournalForRecipient creates a controller journal bound to exactly one
+// local recipient device generation.
+func OpenJournalForRecipient(path string, recipient RecipientIdentity) (*Journal, error) {
+	if !recipient.valid() {
+		return nil, errors.New("invalid controller recipient identity")
+	}
+	return openJournal(path, recipient)
+}
+
+func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 	if !filepath.IsAbs(path) || strings.TrimSpace(path) == "" {
 		return nil, errors.New("controller journal path must be absolute")
 	}
@@ -97,7 +122,7 @@ func OpenJournal(path string) (*Journal, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Journal{db: db}, nil
+	return &Journal{db: db, recipient: recipient}, nil
 }
 
 func (j *Journal) Close() error {
@@ -112,6 +137,9 @@ func (j *Journal) Close() error {
 func (j *Journal) AddMapping(mapping Mapping) error {
 	if j == nil || j.db == nil || !mapping.valid() {
 		return errors.New("invalid controller mapping")
+	}
+	if j.recipient.valid() && (mapping.RecipientDeviceID != j.recipient.DeviceID || mapping.RecipientGeneration != j.recipient.Generation) {
+		return errors.New("controller mapping recipient is not local")
 	}
 	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_mappings(
 		relay_conversation_id, conversation_id, sender_device_id, sender_generation,
