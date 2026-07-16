@@ -213,6 +213,57 @@ func TestRecipientAcceptanceReconcilesExpiredUncertainOutcome(t *testing.T) {
 	}
 }
 
+func TestRecipientAcceptanceRenewsExpiredOutcomeAttemptAfterAmbiguousLookup(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	// The accept can have committed at the relay even though its response was
+	// lost. Its local record is therefore uncertain before the first lookup.
+	transport.operationErr = errTest("accept response lost")
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("ambiguous acceptance failure was accepted")
+	}
+	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
+	transport.operationErr = errTest("outcome response lost")
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("ambiguous outcome lookup was accepted")
+	}
+	if transport.issueCalls != 2 || transport.operationCalls != 2 || transport.operation.Operation != attachmentv3.PermitOperationOutcome {
+		t.Fatalf("first outcome lookup was not attempted safely issue=%d calls=%d op=%+v", transport.issueCalls, transport.operationCalls, transport.operation)
+	}
+	firstOutcomeOperation := transport.operation
+	// Once the first lookup permit expires, the worker must persist and use a
+	// new capability. Reusing the old one would make a crash at this exact
+	// boundary permanently unrecoverable.
+	worker.options.Now = func() time.Time { return time.Unix(155, 0).UTC() }
+	worker.options.NewID = sequenceID(bytes16(95), bytes16(96))
+	transport.operationErr = nil
+	result, err := worker.Accept(context.Background(), inbound)
+	if err != nil || result.State != attachmentv3.TransferStateAccepted {
+		t.Fatalf("renewed outcome result=%+v err=%v", result, err)
+	}
+	if transport.issueCalls != 3 || transport.operationCalls != 3 || transport.operation.Operation != attachmentv3.PermitOperationOutcome || transport.operation == firstOutcomeOperation {
+		t.Fatalf("expired outcome capability was reused issue=%d calls=%d op=%+v first=%+v", transport.issueCalls, transport.operationCalls, transport.operation, firstOutcomeOperation)
+	}
+}
+
+func TestRecipientAcceptanceRejectsOutcomePermitForAnotherTransferBeforeTransport(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	transport.operationErr = errTest("accept response lost")
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("ambiguous acceptance failure was accepted")
+	}
+	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
+	transport.operationErr = nil
+	transport.wrongTransfer = true
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("foreign outcome permit was accepted")
+	}
+	if transport.issueCalls != 2 || transport.operationCalls != 1 {
+		t.Fatalf("foreign outcome permit reached attachment transport issue=%d calls=%d", transport.issueCalls, transport.operationCalls)
+	}
+}
+
 type changedAcceptanceSigner struct{ RecipientOperationSigner }
 
 func (changedAcceptanceSigner) SignReceiptPermit(*attachmentv3.PermitRequest) error { return nil }
@@ -445,6 +496,7 @@ type acceptanceTransportStub struct {
 	serial          byte
 	acceptAnyPermit bool
 	badPermit       bool
+	wrongTransfer   bool
 	issueCalls      int
 	operationCalls  int
 }
@@ -480,6 +532,9 @@ func (s *acceptanceTransportStub) IssueV3Permit(_ context.Context, request attac
 		serial = 80
 	}
 	s.permit = attachmentv3.Permit{Audience: bytes32(5), Serial: bytes16(serial), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(7), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment}
+	if s.wrongTransfer {
+		s.permit.TransferID = bytes16(99)
+	}
 	_, issuer := testOfferSigner()
 	if err := attachmentv3.SignPermit(&s.permit, issuer); err != nil {
 		return attachmentv3.Permit{}, err

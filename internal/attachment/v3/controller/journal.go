@@ -35,8 +35,9 @@ type RecipientIdentity struct {
 func (r RecipientIdentity) valid() bool { return r.DeviceID != [16]byte{} && r.Generation != 0 }
 
 const (
-	maxPendingOffers     = 64
-	maxPendingOfferBytes = 2 << 20
+	maxPendingOffers       = 64
+	maxPendingOfferBytes   = 2 << 20
+	maxPendingSenderStages = 64
 )
 
 // OpenJournal opens a private non-symlinked SQLite database. The parent is
@@ -136,10 +137,28 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			outcome_permit BLOB, outcome_operation BLOB, outcome_result BLOB,
 			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_acceptances(punaro_message_id)
 		)`,
+		// Outcome permits are deliberately append-only attempts. A lookup request
+		// can be accepted remotely just before a client crash; after its permit
+		// expires the controller must mint a fresh lookup capability rather than
+		// reusing an expired one or treating a transient failure as terminal.
+		`CREATE TABLE IF NOT EXISTS controller_receipt_outcome_attempts (
+			punaro_message_id TEXT NOT NULL, attempt_index INTEGER NOT NULL,
+			permit_request BLOB NOT NULL, operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(punaro_message_id, attempt_index),
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_reconciliation(punaro_message_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS controller_sender_transfers (
 			transfer_id BLOB PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
 			manifest BLOB NOT NULL, manifest_commitment BLOB NOT NULL,
-			file_key BLOB NOT NULL, envelope BLOB, offer BLOB, offer_nonce BLOB,
+			wrapped_file_key BLOB NOT NULL, envelope BLOB, offer BLOB, offer_nonce BLOB,
+			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_stage_intents (
+			stage_id BLOB PRIMARY KEY, transfer_id BLOB NOT NULL UNIQUE,
+			relay_conversation_id TEXT NOT NULL, manifest BLOB NOT NULL,
+			manifest_commitment BLOB NOT NULL, wrapped_file_key BLOB NOT NULL,
+			created_at INTEGER NOT NULL,
 			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS controller_sender_chunks (
@@ -169,6 +188,10 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate controller journal: %w", err)
 	}
+	if err := ensureSenderTransferKeySchema(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate sender key journal: %w", err)
+	}
 	if err := bindJournalRecipient(db, recipient); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("bind controller recipient: %w", err)
@@ -178,6 +201,88 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 		return nil, err
 	}
 	return &Journal{db: db, recipient: recipient}, nil
+}
+
+// ensureSenderTransferKeySchema fails closed on an old journal which may
+// contain raw file keys. Empty pre-release tables are safe to replace; a row
+// requires an explicit operator purge rather than a best-effort migration
+// which could preserve secret material under a misleading new column name.
+func ensureSenderTransferKeySchema(db *sql.DB) error {
+	if db == nil {
+		return errors.New("missing controller journal")
+	}
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(controller_sender_transfers)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var hasRaw, hasWrapped bool
+	for rows.Next() {
+		var cid, notNull, primary int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primary); err != nil {
+			return err
+		}
+		hasRaw = hasRaw || name == "file_key"
+		hasWrapped = hasWrapped || name == "wrapped_file_key"
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasWrapped && !hasRaw {
+		return nil
+	}
+	if !hasRaw || hasWrapped {
+		return errors.New("invalid sender key journal schema")
+	}
+	var transfers, chunks, operations int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&transfers); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_chunks`).Scan(&chunks); err != nil {
+		return err
+	}
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_operations`).Scan(&operations); err != nil {
+		return err
+	}
+	if transfers != 0 || chunks != 0 || operations != 0 {
+		return errors.New("legacy journal contains unsafe raw sender key material")
+	}
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range []string{
+		`DROP TABLE controller_sender_operations`,
+		`DROP TABLE controller_sender_chunks`,
+		`DROP TABLE controller_sender_transfers`,
+		`CREATE TABLE controller_sender_transfers (
+			transfer_id BLOB PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
+			manifest BLOB NOT NULL, manifest_commitment BLOB NOT NULL,
+			wrapped_file_key BLOB NOT NULL, envelope BLOB, offer BLOB, offer_nonce BLOB,
+			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
+		)`,
+		`CREATE TABLE controller_sender_chunks (
+			transfer_id BLOB NOT NULL, chunk_index INTEGER NOT NULL,
+			ciphertext BLOB NOT NULL, ciphertext_commitment BLOB NOT NULL,
+			PRIMARY KEY(transfer_id, chunk_index),
+			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
+		)`,
+		`CREATE TABLE controller_sender_operations (
+			transfer_id BLOB NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			permit_request BLOB NOT NULL, operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(transfer_id, phase, chunk_index),
+			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
+		)`,
+	} {
+		if _, err := tx.ExecContext(context.Background(), statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // bindJournalRecipient makes the local recipient pin durable. A process

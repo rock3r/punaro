@@ -357,6 +357,61 @@ func TestRecipientBoundJournalRejectsOtherDeviceMappings(t *testing.T) {
 	}
 }
 
+func TestJournalUsesNamedWrappedSenderKeyStorage(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = journal.Close() }()
+	rows, err := journal.db.Query(`PRAGMA table_info(controller_sender_transfers)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var hasRaw, hasWrapped bool
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, primary int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primary); err != nil {
+			t.Fatal(err)
+		}
+		hasRaw = hasRaw || name == "file_key"
+		hasWrapped = hasWrapped || name == "wrapped_file_key"
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if hasRaw || !hasWrapped {
+		t.Fatalf("sender transfer schema raw=%t wrapped=%t", hasRaw, hasWrapped)
+	}
+}
+
+func TestJournalRefusesLegacyRawSenderKeyRows(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "controller.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE controller_sender_transfers(transfer_id BLOB PRIMARY KEY, file_key BLOB NOT NULL); INSERT INTO controller_sender_transfers(transfer_id,file_key) VALUES (x'01',x'01020304')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenJournal(path); err == nil {
+		t.Fatal("legacy journal with raw sender key rows was opened")
+	}
+}
+
 func testCurrentBinding(mapping Mapping, expiresAt uint64) attachmentv2.DirectoryTransferBinding {
 	return attachmentv2.DirectoryTransferBinding{
 		Permit:     attachmentv2.DirectoryPermitBinding{Audience: bytes32(31), DirectoryHead: bytes32(32), RevocationEpoch: 1, ExpiresAt: expiresAt},

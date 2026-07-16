@@ -37,8 +37,8 @@ func TestPrepareSourceArtifactReservesV3MaterialBeforeEncrypting(t *testing.T) {
 	if _, err := store.db.Exec(`SELECT 1 FROM v3_source_file_keys LIMIT 1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.reserveCrypto(fileKey, mustEncodeManifest(t, artifact.Manifest), artifact.ManifestCommitment); err == nil {
-		t.Fatal("reused cryptographic material accepted")
+	if err := store.reserveCrypto(fileKey, mustEncodeManifest(t, artifact.Manifest), artifact.ManifestCommitment); err != nil {
+		t.Fatalf("exact crash replay of cryptographic material rejected: %v", err)
 	}
 	if _, err := openSourceArtifact(verified, artifact.Chunks, testHash(99), now); err == nil {
 		t.Fatal("wrong file key decrypted artifact")
@@ -92,6 +92,38 @@ func TestPrepareSourceArtifactBoundsPermanentCryptoReservations(t *testing.T) {
 	manifest.TransferID = testID(88)
 	if _, _, err := prepareSourceArtifact([]byte("y"), manifest, signer, store); err == nil {
 		t.Fatal("crypto reservation budget did not bound prepare-discard growth")
+	}
+}
+
+func TestPreparedSourceArtifactCanReplaySameDurablyIdentifiedMaterial(t *testing.T) {
+	_, signer, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenArtifactStore(privateDatabase(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	manifest := testManifest(now)
+	manifest.ContentSalt, manifest.PlaintextCommitment = [32]byte{}, [32]byte{}
+	manifest.ChunkSize, manifest.ChunkCount, manifest.PlaintextSize = 5, 0, 0
+	material := SourceArtifactMaterial{FileKey: testHash(91), ContentSalt: testHash(92)}
+	prepared, commitment, err := PrepareSourceManifest([]byte("replay-safe artifact"), manifest, signer, material)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := EncryptPreparedSourceArtifact([]byte("replay-safe artifact"), prepared, commitment, material.FileKey, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := EncryptPreparedSourceArtifact([]byte("replay-safe artifact"), prepared, commitment, material.FileKey, store)
+	if err != nil {
+		t.Fatalf("same prepared material could not replay after crash boundary: %v", err)
+	}
+	if !bytes.Equal(first.Chunks[0].Ciphertext, second.Chunks[0].Ciphertext) || first.ManifestCommitment != second.ManifestCommitment {
+		t.Fatal("replay changed encrypted source artifact")
 	}
 }
 

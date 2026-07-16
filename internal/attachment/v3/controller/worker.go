@@ -170,9 +170,14 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
+	// Persist the ambiguity boundary before the irreversible remote state
+	// transition. A process death after the relay accepts this operation must
+	// still enter outcome reconciliation after the short-lived permit expires.
+	if err := w.options.Journal.markReceiptUncertain(inbound.PunaroMessageID, now); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
 	rawResult, err := w.options.Transport.DoV3Attachment(ctx, "POST", acceptancePath(notice.Manifest.TransferID), notice.AcceptanceNonce[:], permit, operation)
 	if err != nil {
-		_ = w.options.Journal.markReceiptUncertain(inbound.PunaroMessageID, now)
 		return attachmentv3.TransferResult{}, fmt.Errorf("submit recipient acceptance: %w", err)
 	}
 	result, err := exactAcceptedResult(rawResult, notice.Manifest.TransferID, commitment)
@@ -226,53 +231,74 @@ func (j *Journal) terminalizeReceiptUncertain(messageID string, now time.Time) e
 	return nil
 }
 
-type receiptOutcomeRecord struct {
+type receiptOutcomeAttempt struct {
+	index                     uint64
 	request                   []byte
 	operationID               [16]byte
 	idempotencyKey            [32]byte
 	permit, operation, result []byte
 }
 
-func (j *Journal) storeReceiptOutcomeIntent(messageID string, request []byte, operationID [16]byte, idempotencyKey [32]byte) (receiptOutcomeRecord, error) {
-	if j == nil || j.db == nil || messageID == "" || len(request) == 0 || operationID == [16]byte{} || idempotencyKey == [32]byte{} {
-		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome intent")
-	}
-	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_request=?,outcome_operation_id=?,outcome_idempotency_key=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_request IS NULL`, request, operationID[:], idempotencyKey[:], messageID)
-	if err != nil {
-		return receiptOutcomeRecord{}, err
-	}
-	return j.receiptOutcome(messageID)
-}
-func (j *Journal) receiptOutcome(messageID string) (receiptOutcomeRecord, error) {
-	var r receiptOutcomeRecord
+func (j *Journal) latestReceiptOutcomeAttempt(messageID string) (receiptOutcomeAttempt, bool, error) {
+	var r receiptOutcomeAttempt
+	var index int64
 	var id, key []byte
-	err := j.db.QueryRowContext(context.Background(), `SELECT outcome_request,outcome_operation_id,outcome_idempotency_key,outcome_permit,outcome_operation,outcome_result FROM controller_receipt_reconciliation WHERE punaro_message_id=? AND state='uncertain'`, messageID).Scan(&r.request, &id, &key, &r.permit, &r.operation, &r.result)
-	if err != nil || len(r.request) == 0 || len(id) != 16 || len(key) != 32 {
-		return r, errors.New("invalid receipt outcome record")
+	err := j.db.QueryRowContext(context.Background(), `SELECT attempt_index,permit_request,operation_id,idempotency_key,permit,operation,result FROM controller_receipt_outcome_attempts WHERE punaro_message_id=? ORDER BY attempt_index DESC LIMIT 1`, messageID).Scan(&index, &r.request, &id, &key, &r.permit, &r.operation, &r.result)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, false, nil
 	}
+	if err != nil || index < 0 || len(r.request) == 0 || len(id) != 16 || len(key) != 32 {
+		return r, false, errors.New("invalid receipt outcome attempt")
+	}
+	r.index = uint64(index)
 	copy(r.operationID[:], id)
 	copy(r.idempotencyKey[:], key)
-	return r, nil
+	return r, true, nil
 }
-func (j *Journal) storeReceiptOutcomeCredentials(messageID string, permit, operation []byte) (receiptOutcomeRecord, error) {
-	if len(permit) == 0 || len(operation) == 0 {
-		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome credentials")
+
+func (j *Journal) storeReceiptOutcomeAttempt(messageID string, attempt receiptOutcomeAttempt) (receiptOutcomeAttempt, error) {
+	if j == nil || j.db == nil || messageID == "" || len(attempt.request) == 0 || attempt.operationID == [16]byte{} || attempt.idempotencyKey == [32]byte{} || attempt.index > uint64(^uint(0)>>1) {
+		return receiptOutcomeAttempt{}, errors.New("invalid receipt outcome attempt")
 	}
-	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_permit=?,outcome_operation=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_permit IS NULL AND outcome_operation IS NULL`, permit, operation, messageID)
+	_, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_outcome_attempts(punaro_message_id,attempt_index,permit_request,operation_id,idempotency_key) SELECT ?,?,?,?,? WHERE EXISTS (SELECT 1 FROM controller_receipt_reconciliation WHERE punaro_message_id=? AND state='uncertain') ON CONFLICT(punaro_message_id,attempt_index) DO NOTHING`, messageID, int64(attempt.index), attempt.request, attempt.operationID[:], attempt.idempotencyKey[:], messageID)
 	if err != nil {
-		return receiptOutcomeRecord{}, err
+		return receiptOutcomeAttempt{}, err
 	}
-	return j.receiptOutcome(messageID)
+	stored, found, err := j.latestReceiptOutcomeAttempt(messageID)
+	if err != nil || !found || stored.index != attempt.index || !bytes.Equal(stored.request, attempt.request) || stored.operationID != attempt.operationID || stored.idempotencyKey != attempt.idempotencyKey {
+		return receiptOutcomeAttempt{}, errors.New("changed receipt outcome attempt")
+	}
+	return stored, nil
 }
-func (j *Journal) storeReceiptOutcomeResult(messageID string, result []byte) (receiptOutcomeRecord, error) {
-	if len(result) == 0 {
-		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome result")
+
+func (j *Journal) storeReceiptOutcomeAttemptCredentials(messageID string, index uint64, permit, operation []byte) (receiptOutcomeAttempt, error) {
+	if len(permit) == 0 || len(operation) == 0 || index > uint64(^uint(0)>>1) {
+		return receiptOutcomeAttempt{}, errors.New("invalid receipt outcome credentials")
 	}
-	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_result=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_result IS NULL`, result, messageID)
+	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_outcome_attempts SET permit=?,operation=? WHERE punaro_message_id=? AND attempt_index=? AND permit IS NULL AND operation IS NULL`, permit, operation, messageID, int64(index))
 	if err != nil {
-		return receiptOutcomeRecord{}, err
+		return receiptOutcomeAttempt{}, err
 	}
-	return j.receiptOutcome(messageID)
+	stored, found, err := j.latestReceiptOutcomeAttempt(messageID)
+	if err != nil || !found || stored.index != index || len(stored.permit) == 0 || len(stored.operation) == 0 {
+		return receiptOutcomeAttempt{}, errors.New("missing receipt outcome credentials")
+	}
+	return stored, nil
+}
+
+func (j *Journal) storeReceiptOutcomeAttemptResult(messageID string, index uint64, result []byte) (receiptOutcomeAttempt, error) {
+	if len(result) == 0 || index > uint64(^uint(0)>>1) {
+		return receiptOutcomeAttempt{}, errors.New("invalid receipt outcome result")
+	}
+	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_outcome_attempts SET result=? WHERE punaro_message_id=? AND attempt_index=? AND result IS NULL`, result, messageID, int64(index))
+	if err != nil {
+		return receiptOutcomeAttempt{}, err
+	}
+	stored, found, err := j.latestReceiptOutcomeAttempt(messageID)
+	if err != nil || !found || stored.index != index || len(stored.result) == 0 {
+		return receiptOutcomeAttempt{}, errors.New("missing receipt outcome result")
+	}
+	return stored, nil
 }
 
 // reconcileExpiredAcceptance is the only path that may proceed after an
@@ -283,89 +309,128 @@ func (w *RecipientAcceptanceWorker) reconcileExpiredAcceptance(ctx context.Conte
 		_ = w.options.Journal.terminalizeReceiptUncertain(messageID, now)
 		return attachmentv3.TransferResult{}, errors.New("recipient acceptance outcome requires operator reconciliation")
 	}
-	outcome, err := w.options.Journal.receiptOutcome(messageID)
+	outcome, found, err := w.options.Journal.latestReceiptOutcomeAttempt(messageID)
 	if err != nil {
-		request := record.request
-		requestID, err := w.options.NewID()
-		if err != nil || requestID == [16]byte{} {
-			return terminal()
-		}
-		opID, err := w.options.NewID()
-		if err != nil || opID == [16]byte{} {
-			return terminal()
-		}
-		key, err := w.options.NewIdempotencyKey()
-		if err != nil || key == [32]byte{} {
-			return terminal()
-		}
-		request.RequestID, request.Operation, request.AttemptGeneration = requestID, attachmentv3.PermitOperationOutcome, 0
-		request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(20*time.Second).Unix())
-		if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
-			return terminal()
-		}
-		raw, err := attachmentv3.EncodePermitRequest(request)
+		return attachmentv3.TransferResult{}, err
+	}
+	if found && len(outcome.result) != 0 {
+		return w.finishReceiptOutcome(messageID, record, outcome.result, now, terminal)
+	}
+	// A capability is one-use only for its short lifetime. Retain every old
+	// attempt for audit, but create a new one after expiry so a client crash or
+	// a transient GET failure cannot strand the recipient permanently.
+	if !found || outcomeAttemptExpired(outcome, now) {
+		outcome, err = w.newReceiptOutcomeAttempt(messageID, record, outcome, found, now)
 		if err != nil {
-			return terminal()
-		}
-		outcome, err = w.options.Journal.storeReceiptOutcomeIntent(messageID, raw, opID, key)
-		if err != nil {
-			return terminal()
+			return attachmentv3.TransferResult{}, err
 		}
 	}
 	request, err := attachmentv3.DecodePermitRequest(outcome.request)
-	if err != nil {
-		return terminal()
+	if err != nil || !exactOutcomeRequest(request, record, now) {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable recipient outcome request")
 	}
 	if len(outcome.permit) == 0 || len(outcome.operation) == 0 {
 		permit, err := w.options.Transport.IssueV3Permit(ctx, request)
-		if err != nil || attachmentv3.VerifyPermit(permit, authority, now) != nil || permit.Operation != attachmentv3.PermitOperationOutcome {
-			return terminal()
+		if err != nil || !exactOutcomePermit(permit, request, record, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+			return attachmentv3.TransferResult{}, errors.New("recipient outcome permit is unavailable")
 		}
-		op, err := w.options.Signer.BuildOutcomeOperation(permit, "GET", outcomePath(permit.TransferID), outcome.operationID, outcome.idempotencyKey, permit.IssuedAt, permit.ExpiresAt)
+		op, err := w.options.Signer.BuildOutcomeOperation(permit, "GET", outcomePath(record.transferID), outcome.operationID, outcome.idempotencyKey, permit.IssuedAt, permit.ExpiresAt)
 		if err != nil {
-			return terminal()
+			return attachmentv3.TransferResult{}, err
 		}
 		rawPermit, err := attachmentv3.EncodePermit(permit)
 		if err != nil {
-			return terminal()
+			return attachmentv3.TransferResult{}, err
 		}
 		rawOp, err := attachmentv3.EncodeOperation(op)
 		if err != nil {
-			return terminal()
+			return attachmentv3.TransferResult{}, err
 		}
-		outcome, err = w.options.Journal.storeReceiptOutcomeCredentials(messageID, rawPermit, rawOp)
+		outcome, err = w.options.Journal.storeReceiptOutcomeAttemptCredentials(messageID, outcome.index, rawPermit, rawOp)
 		if err != nil {
-			return terminal()
+			return attachmentv3.TransferResult{}, err
 		}
 	}
 	permit, err := attachmentv3.DecodePermit(outcome.permit)
-	if err != nil || attachmentv3.VerifyPermit(permit, authority, now) != nil {
-		return terminal()
+	if err != nil || !exactOutcomePermit(permit, request, record, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable recipient outcome permit")
 	}
 	op, err := attachmentv3.DecodeOperation(outcome.operation)
 	if err != nil {
-		return terminal()
+		return attachmentv3.TransferResult{}, errors.New("invalid durable recipient outcome operation")
 	}
-	route, requestOp, err := attachmentv3.NewAttachmentOperationRequest("GET", outcomePath(permit.TransferID), nil, nil)
-	if err != nil {
-		return terminal()
+	route, requestOp, err := attachmentv3.NewAttachmentOperationRequest("GET", outcomePath(record.transferID), nil, nil)
+	if err != nil || op.OperationID != outcome.operationID || op.IdempotencyKey != outcome.idempotencyKey {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable recipient outcome operation")
 	}
 	if _, _, err := attachmentv3.VerifyAttachmentOperationRequest(op, permit, authority, route, requestOp, now); err != nil {
-		return terminal()
+		return attachmentv3.TransferResult{}, errors.New("invalid durable recipient outcome operation")
 	}
-	raw, err := w.options.Transport.DoV3Attachment(ctx, "GET", outcomePath(permit.TransferID), nil, permit, op)
+	raw, err := w.options.Transport.DoV3Attachment(ctx, "GET", outcomePath(record.transferID), nil, permit, op)
 	if err != nil {
-		return terminal()
+		// Do not terminalize: the remote GET may have succeeded just before this
+		// transport error. The durable attempt will be retried while valid, or a
+		// fresh attempt will be used after it expires.
+		return attachmentv3.TransferResult{}, fmt.Errorf("query recipient acceptance outcome: %w", err)
 	}
-	outcome, err = w.options.Journal.storeReceiptOutcomeResult(messageID, raw)
+	outcome, err = w.options.Journal.storeReceiptOutcomeAttemptResult(messageID, outcome.index, raw)
 	if err != nil {
-		return terminal()
+		return attachmentv3.TransferResult{}, err
 	}
-	result, err := attachmentv3.DecodeTransferResult(outcome.result)
+	return w.finishReceiptOutcome(messageID, record, outcome.result, now, terminal)
+}
+
+func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, record receiptAcceptanceRecord, previous receiptOutcomeAttempt, found bool, now time.Time) (receiptOutcomeAttempt, error) {
+	if now.Unix() < 0 || (found && previous.index == ^uint64(0)) {
+		return receiptOutcomeAttempt{}, errors.New("cannot create recipient outcome attempt")
+	}
+	requestID, err := w.options.NewID()
+	if err != nil || requestID == [16]byte{} {
+		return receiptOutcomeAttempt{}, errors.New("generate recipient outcome request identity")
+	}
+	opID, err := w.options.NewID()
+	if err != nil || opID == [16]byte{} {
+		return receiptOutcomeAttempt{}, errors.New("generate recipient outcome operation identity")
+	}
+	key, err := w.options.NewIdempotencyKey()
+	if err != nil || key == [32]byte{} {
+		return receiptOutcomeAttempt{}, errors.New("generate recipient outcome idempotency identity")
+	}
+	request := record.request
+	request.RequestID, request.Operation, request.AttemptGeneration = requestID, attachmentv3.PermitOperationOutcome, 0
+	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(20*time.Second).Unix())
+	if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
+		return receiptOutcomeAttempt{}, err
+	}
+	raw, err := attachmentv3.EncodePermitRequest(request)
+	if err != nil {
+		return receiptOutcomeAttempt{}, err
+	}
+	index := uint64(0)
+	if found {
+		index = previous.index + 1
+	}
+	return w.options.Journal.storeReceiptOutcomeAttempt(messageID, receiptOutcomeAttempt{index: index, request: raw, operationID: opID, idempotencyKey: key})
+}
+
+func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
+	request, err := attachmentv3.DecodePermitRequest(outcome.request)
+	if err != nil || now.Unix() < 0 {
+		return true
+	}
+	if len(outcome.permit) != 0 {
+		permit, err := attachmentv3.DecodePermit(outcome.permit)
+		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
+	}
+	return request.ExpiresAt <= uint64(now.Unix())
+}
+
+func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, now time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
+	result, err := attachmentv3.DecodeTransferResult(raw)
 	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.State != attachmentv3.TransferStateAccepted {
 		return terminal()
 	}
-	if err := w.options.Journal.storeReceiptAcceptanceResult(messageID, outcome.result); err != nil {
+	if err := w.options.Journal.storeReceiptAcceptanceResult(messageID, raw); err != nil {
 		return terminal()
 	}
 	return result, nil
@@ -575,6 +640,31 @@ func exactAcceptancePermit(permit attachmentv3.Permit, request attachmentv3.Perm
 		return false
 	}
 	return now.Unix() >= 0 && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+}
+
+// exactOutcomeRequest and exactOutcomePermit bind a reconciliation lookup to
+// the immutable acceptance record, not merely to whatever capability happened
+// to be returned by the permit service. In particular, a valid recipient
+// outcome permit for another transfer or conversation must never reach the
+// transport layer.
+func exactOutcomeRequest(request attachmentv3.PermitRequest, record receiptAcceptanceRecord, now time.Time) bool {
+	if now.Unix() < 0 || request.RequestID == [16]byte{} || request.HolderDeviceID != record.request.HolderDeviceID || request.HolderGeneration != record.request.HolderGeneration || request.HolderRole != attachmentv3.PermitHolderRecipient || request.TransferID != record.transferID || request.ConversationID != record.request.ConversationID || request.SenderDeviceID != record.request.SenderDeviceID || request.SenderGeneration != record.request.SenderGeneration || request.RecipientDeviceID != record.request.RecipientDeviceID || request.RecipientGeneration != record.request.RecipientGeneration || request.AttemptGeneration != 0 || request.Operation != attachmentv3.PermitOperationOutcome || request.MembershipCommitment != record.request.MembershipCommitment || request.StagedManifestCommitment != record.manifestCommitment || request.MaxBytes != record.request.MaxBytes || request.MaxChunks != record.request.MaxChunks || request.MaxOperations != 1 {
+		return false
+	}
+	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
+}
+
+func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptAcceptanceRecord, now time.Time) bool {
+	if !exactOutcomeRequest(request, record, now) {
+		return false
+	}
+	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil {
+		return false
+	}
+	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+		return false
+	}
+	return permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
 }
 func mustEncodePermit(permit attachmentv3.Permit) []byte {
 	raw, err := attachmentv3.EncodePermit(permit)
