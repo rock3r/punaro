@@ -342,7 +342,7 @@ func receiptDownloadOutcomeAttemptExpired(attempt receiptDownloadOutcomeAttempt,
 		// #nosec G115 -- the caller rejects pre-epoch times before permit use.
 		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
 	}
-	return attempt.request.ExpiresAt <= uint64(now.Unix())
+	return attempt.request.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func (w *RecipientDownloadWorker) newReceiptDownloadOutcomeAttempt(record receiptDownloadRecord, phase receiptDownloadPhase, chunk uint64, original receiptDownloadOperation, previous receiptDownloadOutcomeAttempt, found bool, now time.Time) (receiptDownloadOutcomeAttempt, error) {
@@ -370,13 +370,13 @@ func (w *RecipientDownloadWorker) newReceiptDownloadOutcomeAttempt(record receip
 	request.RequestID, request.Operation, request.AttemptGeneration, request.OutcomeOfSerial = requestID, attachmentv3.PermitOperationOutcome, 0, originalPermit.Serial
 	request.MaxOperations = 1
 	expires := now.UTC().Add(20 * time.Second).Unix()
-	if uint64(expires) > manifest.ExpiresAt {
-		expires = int64(manifest.ExpiresAt)
+	if uint64(expires) > manifest.ExpiresAt { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		expires = int64(manifest.ExpiresAt) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
 	if expires <= now.UTC().Unix() {
 		return receiptDownloadOutcomeAttempt{}, errors.New("recipient download outcome exceeds manifest lifetime")
 	}
-	request.IssuedAt, request.ExpiresAt = uint64(now.UTC().Unix()), uint64(expires)
+	request.IssuedAt, request.ExpiresAt = uint64(now.UTC().Unix()), uint64(expires) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if err := w.options.Acceptance.options.Signer.SignOutcomePermit(&request); err != nil {
 		return receiptDownloadOutcomeAttempt{}, err
 	}
@@ -419,10 +419,10 @@ func (w *RecipientDownloadWorker) receiptDownloadOutcomeCredentials(ctx context.
 
 func exactReceiptDownloadOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptDownloadRecord, original receiptDownloadOperation, now time.Time) bool {
 	origin, err := attachmentv3.DecodePermit(original.permit)
-	if err != nil || request.OutcomeOfSerial != origin.Serial || request.RequestID == [16]byte{} || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 || request.TransferID != record.transferID || request.StagedManifestCommitment != record.manifestCommitment || request.HolderRole != attachmentv3.PermitHolderRecipient || request.IssuedAt > uint64(now.Unix()) || request.ExpiresAt <= uint64(now.Unix()) {
+	if err != nil || request.OutcomeOfSerial != origin.Serial || request.RequestID == [16]byte{} || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 || request.TransferID != record.transferID || request.StagedManifestCommitment != record.manifestCommitment || request.HolderRole != attachmentv3.PermitHolderRecipient || request.IssuedAt > uint64(now.Unix()) || request.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		return false
 	}
-	return permit.HolderDeviceID == request.HolderDeviceID && permit.HolderGeneration == request.HolderGeneration && permit.HolderRole == request.HolderRole && permit.TransferID == request.TransferID && permit.ConversationID == request.ConversationID && permit.SenderDeviceID == request.SenderDeviceID && permit.SenderGeneration == request.SenderGeneration && permit.RecipientDeviceID == request.RecipientDeviceID && permit.RecipientGeneration == request.RecipientGeneration && permit.Operation == request.Operation && permit.AttemptGeneration == 0 && permit.OutcomeOfSerial == request.OutcomeOfSerial && permit.MembershipCommitment == request.MembershipCommitment && permit.StagedManifestCommitment == request.StagedManifestCommitment && permit.MaxBytes == request.MaxBytes && permit.MaxChunks == request.MaxChunks && permit.MaxOperations == 1 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.ExpiresAt > uint64(now.Unix())
+	return permit.HolderDeviceID == request.HolderDeviceID && permit.HolderGeneration == request.HolderGeneration && permit.HolderRole == request.HolderRole && permit.TransferID == request.TransferID && permit.ConversationID == request.ConversationID && permit.SenderDeviceID == request.SenderDeviceID && permit.SenderGeneration == request.SenderGeneration && permit.RecipientDeviceID == request.RecipientDeviceID && permit.RecipientGeneration == request.RecipientGeneration && permit.Operation == request.Operation && permit.AttemptGeneration == 0 && permit.OutcomeOfSerial == request.OutcomeOfSerial && permit.MembershipCommitment == request.MembershipCommitment && permit.StagedManifestCommitment == request.StagedManifestCommitment && permit.MaxBytes == request.MaxBytes && permit.MaxChunks == request.MaxChunks && permit.MaxOperations == 1 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.ExpiresAt > uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receiptDownloadRecord, operation receiptDownloadOperation, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
@@ -431,10 +431,10 @@ func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receip
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("incomplete durable recipient download credentials")
 		}
 		permit, err := attachmentv3.DecodePermit(operation.permit)
-		if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil {
+		if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient download permit")
 		}
-		if permit.ExpiresAt <= uint64(now.Unix()) {
+		if permit.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errRecipientDownloadOutcome
 		}
 		if len(operation.operation) == 0 {
@@ -457,20 +457,20 @@ func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receip
 		return permit, signed, nil
 	}
 	permit, err := w.options.Transport.IssueV3Permit(ctx, operation.request)
-	if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil {
+	if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient download permit is unavailable")
 	}
 	stored, err := w.options.Acceptance.options.Journal.storeReceiptDownloadPermit(record, operation, permit)
 	if err != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
 	}
-	if permit.ExpiresAt <= uint64(now.Unix()) {
+	if permit.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errRecipientDownloadOutcome
 	}
 	method, path := receiptDownloadRoute(record.transferID, operation.phase, operation.chunk)
 	issuedAt := permit.IssuedAt
-	if uint64(now.Unix()) > issuedAt {
-		issuedAt = uint64(now.Unix())
+	if uint64(now.Unix()) > issuedAt { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		issuedAt = uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
 	signed, err := w.options.Signer.BuildReceiptDownloadOperation(permit, method, path, nil, operation.operationID, operation.idempotencyKey, issuedAt, permit.ExpiresAt)
 	if err != nil || !verifyReceiptDownloadOperation(signed, permit, method, path, authority, now) {

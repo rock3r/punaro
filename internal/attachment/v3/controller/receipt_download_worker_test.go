@@ -289,6 +289,7 @@ func (s *receiptDownloadTransport) DoV3Attachment(ctx context.Context, method, p
 func encryptedInboundOffer(t *testing.T, mapping Mapping, plain []byte, now time.Time) (InboundOffer, attachmentv3.SourceArtifact, [32]byte) {
 	t.Helper()
 	_, sender := testOfferSigner()
+	// #nosec G115 -- test clock is fixed after the Unix epoch.
 	manifest := attachmentv3.Manifest{Audience: bytes32(5), TransferID: bytes16(6), ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: bytes32(7), MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: 1, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(20 * time.Second).Unix()), ChunkSize: 4, SignerKeyID: bytes32(10)}
 	privateDir := filepath.Join(t.TempDir(), "artifact-private")
 	if err := os.Mkdir(privateDir, 0o700); err != nil {

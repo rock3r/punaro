@@ -686,7 +686,7 @@ func (w *SenderOutcomeWorker) Reconcile(ctx context.Context, transferID [16]byte
 		return attachmentv3.TransferResult{}, errors.New("sender operation is not reconcilable")
 	}
 	originalPermit, err := attachmentv3.DecodePermit(original.permit)
-	if err != nil || originalPermit.ExpiresAt > uint64(now.Unix()) {
+	if err != nil || originalPermit.ExpiresAt > uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		return attachmentv3.TransferResult{}, errors.New("sender operation has not expired")
 	}
 	attempt, found, err := w.source.options.Journal.latestSenderOutcomeAttempt(transferID, phase, chunk)
@@ -758,9 +758,9 @@ func senderOutcomeAttemptExpired(attempt senderOutcomeAttempt, now time.Time) bo
 	}
 	if len(attempt.permit) != 0 {
 		permit, err := attachmentv3.DecodePermit(attempt.permit)
-		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
+		return err != nil || permit.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
-	return request.ExpiresAt <= uint64(now.Unix())
+	return request.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func senderOperationPath(transfer [16]byte, phase senderPhase, chunk uint64) (string, string, error) {
@@ -810,8 +810,8 @@ func (j *Journal) ensureSenderOperation(transfer senderTransferRecord, phase sen
 		return senderOperationRecord{}, errors.New("invalid durable sender manifest")
 	}
 	expires := now.Add(senderOperationLifetime).Unix()
-	if uint64(expires) > manifest.ExpiresAt {
-		expires = int64(manifest.ExpiresAt)
+	if uint64(expires) > manifest.ExpiresAt { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		expires = int64(manifest.ExpiresAt) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
 	if expires <= now.Unix() {
 		return senderOperationRecord{}, errors.New("expired sender source")
@@ -825,7 +825,7 @@ func (j *Journal) ensureSenderOperation(transfer senderTransferRecord, phase sen
 		return senderOperationRecord{}, errors.New("invalid sender source size")
 	}
 	record := senderOperationRecord{operationID: opID, idempotencyKey: idempotency}
-	record.request = attachmentv3.PermitRequest{RequestID: requestID, HolderDeviceID: manifest.SenderDeviceID, HolderGeneration: manifest.SenderGeneration, HolderRole: attachmentv3.PermitHolderSender, TransferID: manifest.TransferID, ConversationID: manifest.ConversationID, SenderDeviceID: manifest.SenderDeviceID, SenderGeneration: manifest.SenderGeneration, RecipientDeviceID: manifest.RecipientDeviceID, RecipientGeneration: manifest.RecipientGeneration, Operation: operation, MembershipCommitment: manifest.MembershipCommitment, StagedManifestCommitment: transfer.commitment, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(expires), MaxBytes: maxBytes, MaxChunks: maxChunks, MaxOperations: 1}
+	record.request = attachmentv3.PermitRequest{RequestID: requestID, HolderDeviceID: manifest.SenderDeviceID, HolderGeneration: manifest.SenderGeneration, HolderRole: attachmentv3.PermitHolderSender, TransferID: manifest.TransferID, ConversationID: manifest.ConversationID, SenderDeviceID: manifest.SenderDeviceID, SenderGeneration: manifest.SenderGeneration, RecipientDeviceID: manifest.RecipientDeviceID, RecipientGeneration: manifest.RecipientGeneration, Operation: operation, MembershipCommitment: manifest.MembershipCommitment, StagedManifestCommitment: transfer.commitment, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(expires), MaxBytes: maxBytes, MaxChunks: maxChunks, MaxOperations: 1} // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if err := signer.SignSenderPermit(&record.request); err != nil {
 		return senderOperationRecord{}, err
 	}
@@ -908,7 +908,7 @@ func (j *Journal) newSenderOutcomeAttempt(transfer senderTransferRecord, phase s
 	request := original.request
 	request.RequestID, request.Operation, request.AttemptGeneration, request.OutcomeOfSerial = requestID, attachmentv3.PermitOperationOutcome, 0, originalPermit.Serial
 	request.MaxOperations = 1
-	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(senderOutcomeLifetime).Unix())
+	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(senderOutcomeLifetime).Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	manifest, err := attachmentv3.DecodeManifest(transfer.manifest)
 	if err != nil {
 		return senderOutcomeAttempt{}, errors.New("invalid sender outcome source")
@@ -963,7 +963,7 @@ func (w *SenderOutcomeWorker) senderOutcomeCredentials(ctx context.Context, tran
 	if err != nil || !exactSenderOutcomePermit(permit, request, original, transfer, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender outcome permit is unavailable")
 	}
-	issued := uint64(now.Unix())
+	issued := uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if issued < permit.IssuedAt {
 		issued = permit.IssuedAt
 	}
@@ -1042,7 +1042,7 @@ func (w *SenderSourceInitializer) credentials(ctx context.Context, transfer send
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit is unavailable")
 	}
 	if attachmentv3.VerifyPermit(permit, authority, now) != nil {
-		if permit.ExpiresAt <= uint64(now.Unix()) {
+		if permit.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 			if _, storeErr := w.options.Journal.storeSenderPermit(transfer.transferID, phase, chunk, permit); storeErr != nil {
 				return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, storeErr
 			}
@@ -1050,7 +1050,7 @@ func (w *SenderSourceInitializer) credentials(ctx context.Context, transfer send
 		}
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("sender source permit is unavailable")
 	}
-	issued := uint64(now.Unix())
+	issued := uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if issued < permit.IssuedAt {
 		issued = permit.IssuedAt
 	}
@@ -1070,7 +1070,7 @@ func (w *SenderSourceInitializer) reconcileExpired(ctx context.Context, transfer
 		return attachmentv3.TransferResult{}, errors.New("sender operation has no expired durable credentials")
 	}
 	permit, err := attachmentv3.DecodePermit(record.permit)
-	if err != nil || permit.ExpiresAt > uint64(now.Unix()) {
+	if err != nil || permit.ExpiresAt > uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		return attachmentv3.TransferResult{}, errors.New("sender operation is not expired")
 	}
 	outcomes, err := NewSenderOutcomeWorker(w)
@@ -1144,7 +1144,7 @@ func exactSenderPermit(permit attachmentv3.Permit, request attachmentv3.PermitRe
 	if !exactSenderPermitFields(permit, request, transfer, operation) {
 		return false
 	}
-	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func exactSenderPermitFields(permit attachmentv3.Permit, request attachmentv3.PermitRequest, transfer senderTransferRecord, operation uint64) bool {
@@ -1159,7 +1159,7 @@ func exactSenderOutcomeRequest(request attachmentv3.PermitRequest, original send
 	if err != nil || now.Unix() < 0 || request.RequestID == [16]byte{} || request.HolderDeviceID != original.request.HolderDeviceID || request.HolderGeneration != original.request.HolderGeneration || request.HolderRole != attachmentv3.PermitHolderSender || request.TransferID != transfer.transferID || request.ConversationID != original.request.ConversationID || request.SenderDeviceID != original.request.SenderDeviceID || request.SenderGeneration != original.request.SenderGeneration || request.RecipientDeviceID != original.request.RecipientDeviceID || request.RecipientGeneration != original.request.RecipientGeneration || request.AttemptGeneration != 0 || request.Operation != attachmentv3.PermitOperationOutcome || request.OutcomeOfSerial != originalPermit.Serial || request.MembershipCommitment != original.request.MembershipCommitment || request.StagedManifestCommitment != transfer.commitment || request.MaxBytes != original.request.MaxBytes || request.MaxChunks != original.request.MaxChunks || request.MaxOperations != 1 {
 		return false
 	}
-	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
+	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func exactSenderOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, original senderOperationRecord, transfer senderTransferRecord, now time.Time) bool {
@@ -1172,7 +1172,7 @@ func exactSenderOutcomePermit(permit attachmentv3.Permit, request attachmentv3.P
 	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderSender || permit.TransferID != transfer.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.OutcomeOfSerial != request.OutcomeOfSerial || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != transfer.commitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
-	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func verifySenderOperation(operation attachmentv3.OperationRecord, permit attachmentv3.Permit, method, path string, body []byte, authority SenderDeliveryAuthority, now time.Time) error {

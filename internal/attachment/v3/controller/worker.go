@@ -184,7 +184,7 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 		if err != nil || !found {
 			return attachmentv3.TransferResult{}, errors.New("uncertain recipient acceptance record is unavailable")
 		}
-		if permit, err := attachmentv3.DecodePermit(record.permit); err == nil && permit.ExpiresAt <= uint64(now.Unix()) {
+		if permit, err := attachmentv3.DecodePermit(record.permit); err == nil && permit.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 			return w.reconcileExpiredAcceptance(ctx, inbound.PunaroMessageID, record, authority, now)
 		}
 	}
@@ -452,7 +452,7 @@ func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, r
 	if expires <= now.Unix() {
 		return receiptOutcomeAttempt{}, errors.New("recipient outcome exceeds manifest lifetime")
 	}
-	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(expires)
+	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(expires) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
 		return receiptOutcomeAttempt{}, err
 	}
@@ -485,9 +485,9 @@ func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
 	}
 	if len(outcome.permit) != 0 {
 		permit, err := attachmentv3.DecodePermit(outcome.permit)
-		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
+		return err != nil || permit.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
-	return request.ExpiresAt <= uint64(now.Unix())
+	return request.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, _ time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
@@ -524,7 +524,7 @@ func (w *RecipientAcceptanceWorker) acceptanceCredentials(ctx context.Context, r
 	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient acceptance permit is unavailable")
 	}
-	issuedAt := uint64(now.Unix())
+	issuedAt := uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if issuedAt < permit.IssuedAt {
 		issuedAt = permit.IssuedAt
 	}
@@ -597,8 +597,9 @@ func (j *Journal) ensureReceiptAcceptance(messageID string, notice attachmentv3.
 		return receiptAcceptanceRecord{}, errors.New("generate recipient acceptance idempotency identity")
 	}
 	expires := now.Add(20 * time.Second).Unix()
+	// #nosec G115 -- this path rejects pre-epoch and expired times before permit use.
 	if uint64(expires) > notice.Manifest.ExpiresAt {
-		expires = int64(notice.Manifest.ExpiresAt)
+		expires = int64(notice.Manifest.ExpiresAt) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
 	if expires <= now.Unix() {
 		return receiptAcceptanceRecord{}, errors.New("expired recipient acceptance offer")
@@ -608,6 +609,7 @@ func (j *Journal) ensureReceiptAcceptance(messageID string, notice attachmentv3.
 		return receiptAcceptanceRecord{}, errors.New("invalid recipient acceptance size")
 	}
 	record := receiptAcceptanceRecord{messageID: messageID, transferID: notice.Manifest.TransferID, manifestCommitment: blake3.Sum256(notice.ManifestRaw), acceptanceNonce: notice.AcceptanceNonce, operationID: opID, idempotencyKey: idempotency}
+	// #nosec G115 -- the same path rejects pre-epoch and expired times before permit use.
 	record.request = attachmentv3.PermitRequest{RequestID: requestID, HolderDeviceID: j.recipient.DeviceID, HolderGeneration: j.recipient.Generation, HolderRole: attachmentv3.PermitHolderRecipient, TransferID: notice.Manifest.TransferID, ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, Operation: attachmentv3.PermitOperationAccept, MembershipCommitment: mapping.MembershipCommitment, StagedManifestCommitment: record.manifestCommitment, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(expires), MaxBytes: maxBytes, MaxChunks: notice.Manifest.ChunkCount, MaxOperations: 1}
 	if err := signer.SignReceiptPermit(&record.request); err != nil {
 		return receiptAcceptanceRecord{}, err
@@ -704,6 +706,7 @@ func exactAcceptancePermit(permit attachmentv3.Permit, request attachmentv3.Perm
 	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != request.TransferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationAccept || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != commitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
+	// #nosec G115 -- the initial nonnegative-time predicate makes this comparison fail closed.
 	return now.Unix() >= 0 && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
 }
 
@@ -717,6 +720,7 @@ func exactOutcomeRequest(request attachmentv3.PermitRequest, record receiptAccep
 	if err != nil || original.Operation != attachmentv3.PermitOperationAccept || request.OutcomeOfSerial != original.Serial || now.Unix() < 0 || request.RequestID == [16]byte{} || request.HolderDeviceID != record.request.HolderDeviceID || request.HolderGeneration != record.request.HolderGeneration || request.HolderRole != attachmentv3.PermitHolderRecipient || request.TransferID != record.transferID || request.ConversationID != record.request.ConversationID || request.SenderDeviceID != record.request.SenderDeviceID || request.SenderGeneration != record.request.SenderGeneration || request.RecipientDeviceID != record.request.RecipientDeviceID || request.RecipientGeneration != record.request.RecipientGeneration || request.AttemptGeneration != 0 || request.Operation != attachmentv3.PermitOperationOutcome || request.MembershipCommitment != record.request.MembershipCommitment || request.StagedManifestCommitment != record.manifestCommitment || request.MaxBytes != record.request.MaxBytes || request.MaxChunks != record.request.MaxChunks || request.MaxOperations != 1 {
 		return false
 	}
+	// #nosec G115 -- the caller rejects pre-epoch time before this capability check.
 	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
 }
 
@@ -730,6 +734,7 @@ func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitR
 	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.OutcomeOfSerial != request.OutcomeOfSerial || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
+	// #nosec G115 -- the caller rejects pre-epoch time before this capability check.
 	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
 }
 func mustEncodePermit(permit attachmentv3.Permit) []byte {

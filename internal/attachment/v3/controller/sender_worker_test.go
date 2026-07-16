@@ -37,7 +37,7 @@ func TestSenderSourceInitializerPersistsExactCredentialsBeforeSubmission(t *test
 	if err := insertStagedSenderTransfer(journal, mapping, manifest, raw); err != nil {
 		t.Fatal(err)
 	}
-	transport := &senderTransportStub{result: sourceUploadingTransferResult(t, manifest.TransferID, attachmentCommitment(t, raw), int64(manifest.ExpiresAt))}
+	transport := &senderTransportStub{result: sourceUploadingTransferResult(t, manifest.TransferID, attachmentCommitment(t, raw), int64(manifest.ExpiresAt))} // #nosec G115 -- test fixture Manifest validation bounds expiry.
 	authority := testSenderAuthority(t, mapping, senderPrivate)
 	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{
 		Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: authority}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport,
@@ -95,7 +95,7 @@ func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 	commitment := attachmentCommitment(t, raw)
 	initPath := sourceInitPath(manifest.TransferID)
 	uploadPath := fmt.Sprintf("/v3/attachments/%x/source/chunks/0", manifest.TransferID)
-	transport := &senderTransportStub{results: map[string][]byte{initPath: sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt)), uploadPath: sourceReadyTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}}
+	transport := &senderTransportStub{results: map[string][]byte{initPath: sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt)), uploadPath: sourceReadyTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}} // #nosec G115 -- test fixture Manifest validation bounds expiry.
 	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: testSenderAuthority(t, mapping, senderPrivate)}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71), bytes16(72), bytes16(73)), NewIdempotencyKey: sequenceKey(bytes32(74), bytes32(75))})
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +142,7 @@ func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
 		t.Fatal(err)
 	}
 	commitment := attachmentCommitment(t, raw)
+	// #nosec G115 -- test fixture Manifest validation bounds expiry.
 	transport := &senderTransportStub{operationErr: errors.New("response lost"), results: map[string][]byte{outcomePath(manifest.TransferID): sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}}
 	authority := testSenderAuthority(t, mapping, senderPrivate).(senderAuthorityStub)
 	authority.binding = testCurrentBinding(mapping, 130)
@@ -214,6 +215,7 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 	initPath := sourceInitPath(manifest.TransferID)
 	uploadPath := fmt.Sprintf("/v3/attachments/%x/source/chunks/0", manifest.TransferID)
 	offerPath := fmt.Sprintf("/v3/attachments/%x/offer", manifest.TransferID)
+	// #nosec G115 -- test fixture Manifest validation bounds expiry.
 	transport := &senderTransportStub{results: map[string][]byte{initPath: sourceUploadingTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt)), uploadPath: sourceReadyTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt)), offerPath: offeredTransferResult(t, manifest.TransferID, commitment, int64(manifest.ExpiresAt))}}
 	signer := NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate)
 	source, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: testSenderAuthority(t, mapping, senderPrivate)}, Signer: signer, Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71), bytes16(72), bytes16(73), bytes16(74), bytes16(75)), NewIdempotencyKey: sequenceKey(bytes32(76), bytes32(77), bytes32(78))})
@@ -285,6 +287,7 @@ func (s *offerNoticeQueueStub) ActivateV3OfferNotice(context.Context, string) er
 func stagedSenderManifest(t *testing.T, mapping Mapping, private ed25519.PrivateKey, now time.Time) (attachmentv3.Manifest, []byte) {
 	t.Helper()
 	binding := testCurrentBinding(mapping, 120)
+	// #nosec G115 -- test clock is fixed after the Unix epoch.
 	manifest := attachmentv3.Manifest{Audience: binding.Permit.Audience, TransferID: bytes16(61), ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: binding.Permit.DirectoryHead, MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: binding.Permit.RevocationEpoch, IssuedAt: uint64(now.Unix()), ExpiresAt: binding.Permit.ExpiresAt, ContentSalt: bytes32(62), PlaintextCommitment: bytes32(63), ChunkSize: 1, ChunkCount: 1, PlaintextSize: 1, SignerKeyID: binding.Sender.SigningKeyID}
 	if err := attachmentv3.SignManifest(&manifest, private); err != nil {
 		t.Fatal(err)

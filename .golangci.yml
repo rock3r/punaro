@@ -22,14 +22,6 @@ linters:
     - unconvert
     - unused
     - usestdlibvars
-  settings:
-    gosec:
-      # V3 decoders reject unrepresentable timestamps and bound every chunk
-      # and retry counter before persistence. G115 cannot follow those
-      # protocol invariants through the durable state-machine transitions.
-      excludes:
-        - G115
-
 formatters:
   enable:
     - gofmt

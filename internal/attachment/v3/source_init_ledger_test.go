@@ -36,7 +36,7 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	}
 	permit := permitForManifest(manifest, raw, now)
 	permit.Operation, permit.MaxOperations = permitOperationSourceInit, 1
-	permit.ExpiresAt = uint64(now.Add(15 * time.Second).Unix())
+	permit.ExpiresAt = uint64(now.Add(15 * time.Second).Unix()) // #nosec G115 -- test clock is fixed after the Unix epoch.
 	if err := SignPermit(&permit, issuerPrivate); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestSourceInitRedeemsPermitAndStagesSourceAtomically(t *testing.T) {
 	// source-uploading result rather than the later lifecycle guess.
 	outcome := permit
 	outcome.Serial, outcome.Operation, outcome.OutcomeOfSerial = testID(97), permitOperationOutcome, permit.Serial
-	outcome.IssuedAt, outcome.ExpiresAt = uint64(now.Add(16*time.Second).Unix()), uint64(now.Add(26*time.Second).Unix())
+	outcome.IssuedAt, outcome.ExpiresAt = uint64(now.Add(16*time.Second).Unix()), uint64(now.Add(26*time.Second).Unix()) // #nosec G115 -- test clock is fixed after the Unix epoch.
 	if err := SignPermit(&outcome, issuerPrivate); err != nil {
 		t.Fatal(err)
 	}

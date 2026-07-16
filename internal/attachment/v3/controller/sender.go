@@ -110,7 +110,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 		if err != nil {
 			return attachmentv3.Manifest{}, err
 		}
-		manifest := attachmentv3.Manifest{Audience: binding.Permit.Audience, TransferID: transferID, ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: binding.Permit.DirectoryHead, MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: binding.Permit.RevocationEpoch, IssuedAt: uint64(now.Unix()), ExpiresAt: binding.Permit.ExpiresAt, ChunkSize: s.options.ChunkSize, SignerKeyID: binding.Sender.SigningKeyID}
+		manifest := attachmentv3.Manifest{Audience: binding.Permit.Audience, TransferID: transferID, ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: binding.Permit.DirectoryHead, MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: binding.Permit.RevocationEpoch, IssuedAt: uint64(now.Unix()), ExpiresAt: binding.Permit.ExpiresAt, ChunkSize: s.options.ChunkSize, SignerKeyID: binding.Sender.SigningKeyID} // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 		prepared, commitment, err := attachmentv3.PrepareSourceManifest(plaintext, manifest, s.options.SigningKey, material)
 		if err != nil {
 			return attachmentv3.Manifest{}, err
@@ -150,7 +150,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 }
 
 func exactStagedManifest(manifest attachmentv3.Manifest, mapping Mapping, binding attachmentv2.DirectoryTransferBinding, now time.Time) bool {
-	return now.Unix() >= 0 && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.DirectoryHead == binding.Permit.DirectoryHead && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.RevocationEpoch == binding.Permit.RevocationEpoch && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= binding.Permit.ExpiresAt
+	return now.Unix() >= 0 && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.DirectoryHead == binding.Permit.DirectoryHead && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.RevocationEpoch == binding.Permit.RevocationEpoch && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= binding.Permit.ExpiresAt // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 }
 
 func newSourceArtifactMaterial() (attachmentv3.SourceArtifactMaterial, error) {
@@ -247,7 +247,7 @@ func (j *Journal) ReapExpiredSenderStages(now time.Time, limit int) (int, error)
 		if err != nil || len(stage) != 16 || len(transfer) != 16 || manifest.TransferID == [16]byte{} {
 			return 0, errors.New("invalid durable sender stage intent")
 		}
-		if manifest.ExpiresAt <= uint64(now.UTC().Unix()) && len(expired) < limit {
+		if manifest.ExpiresAt <= uint64(now.UTC().Unix()) && len(expired) < limit { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 			expired = append(expired, expiredStage{stage: stage, transfer: transfer})
 		}
 	}

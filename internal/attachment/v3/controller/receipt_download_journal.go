@@ -429,7 +429,7 @@ func (j *Journal) storeReceiptDownloadPermit(record receiptDownloadRecord, opera
 		return receiptDownloadOperation{}, err
 	}
 	query := `UPDATE controller_receipt_download_operations SET permit=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND permit IS NULL`
-	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
+	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)} // #nosec G115 -- the manifest bounds chunk indices before this SQLite conversion.
 	if operation.attempt != 0 {
 		query = `UPDATE controller_receipt_download_operation_retries SET permit=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND permit IS NULL`
 		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
@@ -456,7 +456,7 @@ func (j *Journal) storeReceiptDownloadOperationSignature(record receiptDownloadR
 		return receiptDownloadOperation{}, err
 	}
 	query := `UPDATE controller_receipt_download_operations SET operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation IS NULL`
-	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
+	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)} // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if operation.attempt != 0 {
 		query = `UPDATE controller_receipt_download_operation_retries SET operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND operation IS NULL`
 		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
@@ -482,10 +482,10 @@ func (j *Journal) storeReceiptDownloadResult(record receiptDownloadRecord, opera
 		return errors.New("invalid receipt download result")
 	}
 	query := `UPDATE controller_receipt_download_operations SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND result IS NULL`
-	args := []any{result, record.messageID, string(operation.phase), int64(operation.chunk)}
+	args := []any{result, record.messageID, string(operation.phase), int64(operation.chunk)} // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	if operation.attempt != 0 {
 		query = `UPDATE controller_receipt_download_operation_retries SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=? AND result IS NULL`
-		args = append(args, int64(operation.attempt))
+		args = append(args, int64(operation.attempt)) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
 	}
 	changed, err := j.db.ExecContext(context.Background(), query, args...)
 	if err != nil {
