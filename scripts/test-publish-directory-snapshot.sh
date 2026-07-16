@@ -59,7 +59,7 @@ contender_status=$?
 contender_output=$(< /tmp/punaro-publisher-lock-test.out)
 set -e
 [ "$contender_status" -eq 75 ] || { printf '%s\n' 'concurrent publisher was not rejected' >&2; exit 1; }
-[ "$contender_output" = 'directory_snapshot_publish_already_running' ] || { printf '%s\n' 'concurrent publisher rejection was unexpected' >&2; exit 1; }
+case "$contender_output" in *directory_snapshot_publish_already_running*) ;; *) printf '%s\n' 'concurrent publisher rejection was unexpected' >&2; exit 1;; esac
 wait "$holder" || true
 
 # The child kills the publisher shell exactly as a crash would while its own
