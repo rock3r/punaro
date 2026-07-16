@@ -66,6 +66,44 @@ func TestDirectorySnapshotResolverBindsManifestAndRecipientKeysToFreshMembership
 	}
 }
 
+func TestDirectorySnapshotResolverResolvesOnlyExactCurrentTransferBinding(t *testing.T) {
+	t.Parallel()
+	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Now().UTC().Truncate(time.Second)
+	audience, rootID := directoryBytes32(31), directoryBytes32(32)
+	sender := DirectoryDevice{DeviceID: bytes16(33), Generation: 1, SigningKeyID: directoryBytes32(34), SigningPublicKey: directoryBytes32(35), HPKEKeyID: directoryBytes32(36), HPKEPublicKey: directoryBytes32(37)}
+	recipient := DirectoryDevice{DeviceID: bytes16(38), Generation: 1, SigningKeyID: directoryBytes32(39), SigningPublicKey: directoryBytes32(40), HPKEKeyID: directoryBytes32(41), HPKEPublicKey: directoryBytes32(42)}
+	membership := DirectoryMembership{ConversationID: bytes16(43), SenderDeviceID: sender.DeviceID, SenderGeneration: sender.Generation, RecipientDeviceID: recipient.DeviceID, RecipientGeneration: recipient.Generation, Commitment: directoryBytes32(44)}
+	entries := []DirectoryEntry{{Device: &sender}, {Device: &recipient}, {Membership: &membership}}
+	leaves, err := DirectoryEntryHashes(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := signedDirectoryHead(t, rootPrivate, DirectoryHead{Audience: audience, RootKeyID: rootID, TreeSize: uint64(len(entries)), TreeRoot: directoryMerkleRoot(leaves), Sequence: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), RevocationEpoch: 1})
+	raw, err := EncodeDirectoryHead(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewDirectorySnapshotResolver(raw, DirectoryTrust{Audience: audience, RootKeyID: rootID, RootPublicKey: rootPublic, Checkpoints: &memoryCheckpointStore{checkpoints: make(map[[32]byte]DirectoryCheckpoint)}}, clock, nil, entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := resolver.ResolveTransferBinding(membership.ConversationID, sender.DeviceID, sender.Generation, recipient.DeviceID, recipient.Generation, membership.Commitment, clock)
+	if err != nil || binding.Sender != sender || binding.Recipient != recipient || binding.Membership != membership || binding.Permit.Audience != audience || binding.Permit.RevocationEpoch != 1 {
+		t.Fatalf("binding=%+v err=%v", binding, err)
+	}
+	if _, err := resolver.ResolveTransferBinding(membership.ConversationID, sender.DeviceID, sender.Generation, recipient.DeviceID, recipient.Generation, directoryBytes32(45), clock); err == nil {
+		t.Fatal("transfer binding accepted a mismatched membership commitment")
+	}
+	resolver.now = func() time.Time { return clock.Add(21 * time.Second) }
+	if _, err := resolver.ResolveTransferBinding(membership.ConversationID, sender.DeviceID, sender.Generation, recipient.DeviceID, recipient.Generation, membership.Commitment, clock.Add(21*time.Second)); err == nil {
+		t.Fatal("transfer binding accepted a stale directory")
+	}
+}
+
 func TestDirectorySnapshotResolverCopiesInputAndRejectsSupersededOrStaleAuthority(t *testing.T) {
 	t.Parallel()
 	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)

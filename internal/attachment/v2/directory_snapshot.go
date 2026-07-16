@@ -288,6 +288,17 @@ type DirectoryPermitBinding struct {
 	ExpiresAt       uint64
 }
 
+// DirectoryTransferBinding is the exact current, root-verified directory
+// authority for one already-approved attachment relationship. It deliberately
+// includes the immutable membership commitment rather than allowing callers to
+// discover a recipient from an arbitrary device entry.
+type DirectoryTransferBinding struct {
+	Permit     DirectoryPermitBinding
+	Sender     DirectoryDevice
+	Recipient  DirectoryDevice
+	Membership DirectoryMembership
+}
+
 // CurrentPermitBinding returns the signed-head commitment and expiry only when
 // the resolver is still fresh and matches its durable checkpoint.
 func (r *DirectorySnapshotResolver) CurrentPermitBinding(now time.Time) (DirectoryPermitBinding, error) {
@@ -299,6 +310,27 @@ func (r *DirectorySnapshotResolver) CurrentPermitBinding(now time.Time) (Directo
 		return DirectoryPermitBinding{}, errors.New("invalid permit directory authority")
 	}
 	return DirectoryPermitBinding{Audience: r.head.Audience, DirectoryHead: commitment, RevocationEpoch: r.head.RevocationEpoch, ExpiresAt: r.head.ExpiresAt}, nil
+}
+
+// ResolveTransferBinding returns only an exact active sender/recipient
+// membership from the resolver's current checkpointed directory snapshot. A
+// caller must supply every identifier from its immutable local policy; this
+// method never selects a recipient or membership opportunistically.
+func (r *DirectorySnapshotResolver) ResolveTransferBinding(conversationID, senderID [16]byte, senderGeneration uint64, recipientID [16]byte, recipientGeneration uint64, membershipCommitment [32]byte, now time.Time) (DirectoryTransferBinding, error) {
+	if r == nil || conversationID == [16]byte{} || senderID == [16]byte{} || recipientID == [16]byte{} || senderGeneration == 0 || recipientGeneration == 0 || membershipCommitment == [32]byte{} {
+		return DirectoryTransferBinding{}, errors.New("invalid transfer directory binding")
+	}
+	permit, err := r.CurrentPermitBinding(now)
+	if err != nil {
+		return DirectoryTransferBinding{}, errors.New("stale transfer directory authority")
+	}
+	sender, senderFound := r.device(senderID, senderGeneration)
+	recipient, recipientFound := r.device(recipientID, recipientGeneration)
+	membership, membershipFound := r.memberships[directoryMembershipKey{conversation: conversationID, sender: senderID, senderGen: senderGeneration, recipient: recipientID, recipientGen: recipientGeneration, commitment: membershipCommitment}]
+	if !senderFound || !recipientFound || !membershipFound || membership.Revoked {
+		return DirectoryTransferBinding{}, errors.New("unknown or revoked transfer directory binding")
+	}
+	return DirectoryTransferBinding{Permit: permit, Sender: sender, Recipient: recipient, Membership: membership}, nil
 }
 
 // NewDirectorySnapshotResolver verifies the exact supplied ordered directory
