@@ -40,3 +40,5 @@ jobs:
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
       - name: Build the reviewed container context
         run: docker build --tag punaro:ci .
+      - name: Verify container command set
+        run: sh scripts/verify-container-binaries.sh
