@@ -1,4 +1,4 @@
-.PHONY: test test-race vet staticcheck golangci vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint release-gates fuzz
+.PHONY: test test-race vet staticcheck golangci vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
 
 test:
 	go test -covermode=atomic ./...
@@ -28,7 +28,10 @@ gosec:
 secrets:
 	go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
 
-lint: vet staticcheck golangci
+deployment-lint:
+	./scripts/verify-deployment-files.sh
+
+lint: vet staticcheck golangci deployment-lint
 
 security: vuln gosec secrets
 

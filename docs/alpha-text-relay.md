@@ -76,9 +76,27 @@ PUNARO_ADAPTER_POLL_INTERVAL=30s
 
 For an Access service-token policy, provision both
 `PUNARO_CF_ACCESS_CLIENT_ID` and `PUNARO_CF_ACCESS_CLIENT_SECRET` through the
-OS service secret mechanism. The adapter rejects a partial pair. Start the
-adapter with `go run ./cmd/punaro-adapter` during development; production
-service units are not yet part of the released remote deployment profile.
+same private environment that starts the adapter. The adapter rejects a partial
+pair. Start it with `go run ./cmd/punaro-adapter` during development; the
+supplied user service reads the pair from its owner-only environment file.
+
+For a Linux agent machine that should keep its attachment active after logout,
+use the supplied user-level `deploy/systemd/user/punaro-adapter.service`
+profile. It deliberately runs as the same unprivileged account that owns the
+agent and its mailbox state; a privileged system service must never be pointed
+at an interactive user's mailbox database. Install the reviewed adapter as
+`~/.local/bin/punaro-adapter`, copy the non-secret example to
+`~/.config/punaro/adapter.env`, and set both that file and its machine-key file
+to mode `0600`. Add that machine's distinct Access client ID and secret only to
+the private environment file. The unit limits writable paths to its private
+adapter journal and the explicit `agent-mailbox` state path, then starts from
+the same session identity as the attached aliases. Install it under
+`~/.config/systemd/user/`, run `systemctl --user daemon-reload`, enable it, and
+start it with `systemctl --user enable --now punaro-adapter.service`. Use
+`loginctl enable-linger <user>` before logout only if the machine should
+continue serving after logout. Verify the service is active and the relay
+readiness endpoint is healthy. Never reuse the machine key or Access pair on
+another machine.
 
 ## Onboard and revoke a machine
 

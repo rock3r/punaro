@@ -41,6 +41,8 @@ jobs:
         run: docker run --rm -i hadolint/hadolint@sha256:27086352fd5e1907ea2b934eb1023f217c5ae087992eb59fde121dce9c9ff21e < Dockerfile
       - name: Lint GitHub Actions workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
+      - name: Verify deployment artifacts
+        run: ./scripts/verify-deployment-files.sh
       - name: Build the reviewed container context
         run: docker build --tag punaro:ci .
       - name: Verify container command set
