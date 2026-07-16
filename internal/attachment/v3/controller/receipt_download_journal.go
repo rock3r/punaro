@@ -123,11 +123,16 @@ func (j *Journal) ensureReceiptDownloadOperation(record receiptDownloadRecord, p
 	if err != nil || key == [32]byte{} {
 		return receiptDownloadOperation{}, errors.New("generate receipt download idempotency identity")
 	}
-	operation := attachmentv3.PermitOperationBegin
-	if phase == receiptDownloadChunk {
+	var operation uint64
+	switch phase {
+	case receiptDownloadBegin:
+		operation = attachmentv3.PermitOperationBegin
+	case receiptDownloadChunk:
 		operation = attachmentv3.PermitOperationDownload
-	} else if phase == receiptDownloadComplete {
+	case receiptDownloadComplete:
 		operation = attachmentv3.PermitOperationComplete
+	default:
+		return receiptDownloadOperation{}, errors.New("invalid receipt download phase")
 	}
 	expires := now.UTC().Add(20 * time.Second).Unix()
 	manifest, err := attachmentv3.DecodeManifest(record.manifest)

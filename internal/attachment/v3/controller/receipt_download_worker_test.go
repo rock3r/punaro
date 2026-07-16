@@ -123,7 +123,7 @@ func (s *receiptDownloadTransport) DoV3Attachment(ctx context.Context, method, p
 		}
 		return nil, errTest("invalid test chunk route")
 	case attachmentv3.PermitOperationComplete:
-		s.acceptanceTransportStub.result = s.completed
+		s.result = s.completed
 	default:
 		return nil, errTest("unexpected receipt operation")
 	}
