@@ -96,7 +96,8 @@ func VerifyFreshMapping(ctx context.Context, mapping Mapping, resolver TransferB
 
 func exactTransferBinding(mapping Mapping, binding attachmentv2.DirectoryTransferBinding, now time.Time) bool {
 	nowUnix := now.Unix()
-	return nowUnix >= 0 && binding.Permit.Audience != [32]byte{} && binding.Permit.DirectoryHead != [32]byte{} && binding.Permit.ExpiresAt > uint64(nowUnix) && // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	return nowUnix >= 0 && binding.Permit.Audience != [32]byte{} && binding.Permit.DirectoryHead != [32]byte{} && binding.Permit.ExpiresAt > uint64(nowUnix) &&
 		!binding.Sender.Revoked && binding.Sender.DeviceID == mapping.SenderDeviceID && binding.Sender.Generation == mapping.SenderGeneration &&
 		!binding.Recipient.Revoked && binding.Recipient.DeviceID == mapping.RecipientDeviceID && binding.Recipient.Generation == mapping.RecipientGeneration &&
 		!binding.Membership.Revoked && binding.Membership.ConversationID == mapping.ConversationID && binding.Membership.SenderDeviceID == mapping.SenderDeviceID && binding.Membership.SenderGeneration == mapping.SenderGeneration &&

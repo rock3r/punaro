@@ -184,7 +184,8 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 		if err != nil || !found {
 			return attachmentv3.TransferResult{}, errors.New("uncertain recipient acceptance record is unavailable")
 		}
-		if permit, err := attachmentv3.DecodePermit(record.permit); err == nil && permit.ExpiresAt <= uint64(now.Unix()) { // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		if permit, err := attachmentv3.DecodePermit(record.permit); err == nil && permit.ExpiresAt <= uint64(now.Unix()) {
 			return w.reconcileExpiredAcceptance(ctx, inbound.PunaroMessageID, record, authority, now)
 		}
 	}
@@ -452,7 +453,8 @@ func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, r
 	if expires <= now.Unix() {
 		return receiptOutcomeAttempt{}, errors.New("recipient outcome exceeds manifest lifetime")
 	}
-	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(expires) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(expires)
 	if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
 		return receiptOutcomeAttempt{}, err
 	}
@@ -485,9 +487,11 @@ func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
 	}
 	if len(outcome.permit) != 0 {
 		permit, err := attachmentv3.DecodePermit(outcome.permit)
-		return err != nil || permit.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
 	}
-	return request.ExpiresAt <= uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	return request.ExpiresAt <= uint64(now.Unix())
 }
 
 func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, _ time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
@@ -524,7 +528,8 @@ func (w *RecipientAcceptanceWorker) acceptanceCredentials(ctx context.Context, r
 	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient acceptance permit is unavailable")
 	}
-	issuedAt := uint64(now.Unix()) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+	issuedAt := uint64(now.Unix())
 	if issuedAt < permit.IssuedAt {
 		issuedAt = permit.IssuedAt
 	}
@@ -599,7 +604,8 @@ func (j *Journal) ensureReceiptAcceptance(messageID string, notice attachmentv3.
 	expires := now.Add(20 * time.Second).Unix()
 	// #nosec G115 -- this path rejects pre-epoch and expired times before permit use.
 	if uint64(expires) > notice.Manifest.ExpiresAt {
-		expires = int64(notice.Manifest.ExpiresAt) // #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
+		expires = int64(notice.Manifest.ExpiresAt)
 	}
 	if expires <= now.Unix() {
 		return receiptAcceptanceRecord{}, errors.New("expired recipient acceptance offer")
