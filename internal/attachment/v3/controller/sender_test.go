@@ -212,13 +212,13 @@ func TestJournalReapsExpiredSenderStagesAndCiphertext(t *testing.T) {
 	if err := journal.holdSenderOffer(manifest.TransferID); err != nil {
 		t.Fatal(err)
 	}
-	if reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1); err != nil || reaped != 0 {
+	if reaped, err := journal.ReapExpiredSenderStages(time.Unix(701, 0).UTC(), 1); err != nil || reaped != 0 {
 		t.Fatalf("held reaped=%d err=%v", reaped, err)
 	}
 	if err := journal.releaseSenderOfferHold(manifest.TransferID); err != nil {
 		t.Fatal(err)
 	}
-	reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1)
+	reaped, err := journal.ReapExpiredSenderStages(time.Unix(701, 0).UTC(), 1)
 	if err != nil || reaped != 1 {
 		t.Fatalf("reaped=%d err=%v", reaped, err)
 	}

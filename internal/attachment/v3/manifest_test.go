@@ -61,6 +61,54 @@ func TestDecodeAndVerifySourceInitRejectsFutureOrUnrepresentableTime(t *testing.
 	}
 }
 
+func TestManifestPermitsBoundedTenMinuteTransferLifetime(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	manifest := testManifest(now)
+	manifest.ExpiresAt = uint64(now.Add(10 * time.Minute).Unix()) // #nosec G115 -- fixed positive test clock.
+	if err := SignManifest(&manifest, private); err != nil {
+		t.Fatalf("sign ten-minute manifest: %v", err)
+	}
+	raw, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatalf("encode ten-minute manifest: %v", err)
+	}
+	if _, err := DecodeAndVerifySourceInit(raw, manifestAuthorityStub{public: public}, now); err != nil {
+		t.Fatalf("ten-minute manifest rejected: %v", err)
+	}
+	manifest.ExpiresAt = uint64(now.Add(10*time.Minute + time.Second).Unix()) // #nosec G115 -- fixed positive test clock.
+	if err := SignManifest(&manifest, private); err == nil {
+		t.Fatal("manifest longer than ten minutes was accepted")
+	}
+}
+
+func TestDecodeAndVerifyRetainedSourceAllowsHeadRolloverButRejectsRevocation(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	manifest := testManifest(now)
+	manifest.ExpiresAt = uint64(now.Add(10 * time.Minute).Unix()) // #nosec G115 -- fixed positive test clock.
+	if err := SignManifest(&manifest, private); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rolled := retainedManifestAuthorityStub{public: public}
+	if _, err := DecodeAndVerifyRetainedSource(raw, rolled, now.Add(time.Minute)); err != nil {
+		t.Fatalf("retained manifest rejected after directory head rollover: %v", err)
+	}
+	if _, err := DecodeAndVerifyRetainedSource(raw, retainedManifestAuthorityStub{err: errors.New("membership revoked")}, now.Add(time.Minute)); err == nil {
+		t.Fatal("retained manifest accepted after current directory revocation")
+	}
+}
+
 func testManifest(now time.Time) Manifest {
 	return Manifest{
 		Audience: testHash(1), TransferID: testID(2), ConversationID: testID(3),
@@ -80,6 +128,22 @@ type manifestAuthorityStub struct {
 }
 
 func (s manifestAuthorityStub) ValidateManifestAuthority(Manifest, time.Time) (ed25519.PublicKey, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.public, nil
+}
+
+func (s manifestAuthorityStub) ValidateRetainedManifestAuthority(m Manifest, now time.Time) (ed25519.PublicKey, error) {
+	return s.ValidateManifestAuthority(m, now)
+}
+
+type retainedManifestAuthorityStub struct {
+	public ed25519.PublicKey
+	err    error
+}
+
+func (s retainedManifestAuthorityStub) ValidateRetainedManifestAuthority(Manifest, time.Time) (ed25519.PublicKey, error) {
 	if s.err != nil {
 		return nil, s.err
 	}

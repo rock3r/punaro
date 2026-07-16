@@ -18,7 +18,7 @@ envelope containing the relay message and conversation IDs.
 ## What is intentionally unavailable
 
 - Automatic Telegram topic discovery or main-chat fallback
-- Automatic, user-facing file transfer workflow
+- Automatic or unattended file transfer workflow
 - Browser clients, public sharing links, and anonymous downloads
 
 The alpha daemon still binds only to a literal loopback address. Before any
@@ -54,7 +54,10 @@ body with the exact `punaro/attachment-offer/v3:` marker can be parsed by
 `attachment/v3.DecodeOfferNotice`; it is untrusted discovery data until the
 recipient completes fresh directory verification, opens its own HPKE envelope,
 and obtains recipient-specific permits. The attachment bytes never travel via
-Telegram or the mailbox relay.
+Telegram or the mailbox relay. A provisioned agent may use the controlled
+[attachment skill](../skills/punaro-attachment/SKILL.md) for one explicit,
+task-owner-approved send or receipt; it is not an automatic download or a
+substitute for operator enrollment.
 
 ## How future attachments will behave
 

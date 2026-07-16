@@ -200,6 +200,20 @@ func sourceInitPermitBinding(permit Permit, manifest Manifest, raw []byte) bool 
 		manifest.RevocationEpoch == permit.RevocationEpoch && permit.ExpiresAt <= manifest.ExpiresAt
 }
 
+// retainedManifestPermitBinding binds every immutable transfer fact to a
+// freshly issued short-lived permit after source-init. Directory head and
+// epoch intentionally differ here: VerifyPermit has already bound the permit
+// to the current fresh directory, while the manifest retains its admission
+// head as immutable provenance.
+func retainedManifestPermitBinding(permit Permit, manifest Manifest, raw []byte) bool {
+	commitment := blake3.Sum256(raw)
+	return commitment == permit.StagedManifestCommitment && manifest.Audience == permit.Audience &&
+		manifest.TransferID == permit.TransferID && manifest.ConversationID == permit.ConversationID &&
+		manifest.SenderDeviceID == permit.SenderDeviceID && manifest.SenderGeneration == permit.SenderGeneration &&
+		manifest.RecipientDeviceID == permit.RecipientDeviceID && manifest.RecipientGeneration == permit.RecipientGeneration &&
+		manifest.MembershipCommitment == permit.MembershipCommitment && permit.ExpiresAt <= manifest.ExpiresAt
+}
+
 func attachmentHTTPMethod(method string) (uint64, bool) {
 	switch method {
 	case "POST":

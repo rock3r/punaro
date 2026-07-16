@@ -65,7 +65,7 @@ func decodeOfferPayloadDetailed(raw []byte) (Manifest, []byte, Envelope, []byte,
 
 func validateOfferPayloadForPermit(raw []byte, permit Permit) error {
 	manifest, manifestRaw, _, _, err := decodeOfferPayload(raw)
-	if err != nil || !sourceInitPermitBinding(permit, manifest, manifestRaw) {
+	if err != nil || !retainedManifestPermitBinding(permit, manifest, manifestRaw) {
 		return errors.New("invalid v3 offer permit binding")
 	}
 	return nil

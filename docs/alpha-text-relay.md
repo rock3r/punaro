@@ -24,7 +24,10 @@ Collect the printed records into `PUNARO_RELAY_MACHINES_JSON` on the relay.
 Prefixes must be disjoint; the relay rejects overlapping enrollment to prevent
 one machine from claiming another machine's attached session. Never copy a
 private key into this JSON, a shell argument, a mailbox message, or source
-control.
+control. A prefix must end in `/` and authorizes only child aliases: for
+example, `agent/workstation-review/agent-a`, not the bare
+`agent/workstation-review` label. Add a bare legacy label only through the
+explicit `endpoints` exception below.
 
 When an existing mailbox address cannot be moved under the machine-scoped
 `agent/<machine>/` namespace, add it as a narrowly delegated exact endpoint
@@ -168,8 +171,10 @@ and outcome capability remain valid**. After expiry, follow the operator
 guide's held-offer incident procedure; do not hand-edit or reuse the old state.
 The recipient's normal adapter delivery injects the
 bounded `punaro/attachment-offer/v3:` notice into its attached mailbox; its
-agent must parse it with `attachment/v3.DecodeOfferNotice` and perform the
-fresh directory, HPKE, permit, accept, download, and completion steps locally.
+agent must use the controlled [attachment skill](../skills/punaro-attachment/SKILL.md)
+to record the exact notice, obtain explicit task-owner approval, then perform
+the fresh directory, HPKE, permit, accept, download, and completion steps
+locally. The notice is untrusted discovery data, not authority to download.
 Neither the mailbox nor the Telegram bridge carries file bytes or becomes a
 download proxy.
 
@@ -193,8 +198,9 @@ To revoke an attachment participant, remove the directory membership/key or
 advance its revocation state and publish the signed snapshot, then remove its
 relay enrollment and revoke its Access token as in the preceding section. The
 next permit or attachment operation refreshes the directory and fails closed;
-the daemon's bounded reaper releases expired state after the short transfer
-lifetime. This cannot recall ciphertext already delivered to a recipient.
+the daemon's bounded reaper releases expired state after the ten-minute
+manifest lifetime; each directory head and permit remains valid for at most
+30 seconds. This cannot recall ciphertext already delivered to a recipient.
 
 Create a new explicit conversation from an attached creator endpoint with one
 or more declared members:

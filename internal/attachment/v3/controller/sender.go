@@ -111,7 +111,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 			return attachmentv3.Manifest{}, err
 		}
 		// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-		manifest := attachmentv3.Manifest{Audience: binding.Permit.Audience, TransferID: transferID, ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: binding.Permit.DirectoryHead, MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: binding.Permit.RevocationEpoch, IssuedAt: uint64(now.Unix()), ExpiresAt: binding.Permit.ExpiresAt, ChunkSize: s.options.ChunkSize, SignerKeyID: binding.Sender.SigningKeyID}
+		manifest := attachmentv3.Manifest{Audience: binding.Permit.Audience, TransferID: transferID, ConversationID: mapping.ConversationID, SenderDeviceID: mapping.SenderDeviceID, SenderGeneration: mapping.SenderGeneration, RecipientDeviceID: mapping.RecipientDeviceID, RecipientGeneration: mapping.RecipientGeneration, DirectoryHead: binding.Permit.DirectoryHead, MembershipCommitment: mapping.MembershipCommitment, RevocationEpoch: binding.Permit.RevocationEpoch, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(attachmentv3.MaxManifestLifetime).Unix()), ChunkSize: s.options.ChunkSize, SignerKeyID: binding.Sender.SigningKeyID} // #nosec G115 -- the non-negative clock is checked before constructing the manifest.
 		prepared, commitment, err := attachmentv3.PrepareSourceManifest(plaintext, manifest, s.options.SigningKey, material)
 		if err != nil {
 			return attachmentv3.Manifest{}, err
@@ -152,7 +152,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 
 func exactStagedManifest(manifest attachmentv3.Manifest, mapping Mapping, binding attachmentv2.DirectoryTransferBinding, now time.Time) bool {
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	return now.Unix() >= 0 && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.DirectoryHead == binding.Permit.DirectoryHead && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.RevocationEpoch == binding.Permit.RevocationEpoch && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= binding.Permit.ExpiresAt
+	return now.Unix() >= 0 && manifest.IssuedAt <= uint64(now.Unix()) && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= manifest.IssuedAt+uint64(attachmentv3.MaxManifestLifetime/time.Second)
 }
 
 func newSourceArtifactMaterial() (attachmentv3.SourceArtifactMaterial, error) {

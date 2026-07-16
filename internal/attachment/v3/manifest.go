@@ -16,6 +16,9 @@ const (
 	protocolVersion         = 3
 	maxManifestEncodedBytes = 4 << 10
 	manifestSignatureDomain = "punaro/attachment/manifest/v3\x00"
+	// MaxManifestLifetime bounds immutable v3 transfer state. Directory heads
+	// and operation permits remain independently short-lived (at most 30s).
+	MaxManifestLifetime = 10 * time.Minute
 )
 
 var (
@@ -101,7 +104,7 @@ func validateManifest(m Manifest) error {
 	if m.TransferID == [16]byte{} || m.ConversationID == [16]byte{} || m.SenderDeviceID == [16]byte{} || m.RecipientDeviceID == [16]byte{} || m.Audience == [32]byte{} || m.DirectoryHead == [32]byte{} || m.MembershipCommitment == [32]byte{} || m.ContentSalt == [32]byte{} || m.PlaintextCommitment == [32]byte{} || m.SignerKeyID == [32]byte{} {
 		return errors.New("missing manifest binding")
 	}
-	if m.SenderGeneration == 0 || m.RecipientGeneration == 0 || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt > math.MaxInt64 || m.ExpiresAt-m.IssuedAt > 30 || m.ChunkSize == 0 || m.ChunkSize > 256<<10 || m.ChunkCount == 0 || m.ChunkCount > 4096 || m.PlaintextSize > 64<<20 {
+	if m.SenderGeneration == 0 || m.RecipientGeneration == 0 || m.ExpiresAt <= m.IssuedAt || m.ExpiresAt > math.MaxInt64 || m.ExpiresAt-m.IssuedAt > uint64(MaxManifestLifetime/time.Second) || m.ChunkSize == 0 || m.ChunkSize > 256<<10 || m.ChunkCount == 0 || m.ChunkCount > 4096 || m.PlaintextSize > 64<<20 {
 		return errors.New("invalid manifest bounds")
 	}
 	if m.PlaintextSize == 0 && m.ChunkCount == 1 {
@@ -172,6 +175,15 @@ type DirectoryKeyResolver interface {
 	ValidateManifestAuthority(Manifest, time.Time) (ed25519.PublicKey, error)
 }
 
+// RetainedManifestAuthorityResolver validates a manifest already admitted by
+// source-init against a fresh current directory view. Unlike strict initial
+// admission it permits directory-head rollover, but it still requires the
+// original transfer identities, membership, sender key, and revocation state
+// to remain current and active.
+type RetainedManifestAuthorityResolver interface {
+	ValidateRetainedManifestAuthority(Manifest, time.Time) (ed25519.PublicKey, error)
+}
+
 // VerifiedSource cannot be constructed by a network caller. It contains only
 // values derived from a canonical manifest after fresh directory verification.
 type VerifiedSource struct {
@@ -196,6 +208,29 @@ func DecodeAndVerifySourceInit(raw []byte, directory DirectoryKeyResolver, now t
 	public, err := directory.ValidateManifestAuthority(m, now.UTC())
 	if err != nil || !VerifyManifest(m, public) {
 		return VerifiedSource{}, errors.New("invalid manifest signer binding")
+	}
+	return VerifiedSource{manifest: m, raw: append([]byte(nil), raw...), commitment: blake3.Sum256(raw)}, nil
+}
+
+// DecodeAndVerifyRetainedSource verifies an already source-init-admitted
+// manifest with fresh current authority. It deliberately does not require the
+// current directory head or revocation epoch to equal the immutable manifest:
+// a new short-lived permit carries those current values. The resolver must
+// instead reject any changed membership, device generation/key, or revocation.
+func DecodeAndVerifyRetainedSource(raw []byte, directory RetainedManifestAuthorityResolver, now time.Time) (VerifiedSource, error) {
+	if directory == nil {
+		return VerifiedSource{}, errors.New("missing retained directory resolver")
+	}
+	m, err := DecodeManifest(raw)
+	if err != nil {
+		return VerifiedSource{}, err
+	}
+	if err := validateManifestTime(m, now); err != nil {
+		return VerifiedSource{}, err
+	}
+	public, err := directory.ValidateRetainedManifestAuthority(m, now.UTC())
+	if err != nil || !VerifyManifest(m, public) {
+		return VerifiedSource{}, errors.New("invalid retained manifest authority")
 	}
 	return VerifiedSource{manifest: m, raw: append([]byte(nil), raw...), commitment: blake3.Sum256(raw)}, nil
 }

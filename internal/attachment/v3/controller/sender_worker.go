@@ -20,6 +20,7 @@ import (
 // staged source from being sent under incompatible directory facts.
 type SenderDeliveryAuthority interface {
 	TransferBindingResolver
+	attachmentv3.DirectoryKeyResolver
 	attachmentv3.EnvelopeDirectoryKeyResolver
 	attachmentv3.PermitAuthorityResolver
 	attachmentv3.OperationHolderResolver
@@ -164,9 +165,9 @@ func NewSenderSourceInitializer(options SenderSourceInitializerOptions) (*Sender
 }
 
 // Initialize performs source-init exactly once for a staged transfer. If a
-// prior submission is ambiguous and its capability has expired, it fails
-// closed; a later outcome-reconciliation worker is the only valid recovery
-// route and must not mint a different source-init operation.
+// prior submission is ambiguous and its capability has expired, it reconciles
+// only that durable original operation; it never mints a different source-init
+// operation.
 func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16]byte) (attachmentv3.TransferResult, error) {
 	if w == nil || transferID == [16]byte{} {
 		return attachmentv3.TransferResult{}, errors.New("invalid sender source initialization")
@@ -193,7 +194,11 @@ func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16
 	if err != nil || !exactTransferBinding(mapping, binding, now) {
 		return attachmentv3.TransferResult{}, errors.New("fresh sender source binding is unavailable")
 	}
-	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	// A source that has already acquired a durable operation result or
+	// source-init capability must survive ordinary directory-head rollover so
+	// it can return that result or reconcile the old operation. Current
+	// membership/key/revocation is still checked by retained authority below.
+	verified, err := attachmentv3.DecodeAndVerifyRetainedSource(transfer.manifest, authority, now)
 	manifest, manifestErr := attachmentv3.DecodeManifest(transfer.manifest)
 	if err != nil || manifestErr != nil || verified.ManifestCommitment() != transfer.commitment || !exactStagedManifest(manifest, mapping, binding, now) {
 		return attachmentv3.TransferResult{}, errors.New("invalid durable sender source")
@@ -204,6 +209,16 @@ func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16
 	}
 	if len(record.result) != 0 {
 		return exactSenderResult(record.result, transfer, attachmentv3.TransferStateSourceUploading)
+	}
+	// Only the first source-init capability is admitted against the exact
+	// manifest head and epoch. A durable prior permit is never replaced with a
+	// new initial capability after rollover; credentials/reconciliation below
+	// either use that exact record or fail closed until its outcome is known.
+	if len(record.permit) == 0 {
+		initial, initialErr := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+		if initialErr != nil || initial.ManifestCommitment() != transfer.commitment {
+			return attachmentv3.TransferResult{}, errors.New("initial sender source admission is unavailable")
+		}
 	}
 	permit, operation, err := w.credentials(ctx, transfer, senderPhaseSourceInit, 0, record, transfer.manifest, authority, now)
 	if err != nil {
@@ -380,7 +395,7 @@ func (w *SenderSourceInitializer) freshSenderTransfer(ctx context.Context, trans
 	if err != nil || !exactTransferBinding(mapping, binding, now) {
 		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("fresh sender source binding is unavailable")
 	}
-	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	verified, err := attachmentv3.DecodeAndVerifyRetainedSource(transfer.manifest, authority, now)
 	manifest, decodeErr := attachmentv3.DecodeManifest(transfer.manifest)
 	if err != nil || decodeErr != nil || verified.ManifestCommitment() != transfer.commitment || !exactStagedManifest(manifest, mapping, binding, now) {
 		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("invalid durable sender source")
@@ -413,7 +428,7 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	verified, err := attachmentv3.DecodeAndVerifySourceInit(transfer.manifest, authority, now)
+	verified, err := attachmentv3.DecodeAndVerifyRetainedSource(transfer.manifest, authority, now)
 	if err != nil || verified.ManifestCommitment() != transfer.commitment {
 		return attachmentv3.TransferResult{}, errors.New("invalid durable sender source")
 	}
@@ -581,8 +596,9 @@ func (j *Journal) storeSenderOffer(transferID [16]byte, envelope attachmentv3.En
 type senderPhase string
 
 const (
-	// The protocol caps manifest/permit lifetimes at 30 seconds. Keep the
-	// original operation and its outcome capability deliberately shorter so an
+	// Manifests can live for ten minutes, but directory-bound permits remain at
+	// most 30 seconds. Keep the original operation and its outcome capability
+	// deliberately shorter so an
 	// expired submission can be reconciled while the signed manifest remains
 	// fresh; otherwise recovery would be mathematically unreachable.
 	senderOperationLifetime = 15 * time.Second

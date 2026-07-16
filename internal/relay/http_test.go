@@ -33,8 +33,8 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	auth, err := NewAuthenticator(store, []Machine{
-		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a"}},
-		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b"}},
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -42,9 +42,9 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
 
-	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a"]}`, "advertise-a", "")
-	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b"]}`, "advertise-b", "")
-	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]},{"endpoint":"agent/b","capabilities":["receive"]}]}`, "create", "create-1")
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
 	}
@@ -54,11 +54,11 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	if err := json.NewDecoder(create.Body).Decode(&conversation); err != nil {
 		t.Fatal(err)
 	}
-	message := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a","body":"review complete"}`, "send", "send-1")
+	message := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"review complete"}`, "send", "send-1")
 	if message.Code != http.StatusCreated {
 		t.Fatalf("message status=%d body=%s", message.Code, message.Body.String())
 	}
-	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b"}`, "lease", "")
+	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session"}`, "lease", "")
 	if lease.Code != http.StatusOK {
 		t.Fatalf("lease status=%d body=%s", lease.Code, lease.Body.String())
 	}
@@ -78,7 +78,7 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	if len(leased.Deliveries) != 1 || leased.Deliveries[0].Message.Body != "review complete" {
 		t.Fatalf("leased=%+v", leased)
 	}
-	ackBody, err := json.Marshal(map[string]any{"endpoint": "agent/b", "lease_token": leased.Deliveries[0].LeaseToken, "lease_generation": leased.Deliveries[0].LeaseGeneration})
+	ackBody, err := json.Marshal(map[string]any{"endpoint": "agent/b/session", "lease_token": leased.Deliveries[0].LeaseToken, "lease_generation": leased.Deliveries[0].LeaseGeneration})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,15 +102,15 @@ func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b"}}})
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
-	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a"]}`, "advertise-a", "")
-	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b"]}`, "advertise-b", "")
-	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]},{"endpoint":"agent/b","capabilities":["receive"]}]}`, "create", "create-1")
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status=%d", created.Code)
 	}
@@ -118,13 +118,13 @@ func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T)
 	if err := json.NewDecoder(created.Body).Decode(&conversation); err != nil {
 		t.Fatal(err)
 	}
-	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/a"}`, "validate-ok", ""); response.Code != http.StatusOK {
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/a/session"}`, "validate-ok", ""); response.Code != http.StatusOK {
 		t.Fatalf("authorized validation status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b"}`, "validate-no-send", ""); response.Code != http.StatusForbidden {
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b/session"}`, "validate-no-send", ""); response.Code != http.StatusForbidden {
 		t.Fatalf("no-send validation status=%d body=%s", response.Code, response.Body.String())
 	}
-	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b"}`, "validate-wrong-owner", ""); response.Code != http.StatusForbidden {
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b/session"}`, "validate-wrong-owner", ""); response.Code != http.StatusForbidden {
 		t.Fatalf("wrong-owner validation status=%d body=%s", response.Code, response.Body.String())
 	}
 	for _, table := range []string{"messages", "idempotency"} {
@@ -146,14 +146,14 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a"}}})
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
-	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a"]}`, "advertise", "")
-	body := `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]}]}`
+	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise", "")
+	body := `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`
 	first := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", body, "create-first", "create-1")
 	second := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", body, "create-retry", "create-1")
 	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
@@ -169,7 +169,7 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 	if firstConversation.ID == "" || secondConversation.ID != firstConversation.ID {
 		t.Fatalf("idempotent create first=%#v second=%#v", firstConversation, secondConversation)
 	}
-	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]},{"endpoint":"agent/b","capabilities":["receive"]}]}`, "create-conflict", "create-1")
+	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create-conflict", "create-1")
 	if changed.Code != http.StatusConflict {
 		t.Fatalf("changed create retry status=%d body=%s", changed.Code, changed.Body.String())
 	}
@@ -219,7 +219,7 @@ func TestHTTPNotificationsAuthenticatesAndEmitsOnlyWakeMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a"}}})
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

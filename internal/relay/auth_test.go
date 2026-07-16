@@ -95,8 +95,43 @@ func TestAuthenticatorRejectsOverlappingMachineEndpointNamespaces(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/a"}}}); err == nil {
+	if _, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/a/"}}}); err == nil {
 		t.Fatal("overlapping endpoint namespaces were accepted")
+	}
+}
+
+func TestAuthenticatorRequiresSegmentTerminatedEndpointPrefixes(t *testing.T) {
+	t.Parallel()
+	public := make([]byte, ed25519.PublicKeySize)
+	public[0] = 1
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a"}}}); err == nil {
+		t.Fatal("non-segment-terminated endpoint prefix was accepted")
+	}
+}
+
+func TestAuthenticatorNamespacePrefixExcludesBareAndAdjacentEndpoints(t *testing.T) {
+	t.Parallel()
+	public := make([]byte, ed25519.PublicKeySize)
+	public[0] = 1
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.AllowsEndpoint("machine-a", "agent/a/session") {
+		t.Fatal("nested endpoint was rejected")
+	}
+	if auth.AllowsEndpoint("machine-a", "agent/a") || auth.AllowsEndpoint("machine-a", "agent/abuse") {
+		t.Fatal("namespace prefix authorized a bare or adjacent endpoint")
 	}
 }
 

@@ -77,11 +77,21 @@ The source-init body contains the complete canonical signed Manifest. The relay
 fresh-verifies it before reserving capacity, derives (rather than duplicates)
 the manifest commitment, audience, chunk geometry, identities, membership,
 directory head, revocation epoch, and expiry, and stores the exact bytes
-immutably. A route, permit, operation record, and source-init body must bind
-the identical audience, transfer/conversation IDs, sender/recipient generations,
-manifest commitment, directory/membership/revocation commitments, and expiry.
-Permit and operation expiry may not outlive either the Manifest or fresh
-directory head.
+immutably. Source-init is strict: its route, permit, operation record, and
+body must bind the identical audience, transfer/conversation IDs,
+sender/recipient generations, manifest commitment, directory-head commitment,
+membership commitment, revocation epoch, and expiry.
+
+An immutable v3 Manifest may live for at most ten minutes. Directory heads and
+permits remain independently short-lived (at most 30 seconds). After strict
+source-init, each operation obtains a new permit from a fresh current directory
+view. That permit remains exactly bound to the Manifest commitment, transfer
+identities, and membership commitment, but its directory head and revocation
+epoch are the current values and may therefore differ from the Manifest's
+admission provenance. Every operation rejects a current missing/revoked
+membership, device generation, signer key, or permit issuer; it never accepts a
+stale directory head as an offline grace period. Permit and operation expiry
+may not outlive either the Manifest or their fresh directory head.
 
 V3 operation identifiers are `1=source-init`, `2=source-upload`,
 `3=offer`, `4=accept`, `5=download`, `6=begin`, `7=complete`, and `8=cancel`.

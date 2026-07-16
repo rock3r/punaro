@@ -23,9 +23,9 @@ const (
 )
 
 // EnvelopeDirectoryKeyResolver adds the current recipient HPKE-key view to
-// the fresh manifest authority. Callers must not substitute a cached key.
+// retained-manifest authority. Callers must not substitute a cached key.
 type EnvelopeDirectoryKeyResolver interface {
-	DirectoryKeyResolver
+	RetainedManifestAuthorityResolver
 	CurrentRecipientHPKEKey(deviceID [16]byte, generation uint64) ([32]byte, *ecdh.PublicKey, error)
 	ResolveRecipientHPKEKey(deviceID [16]byte, generation uint64, keyID [32]byte) (*ecdh.PublicKey, error)
 }
@@ -131,11 +131,11 @@ func SealRecipientEnvelope(source VerifiedSource, directory EnvelopeDirectoryKey
 	if directory == nil || fileKey == [32]byte{} || len(signer) != ed25519.PrivateKeySize {
 		return Envelope{}, errors.New("invalid v3 envelope key binding")
 	}
-	fresh, err := DecodeAndVerifySourceInit(source.raw, directory, now)
+	fresh, err := DecodeAndVerifyRetainedSource(source.raw, directory, now)
 	if err != nil || fresh.commitment != source.commitment {
 		return Envelope{}, errors.New("invalid v3 envelope key binding")
 	}
-	manifestSigner, err := directory.ValidateManifestAuthority(fresh.manifest, now.UTC())
+	manifestSigner, err := directory.ValidateRetainedManifestAuthority(fresh.manifest, now.UTC())
 	if err != nil || !bytes.Equal(signer.Public().(ed25519.PublicKey), manifestSigner) {
 		return Envelope{}, errors.New("invalid v3 envelope key binding")
 	}
@@ -178,11 +178,11 @@ func OpenRecipientEnvelope(rawEnvelope []byte, source VerifiedSource, directory 
 	if err != nil || directory == nil || private == nil {
 		return [32]byte{}, errors.New("invalid v3 envelope")
 	}
-	fresh, err := DecodeAndVerifySourceInit(source.raw, directory, now)
+	fresh, err := DecodeAndVerifyRetainedSource(source.raw, directory, now)
 	if err != nil || fresh.commitment != source.commitment {
 		return [32]byte{}, errors.New("invalid v3 envelope binding")
 	}
-	signer, err := directory.ValidateManifestAuthority(fresh.manifest, now.UTC())
+	signer, err := directory.ValidateRetainedManifestAuthority(fresh.manifest, now.UTC())
 	if err != nil || !verifyEnvelope(e, fresh.manifest, fresh.raw, signer) {
 		return [32]byte{}, errors.New("invalid v3 envelope binding")
 	}
@@ -225,7 +225,7 @@ func VerifyOfferNotice(notice OfferNotice, directory EnvelopeDirectoryKeyResolve
 	if directory == nil {
 		return VerifiedSource{}, Envelope{}, errors.New("missing v3 offer directory")
 	}
-	source, err := DecodeAndVerifySourceInit(notice.ManifestRaw, directory, now)
+	source, err := DecodeAndVerifyRetainedSource(notice.ManifestRaw, directory, now)
 	if err != nil {
 		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer manifest")
 	}
@@ -233,7 +233,7 @@ func VerifyOfferNotice(notice OfferNotice, directory EnvelopeDirectoryKeyResolve
 	if err != nil {
 		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer envelope")
 	}
-	signer, err := directory.ValidateManifestAuthority(notice.Manifest, now.UTC())
+	signer, err := directory.ValidateRetainedManifestAuthority(notice.Manifest, now.UTC())
 	if err != nil || !verifyEnvelope(envelope, notice.Manifest, notice.ManifestRaw, signer) {
 		return VerifiedSource{}, Envelope{}, errors.New("invalid v3 offer envelope")
 	}

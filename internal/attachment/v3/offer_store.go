@@ -10,16 +10,16 @@ import (
 
 // redeemOffer fresh-verifies the embedded source and envelope, then makes the
 // offer visible in the same permit/replay transaction as its lifecycle CAS.
-func (s *sourceStore) redeemOffer(ctx context.Context, permit Permit, operation OperationRecord, route AttachmentRoute, request OperationRequest, authorities PermitAuthorityResolver, holders OperationHolderResolver, directory DirectoryKeyResolver, now time.Time) ([]byte, bool, error) {
+func (s *sourceStore) redeemOffer(ctx context.Context, permit Permit, operation OperationRecord, route AttachmentRoute, request OperationRequest, authorities PermitAuthorityResolver, holders OperationHolderResolver, directory RetainedManifestAuthorityResolver, now time.Time) ([]byte, bool, error) {
 	manifest, manifestRaw, envelope, nonce, err := decodeOfferPayload(request.body)
 	if err != nil {
 		return nil, false, err
 	}
-	source, err := DecodeAndVerifySourceInit(manifestRaw, directory, now)
-	if err != nil || source.ManifestCommitment() != permit.StagedManifestCommitment || !sourceInitPermitBinding(permit, manifest, manifestRaw) {
+	source, err := DecodeAndVerifyRetainedSource(manifestRaw, directory, now)
+	if err != nil || source.ManifestCommitment() != permit.StagedManifestCommitment || !retainedManifestPermitBinding(permit, manifest, manifestRaw) {
 		return nil, false, errors.New("invalid fresh v3 offer source")
 	}
-	signer, err := directory.ValidateManifestAuthority(manifest, now)
+	signer, err := directory.ValidateRetainedManifestAuthority(manifest, now)
 	if err != nil || !verifyEnvelope(envelope, manifest, manifestRaw, signer) {
 		return nil, false, errors.New("invalid fresh v3 offer envelope")
 	}
@@ -54,7 +54,7 @@ func (s *sourceStore) redeemOffer(ctx context.Context, permit Permit, operation 
 
 // redeemAccept atomically consumes the one-time nonce and advances offered to
 // accepted after fresh directory validation of the original staged Manifest.
-func (s *sourceStore) redeemAccept(ctx context.Context, permit Permit, operation OperationRecord, route AttachmentRoute, request OperationRequest, authorities PermitAuthorityResolver, holders OperationHolderResolver, directory DirectoryKeyResolver, now time.Time) ([]byte, bool, error) {
+func (s *sourceStore) redeemAccept(ctx context.Context, permit Permit, operation OperationRecord, route AttachmentRoute, request OperationRequest, authorities PermitAuthorityResolver, holders OperationHolderResolver, directory RetainedManifestAuthorityResolver, now time.Time) ([]byte, bool, error) {
 	if len(request.body) != 32 {
 		return nil, false, errors.New("invalid v3 acceptance nonce")
 	}
@@ -64,7 +64,7 @@ func (s *sourceStore) redeemAccept(ctx context.Context, permit Permit, operation
 		if err := tx.QueryRowContext(ctx, `SELECT manifest, envelope, acceptance_nonce, acceptance_consumed FROM v3_offers WHERE transfer_id = ?`, permit.TransferID[:]).Scan(&raw, &envelopeRaw, &nonce, &consumed); err != nil || consumed != 0 || len(nonce) != 32 || !bytes.Equal(nonce, request.body) {
 			return nil, errors.New("invalid or consumed v3 acceptance")
 		}
-		source, err := DecodeAndVerifySourceInit(raw, directory, now)
+		source, err := DecodeAndVerifyRetainedSource(raw, directory, now)
 		if err != nil || source.ManifestCommitment() != permit.StagedManifestCommitment {
 			return nil, errors.New("invalid fresh v3 acceptance source")
 		}
@@ -72,7 +72,7 @@ func (s *sourceStore) redeemAccept(ctx context.Context, permit Permit, operation
 		if err != nil {
 			return nil, errors.New("invalid stored v3 envelope")
 		}
-		signer, err := directory.ValidateManifestAuthority(source.manifest, now)
+		signer, err := directory.ValidateRetainedManifestAuthority(source.manifest, now)
 		if err != nil || !verifyEnvelope(envelope, source.manifest, raw, signer) {
 			return nil, errors.New("invalid fresh stored v3 envelope")
 		}

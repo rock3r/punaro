@@ -147,6 +147,7 @@ func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
 	authority := testSenderAuthority(t, mapping, senderPrivate).(senderAuthorityStub)
 	authority.binding = testCurrentBinding(mapping, 130)
 	copy(authority.binding.Sender.SigningPublicKey[:], senderPrivate.Public().(ed25519.PublicKey))
+	authority.strictRejectAt = now.Add(15 * time.Second)
 	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: authority}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71), bytes16(72), bytes16(73)), NewIdempotencyKey: sequenceKey(bytes32(74), bytes32(75))})
 	if err != nil {
 		t.Fatal(err)
@@ -156,13 +157,9 @@ func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
 	}
 	now = time.Unix(116, 0).UTC()
 	transport.operationErr = nil
-	outcomes, err := NewSenderOutcomeWorker(worker)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := outcomes.Reconcile(context.Background(), manifest.TransferID, senderPhaseSourceInit, 0)
+	result, err := worker.Initialize(context.Background(), manifest.TransferID)
 	if err != nil || result.State != attachmentv3.TransferStateSourceUploading {
-		t.Fatalf("result=%+v err=%v", result, err)
+		t.Fatalf("head-rollover retry did not reconcile source-init: result=%+v err=%v", result, err)
 	}
 	if transport.issueCalls != 2 || transport.operationCalls != 2 || transport.method != http.MethodGet || transport.path != outcomePath(manifest.TransferID) || transport.request.Operation != attachmentv3.PermitOperationOutcome || transport.request.OutcomeOfSerial == [16]byte{} {
 		t.Fatalf("unsafe sender outcome issue=%d calls=%d method=%s path=%s request=%+v", transport.issueCalls, transport.operationCalls, transport.method, transport.path, transport.request)
@@ -317,6 +314,14 @@ type senderAuthorityStub struct {
 	*bindingResolverStub
 	offerDirectoryStub
 	issuer, holder ed25519.PublicKey
+	strictRejectAt time.Time
+}
+
+func (a senderAuthorityStub) ValidateManifestAuthority(m attachmentv3.Manifest, now time.Time) (ed25519.PublicKey, error) {
+	if !a.strictRejectAt.IsZero() && !now.Before(a.strictRejectAt) {
+		return nil, errors.New("manifest directory head rolled")
+	}
+	return a.offerDirectoryStub.ValidateManifestAuthority(m, now)
 }
 
 func (a senderAuthorityStub) ValidatePermitAuthority(attachmentv3.Permit, time.Time) (ed25519.PublicKey, error) {

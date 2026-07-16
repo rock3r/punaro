@@ -20,6 +20,7 @@ const (
 // every key check needed by the request and never permits cached authority.
 type AttachmentAuthority interface {
 	DirectoryKeyResolver
+	RetainedManifestAuthorityResolver
 	PermitAuthorityResolver
 	OperationHolderResolver
 }

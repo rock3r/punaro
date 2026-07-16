@@ -30,6 +30,14 @@ func TestOfferPayloadRequiresCanonicalManifestAndEnvelopeBoundToPermit(t *testin
 	if err := validateOfferPayloadForPermit(payload, permit); err != nil {
 		t.Fatal(err)
 	}
+	refreshed := permit
+	refreshed.DirectoryHead, refreshed.RevocationEpoch = testHash(98), manifest.RevocationEpoch+1
+	if err := validateOfferPayloadForPermit(payload, refreshed); err != nil {
+		t.Fatalf("offer rejected after fresh permit directory rollover: %v", err)
+	}
+	if sourceInitPermitBinding(refreshed, manifest, manifestRaw) {
+		t.Fatal("source-init accepted a permit with a rolled directory head")
+	}
 	route, request, err := NewAttachmentOperationRequest("POST", "/v3/attachments/02000000000000000000000000000000/offer", payload, nil)
 	if err != nil {
 		t.Fatal(err)

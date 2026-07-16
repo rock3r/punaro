@@ -20,6 +20,40 @@ func TestPermitLedgerActiveBoundCoversMaximumAttachmentLifecycle(t *testing.T) {
 	}
 }
 
+func TestPermitLedgerAdmitsRefreshedHeadForRetainedManifest(t *testing.T) {
+	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	source := verifiedTestSource(t, now, 1, 4, 4)
+	if err := store.initialize(context.Background(), source, now); err != nil {
+		t.Fatal(err)
+	}
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := permitForManifest(source.manifest, source.raw, now)
+	permit.Serial, permit.Operation, permit.MaxOperations = testID(91), permitOperationSourceUpload, 1
+	permit.DirectoryHead, permit.RevocationEpoch = testHash(92), source.manifest.RevocationEpoch+1
+	if err := SignPermit(&permit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.issuePermit(context.Background(), permit, permitAuthorityStub{key: issuerPublic}, now); err != nil {
+		t.Fatalf("refreshed directory permit rejected for retained transfer: %v", err)
+	}
+	changedMembership := permit
+	changedMembership.Serial, changedMembership.MembershipCommitment = testID(93), testHash(94)
+	if err := SignPermit(&changedMembership, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.issuePermit(context.Background(), changedMembership, permitAuthorityStub{key: issuerPublic}, now); err == nil {
+		t.Fatal("permit with changed retained membership was accepted")
+	}
+}
+
 func TestPermitLedgerIsAtomicAndReturnsExactReplayResult(t *testing.T) {
 	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
 	if err != nil {

@@ -87,7 +87,7 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 			attachmentDevices[machine.AttachmentDeviceID] = machine.ID
 		}
 		for _, prefix := range machine.EndpointPrefixes {
-			if strings.TrimSpace(prefix) == "" {
+			if !validEndpointPrefix(prefix) {
 				return nil, fmt.Errorf("invalid endpoint prefix for machine %q", machine.ID)
 			}
 		}
@@ -131,6 +131,13 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 		}
 	}
 	return &Authenticator{store: store, machines: configured}, nil
+}
+
+// validEndpointPrefix requires a complete mailbox path segment. Without the
+// trailing slash, a raw prefix comparison could let `agent/a` claim
+// `agent/abuse`; prefixes are authority boundaries, not friendly labels.
+func validEndpointPrefix(prefix string) bool {
+	return prefix == strings.TrimSpace(prefix) && prefix != "/" && strings.HasSuffix(prefix, "/") && !strings.Contains(prefix, "//")
 }
 
 // CanonicalRequest returns the stable, unambiguous byte sequence signed by a

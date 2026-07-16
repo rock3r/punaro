@@ -120,7 +120,7 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 	if err != nil || accepted.TransferID != notice.Manifest.TransferID {
 		return attachmentv3.TransferResult{}, errors.New("approved recipient offer is unavailable")
 	}
-	source, err := attachmentv3.DecodeAndVerifySourceInit(notice.ManifestRaw, authority, now)
+	source, err := attachmentv3.DecodeAndVerifyRetainedSource(notice.ManifestRaw, authority, now)
 	if err != nil || source.ManifestCommitment() != accepted.ManifestCommitment {
 		return attachmentv3.TransferResult{}, errors.New("approved recipient source is unavailable")
 	}

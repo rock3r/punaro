@@ -16,7 +16,7 @@ import (
 // publishes plaintext only through an fsync+no-replace boundary. Callers must use
 // it after their durable complete result: no partial or unauthenticated bytes
 // are ever written to the requested destination.
-func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chunks []attachmentv3.EncryptedChunk, fileKey [32]byte, directory attachmentv3.DirectoryKeyResolver, nowUnix int64) error {
+func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chunks []attachmentv3.EncryptedChunk, fileKey [32]byte, directory attachmentv3.RetainedManifestAuthorityResolver, nowUnix int64) error {
 	if nowUnix < 0 {
 		return errors.New("invalid receipt output destination")
 	}

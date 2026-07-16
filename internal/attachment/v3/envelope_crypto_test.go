@@ -22,6 +22,9 @@ func (d envelopeDirectoryStub) ValidateManifestAuthority(Manifest, time.Time) (e
 	}
 	return d.signer, nil
 }
+func (d envelopeDirectoryStub) ValidateRetainedManifestAuthority(m Manifest, now time.Time) (ed25519.PublicKey, error) {
+	return d.ValidateManifestAuthority(m, now)
+}
 func (d envelopeDirectoryStub) CurrentRecipientHPKEKey([16]byte, uint64) ([32]byte, *ecdh.PublicKey, error) {
 	if d.reject {
 		return [32]byte{}, nil, errors.New("revoked")

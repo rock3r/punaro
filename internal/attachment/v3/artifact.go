@@ -138,8 +138,8 @@ func EncryptPreparedSourceArtifact(plaintext []byte, manifest Manifest, commitme
 // OpenSourceArtifact verifies and decrypts a fetched artifact with the file
 // key recovered from a valid recipient envelope. The caller supplies the same
 // fresh directory authority used to verify the manifest before decryption.
-func OpenSourceArtifact(rawManifest []byte, chunks []EncryptedChunk, fileKey [32]byte, directory DirectoryKeyResolver, now time.Time) ([]byte, error) {
-	source, err := DecodeAndVerifySourceInit(rawManifest, directory, now)
+func OpenSourceArtifact(rawManifest []byte, chunks []EncryptedChunk, fileKey [32]byte, directory RetainedManifestAuthorityResolver, now time.Time) ([]byte, error) {
+	source, err := DecodeAndVerifyRetainedSource(rawManifest, directory, now)
 	if err != nil {
 		return nil, err
 	}

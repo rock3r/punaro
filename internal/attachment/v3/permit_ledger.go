@@ -102,7 +102,7 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 		return tx.Commit()
 	}
 	manifest, err := DecodeManifest(spec.Manifest)
-	if err != nil || !sourceInitPermitBinding(permit, manifest, spec.Manifest) {
+	if err != nil || !retainedManifestPermitBinding(permit, manifest, spec.Manifest) {
 		return errors.New("invalid v3 staged permit binding")
 	}
 	var status transferStatus

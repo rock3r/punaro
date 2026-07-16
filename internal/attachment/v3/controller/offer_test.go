@@ -164,6 +164,9 @@ type offerDirectoryStub struct {
 func (d offerDirectoryStub) ValidateManifestAuthority(attachmentv3.Manifest, time.Time) (ed25519.PublicKey, error) {
 	return d.signer, nil
 }
+func (d offerDirectoryStub) ValidateRetainedManifestAuthority(m attachmentv3.Manifest, now time.Time) (ed25519.PublicKey, error) {
+	return d.ValidateManifestAuthority(m, now)
+}
 func (d offerDirectoryStub) CurrentRecipientHPKEKey([16]byte, uint64) ([32]byte, *ecdh.PublicKey, error) {
 	return bytes32(11), d.recipient, nil
 }

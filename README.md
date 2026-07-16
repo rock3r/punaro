@@ -33,6 +33,8 @@ Read the [architecture and security design](DESIGN.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
 [Telegram gateway guide](docs/telegram-gateway.md),
 [attachment RFC](docs/attachments-v2-rfc.md),
+[controlled v3 attachment RFC](docs/attachments-v3-rfc.md), and the
+[explicit attachment agent workflow](skills/punaro-attachment/SKILL.md),
 [security release gates](docs/security-release-gates.md), and
 [review record](REVIEWS.md).
 

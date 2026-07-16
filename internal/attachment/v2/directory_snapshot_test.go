@@ -64,6 +64,23 @@ func TestDirectorySnapshotResolverBindsManifestAndRecipientKeysToFreshMembership
 	if _, err := resolver.ValidateManifestAuthority(manifest, clock); err == nil {
 		t.Fatal("manifest with stale revocation epoch was accepted")
 	}
+	manifest.RevocationEpoch = 3
+	manifest.ExpiresAt = testUnix(t, clock.Add(10*time.Minute))
+	if _, err := resolver.ValidateManifestAuthority(manifest, clock); err == nil {
+		t.Fatal("v2 strict manifest validation accepted a manifest beyond its directory head")
+	}
+	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err != nil {
+		t.Fatalf("v3 strict admission rejected exact ten-minute manifest: %v", err)
+	}
+	admissionHead := manifest.DirectoryHead
+	manifest.DirectoryHead = directoryBytes32(99)
+	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err == nil {
+		t.Fatal("v3 strict admission accepted a different directory head")
+	}
+	manifest.DirectoryHead, manifest.RevocationEpoch = admissionHead, 2
+	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err == nil {
+		t.Fatal("v3 strict admission accepted a different revocation epoch")
+	}
 }
 
 func TestDirectorySnapshotResolverResolvesOnlyExactCurrentTransferBinding(t *testing.T) {
