@@ -10,6 +10,8 @@ import (
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 )
 
+var errRecipientDownloadOutcome = errors.New("recipient download requires outcome reconciliation")
+
 // RecipientEnvelopeOpener keeps the recipient HPKE private key behind the
 // receipt worker boundary. It accepts only the already verified offer source
 // and never returns the key to callers of Receive.
@@ -204,11 +206,26 @@ func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDow
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
+	if active, found, err := w.options.Acceptance.options.Journal.receiptDownloadActiveOperation(record.messageID, phase, chunk); err != nil || !found {
+		return attachmentv3.TransferResult{}, errors.New("missing durable recipient download operation")
+	} else {
+		op = active
+	}
 	if phase != receiptDownloadChunk && len(op.result) != 0 {
 		return exactReceiptDownloadResult(op.result, record, expected)
 	}
+	if receiptDownloadOperationExpired(op, now) {
+		return w.reconcileExpiredDownload(ctx, record, phase, chunk, maxBytes, maxChunks, expected, op, authority, now)
+	}
 	permit, signed, err := w.credentials(ctx, record, op, authority, now)
 	if err != nil {
+		if errors.Is(err, errRecipientDownloadOutcome) {
+			active, found, activeErr := w.options.Acceptance.options.Journal.receiptDownloadActiveOperation(record.messageID, phase, chunk)
+			if activeErr != nil || !found {
+				return attachmentv3.TransferResult{}, errors.New("missing recipient download outcome origin")
+			}
+			return w.reconcileExpiredDownload(ctx, record, phase, chunk, maxBytes, maxChunks, expected, active, authority, now)
+		}
 		return attachmentv3.TransferResult{}, err
 	}
 	method, path := receiptDownloadRoute(record.transferID, phase, chunk)
@@ -236,14 +253,186 @@ func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDow
 	return result, nil
 }
 
+func receiptDownloadOperationExpired(operation receiptDownloadOperation, now time.Time) bool {
+	if len(operation.permit) == 0 || now.Unix() < 0 {
+		return false
+	}
+	permit, err := attachmentv3.DecodePermit(operation.permit)
+	return err != nil || permit.ExpiresAt <= uint64(now.Unix())
+}
+
+// reconcileExpiredDownload queries the outcome of exactly one retained relay
+// operation. It never replays its expired permit. A chunk in transferring
+// state has no response body to persist, so only that confirmed state creates
+// a new immutable retrieval capability.
+func (w *RecipientDownloadWorker) reconcileExpiredDownload(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk, maxBytes, maxChunks uint64, expected attachmentv3.TransferState, original receiptDownloadOperation, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.TransferResult, error) {
+	originalPermit, err := attachmentv3.DecodePermit(original.permit)
+	if err != nil || originalPermit.ExpiresAt > uint64(now.Unix()) || originalPermit.Serial == [16]byte{} {
+		return attachmentv3.TransferResult{}, errors.New("recipient download operation is not reconcilable")
+	}
+	attempt, found, err := w.options.Acceptance.options.Journal.latestReceiptDownloadOutcomeAttempt(record.messageID, phase, chunk, original.attempt)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	if !found || receiptDownloadOutcomeAttemptExpired(attempt, now) {
+		attempt, err = w.newReceiptDownloadOutcomeAttempt(record, phase, chunk, original, attempt, found, now)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+	}
+	if len(attempt.result) == 0 {
+		permit, operation, err := w.receiptDownloadOutcomeCredentials(ctx, record, phase, chunk, original, attempt, authority, now)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		raw, err := w.options.Transport.DoV3Attachment(ctx, "GET", outcomePath(record.transferID), nil, permit, operation)
+		if err != nil {
+			return attachmentv3.TransferResult{}, fmt.Errorf("query recipient download outcome: %w", err)
+		}
+		attempt, err = w.options.Acceptance.options.Journal.storeReceiptDownloadOutcomeResult(record, phase, chunk, attempt, raw)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+	}
+	result, err := attachmentv3.DecodeTransferResult(attempt.result)
+	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.AttemptGeneration != 1 {
+		return attachmentv3.TransferResult{}, errors.New("invalid recipient download outcome")
+	}
+	if result.State == attachmentv3.TransferStateCancelled || result.State == attachmentv3.TransferStateExpired || result.State == attachmentv3.TransferStateRevoked {
+		return attachmentv3.TransferResult{}, errors.New("recipient download has terminal relay outcome")
+	}
+	if phase == receiptDownloadChunk {
+		if result.State != attachmentv3.TransferStateTransferring {
+			return attachmentv3.TransferResult{}, errors.New("invalid recipient download chunk outcome")
+		}
+		if _, err := w.options.Acceptance.options.Journal.newReceiptDownloadRetryOperation(record, original, now, w.options.Signer.SignReceiptDownloadPermit, w.options.NewID, w.options.NewIdempotencyKey); err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		return w.advance(ctx, record, phase, chunk, maxBytes, maxChunks, expected, authority, now)
+	}
+	if result.State != expected {
+		return attachmentv3.TransferResult{}, errors.New("invalid recipient download operation outcome")
+	}
+	if err := w.options.Acceptance.options.Journal.storeReceiptDownloadResult(record, original, attempt.result); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	return result, nil
+}
+
+func receiptDownloadOutcomeAttemptExpired(attempt receiptDownloadOutcomeAttempt, now time.Time) bool {
+	if now.Unix() < 0 {
+		return true
+	}
+	if len(attempt.permit) != 0 {
+		permit, err := attachmentv3.DecodePermit(attempt.permit)
+		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
+	}
+	return attempt.request.ExpiresAt <= uint64(now.Unix())
+}
+
+func (w *RecipientDownloadWorker) newReceiptDownloadOutcomeAttempt(record receiptDownloadRecord, phase receiptDownloadPhase, chunk uint64, original receiptDownloadOperation, previous receiptDownloadOutcomeAttempt, found bool, now time.Time) (receiptDownloadOutcomeAttempt, error) {
+	requestID, err := w.options.NewID()
+	if err != nil || requestID == [16]byte{} {
+		return receiptDownloadOutcomeAttempt{}, errors.New("generate recipient download outcome request identity")
+	}
+	opID, err := w.options.NewID()
+	if err != nil || opID == [16]byte{} {
+		return receiptDownloadOutcomeAttempt{}, errors.New("generate recipient download outcome operation identity")
+	}
+	key, err := w.options.NewIdempotencyKey()
+	if err != nil || key == [32]byte{} {
+		return receiptDownloadOutcomeAttempt{}, errors.New("generate recipient download outcome idempotency identity")
+	}
+	originalPermit, err := attachmentv3.DecodePermit(original.permit)
+	if err != nil || originalPermit.Serial == [16]byte{} {
+		return receiptDownloadOutcomeAttempt{}, errors.New("invalid recipient download outcome origin")
+	}
+	manifest, err := attachmentv3.DecodeManifest(record.manifest)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, errors.New("invalid recipient download outcome manifest")
+	}
+	request := original.request
+	request.RequestID, request.Operation, request.AttemptGeneration, request.OutcomeOfSerial = requestID, attachmentv3.PermitOperationOutcome, 0, originalPermit.Serial
+	request.MaxOperations = 1
+	expires := now.UTC().Add(20 * time.Second).Unix()
+	if uint64(expires) > manifest.ExpiresAt {
+		expires = int64(manifest.ExpiresAt)
+	}
+	if expires <= now.UTC().Unix() {
+		return receiptDownloadOutcomeAttempt{}, errors.New("recipient download outcome exceeds manifest lifetime")
+	}
+	request.IssuedAt, request.ExpiresAt = uint64(now.UTC().Unix()), uint64(expires)
+	if err := w.options.Acceptance.options.Signer.SignOutcomePermit(&request); err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	index := uint64(0)
+	if found {
+		if previous.index == ^uint64(0) {
+			return receiptDownloadOutcomeAttempt{}, errors.New("recipient download outcome index overflow")
+		}
+		index = previous.index + 1
+	}
+	return w.options.Acceptance.options.Journal.storeReceiptDownloadOutcomeAttempt(record, phase, chunk, receiptDownloadOutcomeAttempt{operationAttempt: original.attempt, index: index, request: request, operationID: opID, idempotencyKey: key})
+}
+
+func (w *RecipientDownloadWorker) receiptDownloadOutcomeCredentials(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk uint64, original receiptDownloadOperation, attempt receiptDownloadOutcomeAttempt, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
+	if len(attempt.permit) == 0 || len(attempt.operation) == 0 {
+		permit, err := w.options.Transport.IssueV3Permit(ctx, attempt.request)
+		if err != nil || !exactReceiptDownloadOutcomePermit(permit, attempt.request, record, original, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient download outcome permit is unavailable")
+		}
+		op, err := w.options.Acceptance.options.Signer.BuildOutcomeOperation(permit, "GET", outcomePath(record.transferID), attempt.operationID, attempt.idempotencyKey, permit.IssuedAt, permit.ExpiresAt)
+		if err != nil || !verifyReceiptDownloadOperation(op, permit, "GET", outcomePath(record.transferID), authority, now) {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid recipient download outcome operation")
+		}
+		stored, err := w.options.Acceptance.options.Journal.storeReceiptDownloadOutcomeCredentials(record, phase, chunk, attempt, permit, op)
+		if err != nil {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
+		}
+		attempt = stored
+	}
+	permit, err := attachmentv3.DecodePermit(attempt.permit)
+	if err != nil || !exactReceiptDownloadOutcomePermit(permit, attempt.request, record, original, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient download outcome permit")
+	}
+	op, err := attachmentv3.DecodeOperation(attempt.operation)
+	if err != nil || op.OperationID != attempt.operationID || op.IdempotencyKey != attempt.idempotencyKey || !verifyReceiptDownloadOperation(op, permit, "GET", outcomePath(record.transferID), authority, now) {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient download outcome operation")
+	}
+	return permit, op, nil
+}
+
+func exactReceiptDownloadOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptDownloadRecord, original receiptDownloadOperation, now time.Time) bool {
+	origin, err := attachmentv3.DecodePermit(original.permit)
+	if err != nil || request.OutcomeOfSerial != origin.Serial || request.RequestID == [16]byte{} || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 || request.TransferID != record.transferID || request.StagedManifestCommitment != record.manifestCommitment || request.HolderRole != attachmentv3.PermitHolderRecipient || request.IssuedAt > uint64(now.Unix()) || request.ExpiresAt <= uint64(now.Unix()) {
+		return false
+	}
+	return permit.HolderDeviceID == request.HolderDeviceID && permit.HolderGeneration == request.HolderGeneration && permit.HolderRole == request.HolderRole && permit.TransferID == request.TransferID && permit.ConversationID == request.ConversationID && permit.SenderDeviceID == request.SenderDeviceID && permit.SenderGeneration == request.SenderGeneration && permit.RecipientDeviceID == request.RecipientDeviceID && permit.RecipientGeneration == request.RecipientGeneration && permit.Operation == request.Operation && permit.AttemptGeneration == 0 && permit.OutcomeOfSerial == request.OutcomeOfSerial && permit.MembershipCommitment == request.MembershipCommitment && permit.StagedManifestCommitment == request.StagedManifestCommitment && permit.MaxBytes == request.MaxBytes && permit.MaxChunks == request.MaxChunks && permit.MaxOperations == 1 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.ExpiresAt > uint64(now.Unix())
+}
+
 func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receiptDownloadRecord, operation receiptDownloadOperation, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
 	if len(operation.permit) != 0 || len(operation.operation) != 0 {
-		if len(operation.permit) == 0 || len(operation.operation) == 0 {
+		if len(operation.permit) == 0 {
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("incomplete durable recipient download credentials")
 		}
 		permit, err := attachmentv3.DecodePermit(operation.permit)
-		if err != nil || !exactReceiptDownloadPermit(permit, operation.request, record, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
-			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient download requires outcome reconciliation")
+		if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient download permit")
+		}
+		if permit.ExpiresAt <= uint64(now.Unix()) {
+			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errRecipientDownloadOutcome
+		}
+		if len(operation.operation) == 0 {
+			method, path := receiptDownloadRoute(record.transferID, operation.phase, operation.chunk)
+			signed, err := w.options.Signer.BuildReceiptDownloadOperation(permit, method, path, nil, operation.operationID, operation.idempotencyKey, permit.IssuedAt, permit.ExpiresAt)
+			if err != nil || !verifyReceiptDownloadOperation(signed, permit, method, path, authority, now) {
+				return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid recipient download operation")
+			}
+			stored, err := w.options.Acceptance.options.Journal.storeReceiptDownloadOperationSignature(record, operation, signed)
+			if err != nil {
+				return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
+			}
+			return w.credentials(ctx, record, stored, authority, now)
 		}
 		signed, err := attachmentv3.DecodeOperation(operation.operation)
 		method, path := receiptDownloadRoute(record.transferID, operation.phase, operation.chunk)
@@ -253,8 +442,15 @@ func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receip
 		return permit, signed, nil
 	}
 	permit, err := w.options.Transport.IssueV3Permit(ctx, operation.request)
-	if err != nil || !exactReceiptDownloadPermit(permit, operation.request, record, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+	if err != nil || !exactReceiptDownloadPermitFields(permit, operation.request, record) || attachmentv3.VerifyPermit(permit, authority, time.Unix(int64(permit.IssuedAt), 0).UTC()) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient download permit is unavailable")
+	}
+	stored, err := w.options.Acceptance.options.Journal.storeReceiptDownloadPermit(record, operation, permit)
+	if err != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
+	}
+	if permit.ExpiresAt <= uint64(now.Unix()) {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errRecipientDownloadOutcome
 	}
 	method, path := receiptDownloadRoute(record.transferID, operation.phase, operation.chunk)
 	issuedAt := permit.IssuedAt
@@ -265,18 +461,18 @@ func (w *RecipientDownloadWorker) credentials(ctx context.Context, record receip
 	if err != nil || !verifyReceiptDownloadOperation(signed, permit, method, path, authority, now) {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid recipient download operation")
 	}
-	stored, err := w.options.Acceptance.options.Journal.storeReceiptDownloadCredentials(record, operation, permit, signed)
+	stored, err = w.options.Acceptance.options.Journal.storeReceiptDownloadOperationSignature(record, stored, signed)
 	if err != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
 	}
 	return w.credentials(ctx, record, stored, authority, now)
 }
 
-func exactReceiptDownloadPermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptDownloadRecord, now time.Time) bool {
-	if _, err := attachmentv3.EncodePermit(permit); err != nil || now.Unix() < 0 || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 1 || permit.Operation != request.Operation || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+func exactReceiptDownloadPermitFields(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptDownloadRecord) bool {
+	if _, err := attachmentv3.EncodePermit(permit); err != nil || permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 1 || permit.Operation != request.Operation || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
-	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt
 }
 
 func verifyReceiptDownloadOperation(signed attachmentv3.OperationRecord, permit attachmentv3.Permit, method, path string, authority RecipientAcceptanceAuthority, now time.Time) bool {

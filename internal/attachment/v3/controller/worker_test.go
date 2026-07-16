@@ -503,20 +503,23 @@ func TestRecipientAcceptanceWorkersConvergeAcrossJournalProcesses(t *testing.T) 
 }
 
 type acceptanceTransportStub struct {
-	request         attachmentv3.PermitRequest
-	permit          attachmentv3.Permit
-	operation       attachmentv3.OperationRecord
-	method, path    string
-	body            []byte
-	result          []byte
-	operationErr    error
-	operations      []attachmentv3.OperationRecord
-	serial          byte
-	acceptAnyPermit bool
-	badPermit       bool
-	wrongTransfer   bool
-	issueCalls      int
-	operationCalls  int
+	request              attachmentv3.PermitRequest
+	permit               attachmentv3.Permit
+	operation            attachmentv3.OperationRecord
+	method, path         string
+	body                 []byte
+	result               []byte
+	operationErr         error
+	operations           []attachmentv3.OperationRecord
+	serial               byte
+	incrementSerial      bool
+	permitExpiresAt      uint64
+	shortDownloadPermits bool
+	acceptAnyPermit      bool
+	badPermit            bool
+	wrongTransfer        bool
+	issueCalls           int
+	operationCalls       int
 }
 
 type acceptanceAuthorityProviderStub struct{ authority RecipientAcceptanceAuthority }
@@ -549,7 +552,13 @@ func (s *acceptanceTransportStub) IssueV3Permit(_ context.Context, request attac
 	if serial == 0 {
 		serial = 80
 	}
+	if s.incrementSerial {
+		s.serial = serial + 1
+	}
 	s.permit = attachmentv3.Permit{Audience: bytes32(5), Serial: bytes16(serial), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(7), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
+	if s.permitExpiresAt != 0 && (!s.shortDownloadPermits || request.AttemptGeneration == 1) && s.permitExpiresAt >= s.permit.IssuedAt && s.permitExpiresAt <= s.permit.ExpiresAt {
+		s.permit.ExpiresAt = s.permitExpiresAt
+	}
 	if s.wrongTransfer {
 		s.permit.TransferID = bytes16(99)
 	}

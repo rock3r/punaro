@@ -173,6 +173,27 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			PRIMARY KEY(punaro_message_id, phase, chunk_index),
 			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_downloads(punaro_message_id)
 		)`,
+		// A download response can be lost after the relay has committed it. The
+		// original one-use capability is immutable; only a confirmed outcome may
+		// authorize a separately retained retry operation.
+		`CREATE TABLE IF NOT EXISTS controller_receipt_download_operation_retries (
+			punaro_message_id TEXT NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			attempt_index INTEGER NOT NULL, permit_request BLOB NOT NULL,
+			operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(punaro_message_id, phase, chunk_index, attempt_index),
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_downloads(punaro_message_id)
+		)`,
+		// Outcome capabilities are also one-use and are therefore append-only per
+		// operation attempt. They are never substituted for the original permit.
+		`CREATE TABLE IF NOT EXISTS controller_receipt_download_outcome_attempts (
+			punaro_message_id TEXT NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			operation_attempt_index INTEGER NOT NULL, attempt_index INTEGER NOT NULL,
+			permit_request BLOB NOT NULL, operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(punaro_message_id, phase, chunk_index, operation_attempt_index, attempt_index),
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_downloads(punaro_message_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS controller_sender_transfers (
 			transfer_id BLOB PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
 			manifest BLOB NOT NULL, manifest_commitment BLOB NOT NULL,

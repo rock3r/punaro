@@ -24,6 +24,25 @@ const (
 
 type permitMutation func(context.Context, *sql.Tx) ([]byte, error)
 
+// hasIssuedPermit proves that an expired issuance replay is the same signed
+// permit previously admitted to this source. It is intentionally narrower
+// than admission: no new serial, lifecycle mutation, or authority refresh is
+// possible on this path.
+func (s *sourceStore) hasIssuedPermit(ctx context.Context, permit Permit) error {
+	if s == nil || s.db == nil || permit.Serial == [16]byte{} {
+		return errors.New("invalid issued permit receipt")
+	}
+	raw, err := EncodePermit(permit)
+	if err != nil {
+		return err
+	}
+	var stored []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT permit FROM v3_issued_permits WHERE serial=?`, permit.Serial[:]).Scan(&stored); err != nil || !bytes.Equal(stored, raw) {
+		return errors.New("unknown issued permit receipt")
+	}
+	return nil
+}
+
 // issuePermit records only a fresh, signed permit bound to an already staged
 // canonical source. The source-init handler is separate because it creates
 // that source atomically after fresh directory verification.

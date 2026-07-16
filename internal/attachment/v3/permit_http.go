@@ -71,7 +71,7 @@ func (h *permitHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		attachmentHTTPError(w, http.StatusForbidden)
 		return
 	}
-	permit, _, err := h.issuer.Issue(r.Context(), request, authority)
+	permit, replayed, err := h.issuer.Issue(r.Context(), request, authority)
 	if err != nil {
 		attachmentHTTPError(w, http.StatusForbidden)
 		return
@@ -80,7 +80,15 @@ func (h *permitHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// transaction. Every later operation must be registered first, so issuance
 	// alone can never create a redeemable capability for an unknown lifecycle.
 	if permit.Operation != permitOperationSourceInit {
-		if err := h.issuer.store.issuePermit(r.Context(), permit, authority, now); err != nil {
+		// An expired exact issuance replay is an outcome-correlation receipt,
+		// not a renewed capability. It must already be durably registered with
+		// the source; never pass it through fresh admission or expiry checks.
+		if replayed && permit.ExpiresAt <= uint64(now.Unix()) {
+			if err := h.issuer.store.hasIssuedPermit(r.Context(), permit); err != nil {
+				attachmentHTTPError(w, http.StatusForbidden)
+				return
+			}
+		} else if err := h.issuer.store.issuePermit(r.Context(), permit, authority, now); err != nil {
 			attachmentHTTPError(w, http.StatusForbidden)
 			return
 		}
