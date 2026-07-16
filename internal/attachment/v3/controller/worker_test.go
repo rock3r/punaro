@@ -44,7 +44,7 @@ func TestRecipientAcceptanceWorkerPersistsAndReplaysOnlyExactAcceptedOperation(t
 	}
 	transport := &acceptanceTransportStub{result: acceptedTransferResult(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120)}
 	worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{
-		Journal: journal, BindingResolver: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, Directory: testOfferDirectory(t),
+		Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private),
 		Signer:    NewLocalRecipientOperationSigner(RecipientIdentity{DeviceID: mapping.RecipientDeviceID, Generation: mapping.RecipientGeneration}, private),
 		Transport: transport, Now: func() time.Time { return now },
 		NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil },
@@ -79,7 +79,7 @@ func TestRecipientAcceptanceWorkerPersistsAndReplaysOnlyExactAcceptedOperation(t
 	}
 	restartedTransport := &acceptanceTransportStub{result: transport.result}
 	restarted, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{
-		Journal: journal, BindingResolver: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, Directory: testOfferDirectory(t),
+		Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private),
 		Signer: NewLocalRecipientOperationSigner(recipient, private), Transport: restartedTransport, Now: func() time.Time { return now },
 		NewID: sequenceID(bytes16(93)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(94), nil },
 	})
@@ -124,7 +124,7 @@ func TestRecipientAcceptanceWorkerRetriesOnlyPersistedCredentialsAfterRemoteFail
 	}
 	transport := &acceptanceTransportStub{result: acceptedTransferResult(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120), operationErr: errTest("offline")}
 	worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{
-		Journal: journal, BindingResolver: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, Directory: testOfferDirectory(t),
+		Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private),
 		Signer: NewLocalRecipientOperationSigner(recipient, private), Transport: transport, Now: func() time.Time { return now },
 		NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil },
 	})
@@ -141,6 +141,123 @@ func TestRecipientAcceptanceWorkerRetriesOnlyPersistedCredentialsAfterRemoteFail
 	if transport.issueCalls != 1 || transport.operationCalls != 2 || len(transport.operations) != 2 || transport.operations[0] != transport.operations[1] {
 		t.Fatalf("retry created new credentials issue=%d operation=%d records=%d", transport.issueCalls, transport.operationCalls, len(transport.operations))
 	}
+}
+
+func TestRecipientAcceptanceRejectsPermitOutsideFreshAuthorityBeforeTransport(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	transport.badPermit = true
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("foreign issuer permit reached transport")
+	}
+	if transport.operationCalls != 0 {
+		t.Fatal("foreign issuer permit called attachment transport")
+	}
+}
+
+func TestRecipientAcceptanceRejectsChangedOperationBeforeTransport(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, changedAcceptanceSigner{})
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("changed operation reached transport")
+	}
+	if transport.operationCalls != 0 {
+		t.Fatal("changed operation called attachment transport")
+	}
+}
+
+func TestRecipientAcceptanceNeverRetriesTerminalUncertainState(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	now := time.Unix(100, 0).UTC()
+	notice, err := attachmentv3.DecodeOfferNotice(inbound.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping, found, err := worker.options.Journal.mapping(inbound.RelayConversationID)
+	if err != nil || !found {
+		t.Fatal("missing acceptance mapping")
+	}
+	if _, err := worker.options.Journal.ensureReceiptAcceptance(inbound.PunaroMessageID, notice, mapping, now, worker.options.Signer, worker.options.NewID, worker.options.NewIdempotencyKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.options.Journal.markReceiptUncertain(inbound.PunaroMessageID, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.options.Journal.terminalizeReceiptUncertain(inbound.PunaroMessageID, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("terminal uncertain acceptance retried")
+	}
+	if transport.issueCalls != 0 || transport.operationCalls != 0 {
+		t.Fatalf("terminal uncertain reached transport issue=%d operation=%d", transport.issueCalls, transport.operationCalls)
+	}
+}
+
+func TestRecipientAcceptanceReconcilesExpiredUncertainOutcome(t *testing.T) {
+	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
+	transport.operationErr = errTest("ambiguous network failure")
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("ambiguous acceptance failure was accepted")
+	}
+	if transport.operationCalls != 1 || transport.operation.Operation != attachmentv3.PermitOperationAccept {
+		t.Fatalf("initial operation=%+v calls=%d", transport.operation, transport.operationCalls)
+	}
+	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
+	transport.operationErr = nil
+	result, err := worker.Accept(context.Background(), inbound)
+	if err != nil || result.State != attachmentv3.TransferStateAccepted {
+		t.Fatalf("outcome result=%+v err=%v", result, err)
+	}
+	if transport.issueCalls != 2 || transport.operationCalls != 2 || transport.operation.Operation != attachmentv3.PermitOperationOutcome || transport.method != http.MethodGet {
+		t.Fatalf("outcome was not used issue=%d operation=%d method=%s op=%+v", transport.issueCalls, transport.operationCalls, transport.method, transport.operation)
+	}
+}
+
+type changedAcceptanceSigner struct{ RecipientOperationSigner }
+
+func (changedAcceptanceSigner) SignReceiptPermit(*attachmentv3.PermitRequest) error { return nil }
+func (changedAcceptanceSigner) BuildReceiptOperation(attachmentv3.Permit, string, string, []byte, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error) {
+	return attachmentv3.OperationRecord{}, errTest("changed operation")
+}
+
+func newAcceptanceWorkerForNegativeTest(t *testing.T, override RecipientOperationSigner) (*RecipientAcceptanceWorker, InboundOffer, *acceptanceTransportStub) {
+	t.Helper()
+	recipient := RecipientIdentity{DeviceID: bytes16(3), Generation: 1}
+	journal, err := OpenJournalForRecipient(filepath.Join(t.TempDir(), "private", "controller.db"), recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(1), SenderDeviceID: bytes16(2), SenderGeneration: 1, RecipientDeviceID: bytes16(3), RecipientGeneration: 1, MembershipCommitment: bytes32(4)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	if ok, err := journal.ApproveInboundOffer(inbound.PunaroMessageID, now); err != nil || !ok {
+		t.Fatal(err)
+	}
+	notice, err := attachmentv3.DecodeOfferNotice(inbound.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, private, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := RecipientOperationSigner(NewLocalRecipientOperationSigner(recipient, private))
+	if override != nil {
+		signer = override
+	}
+	transport := &acceptanceTransportStub{result: acceptedTransferResult(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120)}
+	worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private), Signer: signer, Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return worker, inbound, transport
 }
 
 func TestRecipientAcceptanceWorkerSerializesConcurrentLocalAccepts(t *testing.T) {
@@ -170,7 +287,7 @@ func TestRecipientAcceptanceWorkerSerializesConcurrentLocalAccepts(t *testing.T)
 		t.Fatal(err)
 	}
 	transport := &acceptanceTransportStub{result: acceptedTransferResult(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120)}
-	worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{Journal: journal, BindingResolver: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, Directory: testOfferDirectory(t), Signer: NewLocalRecipientOperationSigner(RecipientIdentity{DeviceID: bytes16(3), Generation: 1}, private), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil }})
+	worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private), Signer: NewLocalRecipientOperationSigner(RecipientIdentity{DeviceID: bytes16(3), Generation: 1}, private), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +408,7 @@ func TestRecipientAcceptanceWorkersConvergeAcrossJournalProcesses(t *testing.T) 
 	}
 	result := acceptedTransferResult(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120)
 	newWorker := func(journal *Journal, transport *acceptanceTransportStub) *RecipientAcceptanceWorker {
-		worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{Journal: journal, BindingResolver: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, Directory: testOfferDirectory(t), Signer: NewLocalRecipientOperationSigner(recipient, private), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil }})
+		worker, err := NewRecipientAcceptanceWorker(RecipientAcceptanceWorkerOptions{Journal: journal, AuthorityProvider: testAcceptanceAuthority(t, mapping, private), Signer: NewLocalRecipientOperationSigner(recipient, private), Transport: transport, Now: func() time.Time { return now }, NewID: sequenceID(bytes16(90), bytes16(91)), NewIdempotencyKey: func() ([32]byte, error) { return bytes32(92), nil }})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -327,8 +444,32 @@ type acceptanceTransportStub struct {
 	operations      []attachmentv3.OperationRecord
 	serial          byte
 	acceptAnyPermit bool
+	badPermit       bool
 	issueCalls      int
 	operationCalls  int
+}
+
+type acceptanceAuthorityProviderStub struct{ authority RecipientAcceptanceAuthority }
+
+func (p acceptanceAuthorityProviderStub) ResolveRecipientAcceptanceAuthority(context.Context, time.Time) (RecipientAcceptanceAuthority, error) {
+	return p.authority, nil
+}
+
+type acceptanceAuthorityStub struct {
+	*bindingResolverStub
+	offerDirectoryStub
+	issuer, holder ed25519.PublicKey
+}
+
+func (a acceptanceAuthorityStub) ValidatePermitAuthority(attachmentv3.Permit, time.Time) (ed25519.PublicKey, error) {
+	return a.issuer, nil
+}
+func (a acceptanceAuthorityStub) CurrentDeviceSigningKey([16]byte, uint64) (ed25519.PublicKey, error) {
+	return a.holder, nil
+}
+func testAcceptanceAuthority(t *testing.T, mapping Mapping, holder ed25519.PrivateKey) RecipientAcceptanceAuthorityProvider {
+	issuer, _ := testOfferSigner()
+	return acceptanceAuthorityProviderStub{authority: acceptanceAuthorityStub{bindingResolverStub: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, offerDirectoryStub: testOfferDirectory(t), issuer: issuer, holder: holder.Public().(ed25519.PublicKey)}}
 }
 
 func (s *acceptanceTransportStub) IssueV3Permit(_ context.Context, request attachmentv3.PermitRequest) (attachmentv3.Permit, error) {
@@ -339,6 +480,13 @@ func (s *acceptanceTransportStub) IssueV3Permit(_ context.Context, request attac
 		serial = 80
 	}
 	s.permit = attachmentv3.Permit{Audience: bytes32(5), Serial: bytes16(serial), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(7), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment}
+	_, issuer := testOfferSigner()
+	if err := attachmentv3.SignPermit(&s.permit, issuer); err != nil {
+		return attachmentv3.Permit{}, err
+	}
+	if s.badPermit {
+		s.permit.Signature[0] ^= 1
+	}
 	return s.permit, nil
 }
 

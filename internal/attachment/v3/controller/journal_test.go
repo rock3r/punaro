@@ -331,7 +331,9 @@ func TestJournalReapsOnlyExpiredUnapprovedOffers(t *testing.T) {
 }
 
 func TestRecipientBoundJournalRejectsOtherDeviceMappings(t *testing.T) {
-	journal, err := OpenJournalForRecipient(filepath.Join(t.TempDir(), "private", "controller.db"), RecipientIdentity{DeviceID: bytes16(71), Generation: 2})
+	path := filepath.Join(t.TempDir(), "private", "controller.db")
+	recipient := RecipientIdentity{DeviceID: bytes16(71), Generation: 2}
+	journal, err := OpenJournalForRecipient(path, recipient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,6 +345,15 @@ func TestRecipientBoundJournalRejectsOtherDeviceMappings(t *testing.T) {
 	mapping.RecipientDeviceID, mapping.RecipientGeneration = bytes16(71), 2
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatalf("local recipient mapping rejected: %v", err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenJournalForRecipient(path, RecipientIdentity{DeviceID: bytes16(76), Generation: 1}); err == nil {
+		t.Fatal("journal reopened under a different recipient identity")
+	}
+	if _, err := OpenJournal(path); err == nil {
+		t.Fatal("recipient-bound journal reopened without its local identity")
 	}
 }
 

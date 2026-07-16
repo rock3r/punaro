@@ -98,6 +98,8 @@ func permitCompatibleSourceStatus(permit Permit, status transferStatus, attempt 
 		return status == transferAccepted && attempt == 0 && permit.AttemptGeneration == 1
 	case permitOperationDownload, permitOperationComplete:
 		return status == transferTransferring && attempt == 1 && permit.AttemptGeneration == 1
+	case permitOperationOutcome:
+		return permit.AttemptGeneration == 0
 	default:
 		return false
 	}

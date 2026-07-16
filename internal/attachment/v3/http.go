@@ -112,6 +112,8 @@ func (h *attachmentHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		result, _, err = h.store.redeemComplete(r.Context(), permit, operation, route, request, authority, authority, now)
 	case permitOperationCancel:
 		result, _, err = h.store.redeemCancel(r.Context(), permit, operation, route, request, authority, authority, now)
+	case permitOperationOutcome:
+		result, _, err = h.store.redeemOutcome(r.Context(), permit, operation, route, request, authority, authority, now)
 	default:
 		attachmentHTTPError(w, http.StatusNotFound)
 		return

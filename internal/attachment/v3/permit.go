@@ -23,6 +23,7 @@ const (
 	permitOperationBegin        uint64 = 6
 	permitOperationComplete     uint64 = 7
 	permitOperationCancel       uint64 = 8
+	permitOperationOutcome      uint64 = 9
 )
 
 // Public protocol identifiers let adapters construct holder-signed requests
@@ -40,6 +41,7 @@ const (
 	PermitOperationBegin        = permitOperationBegin
 	PermitOperationComplete     = permitOperationComplete
 	PermitOperationCancel       = permitOperationCancel
+	PermitOperationOutcome      = permitOperationOutcome
 )
 
 // PermitAuthorityResolver fresh-validates the audience, issuer key, directory
@@ -109,7 +111,7 @@ func (p Permit) signedBytes() ([]byte, error) {
 	return append([]byte(permitSignatureDomain), raw...), err
 }
 func validatePermit(p Permit) error {
-	if p.Audience == [32]byte{} || p.Serial == [16]byte{} || p.IssuerKeyID == [32]byte{} || p.HolderDeviceID == [16]byte{} || p.TransferID == [16]byte{} || p.ConversationID == [16]byte{} || p.SenderDeviceID == [16]byte{} || p.RecipientDeviceID == [16]byte{} || p.DirectoryHead == [32]byte{} || p.MembershipCommitment == [32]byte{} || p.StagedManifestCommitment == [32]byte{} || p.HolderGeneration == 0 || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.HolderRole < permitHolderSender || p.HolderRole > permitHolderRecipient || p.Operation < permitOperationSourceInit || p.Operation > permitOperationCancel || p.IssuedAt > math.MaxInt64 || p.ExpiresAt > math.MaxInt64 || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 30 || p.MaxBytes > maxPermitCiphertextBytes || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
+	if p.Audience == [32]byte{} || p.Serial == [16]byte{} || p.IssuerKeyID == [32]byte{} || p.HolderDeviceID == [16]byte{} || p.TransferID == [16]byte{} || p.ConversationID == [16]byte{} || p.SenderDeviceID == [16]byte{} || p.RecipientDeviceID == [16]byte{} || p.DirectoryHead == [32]byte{} || p.MembershipCommitment == [32]byte{} || p.StagedManifestCommitment == [32]byte{} || p.HolderGeneration == 0 || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.HolderRole < permitHolderSender || p.HolderRole > permitHolderRecipient || p.Operation < permitOperationSourceInit || p.Operation > permitOperationOutcome || p.IssuedAt > math.MaxInt64 || p.ExpiresAt > math.MaxInt64 || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 30 || p.MaxBytes > maxPermitCiphertextBytes || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
 		return errors.New("invalid v3 permit")
 	}
 	if p.HolderRole == permitHolderSender && (p.HolderDeviceID != p.SenderDeviceID || p.HolderGeneration != p.SenderGeneration) {
@@ -132,6 +134,8 @@ func validPermitOperation(p Permit) bool {
 		return p.HolderRole == permitHolderRecipient && p.AttemptGeneration == 0
 	case permitOperationBegin, permitOperationDownload, permitOperationComplete:
 		return p.HolderRole == permitHolderRecipient && p.AttemptGeneration == 1
+	case permitOperationOutcome:
+		return (p.HolderRole == permitHolderSender || p.HolderRole == permitHolderRecipient) && p.AttemptGeneration == 0
 	default:
 		return false
 	}

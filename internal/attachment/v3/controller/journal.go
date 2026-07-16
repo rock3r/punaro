@@ -105,6 +105,10 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			recipient_device_id BLOB NOT NULL, recipient_generation INTEGER NOT NULL,
 			membership_commitment BLOB NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS controller_recipient_identity (
+			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+			device_id BLOB NOT NULL, generation INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS controller_inbound_offers (
 			punaro_message_id TEXT PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
 			offer BLOB NOT NULL, transfer_id BLOB NOT NULL,
@@ -125,6 +129,32 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			permit BLOB, operation BLOB, result BLOB,
 			FOREIGN KEY(punaro_message_id) REFERENCES controller_inbound_offers(punaro_message_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS controller_receipt_reconciliation (
+			punaro_message_id TEXT PRIMARY KEY, state TEXT NOT NULL,
+			uncertain_at INTEGER NOT NULL, terminal_at INTEGER,
+			outcome_request BLOB, outcome_operation_id BLOB, outcome_idempotency_key BLOB,
+			outcome_permit BLOB, outcome_operation BLOB, outcome_result BLOB,
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_acceptances(punaro_message_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_transfers (
+			transfer_id BLOB PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
+			manifest BLOB NOT NULL, manifest_commitment BLOB NOT NULL,
+			file_key BLOB NOT NULL, envelope BLOB, offer BLOB, offer_nonce BLOB,
+			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_chunks (
+			transfer_id BLOB NOT NULL, chunk_index INTEGER NOT NULL,
+			ciphertext BLOB NOT NULL, ciphertext_commitment BLOB NOT NULL,
+			PRIMARY KEY(transfer_id, chunk_index),
+			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_operations (
+			transfer_id BLOB NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			permit_request BLOB NOT NULL, operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(transfer_id, phase, chunk_index),
+			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -139,11 +169,40 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate controller journal: %w", err)
 	}
+	if err := bindJournalRecipient(db, recipient); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("bind controller recipient: %w", err)
+	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return &Journal{db: db, recipient: recipient}, nil
+}
+
+// bindJournalRecipient makes the local recipient pin durable. A process
+// cannot reopen an existing controller journal under another device identity
+// merely by changing its local configuration.
+func bindJournalRecipient(db *sql.DB, recipient RecipientIdentity) error {
+	var device []byte
+	var generation uint64
+	err := db.QueryRowContext(context.Background(), `SELECT device_id, generation FROM controller_recipient_identity WHERE singleton = 1`).Scan(&device, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		if !recipient.valid() {
+			return nil
+		}
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO controller_recipient_identity(singleton, device_id, generation) VALUES (1, ?, ?) ON CONFLICT(singleton) DO NOTHING`, recipient.DeviceID[:], recipient.Generation); err != nil {
+			return err
+		}
+		err = db.QueryRowContext(context.Background(), `SELECT device_id, generation FROM controller_recipient_identity WHERE singleton = 1`).Scan(&device, &generation)
+	}
+	if err != nil || len(device) != len(recipient.DeviceID) || generation == 0 {
+		return errors.New("invalid durable controller recipient identity")
+	}
+	if !recipient.valid() || !bytes.Equal(device, recipient.DeviceID[:]) || generation != recipient.Generation {
+		return errors.New("controller journal recipient identity mismatch")
+	}
+	return nil
 }
 
 func (j *Journal) Close() error {

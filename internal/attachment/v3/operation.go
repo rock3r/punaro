@@ -136,7 +136,7 @@ func (r OperationRecord) signedBytes() ([]byte, error) {
 }
 
 func validateOperation(r OperationRecord) error {
-	if r.PermitSerial == [16]byte{} || r.OperationID == [16]byte{} || r.Operation < permitOperationSourceInit || r.Operation > permitOperationCancel || r.Method == 0 || r.PathCommitment == [32]byte{} || r.TargetCommitment == [32]byte{} || r.BodyCommitment == [32]byte{} || r.IdempotencyKey == [32]byte{} || r.StagedManifestCommitment == [32]byte{} || r.ExpiresAt <= r.IssuedAt {
+	if r.PermitSerial == [16]byte{} || r.OperationID == [16]byte{} || r.Operation < permitOperationSourceInit || r.Operation > permitOperationOutcome || r.Method == 0 || r.PathCommitment == [32]byte{} || r.TargetCommitment == [32]byte{} || r.BodyCommitment == [32]byte{} || r.IdempotencyKey == [32]byte{} || r.StagedManifestCommitment == [32]byte{} || r.ExpiresAt <= r.IssuedAt {
 		return errors.New("invalid v3 operation record")
 	}
 	return nil

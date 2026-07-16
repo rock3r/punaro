@@ -77,6 +77,8 @@ func ParseAttachmentRoute(method, path string) (AttachmentRoute, error) {
 		route.Operation = permitOperationComplete
 	case len(parts) == 5 && parts[4] == "cancel" && methodID == attachmentHTTPPost:
 		route.Operation = permitOperationCancel
+	case len(parts) == 5 && parts[4] == "outcome" && methodID == attachmentHTTPGet:
+		route.Operation = permitOperationOutcome
 	default:
 		return AttachmentRoute{}, errors.New("invalid v3 attachment route")
 	}
@@ -99,7 +101,7 @@ func NewAttachmentOperationRequest(method, path string, body, responseCiphertext
 	if err != nil {
 		return AttachmentRoute{}, OperationRequest{}, err
 	}
-	if route.Operation == permitOperationDownload {
+	if route.Operation == permitOperationDownload || route.Operation == permitOperationOutcome {
 		if len(body) != 0 || len(responseCiphertext) != 0 {
 			return AttachmentRoute{}, OperationRequest{}, errors.New("v3 download request body is forbidden")
 		}
@@ -123,7 +125,7 @@ func validAttachmentRequestBody(operation uint64, body []byte) bool {
 		return len(body) > 0 && len(body) <= maxOfferPayloadBytes
 	case permitOperationAccept:
 		return len(body) == 32
-	case permitOperationBegin, permitOperationComplete, permitOperationCancel:
+	case permitOperationBegin, permitOperationComplete, permitOperationCancel, permitOperationOutcome:
 		return len(body) == 0
 	default:
 		return false
@@ -162,7 +164,7 @@ func verifyAttachmentRequestRoute(route AttachmentRoute, permit Permit, request 
 	if err != nil || !bytes.Equal(request.target, target) {
 		return errors.New("v3 operation request route mismatch")
 	}
-	if route.Operation == permitOperationDownload {
+	if route.Operation == permitOperationDownload || route.Operation == permitOperationOutcome {
 		if len(request.body) != 0 || len(request.responseCiphertext) != 0 {
 			return errors.New("invalid v3 download request body")
 		}

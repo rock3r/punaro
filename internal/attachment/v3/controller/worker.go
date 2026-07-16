@@ -21,12 +21,28 @@ type RecipientAttachmentTransport interface {
 	DoV3Attachment(context.Context, string, string, []byte, attachmentv3.Permit, attachmentv3.OperationRecord) ([]byte, error)
 }
 
+// RecipientAcceptanceAuthority is one root-verified directory snapshot for a
+// single Accept attempt. Splitting any of these checks across independently
+// refreshed views would let an offer, permit, and holder signature refer to
+// incompatible authority facts.
+type RecipientAcceptanceAuthority interface {
+	TransferBindingResolver
+	attachmentv3.EnvelopeDirectoryKeyResolver
+	attachmentv3.PermitAuthorityResolver
+	attachmentv3.OperationHolderResolver
+}
+type RecipientAcceptanceAuthorityProvider interface {
+	ResolveRecipientAcceptanceAuthority(context.Context, time.Time) (RecipientAcceptanceAuthority, error)
+}
+
 // RecipientOperationSigner keeps the enrolled recipient signing key behind a
 // narrow operation-specific interface. It must reject every non-recipient
 // request rather than acting as a general-purpose signing oracle.
 type RecipientOperationSigner interface {
 	SignReceiptPermit(*attachmentv3.PermitRequest) error
 	BuildReceiptOperation(attachmentv3.Permit, string, string, []byte, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error)
+	SignOutcomePermit(*attachmentv3.PermitRequest) error
+	BuildOutcomeOperation(attachmentv3.Permit, string, string, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error)
 }
 
 type localRecipientOperationSigner struct {
@@ -55,10 +71,23 @@ func (s *localRecipientOperationSigner) BuildReceiptOperation(permit attachmentv
 	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, body, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
 }
 
+func (s *localRecipientOperationSigner) SignOutcomePermit(request *attachmentv3.PermitRequest) error {
+	if s == nil || !s.recipient.valid() || request == nil || len(s.private) != ed25519.PrivateKeySize || request.HolderDeviceID != s.recipient.DeviceID || request.HolderGeneration != s.recipient.Generation || request.HolderRole != attachmentv3.PermitHolderRecipient || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 {
+		return errors.New("invalid local recipient outcome signing request")
+	}
+	return attachmentv3.SignPermitRequest(request, s.private)
+}
+
+func (s *localRecipientOperationSigner) BuildOutcomeOperation(permit attachmentv3.Permit, method, path string, operationID [16]byte, idempotencyKey [32]byte, issuedAt, expiresAt uint64) (attachmentv3.OperationRecord, error) {
+	if s == nil || !s.recipient.valid() || len(s.private) != ed25519.PrivateKeySize || permit.HolderDeviceID != s.recipient.DeviceID || permit.HolderGeneration != s.recipient.Generation || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.Operation != attachmentv3.PermitOperationOutcome || permit.AttemptGeneration != 0 {
+		return attachmentv3.OperationRecord{}, errors.New("invalid local recipient outcome operation")
+	}
+	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, nil, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
+}
+
 type RecipientAcceptanceWorkerOptions struct {
 	Journal           *Journal
-	BindingResolver   TransferBindingResolver
-	Directory         attachmentv3.EnvelopeDirectoryKeyResolver
+	AuthorityProvider RecipientAcceptanceAuthorityProvider
 	Signer            RecipientOperationSigner
 	Transport         RecipientAttachmentTransport
 	Now               func() time.Time
@@ -74,7 +103,7 @@ type RecipientAcceptanceWorker struct {
 }
 
 func NewRecipientAcceptanceWorker(options RecipientAcceptanceWorkerOptions) (*RecipientAcceptanceWorker, error) {
-	if options.Journal == nil || options.Journal.db == nil || !options.Journal.recipient.valid() || options.BindingResolver == nil || options.Directory == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
+	if options.Journal == nil || options.Journal.db == nil || !options.Journal.recipient.valid() || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid recipient acceptance worker")
 	}
 	if options.Now == nil {
@@ -102,7 +131,26 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 	if now.Unix() < 0 {
 		return attachmentv3.TransferResult{}, errors.New("invalid recipient acceptance clock")
 	}
-	notice, err := w.options.Journal.PrepareApprovedReceipt(ctx, inbound, w.options.BindingResolver, w.options.Directory, now)
+	state, foundReconciliation, err := w.options.Journal.receiptReconciliation(inbound.PunaroMessageID)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	} else if foundReconciliation && state == receiptStateTerminal {
+		return attachmentv3.TransferResult{}, errors.New("recipient acceptance requires operator reconciliation")
+	}
+	authority, err := w.options.AuthorityProvider.ResolveRecipientAcceptanceAuthority(ctx, now)
+	if err != nil || authority == nil {
+		return attachmentv3.TransferResult{}, errors.New("fresh recipient acceptance authority is unavailable")
+	}
+	if foundReconciliation && state == receiptStateUncertain {
+		record, found, err := w.options.Journal.receiptAcceptance(inbound.PunaroMessageID)
+		if err != nil || !found {
+			return attachmentv3.TransferResult{}, errors.New("uncertain recipient acceptance record is unavailable")
+		}
+		if permit, err := attachmentv3.DecodePermit(record.permit); err == nil && permit.ExpiresAt <= uint64(now.Unix()) {
+			return w.reconcileExpiredAcceptance(ctx, inbound.PunaroMessageID, record, authority, now)
+		}
+	}
+	notice, err := w.options.Journal.PrepareApprovedReceipt(ctx, inbound, authority, authority, now)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
@@ -118,12 +166,13 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 	if len(record.result) != 0 {
 		return exactAcceptedResult(record.result, notice.Manifest.TransferID, commitment)
 	}
-	permit, operation, err := w.acceptanceCredentials(ctx, record, now)
+	permit, operation, err := w.acceptanceCredentials(ctx, record, authority, now)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
 	rawResult, err := w.options.Transport.DoV3Attachment(ctx, "POST", acceptancePath(notice.Manifest.TransferID), notice.AcceptanceNonce[:], permit, operation)
 	if err != nil {
+		_ = w.options.Journal.markReceiptUncertain(inbound.PunaroMessageID, now)
 		return attachmentv3.TransferResult{}, fmt.Errorf("submit recipient acceptance: %w", err)
 	}
 	result, err := exactAcceptedResult(rawResult, notice.Manifest.TransferID, commitment)
@@ -136,23 +185,213 @@ func (w *RecipientAcceptanceWorker) Accept(ctx context.Context, inbound InboundO
 	return result, nil
 }
 
-func (w *RecipientAcceptanceWorker) acceptanceCredentials(ctx context.Context, record receiptAcceptanceRecord, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
+func (j *Journal) markReceiptUncertain(messageID string, now time.Time) error {
+	if j == nil || j.db == nil || messageID == "" || now.UTC().Unix() < 0 {
+		return errors.New("invalid recipient reconciliation state")
+	}
+	_, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_reconciliation(punaro_message_id,state,uncertain_at) VALUES (?, 'uncertain', ?) ON CONFLICT(punaro_message_id) DO NOTHING`, messageID, now.UTC().Unix())
+	return err
+}
+
+type receiptReconciliationState string
+
+const (
+	receiptStateUncertain receiptReconciliationState = "uncertain"
+	receiptStateTerminal  receiptReconciliationState = "terminal_uncertain"
+)
+
+func (j *Journal) receiptReconciliation(messageID string) (receiptReconciliationState, bool, error) {
+	var state string
+	err := j.db.QueryRowContext(context.Background(), `SELECT state FROM controller_receipt_reconciliation WHERE punaro_message_id=?`, messageID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil || (state != string(receiptStateUncertain) && state != string(receiptStateTerminal)) {
+		return "", false, errors.New("invalid recipient reconciliation state")
+	}
+	return receiptReconciliationState(state), true, nil
+}
+func (j *Journal) terminalizeReceiptUncertain(messageID string, now time.Time) error {
+	if j == nil || j.db == nil || messageID == "" || now.UTC().Unix() < 0 {
+		return errors.New("invalid terminal recipient reconciliation")
+	}
+	r, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET state='terminal_uncertain',terminal_at=? WHERE punaro_message_id=? AND state='uncertain'`, now.UTC().Unix(), messageID)
+	if err != nil {
+		return err
+	}
+	n, err := r.RowsAffected()
+	if err != nil || n != 1 {
+		return errors.New("recipient reconciliation state transition failed")
+	}
+	return nil
+}
+
+type receiptOutcomeRecord struct {
+	request                   []byte
+	operationID               [16]byte
+	idempotencyKey            [32]byte
+	permit, operation, result []byte
+}
+
+func (j *Journal) storeReceiptOutcomeIntent(messageID string, request []byte, operationID [16]byte, idempotencyKey [32]byte) (receiptOutcomeRecord, error) {
+	if j == nil || j.db == nil || messageID == "" || len(request) == 0 || operationID == [16]byte{} || idempotencyKey == [32]byte{} {
+		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome intent")
+	}
+	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_request=?,outcome_operation_id=?,outcome_idempotency_key=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_request IS NULL`, request, operationID[:], idempotencyKey[:], messageID)
+	if err != nil {
+		return receiptOutcomeRecord{}, err
+	}
+	return j.receiptOutcome(messageID)
+}
+func (j *Journal) receiptOutcome(messageID string) (receiptOutcomeRecord, error) {
+	var r receiptOutcomeRecord
+	var id, key []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT outcome_request,outcome_operation_id,outcome_idempotency_key,outcome_permit,outcome_operation,outcome_result FROM controller_receipt_reconciliation WHERE punaro_message_id=? AND state='uncertain'`, messageID).Scan(&r.request, &id, &key, &r.permit, &r.operation, &r.result)
+	if err != nil || len(r.request) == 0 || len(id) != 16 || len(key) != 32 {
+		return r, errors.New("invalid receipt outcome record")
+	}
+	copy(r.operationID[:], id)
+	copy(r.idempotencyKey[:], key)
+	return r, nil
+}
+func (j *Journal) storeReceiptOutcomeCredentials(messageID string, permit, operation []byte) (receiptOutcomeRecord, error) {
+	if len(permit) == 0 || len(operation) == 0 {
+		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome credentials")
+	}
+	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_permit=?,outcome_operation=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_permit IS NULL AND outcome_operation IS NULL`, permit, operation, messageID)
+	if err != nil {
+		return receiptOutcomeRecord{}, err
+	}
+	return j.receiptOutcome(messageID)
+}
+func (j *Journal) storeReceiptOutcomeResult(messageID string, result []byte) (receiptOutcomeRecord, error) {
+	if len(result) == 0 {
+		return receiptOutcomeRecord{}, errors.New("invalid receipt outcome result")
+	}
+	_, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_reconciliation SET outcome_result=? WHERE punaro_message_id=? AND state='uncertain' AND outcome_result IS NULL`, result, messageID)
+	if err != nil {
+		return receiptOutcomeRecord{}, err
+	}
+	return j.receiptOutcome(messageID)
+}
+
+// reconcileExpiredAcceptance is the only path that may proceed after an
+// accepted operation's short-lived permit has expired. It asks the relay for
+// the durable lifecycle outcome; it never emits another accept operation.
+func (w *RecipientAcceptanceWorker) reconcileExpiredAcceptance(ctx context.Context, messageID string, record receiptAcceptanceRecord, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.TransferResult, error) {
+	terminal := func() (attachmentv3.TransferResult, error) {
+		_ = w.options.Journal.terminalizeReceiptUncertain(messageID, now)
+		return attachmentv3.TransferResult{}, errors.New("recipient acceptance outcome requires operator reconciliation")
+	}
+	outcome, err := w.options.Journal.receiptOutcome(messageID)
+	if err != nil {
+		request := record.request
+		requestID, err := w.options.NewID()
+		if err != nil || requestID == [16]byte{} {
+			return terminal()
+		}
+		opID, err := w.options.NewID()
+		if err != nil || opID == [16]byte{} {
+			return terminal()
+		}
+		key, err := w.options.NewIdempotencyKey()
+		if err != nil || key == [32]byte{} {
+			return terminal()
+		}
+		request.RequestID, request.Operation, request.AttemptGeneration = requestID, attachmentv3.PermitOperationOutcome, 0
+		request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(20*time.Second).Unix())
+		if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
+			return terminal()
+		}
+		raw, err := attachmentv3.EncodePermitRequest(request)
+		if err != nil {
+			return terminal()
+		}
+		outcome, err = w.options.Journal.storeReceiptOutcomeIntent(messageID, raw, opID, key)
+		if err != nil {
+			return terminal()
+		}
+	}
+	request, err := attachmentv3.DecodePermitRequest(outcome.request)
+	if err != nil {
+		return terminal()
+	}
+	if len(outcome.permit) == 0 || len(outcome.operation) == 0 {
+		permit, err := w.options.Transport.IssueV3Permit(ctx, request)
+		if err != nil || attachmentv3.VerifyPermit(permit, authority, now) != nil || permit.Operation != attachmentv3.PermitOperationOutcome {
+			return terminal()
+		}
+		op, err := w.options.Signer.BuildOutcomeOperation(permit, "GET", outcomePath(permit.TransferID), outcome.operationID, outcome.idempotencyKey, permit.IssuedAt, permit.ExpiresAt)
+		if err != nil {
+			return terminal()
+		}
+		rawPermit, err := attachmentv3.EncodePermit(permit)
+		if err != nil {
+			return terminal()
+		}
+		rawOp, err := attachmentv3.EncodeOperation(op)
+		if err != nil {
+			return terminal()
+		}
+		outcome, err = w.options.Journal.storeReceiptOutcomeCredentials(messageID, rawPermit, rawOp)
+		if err != nil {
+			return terminal()
+		}
+	}
+	permit, err := attachmentv3.DecodePermit(outcome.permit)
+	if err != nil || attachmentv3.VerifyPermit(permit, authority, now) != nil {
+		return terminal()
+	}
+	op, err := attachmentv3.DecodeOperation(outcome.operation)
+	if err != nil {
+		return terminal()
+	}
+	route, requestOp, err := attachmentv3.NewAttachmentOperationRequest("GET", outcomePath(permit.TransferID), nil, nil)
+	if err != nil {
+		return terminal()
+	}
+	if _, _, err := attachmentv3.VerifyAttachmentOperationRequest(op, permit, authority, route, requestOp, now); err != nil {
+		return terminal()
+	}
+	raw, err := w.options.Transport.DoV3Attachment(ctx, "GET", outcomePath(permit.TransferID), nil, permit, op)
+	if err != nil {
+		return terminal()
+	}
+	outcome, err = w.options.Journal.storeReceiptOutcomeResult(messageID, raw)
+	if err != nil {
+		return terminal()
+	}
+	result, err := attachmentv3.DecodeTransferResult(outcome.result)
+	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.State != attachmentv3.TransferStateAccepted {
+		return terminal()
+	}
+	if err := w.options.Journal.storeReceiptAcceptanceResult(messageID, outcome.result); err != nil {
+		return terminal()
+	}
+	return result, nil
+}
+
+func outcomePath(transfer [16]byte) string {
+	return fmt.Sprintf("/v3/attachments/%x/outcome", transfer)
+}
+
+func (w *RecipientAcceptanceWorker) acceptanceCredentials(ctx context.Context, record receiptAcceptanceRecord, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.Permit, attachmentv3.OperationRecord, error) {
 	if len(record.permit) != 0 || len(record.operation) != 0 {
 		if len(record.permit) == 0 || len(record.operation) == 0 {
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("incomplete durable recipient acceptance credentials")
 		}
 		permit, err := attachmentv3.DecodePermit(record.permit)
-		if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) {
+		if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient acceptance permit")
 		}
 		operation, err := attachmentv3.DecodeOperation(record.operation)
-		if err != nil || operation.OperationID != record.operationID || operation.IdempotencyKey != record.idempotencyKey {
+		if err != nil || operation.OperationID != record.operationID || operation.IdempotencyKey != record.idempotencyKey || verifyAcceptanceOperation(operation, permit, record.acceptanceNonce, authority, now) != nil {
 			return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid durable recipient acceptance operation")
 		}
 		return permit, operation, nil
 	}
 	permit, err := w.options.Transport.IssueV3Permit(ctx, record.request)
-	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) {
+	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("recipient acceptance permit is unavailable")
 	}
 	issuedAt := uint64(now.Unix())
@@ -163,19 +402,34 @@ func (w *RecipientAcceptanceWorker) acceptanceCredentials(ctx context.Context, r
 	if err != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
 	}
+	if err := verifyAcceptanceOperation(operation, permit, record.acceptanceNonce, authority, now); err != nil {
+		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
+	}
 	stored, err := w.options.Journal.storeReceiptAcceptanceCredentials(record.messageID, permit, operation)
 	if err != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, err
 	}
 	permit, err = attachmentv3.DecodePermit(stored.permit)
-	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) {
+	if err != nil || !exactAcceptancePermit(permit, record.request, record.manifestCommitment, now) || attachmentv3.VerifyPermit(permit, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid stored recipient acceptance permit")
 	}
 	operation, err = attachmentv3.DecodeOperation(stored.operation)
-	if err != nil || operation.OperationID != record.operationID || operation.IdempotencyKey != record.idempotencyKey {
+	if err != nil || operation.OperationID != record.operationID || operation.IdempotencyKey != record.idempotencyKey || verifyAcceptanceOperation(operation, permit, record.acceptanceNonce, authority, now) != nil {
 		return attachmentv3.Permit{}, attachmentv3.OperationRecord{}, errors.New("invalid stored recipient acceptance operation")
 	}
 	return permit, operation, nil
+}
+
+func verifyAcceptanceOperation(operation attachmentv3.OperationRecord, permit attachmentv3.Permit, nonce [32]byte, authority RecipientAcceptanceAuthority, now time.Time) error {
+	path := acceptancePath(permit.TransferID)
+	route, request, err := attachmentv3.NewAttachmentOperationRequest("POST", path, nonce[:], nil)
+	if err != nil {
+		return errors.New("invalid recipient acceptance operation")
+	}
+	if _, _, err := attachmentv3.VerifyAttachmentOperationRequest(operation, permit, authority, route, request, now); err != nil {
+		return errors.New("invalid recipient acceptance operation")
+	}
+	return nil
 }
 
 type receiptAcceptanceRecord struct {
