@@ -361,6 +361,16 @@ orchestration, recovery drills, vectors/fuzzing, and release evidence remain
 required; the runtime is a controlled validation surface, not a production
 attachment release.
 
+The local v3 controller binds each text-relay conversation to one exact,
+operator-approved directory conversation, sender generation, recipient
+generation, and membership commitment. It persists the canonical inbound offer
+under its relay message ID, deduplicates only byte-identical retries, and
+requires a separate explicit local receipt approval. Before any future
+recipient permit, acceptance, download, or decrypt action, the controller
+must re-fetch and root-verify that exact directory relationship; a notice
+cannot discover a new member or override the binding. Merely receiving a typed
+mailbox offer therefore never starts a data-plane action or writes an output.
+
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally
 **non-normative**: they do not specify cipher parameters, nonce/AAD
