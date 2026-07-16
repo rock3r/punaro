@@ -54,7 +54,7 @@ func TestSenderSourceInitializerPersistsExactCredentialsBeforeSubmission(t *test
 		t.Fatalf("result=%+v request=%s %s", result, transport.method, transport.path)
 	}
 	var permit, operation, storedResult []byte
-	if err := journal.db.QueryRow(`SELECT permit,operation,result FROM controller_sender_operations WHERE transfer_id=? AND phase='source-init' AND chunk_index=0`, manifest.TransferID[:]).Scan(&permit, &operation, &storedResult); err != nil || len(permit) == 0 || len(operation) == 0 || string(storedResult) != string(transport.result) {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT permit,operation,result FROM controller_sender_operations WHERE transfer_id=? AND phase='source-init' AND chunk_index=0`, manifest.TransferID[:]).Scan(&permit, &operation, &storedResult); err != nil || len(permit) == 0 || len(operation) == 0 || string(storedResult) != string(transport.result) {
 		t.Fatalf("credentials/result durable permit=%d operation=%d result=%d err=%v", len(permit), len(operation), len(storedResult), err)
 	}
 	if transport.issueCalls != 1 || transport.operationCalls != 1 {
@@ -89,7 +89,7 @@ func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 	}
 	ciphertext := bytes.Repeat([]byte{0xA5}, 17)
 	chunkCommitment := senderCiphertextCommitment(ciphertext)
-	if _, err := journal.db.Exec(`INSERT INTO controller_sender_chunks(transfer_id,chunk_index,ciphertext,ciphertext_commitment) VALUES(?,?,?,?)`, manifest.TransferID[:], 0, ciphertext, chunkCommitment[:]); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `INSERT INTO controller_sender_chunks(transfer_id,chunk_index,ciphertext,ciphertext_commitment) VALUES(?,?,?,?)`, manifest.TransferID[:], 0, ciphertext, chunkCommitment[:]); err != nil {
 		t.Fatal(err)
 	}
 	commitment := attachmentCommitment(t, raw)
@@ -108,7 +108,7 @@ func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 		t.Fatalf("issue=%d calls=%d last=%s body=%x", transport.issueCalls, transport.operationCalls, transport.path, transport.body)
 	}
 	var stored []byte
-	if err := journal.db.QueryRow(`SELECT result FROM controller_sender_operations WHERE transfer_id=? AND phase='source-upload' AND chunk_index=0`, manifest.TransferID[:]).Scan(&stored); err != nil || string(stored) != string(transport.results[uploadPath]) {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT result FROM controller_sender_operations WHERE transfer_id=? AND phase='source-upload' AND chunk_index=0`, manifest.TransferID[:]).Scan(&stored); err != nil || string(stored) != string(transport.results[uploadPath]) {
 		t.Fatalf("stored=%x err=%v", stored, err)
 	}
 }
@@ -230,7 +230,7 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	var offer []byte
-	if err := journal.db.QueryRow(`SELECT offer FROM controller_sender_transfers WHERE transfer_id=?`, manifest.TransferID[:]).Scan(&offer); err != nil {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT offer FROM controller_sender_transfers WHERE transfer_id=?`, manifest.TransferID[:]).Scan(&offer); err != nil {
 		t.Fatal(err)
 	}
 	noticeBody, err := attachmentv3.EncodeOfferNotice(offer)
@@ -259,7 +259,7 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 		t.Fatal("ambiguous reserve failure accepted")
 	}
 	var holds int
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_offer_holds WHERE transfer_id=?`, manifest.TransferID[:]).Scan(&holds); err != nil || holds != 1 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_offer_holds WHERE transfer_id=?`, manifest.TransferID[:]).Scan(&holds); err != nil || holds != 1 {
 		t.Fatalf("holds=%d err=%v", holds, err)
 	}
 	if reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1); err != nil || reaped != 0 {
@@ -300,7 +300,7 @@ func attachmentCommitment(t *testing.T, raw []byte) [32]byte { t.Helper(); retur
 
 func insertStagedSenderTransfer(journal *Journal, mapping Mapping, manifest attachmentv3.Manifest, raw []byte) error {
 	commitment := blake3.Sum256(raw)
-	_, err := journal.db.Exec(`INSERT INTO controller_sender_transfers(transfer_id,relay_conversation_id,manifest,manifest_commitment,wrapped_file_key) VALUES(?,?,?,?,?)`, manifest.TransferID[:], mapping.RelayConversationID, raw, commitment[:], []byte("test-wrapped-key"))
+	_, err := journal.db.ExecContext(context.Background(), `INSERT INTO controller_sender_transfers(transfer_id,relay_conversation_id,manifest,manifest_commitment,wrapped_file_key) VALUES(?,?,?,?,?)`, manifest.TransferID[:], mapping.RelayConversationID, raw, commitment[:], []byte("test-wrapped-key"))
 	return err
 }
 

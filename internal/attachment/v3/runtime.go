@@ -38,6 +38,8 @@ type AttachmentRuntime struct {
 	permitHandler     http.Handler
 }
 
+// NewAttachmentRuntime constructs the shared private store and its fail-closed
+// permit and attachment HTTP handlers.
 func NewAttachmentRuntime(options AttachmentRuntimeOptions) (*AttachmentRuntime, error) {
 	if options.SourceStorePath == "" || options.AttachmentAuthority == nil || options.PermitAuthority == nil || options.AttachmentAuthorize == nil || options.PermitAuthorize == nil {
 		return nil, errors.New("v3 attachment runtime requires source store, authorities, and route admissions")
@@ -68,6 +70,7 @@ func NewAttachmentRuntime(options AttachmentRuntimeOptions) (*AttachmentRuntime,
 	return &AttachmentRuntime{store: store, attachmentHandler: attachmentHandler, permitHandler: permitHandler}, nil
 }
 
+// AttachmentHandler returns the runtime's authenticated attachment handler.
 func (r *AttachmentRuntime) AttachmentHandler() http.Handler {
 	if r == nil {
 		return nil
@@ -75,6 +78,7 @@ func (r *AttachmentRuntime) AttachmentHandler() http.Handler {
 	return r.attachmentHandler
 }
 
+// PermitHandler returns the runtime's authenticated permit handler.
 func (r *AttachmentRuntime) PermitHandler() http.Handler {
 	if r == nil {
 		return nil
@@ -94,6 +98,7 @@ func (r *AttachmentRuntime) ReapExpired(ctx context.Context, now time.Time, limi
 	return r.store.reapExpired(ctx, now.UTC(), limit)
 }
 
+// Close releases the AttachmentRuntime's private source store.
 func (r *AttachmentRuntime) Close() error {
 	if r == nil || r.store == nil {
 		return nil

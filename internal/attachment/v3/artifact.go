@@ -58,6 +58,8 @@ type sourceArtifact = SourceArtifact
 // callers must use a private non-symlinked parent directory.
 type ArtifactStore struct{ store *sourceStore }
 
+// OpenArtifactStore opens a private durable store for sender-local artifact
+// material and rejects unsafe paths or invalid existing state.
 func OpenArtifactStore(path string) (*ArtifactStore, error) {
 	store, err := openSourceStore(path, defaultSourceLimits())
 	if err != nil {
@@ -66,6 +68,7 @@ func OpenArtifactStore(path string) (*ArtifactStore, error) {
 	return &ArtifactStore{store: store}, nil
 }
 
+// Close releases the ArtifactStore's underlying durable database.
 func (s *ArtifactStore) Close() error {
 	if s == nil || s.store == nil {
 		return nil
@@ -278,7 +281,7 @@ func (s *sourceStore) reserveCrypto(fileKey [32]byte, raw []byte, commitment [32
 		}
 		return nil
 	}
-	if err := s.admitCryptoTx(tx, sourceSpec{Manifest: raw}, manifest.ChunkCount+2); err != nil {
+	if err := s.admitCryptoTx(context.Background(), tx, sourceSpec{Manifest: raw}, manifest.ChunkCount+2); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO v3_source_file_keys(commitment) VALUES (?)`, fileKeyCommitment[:]); err != nil {

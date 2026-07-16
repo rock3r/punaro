@@ -108,14 +108,14 @@ func TestSourceStoreReadinessRejectsExpiredOrTamperedChunks(t *testing.T) {
 	if err := store.upload(context.Background(), source.TransferID(), 0, bytes.Repeat([]byte{1}, 20), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE v3_source_chunks SET ciphertext_commitment = zeroblob(32)`); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE v3_source_chunks SET ciphertext_commitment = zeroblob(32)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.readyAt(source.TransferID(), now); err == nil {
 		t.Fatal("tampered commitment accepted")
 	}
 	commitment := ciphertextCommitment(bytes.Repeat([]byte{1}, 20))
-	if _, err := store.db.Exec(`UPDATE v3_source_chunks SET ciphertext_commitment = ?`, commitment[:]); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE v3_source_chunks SET ciphertext_commitment = ?`, commitment[:]); err != nil {
 		t.Fatal(err)
 	}
 	if ready, err := store.readyAt(source.TransferID(), now.Add(31*time.Second)); err != nil || ready {
@@ -137,7 +137,7 @@ func TestSourceStoreReadinessRejectsTamperedManifestOrDerivedColumns(t *testing.
 	if err := store.upload(context.Background(), source.TransferID(), 0, bytes.Repeat([]byte{1}, 20), now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE v3_source_specs SET plaintext_size = plaintext_size + 1`); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE v3_source_specs SET plaintext_size = plaintext_size + 1`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.readyAt(source.TransferID(), now); err == nil {
@@ -156,7 +156,7 @@ func TestSourceStoreFailsClosedWithoutMatchingLifecycleRow(t *testing.T) {
 	if err := store.initialize(context.Background(), source, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`DELETE FROM v3_transfers`); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM v3_transfers`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.upload(context.Background(), source.TransferID(), 0, bytes.Repeat([]byte{1}, 20), now); err == nil {
@@ -164,7 +164,7 @@ func TestSourceStoreFailsClosedWithoutMatchingLifecycleRow(t *testing.T) {
 	}
 	var ready int
 	transferID := source.TransferID()
-	if err := store.db.QueryRow(`SELECT ready FROM v3_source_specs WHERE transfer_id = ?`, transferID[:]).Scan(&ready); err != nil || ready != 0 {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT ready FROM v3_source_specs WHERE transfer_id = ?`, transferID[:]).Scan(&ready); err != nil || ready != 0 {
 		t.Fatalf("ready=%d err=%v", ready, err)
 	}
 	if err := store.close(); err != nil {
@@ -186,7 +186,7 @@ func TestSourceStoreReadinessRejectsLifecycleReadyMismatch(t *testing.T) {
 	if err := store.initialize(context.Background(), source, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE v3_transfers SET status = ?`, transferSourceReady); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE v3_transfers SET status = ?`, transferSourceReady); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.readyAt(source.TransferID(), now); err == nil {
@@ -199,6 +199,7 @@ func TestSourceStoreRejectsRelativeOrInsecureParent(t *testing.T) {
 		t.Fatal("relative source store accepted")
 	}
 	parent := t.TempDir()
+	// #nosec G302 -- this fixture must be group-readable to exercise rejection.
 	if err := os.Chmod(parent, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestSourceStoreRejectsObsoleteSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`CREATE TABLE v3_source_specs (transfer_id BLOB PRIMARY KEY)`); err != nil {
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE v3_source_specs (transfer_id BLOB PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -346,6 +347,7 @@ func verifiedTestSource(t *testing.T, now time.Time, chunkCount, chunkSize, plai
 	t.Helper()
 	manifest := testManifest(now)
 	manifest.ChunkCount, manifest.ChunkSize, manifest.PlaintextSize = chunkCount, chunkSize, plaintextSize
+	// #nosec G115 -- test inputs constrain chunkCount to the v3 4096 limit.
 	manifest.TransferID = testID(byte(10 + chunkCount))
 	return verifiedSourceForManifest(t, manifest, now)
 }
@@ -380,7 +382,7 @@ func privateDatabase(t *testing.T) string {
 func assertTransferStatus(t *testing.T, store *sourceStore, transferID [16]byte, want transferStatus) {
 	t.Helper()
 	var got transferStatus
-	if err := store.db.QueryRow(`SELECT status FROM v3_transfers WHERE transfer_id = ?`, transferID[:]).Scan(&got); err != nil || got != want {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status FROM v3_transfers WHERE transfer_id = ?`, transferID[:]).Scan(&got); err != nil || got != want {
 		t.Fatalf("transfer status=%d err=%v want=%d", got, err, want)
 	}
 }

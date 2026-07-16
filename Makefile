@@ -1,4 +1,4 @@
-.PHONY: test test-race vet staticcheck vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint release-gates fuzz
+.PHONY: test test-race vet staticcheck golangci vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint release-gates fuzz
 
 test:
 	go test -covermode=atomic ./...
@@ -12,6 +12,9 @@ vet:
 staticcheck:
 	go run honnef.co/go/tools/cmd/staticcheck@v0.6.1 ./...
 
+golangci:
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.1 run ./...
+
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
@@ -21,7 +24,7 @@ gosec:
 secrets:
 	go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
 
-lint: vet staticcheck
+lint: vet staticcheck golangci
 
 security: vuln gosec secrets
 

@@ -79,11 +79,16 @@ func (h *permitHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Source-init creates its source and records its permit in the same source
 	// transaction. Every later operation must be registered first, so issuance
 	// alone can never create a redeemable capability for an unknown lifecycle.
+	nowUnix := now.Unix()
+	if nowUnix < 0 {
+		attachmentHTTPError(w, http.StatusForbidden)
+		return
+	}
 	if permit.Operation != permitOperationSourceInit {
 		// An expired exact issuance replay is an outcome-correlation receipt,
 		// not a renewed capability. It must already be durably registered with
 		// the source; never pass it through fresh admission or expiry checks.
-		if replayed && permit.ExpiresAt <= uint64(now.Unix()) {
+		if replayed && permit.ExpiresAt <= uint64(nowUnix) {
 			if err := h.issuer.store.hasIssuedPermit(r.Context(), permit); err != nil {
 				attachmentHTTPError(w, http.StatusForbidden)
 				return

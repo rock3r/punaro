@@ -49,17 +49,17 @@ func TestSenderStagerPersistsEncryptedIntentOnlyAfterFreshExactMapping(t *testin
 		t.Fatal(err)
 	}
 	var rawManifest, fileKey, ciphertext []byte
-	if err := journal.db.QueryRow(`SELECT manifest, wrapped_file_key FROM controller_sender_transfers WHERE transfer_id = ?`, manifest.TransferID[:]).Scan(&rawManifest, &fileKey); err != nil {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT manifest, wrapped_file_key FROM controller_sender_transfers WHERE transfer_id = ?`, manifest.TransferID[:]).Scan(&rawManifest, &fileKey); err != nil {
 		t.Fatal(err)
 	}
 	if len(rawManifest) == 0 || len(fileKey) == 0 || bytes.Contains(fileKey, protector.key[:]) {
 		t.Fatal("sender intent was not durable")
 	}
-	if err := journal.db.QueryRow(`SELECT ciphertext FROM controller_sender_chunks WHERE transfer_id = ? AND chunk_index = 0`, manifest.TransferID[:]).Scan(&ciphertext); err != nil || len(ciphertext) == 0 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT ciphertext FROM controller_sender_chunks WHERE transfer_id = ? AND chunk_index = 0`, manifest.TransferID[:]).Scan(&ciphertext); err != nil || len(ciphertext) == 0 {
 		t.Fatalf("ciphertext=%x err=%v", ciphertext, err)
 	}
 	var count int
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&count); err != nil || count != 1 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
 	if manifest.TransferID != bytes16(90) || manifest.SenderDeviceID != mapping.SenderDeviceID {
@@ -99,7 +99,7 @@ func TestSenderStagerRejectsMismatchedLocalSigningKeyBeforeArtifactOrJournalSide
 		t.Fatal("mismatched local signing key was staged")
 	}
 	var count int
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&count); err != nil || count != 0 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("sender journal side effect count=%d err=%v", count, err)
 	}
 	if protector.calls != 0 {
@@ -148,17 +148,17 @@ func TestSenderStagerStageIDIsStableAndRejectsChangedPlaintext(t *testing.T) {
 	// Simulate a process death after ArtifactStore reserved the exact key/salt
 	// tuple but before the controller's ciphertext transaction committed. The
 	// durable stage intent must replay the same manifest and reservation.
-	if _, err := journal.db.Exec(`DELETE FROM controller_sender_chunks WHERE transfer_id=?`, first.TransferID[:]); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `DELETE FROM controller_sender_chunks WHERE transfer_id=?`, first.TransferID[:]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.db.Exec(`DELETE FROM controller_sender_transfers WHERE transfer_id=?`, first.TransferID[:]); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `DELETE FROM controller_sender_transfers WHERE transfer_id=?`, first.TransferID[:]); err != nil {
 		t.Fatal(err)
 	}
 	third, err := stager.Stage(context.Background(), stageID, mapping.RelayConversationID, []byte("stable staged plaintext"))
 	if err != nil || third != first {
 		t.Fatalf("crash-recovered stage=%+v err=%v", third, err)
 	}
-	if _, err := journal.db.Exec(`UPDATE controller_sender_chunks SET ciphertext=x'00' WHERE transfer_id=? AND chunk_index=0`, first.TransferID[:]); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `UPDATE controller_sender_chunks SET ciphertext=x'00' WHERE transfer_id=? AND chunk_index=0`, first.TransferID[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := stager.Stage(context.Background(), stageID, mapping.RelayConversationID, []byte("stable staged plaintext")); err == nil {
@@ -168,10 +168,10 @@ func TestSenderStagerStageIDIsStableAndRejectsChangedPlaintext(t *testing.T) {
 		t.Fatal("same stage ID accepted changed plaintext")
 	}
 	var transfers, intents int
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&transfers); err != nil || transfers != 1 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_transfers`).Scan(&transfers); err != nil || transfers != 1 {
 		t.Fatalf("transfers=%d err=%v", transfers, err)
 	}
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_stage_intents`).Scan(&intents); err != nil || intents != 1 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_stage_intents`).Scan(&intents); err != nil || intents != 1 {
 		t.Fatalf("intents=%d err=%v", intents, err)
 	}
 }
@@ -224,7 +224,7 @@ func TestJournalReapsExpiredSenderStagesAndCiphertext(t *testing.T) {
 	}
 	for _, table := range []string{"controller_sender_stage_intents", "controller_sender_transfers", "controller_sender_chunks"} {
 		var count int
-		if err := journal.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+		if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("table=%s count=%d err=%v", table, count, err)
 		}
 	}

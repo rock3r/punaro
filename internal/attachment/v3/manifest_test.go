@@ -67,6 +67,7 @@ func testManifest(now time.Time) Manifest {
 		SenderDeviceID: testID(4), SenderGeneration: 1,
 		RecipientDeviceID: testID(5), RecipientGeneration: 1,
 		DirectoryHead: testHash(6), MembershipCommitment: testHash(7),
+		// #nosec G115 -- callers supply fixed positive test clocks.
 		RevocationEpoch: 1, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(30 * time.Second).Unix()),
 		ContentSalt: testHash(8), PlaintextCommitment: testHash(9),
 		ChunkSize: 4, ChunkCount: 2, PlaintextSize: 5, SignerKeyID: testHash(10),

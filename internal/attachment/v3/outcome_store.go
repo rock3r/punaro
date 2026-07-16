@@ -53,7 +53,8 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 	sourceExists, admitted, knownOriginal := false, false, false
 	var originalResult []byte
 	err = tx.QueryRowContext(ctx, `SELECT result FROM v3_redeemed_operations WHERE permit_serial = ?`, original.Serial[:]).Scan(&originalResult)
-	if err == nil {
+	switch {
+	case err == nil:
 		knownOriginal = true
 		var present uint64
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM v3_transfers WHERE transfer_id = ? AND manifest_commitment = ?`, permit.TransferID[:], permit.StagedManifestCommitment[:]).Scan(&present); err != nil {
@@ -65,14 +66,15 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 			return nil, false, errors.New("invalid v3 outcome origin result")
 		}
 		result = originalResult
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	case !errors.Is(err, sql.ErrNoRows):
 		return nil, false, err
-	} else {
+	default:
 		var status transferStatus
 		var attempt uint64
 		var expires int64
 		err = tx.QueryRowContext(ctx, `SELECT status, attempt_generation, expires_at FROM v3_transfers WHERE transfer_id = ? AND manifest_commitment = ?`, permit.TransferID[:], permit.StagedManifestCommitment[:]).Scan(&status, &attempt, &expires)
-		if err == nil {
+		switch {
+		case err == nil:
 			sourceExists = true
 			if status.terminal() {
 				result, err = encodeTransferResult(permit.TransferID, permit.StagedManifestCommitment, status, attempt, expires)
@@ -90,7 +92,7 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 					return nil, false, err
 				}
 			}
-		} else if errors.Is(err, sql.ErrNoRows) {
+		case errors.Is(err, sql.ErrNoRows):
 			if original.Operation != permitOperationSourceInit {
 				return nil, false, errors.New("unknown v3 transfer outcome")
 			}
@@ -113,7 +115,7 @@ func (s *sourceStore) redeemOutcome(ctx context.Context, permit Permit, operatio
 			if err != nil {
 				return nil, false, err
 			}
-		} else {
+		default:
 			return nil, false, err
 		}
 	}

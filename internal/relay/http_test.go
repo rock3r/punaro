@@ -129,7 +129,7 @@ func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T)
 	}
 	for _, table := range []string{"messages", "idempotency"} {
 		var count int
-		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+		if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("validation mutated %s count=%d err=%v", table, count, err)
 		}
 	}

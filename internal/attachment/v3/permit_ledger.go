@@ -138,12 +138,14 @@ func outcomeOriginPermitTx(ctx context.Context, tx *sql.Tx, outcome Permit, now 
 	if outcome.Operation != permitOperationOutcome || outcome.OutcomeOfSerial == [16]byte{} || now.Unix() < 0 {
 		return Permit{}, errors.New("invalid v3 outcome origin")
 	}
+	nowUnix := now.Unix()
 	var raw []byte
 	if err := tx.QueryRowContext(ctx, `SELECT permit FROM v3_permit_requests WHERE permit_serial = ?`, outcome.OutcomeOfSerial[:]).Scan(&raw); err != nil {
 		return Permit{}, errors.New("unknown v3 outcome origin")
 	}
 	original, err := DecodePermit(raw)
-	if err != nil || original.Serial != outcome.OutcomeOfSerial || original.Operation == permitOperationOutcome || original.ExpiresAt > uint64(now.Unix()) || original.TransferID != outcome.TransferID || original.ConversationID != outcome.ConversationID || original.SenderDeviceID != outcome.SenderDeviceID || original.SenderGeneration != outcome.SenderGeneration || original.RecipientDeviceID != outcome.RecipientDeviceID || original.RecipientGeneration != outcome.RecipientGeneration || original.MembershipCommitment != outcome.MembershipCommitment || original.StagedManifestCommitment != outcome.StagedManifestCommitment || original.HolderDeviceID != outcome.HolderDeviceID || original.HolderGeneration != outcome.HolderGeneration || original.HolderRole != outcome.HolderRole {
+	// #nosec G115 -- the negative Unix time case is rejected above.
+	if err != nil || original.Serial != outcome.OutcomeOfSerial || original.Operation == permitOperationOutcome || original.ExpiresAt > uint64(nowUnix) || original.TransferID != outcome.TransferID || original.ConversationID != outcome.ConversationID || original.SenderDeviceID != outcome.SenderDeviceID || original.SenderGeneration != outcome.SenderGeneration || original.RecipientDeviceID != outcome.RecipientDeviceID || original.RecipientGeneration != outcome.RecipientGeneration || original.MembershipCommitment != outcome.MembershipCommitment || original.StagedManifestCommitment != outcome.StagedManifestCommitment || original.HolderDeviceID != outcome.HolderDeviceID || original.HolderGeneration != outcome.HolderGeneration || original.HolderRole != outcome.HolderRole {
 		return Permit{}, errors.New("mismatched v3 outcome origin")
 	}
 	return original, nil

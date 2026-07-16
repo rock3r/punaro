@@ -53,6 +53,7 @@ func TestJournalKeepsMappingsImmutableAndOffersIdempotent(t *testing.T) {
 func TestOpenJournalRejectsUnsafeParent(t *testing.T) {
 	t.Parallel()
 	unsafe := filepath.Join(t.TempDir(), "unsafe")
+	// #nosec G301 -- this fixture must be group-readable to exercise rejection.
 	if err := os.Mkdir(unsafe, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +91,7 @@ func TestOpenJournalRejectsUnsafeSQLiteSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(parent, "controller.db")
+	// #nosec G306 -- this fixture must be group-readable to exercise rejection.
 	if err := os.WriteFile(path+"-journal", []byte("unexpected"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -108,13 +110,13 @@ func TestOpenJournalMigratesLegacyOfferExpiryWithoutGuessingIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.Exec(`CREATE TABLE controller_inbound_offers (
+	if _, err := legacy.ExecContext(context.Background(), `CREATE TABLE controller_inbound_offers (
 		punaro_message_id TEXT PRIMARY KEY, relay_conversation_id TEXT NOT NULL,
 		offer BLOB NOT NULL, transfer_id BLOB NOT NULL
 	)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.Exec(`INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id) VALUES ('legacy', 'relay', x'01', x'02')`); err != nil {
+	if _, err := legacy.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id) VALUES ('legacy', 'relay', x'01', x'02')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Close(); err != nil {
@@ -135,7 +137,7 @@ func TestOpenJournalMigratesLegacyOfferExpiryWithoutGuessingIt(t *testing.T) {
 		t.Fatalf("legacy offer was guessed expired: reaped=%d err=%v", reaped, err)
 	}
 	var retained int
-	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_inbound_offers WHERE punaro_message_id = 'legacy'`).Scan(&retained); err != nil || retained != 1 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_inbound_offers WHERE punaro_message_id = 'legacy'`).Scan(&retained); err != nil || retained != 1 {
 		t.Fatalf("legacy offer retained=%d err=%v", retained, err)
 	}
 }
@@ -183,7 +185,7 @@ func TestApprovedInboundOfferRequiresMatchingImmutableApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	mapping := Mapping{RelayConversationID: "relay-approved", ConversationID: bytes16(61), SenderDeviceID: bytes16(62), SenderGeneration: 1, RecipientDeviceID: bytes16(63), RecipientGeneration: 1, MembershipCommitment: bytes32(64)}
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
@@ -202,7 +204,7 @@ func TestApprovedInboundOfferRequiresMatchingImmutableApproval(t *testing.T) {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
 	tampered := bytes32(99)
-	if _, err := journal.db.Exec(`UPDATE controller_receipt_approvals SET offer_commitment=? WHERE punaro_message_id=?`, tampered[:], inbound.PunaroMessageID); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `UPDATE controller_receipt_approvals SET offer_commitment=? WHERE punaro_message_id=?`, tampered[:], inbound.PunaroMessageID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err == nil {
@@ -417,7 +419,7 @@ func TestJournalUsesNamedWrappedSenderKeyStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = journal.Close() }()
-	rows, err := journal.db.Query(`PRAGMA table_info(controller_sender_transfers)`)
+	rows, err := journal.db.QueryContext(context.Background(), `PRAGMA table_info(controller_sender_transfers)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +454,7 @@ func TestJournalRefusesLegacyRawSenderKeyRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.Exec(`CREATE TABLE controller_sender_transfers(transfer_id BLOB PRIMARY KEY, file_key BLOB NOT NULL); INSERT INTO controller_sender_transfers(transfer_id,file_key) VALUES (x'01',x'01020304')`); err != nil {
+	if _, err := legacy.ExecContext(context.Background(), `CREATE TABLE controller_sender_transfers(transfer_id BLOB PRIMARY KEY, file_key BLOB NOT NULL); INSERT INTO controller_sender_transfers(transfer_id,file_key) VALUES (x'01',x'01020304')`); err != nil {
 		t.Fatal(err)
 	}
 	if err := legacy.Close(); err != nil {

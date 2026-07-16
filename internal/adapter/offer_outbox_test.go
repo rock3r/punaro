@@ -66,7 +66,7 @@ func TestOfferNoticeOutboxTreatsConcurrentIdenticalDeliveryAsSuccess(t *testing.
 		t.Fatal(err)
 	}
 	sender := &offerNoticeSenderStub{beforeReturn: func() {
-		if _, err := outbox.db.Exec(`DELETE FROM v3_offer_notice_outbox WHERE idempotency_key='offer-1'`); err != nil {
+		if _, err := outbox.db.ExecContext(context.Background(), `DELETE FROM v3_offer_notice_outbox WHERE idempotency_key='offer-1'`); err != nil {
 			t.Errorf("concurrent delivery delete: %v", err)
 		}
 	}}
@@ -94,6 +94,7 @@ func TestOfferNoticeOutboxClearsProvenPreAppendRejection(t *testing.T) {
 
 func TestOfferNoticeOutboxRejectsUnsafePathsAndBoundsPendingRows(t *testing.T) {
 	unsafeParent := filepath.Join(t.TempDir(), "unsafe")
+	// #nosec G301 -- this fixture must be group-readable to exercise rejection.
 	if err := os.Mkdir(unsafeParent, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +103,7 @@ func TestOfferNoticeOutboxRejectsUnsafePathsAndBoundsPendingRows(t *testing.T) {
 	}
 	privateParent := privateOutboxDir(t)
 	database := filepath.Join(privateParent, "outbox.db")
+	// #nosec G306 -- this fixture must be group-readable to exercise rejection.
 	if err := os.WriteFile(database, []byte("not a database"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +177,7 @@ func TestOfferNoticeOutboxRetainsExpiredHeldReservationsUntilSenderRecovery(t *t
 	}
 	t.Cleanup(func() { _ = outbox.Close() })
 	for index := 0; index < maxOfferNoticeOutboxRows; index++ {
-		if _, err := outbox.db.Exec(`INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, active, created_at) VALUES (?, 'conversation-1', 'agent/a', 'held', 0, ?)`, fmt.Sprintf("held-%d", index), time.Now().Add(-24*time.Hour).UnixMilli()); err != nil {
+		if _, err := outbox.db.ExecContext(context.Background(), `INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, active, created_at) VALUES (?, 'conversation-1', 'agent/a', 'held', 0, ?)`, fmt.Sprintf("held-%d", index), time.Now().Add(-24*time.Hour).UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -204,7 +206,7 @@ func TestOfferNoticeOutboxCountsUTF8BytesRatherThanCharacters(t *testing.T) {
 	if bodyLength <= 0 {
 		t.Fatal("invalid UTF-8 capacity test setup")
 	}
-	if _, err := outbox.db.Exec(`INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, 0)`, oldKey, oldConversation, oldEndpoint, strings.Repeat("x", bodyLength)); err != nil {
+	if _, err := outbox.db.ExecContext(context.Background(), `INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, 0)`, oldKey, oldConversation, oldEndpoint, strings.Repeat("x", bodyLength)); err != nil {
 		t.Fatal(err)
 	}
 	if err := outbox.EnqueueV3OfferNotice(context.Background(), newConversation, newEndpoint, raw, newKey); err == nil {

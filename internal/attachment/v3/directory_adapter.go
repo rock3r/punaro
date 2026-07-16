@@ -18,12 +18,17 @@ type DirectoryAuthorityAdapter struct {
 	provider *attachmentv2.FreshDirectoryAuthorityProvider
 }
 
+// NewDirectoryAuthorityAdapter projects verified v2 directory facts into the
+// v3 authority interfaces without accepting v2 attachment records.
 func NewDirectoryAuthorityAdapter(provider *attachmentv2.FreshDirectoryAuthorityProvider) (*DirectoryAuthorityAdapter, error) {
 	if provider == nil {
 		return nil, errors.New("missing v3 directory provider")
 	}
 	return &DirectoryAuthorityAdapter{provider: provider}, nil
 }
+
+// ResolveAttachmentAuthority returns the current root-verified v3 attachment
+// authority view.
 func (a *DirectoryAuthorityAdapter) ResolveAttachmentAuthority(ctx context.Context, now time.Time) (AttachmentAuthority, error) {
 	if a == nil || a.provider == nil {
 		return nil, errors.New("missing v3 directory provider")

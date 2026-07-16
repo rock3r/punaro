@@ -61,10 +61,10 @@ func TestPermitLedgerIsAtomicAndReturnsExactReplayResult(t *testing.T) {
 	calls := 0
 	mutation := func(_ context.Context, tx *sql.Tx) ([]byte, error) {
 		calls++
-		if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS v3_test_mutation(value INTEGER NOT NULL)`); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS v3_test_mutation(value INTEGER NOT NULL)`); err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(`INSERT INTO v3_test_mutation(value) VALUES (1)`); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO v3_test_mutation(value) VALUES (1)`); err != nil {
 			return nil, err
 		}
 		return []byte("result"), nil
@@ -113,7 +113,7 @@ func TestPermitLedgerReturnsExactIssuedPermitAfterLifecycleAdvance(t *testing.T)
 	if err := store.issuePermit(context.Background(), permit, authority, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`UPDATE v3_transfers SET status = ? WHERE transfer_id = ?`, transferOffered, permit.TransferID[:]); err != nil {
+	if _, err := store.db.ExecContext(context.Background(), `UPDATE v3_transfers SET status = ? WHERE transfer_id = ?`, transferOffered, permit.TransferID[:]); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.issuePermit(context.Background(), permit, authority, now); err != nil {

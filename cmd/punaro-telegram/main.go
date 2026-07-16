@@ -233,6 +233,7 @@ func readPrivateFile(path, label string, maximum int) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s file must be a private regular file", label)
 	}
+	// #nosec G115 -- unix.Open returns a non-negative file descriptor for os.NewFile.
 	file := os.NewFile(uintptr(fd), path)
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()

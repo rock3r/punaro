@@ -46,7 +46,11 @@ func TestLoadPrivateKeyRejectsUnsafeFileModesAndSymlinks(t *testing.T) {
 	}
 	directory := t.TempDir()
 	keyFile := filepath.Join(directory, "machine.key")
-	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o640); err != nil {
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G302 -- this test deliberately makes the credential group-readable.
+	if err := os.Chmod(keyFile, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := loadPrivateKey(keyFile); err == nil {

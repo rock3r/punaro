@@ -37,7 +37,7 @@ func TestRecipientDownloadWorkerPersistsVerifiedCiphertextAndPublishesAfterCompl
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,7 @@ func TestRecipientDownloadWorkerPersistsVerifiedCiphertextAndPublishesAfterCompl
 		opened, openErr := attachmentv3.OpenSourceArtifact(notice.ManifestRaw, stored, fileKey, testOfferDirectory(t), now)
 		t.Fatalf("result=%+v err=%v calls=%d journal=%v chunks=%d chunkErr=%v open=%q openErr=%v permit=%+v operation=%+v", result, err, transport.operationCalls, recordErr, len(stored), chunkErr, opened, openErr, transport.permit, transport.operation)
 	}
+	// #nosec G304 -- destination is the test-controlled temporary output path.
 	written, err := os.ReadFile(destination)
 	if err != nil || !bytes.Equal(written, plain) {
 		t.Fatalf("written=%q err=%v", written, err)
@@ -118,7 +119,7 @@ func TestRecipientDownloadRecoversLostChunkResponseAfterPermitExpiry(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +157,7 @@ func TestRecipientDownloadRecoversLostChunkResponseAfterPermitExpiry(t *testing.
 	if err != nil || result.State != attachmentv3.TransferStateCompleted {
 		t.Fatalf("result=%+v err=%v permits=%d operations=%d", result, err, transport.issueCalls, transport.operationCalls)
 	}
+	// #nosec G304 -- destination is a test-controlled temporary output path.
 	if got, err := os.ReadFile(destination); err != nil || !bytes.Equal(got, []byte("ok")) {
 		t.Fatalf("output=%q err=%v", got, err)
 	}
@@ -179,7 +181,7 @@ func TestReceiptDownloadRetryOperationRetainsOriginalCapability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	mapping := Mapping{RelayConversationID: "retry-relay", ConversationID: bytes16(1), SenderDeviceID: bytes16(2), SenderGeneration: 1, RecipientDeviceID: bytes16(3), RecipientGeneration: 1, MembershipCommitment: bytes32(4)}
 	inbound, _, _ := encryptedInboundOffer(t, mapping, []byte("retry"), time.Unix(100, 0).UTC())
 	notice, err := attachmentv3.DecodeOfferNotice(inbound.Body)
@@ -195,7 +197,7 @@ func TestReceiptDownloadRetryOperationRetainsOriginalCapability(t *testing.T) {
 	if err := attachmentv3.SignPermitRequest(&original.request, private); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := journal.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+	if _, err := journal.db.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
 		t.Fatal(err)
 	}
 	if err := journal.insertReceiptDownloadOperationForTest(record, original); err != nil {
@@ -220,10 +222,10 @@ func (j *Journal) insertReceiptDownloadOperationForTest(record receiptDownloadRe
 	if err != nil {
 		return err
 	}
-	if _, err := j.db.Exec(`INSERT INTO controller_receipt_downloads(punaro_message_id,transfer_id,manifest,envelope,output_path,manifest_commitment,state) VALUES(?,?,?,?,?,?,?)`, record.messageID, record.transferID[:], record.manifest, record.envelope, record.outputPath, record.manifestCommitment[:], record.state); err != nil {
+	if _, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_downloads(punaro_message_id,transfer_id,manifest,envelope,output_path,manifest_commitment,state) VALUES(?,?,?,?,?,?,?)`, record.messageID, record.transferID[:], record.manifest, record.envelope, record.outputPath, record.manifestCommitment[:], record.state); err != nil {
 		return err
 	}
-	_, err = j.db.Exec(`INSERT INTO controller_receipt_download_operations(punaro_message_id,phase,chunk_index,permit_request,operation_id,idempotency_key,permit,operation) VALUES(?,?,?,?,?,?,?,?)`, record.messageID, string(operation.phase), operation.chunk, raw, operation.operationID[:], operation.idempotencyKey[:], operation.permit, operation.operation)
+	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_operations(punaro_message_id,phase,chunk_index,permit_request,operation_id,idempotency_key,permit,operation) VALUES(?,?,?,?,?,?,?,?)`, record.messageID, string(operation.phase), operation.chunk, raw, operation.operationID[:], operation.idempotencyKey[:], operation.permit, operation.operation)
 	return err
 }
 

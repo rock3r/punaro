@@ -17,11 +17,15 @@ import (
 // access control; no key value is configured in Punaro files or environment.
 type MacOSKeychainHostKeyProvider struct{ Service, Account string }
 
+// SenderKeyEncryptionKey loads the host key-encryption key from the configured
+// Keychain item.
 func (p MacOSKeychainHostKeyProvider) SenderKeyEncryptionKey(ctx context.Context) ([32]byte, error) {
 	var key [32]byte
 	if p.Service == "" || p.Account == "" {
 		return key, errors.New("invalid macOS keychain reference")
 	}
+	// #nosec G204 -- executable and argument structure are fixed; service and
+	// account are local Keychain lookup selectors, never shell input.
 	out, err := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", p.Service, "-a", p.Account, "-w").Output()
 	if err != nil {
 		return key, errors.New("macOS keychain key is unavailable")
@@ -33,6 +37,9 @@ func (p MacOSKeychainHostKeyProvider) SenderKeyEncryptionKey(ctx context.Context
 	copy(key[:], raw)
 	return key, nil
 }
+
+// SenderKeyEncryptionKeyID derives a non-secret identifier for the configured
+// Keychain item.
 func (p MacOSKeychainHostKeyProvider) SenderKeyEncryptionKeyID(context.Context) ([32]byte, error) {
 	if p.Service == "" || p.Account == "" {
 		return [32]byte{}, errors.New("invalid macOS keychain reference")

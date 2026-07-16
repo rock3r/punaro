@@ -14,6 +14,8 @@ import (
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/zeebo/blake3"
+
+	// Register SQLite for the controller journal's database/sql connection.
 	_ "modernc.org/sqlite"
 )
 
@@ -504,6 +506,7 @@ func bindJournalSender(db *sql.DB, sender SenderIdentity) error {
 	return nil
 }
 
+// Close releases the Journal's underlying durable database.
 func (j *Journal) Close() error {
 	if j == nil || j.db == nil {
 		return nil
@@ -573,6 +576,8 @@ func (j *Journal) RecordInboundOffer(inbound InboundOffer) (attachmentv3.OfferNo
 	if !errors.Is(err, sql.ErrNoRows) {
 		return attachmentv3.OfferNotice{}, false, err
 	}
+	// #nosec G115 -- ValidateInboundOffer has decoded a manifest whose expiry is
+	// bounded to math.MaxInt64 before this SQLite conversion.
 	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_inbound_offers(punaro_message_id, relay_conversation_id, offer, transfer_id, expires_at)
 		SELECT ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM controller_inbound_offers) < ?
 		AND (SELECT COALESCE(SUM(length(offer)), 0) FROM controller_inbound_offers) + ? <= ?
@@ -642,7 +647,7 @@ func ensureInboundOfferExpiryColumn(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, columnType string
@@ -674,7 +679,7 @@ func ensureReceiptAcceptanceNonceColumn(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, columnType string

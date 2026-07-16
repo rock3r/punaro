@@ -21,6 +21,8 @@ type RecipientEnvelopeOpener interface {
 
 type localRecipientEnvelopeOpener struct{ private *ecdh.PrivateKey }
 
+// NewLocalRecipientEnvelopeOpener returns an opener that keeps the recipient
+// HPKE private key within the local privileged worker.
 func NewLocalRecipientEnvelopeOpener(private *ecdh.PrivateKey) RecipientEnvelopeOpener {
 	return &localRecipientEnvelopeOpener{private: private}
 }
@@ -32,6 +34,8 @@ func (o *localRecipientEnvelopeOpener) OpenRecipientEnvelope(raw []byte, source 
 	return attachmentv3.OpenRecipientEnvelope(raw, source, directory, o.private, now)
 }
 
+// RecipientDownloadWorkerOptions configures the recipient-side download
+// worker and its local authority boundaries.
 type RecipientDownloadWorkerOptions struct {
 	Acceptance        *RecipientAcceptanceWorker
 	AuthorityProvider RecipientAcceptanceAuthorityProvider
@@ -52,6 +56,8 @@ type RecipientDownloadWorker struct {
 	options RecipientDownloadWorkerOptions
 }
 
+// NewRecipientDownloadWorker constructs a recipient worker with all required
+// approval, authority, signing, transport, and output dependencies.
 func NewRecipientDownloadWorker(options RecipientDownloadWorkerOptions) (*RecipientDownloadWorker, error) {
 	if options.Acceptance == nil || options.Acceptance.options.Journal == nil || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.EnvelopeOpener == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid recipient download worker")
@@ -212,11 +218,11 @@ func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDow
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	if active, found, err := w.options.Acceptance.options.Journal.receiptDownloadActiveOperation(record.messageID, phase, chunk); err != nil || !found {
+	active, found, err := w.options.Acceptance.options.Journal.receiptDownloadActiveOperation(record.messageID, phase, chunk)
+	if err != nil || !found {
 		return attachmentv3.TransferResult{}, errors.New("missing durable recipient download operation")
-	} else {
-		op = active
 	}
+	op = active
 	if phase != receiptDownloadChunk && len(op.result) != 0 {
 		return exactReceiptDownloadResult(op.result, record, expected)
 	}
@@ -264,6 +270,7 @@ func receiptDownloadOperationExpired(operation receiptDownloadOperation, now tim
 		return false
 	}
 	permit, err := attachmentv3.DecodePermit(operation.permit)
+	// #nosec G115 -- the caller rejects pre-epoch times before permit use.
 	return err != nil || permit.ExpiresAt <= uint64(now.Unix())
 }
 
@@ -273,6 +280,7 @@ func receiptDownloadOperationExpired(operation receiptDownloadOperation, now tim
 // a new immutable retrieval capability.
 func (w *RecipientDownloadWorker) reconcileExpiredDownload(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk, maxBytes, maxChunks uint64, expected attachmentv3.TransferState, original receiptDownloadOperation, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.TransferResult, error) {
 	originalPermit, err := attachmentv3.DecodePermit(original.permit)
+	// #nosec G115 -- the caller rejects pre-epoch times before reconciliation.
 	if err != nil || originalPermit.ExpiresAt > uint64(now.Unix()) || originalPermit.Serial == [16]byte{} {
 		return attachmentv3.TransferResult{}, errors.New("recipient download operation is not reconcilable")
 	}
@@ -331,6 +339,7 @@ func receiptDownloadOutcomeAttemptExpired(attempt receiptDownloadOutcomeAttempt,
 	}
 	if len(attempt.permit) != 0 {
 		permit, err := attachmentv3.DecodePermit(attempt.permit)
+		// #nosec G115 -- the caller rejects pre-epoch times before permit use.
 		return err != nil || permit.ExpiresAt <= uint64(now.Unix())
 	}
 	return attempt.request.ExpiresAt <= uint64(now.Unix())

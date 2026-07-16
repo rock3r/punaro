@@ -69,7 +69,11 @@ func TestBuildSnapshotRejectsInvalidPublicManifest(t *testing.T) {
 
 func TestPrivateOutputsRequirePrivateParentAndNeverOverwrite(t *testing.T) {
 	unsafe := filepath.Join(t.TempDir(), "unsafe")
-	if err := os.Mkdir(unsafe, 0o755); err != nil {
+	if err := os.Mkdir(unsafe, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G302 -- this test deliberately makes the output parent unsafe.
+	if err := os.Chmod(unsafe, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeNewPrivateFile(filepath.Join(unsafe, "key"), []byte{1}); err == nil {

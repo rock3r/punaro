@@ -28,6 +28,8 @@ type HostAEADFileKeyProtector struct {
 	random   io.Reader
 }
 
+// NewHostAEADFileKeyProtector constructs a sender-key wrapper backed by the
+// supplied host credential provider.
 func NewHostAEADFileKeyProtector(provider HostKeyProvider) (*HostAEADFileKeyProtector, error) {
 	if provider == nil {
 		return nil, errors.New("missing host key provider")
@@ -35,6 +37,8 @@ func NewHostAEADFileKeyProtector(provider HostKeyProvider) (*HostAEADFileKeyProt
 	return &HostAEADFileKeyProtector{provider: provider, random: rand.Reader}, nil
 }
 
+// SealSenderFileKey wraps one sender file key with host-held key material and
+// the caller-provided associated data.
 func (p *HostAEADFileKeyProtector) SealSenderFileKey(ctx context.Context, fileKey [32]byte, aad []byte) ([]byte, error) {
 	if p == nil || p.provider == nil || fileKey == [32]byte{} || len(aad) == 0 {
 		return nil, errors.New("invalid sender key wrap")
@@ -68,6 +72,8 @@ func (p *HostAEADFileKeyProtector) SealSenderFileKey(ctx context.Context, fileKe
 	return out, nil
 }
 
+// OpenSenderFileKey unwraps a previously sealed sender file key after checking
+// its version, host key identity, and associated data.
 func (p *HostAEADFileKeyProtector) OpenSenderFileKey(ctx context.Context, wrapped, aad []byte) ([32]byte, error) {
 	var out [32]byte
 	if p == nil || p.provider == nil || len(aad) == 0 {

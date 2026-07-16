@@ -49,6 +49,8 @@ const (
 type PermitAuthorityResolver interface {
 	ValidatePermitAuthority(Permit, time.Time) (ed25519.PublicKey, error)
 }
+
+// Permit authorizes one bounded attachment operation for a specific holder.
 type Permit struct {
 	Audience                 [32]byte
 	Serial                   [16]byte
@@ -144,6 +146,8 @@ func validPermitOperation(p Permit) bool {
 		return false
 	}
 }
+
+// SignPermit adds the issuer signature to a valid permit.
 func SignPermit(p *Permit, private ed25519.PrivateKey) error {
 	if p == nil || len(private) != ed25519.PrivateKeySize || validatePermit(*p) != nil {
 		return errors.New("invalid permit signer")
@@ -155,6 +159,9 @@ func SignPermit(p *Permit, private ed25519.PrivateKey) error {
 	copy(p.Signature[:], ed25519.Sign(private, raw))
 	return nil
 }
+
+// VerifyPermit validates a permit, its time window, and its fresh directory
+// issuer authority.
 func VerifyPermit(p Permit, authority PermitAuthorityResolver, now time.Time) error {
 	if authority == nil || validatePermit(p) != nil {
 		return errors.New("invalid permit")
@@ -173,12 +180,16 @@ func VerifyPermit(p Permit, authority PermitAuthorityResolver, now time.Time) er
 	}
 	return nil
 }
+
+// EncodePermit returns the canonical wire encoding of a valid permit.
 func EncodePermit(p Permit) ([]byte, error) {
 	if err := validatePermit(p); err != nil {
 		return nil, err
 	}
 	return canonicalEncoding.Marshal(p.wire())
 }
+
+// DecodePermit accepts only a bounded canonical permit encoding.
 func DecodePermit(raw []byte) (Permit, error) {
 	if len(raw) == 0 || len(raw) > maxPermitEncodedBytes {
 		return Permit{}, errors.New("invalid permit size")

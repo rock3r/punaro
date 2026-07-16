@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/zeebo/blake3"
+	// Register SQLite for this package's durable source-store database.
 	_ "modernc.org/sqlite"
 )
 
@@ -235,7 +236,7 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 // reconcileLedgerAdmission fails closed when a database created before the
 // aggregate ledger budget contains durable operation results. It can only
 // backfill rows whose active source still supplies a trustworthy chunk bound.
-func reconcileLedgerAdmission(db *sql.DB, limits sourceLimits) error {
+func reconcileLedgerAdmission(db *sql.DB, _ sourceLimits) error {
 	rows, err := db.QueryContext(context.Background(), `SELECT i.transfer_id, i.manifest_commitment, COUNT(o.operation_id), MAX(i.retain_until) FROM v3_issued_permits i JOIN v3_redeemed_operations o ON o.permit_serial = i.serial GROUP BY i.transfer_id, i.manifest_commitment`)
 	if err != nil {
 		return err
@@ -868,14 +869,14 @@ func (s *sourceStore) admitDurableSourceTx(ctx context.Context, tx *sql.Tx, spec
 	return nil
 }
 
-func (s *sourceStore) admitCryptoTx(tx *sql.Tx, spec sourceSpec, units uint64) error {
+func (s *sourceStore) admitCryptoTx(ctx context.Context, tx *sql.Tx, spec sourceSpec, units uint64) error {
 	keys, err := sourceQuotaKeys(spec)
 	if err != nil || units < 2 || units > 4098 {
 		return errors.New("invalid crypto admission")
 	}
 	for _, key := range keys {
 		var current uint64
-		err := tx.QueryRow(`SELECT reservations FROM v3_source_crypto_admission WHERE scope = ? AND scope_id = ?`, key.scope, key.id[:]).Scan(&current)
+		err := tx.QueryRowContext(ctx, `SELECT reservations FROM v3_source_crypto_admission WHERE scope = ? AND scope_id = ?`, key.scope, key.id[:]).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
 			current = 0
 		} else if err != nil {
@@ -885,7 +886,7 @@ func (s *sourceStore) admitCryptoTx(tx *sql.Tx, spec sourceSpec, units uint64) e
 		if units > limit || current > limit-units {
 			return errors.New("crypto reservation budget exhausted")
 		}
-		if _, err := tx.Exec(`INSERT INTO v3_source_crypto_admission(scope, scope_id, reservations) VALUES (?, ?, ?) ON CONFLICT(scope, scope_id) DO UPDATE SET reservations = v3_source_crypto_admission.reservations + excluded.reservations`, key.scope, key.id[:], units); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO v3_source_crypto_admission(scope, scope_id, reservations) VALUES (?, ?, ?) ON CONFLICT(scope, scope_id) DO UPDATE SET reservations = v3_source_crypto_admission.reservations + excluded.reservations`, key.scope, key.id[:], units); err != nil {
 			return err
 		}
 	}

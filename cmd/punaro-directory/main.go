@@ -408,7 +408,7 @@ func openNewPrivateOutput(path string, expected os.FileInfo) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	directory, err := root.Open(".")
 	if err != nil {
 		return nil, err

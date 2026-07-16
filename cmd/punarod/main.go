@@ -430,6 +430,8 @@ func buildV3AttachmentHandlers(cfg config.Config, store *relay.Store) (http.Hand
 	// the directory first. It only durably releases expired state in bounded
 	// batches so a restart or a long-lived quiet relay cannot accumulate source
 	// staging forever. The close function waits for it before closing SQLite.
+	// #nosec G118 -- closeRuntime below owns and invokes cancelReaper before
+	// closing the dependent SQLite runtime.
 	reaperContext, cancelReaper := context.WithCancel(context.Background())
 	reaperDone := make(chan struct{})
 	previousClose := closeRuntime

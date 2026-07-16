@@ -147,7 +147,8 @@ func journalSourceInitPermit(t testing.TB, store *sourceStore, permit Permit) {
 		t.Fatal(err)
 	}
 	requestID := testID(90)
-	if _, err := store.db.Exec(`INSERT INTO v3_permit_requests(request_id, request, permit, permit_serial, holder_device_id, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?, ?)`, requestID[:], []byte{1}, raw, permit.Serial[:], permit.HolderDeviceID[:], permit.ExpiresAt, int64(permit.ExpiresAt)+86400); err != nil {
+	// #nosec G115 -- testPermit constructs a representable, short-lived expiry.
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO v3_permit_requests(request_id, request, permit, permit_serial, holder_device_id, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?, ?)`, requestID[:], []byte{1}, raw, permit.Serial[:], permit.HolderDeviceID[:], permit.ExpiresAt, int64(permit.ExpiresAt)+86400); err != nil {
 		t.Fatal(err)
 	}
 }

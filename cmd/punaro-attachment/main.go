@@ -159,21 +159,24 @@ func loadX25519PrivateKeyFile(path string) (*ecdh.PrivateKey, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("private key path must be absolute")
 	}
+	// #nosec G703 -- the caller supplies an absolute operator-provisioned
+	// credential path; relay input never controls it.
 	parent, err := os.Lstat(filepath.Dir(path))
 	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("private key parent is unavailable")
 	}
+	// #nosec G703 -- see the credential-path trust boundary above.
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("private key is unavailable")
 	}
-	// #nosec G304 -- this absolute operator-provisioned credential path passed
+	// #nosec G304,G703 -- this absolute operator-provisioned credential path passed
 	// private non-symlink checks above and is never influenced by relay input.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, errors.New("private key is unavailable")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("private key is unavailable")
@@ -264,7 +267,7 @@ func runReceive(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer local.Close()
+	defer func() { _ = local.Close() }()
 	inbound, err := local.ApprovedInboundOffer(messageID)
 	if err != nil {
 		return err
@@ -281,7 +284,7 @@ func runReceive(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer checkpoints.Close()
+	defer func() { _ = checkpoints.Close() }()
 	fresh, err := attachmentv2.NewFreshDirectoryAuthorityProvider(client, attachmentv2.DirectoryTrust{Audience: cfg.directoryAudience, RootKeyID: cfg.directoryRootKeyID, RootPublicKey: cfg.directoryRootPublic, Checkpoints: checkpoints})
 	if err != nil {
 		return err
@@ -358,7 +361,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer journal.Close()
+	defer func() { _ = journal.Close() }()
 	client, err := adapter.NewHTTPRelayClient(cfg.relayURL, cfg.machineID, cfg.machinePrivate, nil, cfg.accessToken)
 	if err != nil {
 		return err
@@ -367,7 +370,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer checkpoints.Close()
+	defer func() { _ = checkpoints.Close() }()
 	fresh, err := attachmentv2.NewFreshDirectoryAuthorityProvider(client, attachmentv2.DirectoryTrust{Audience: cfg.directoryAudience, RootKeyID: cfg.directoryRootKeyID, RootPublicKey: cfg.directoryRootPublic, Checkpoints: checkpoints})
 	if err != nil {
 		return err
@@ -380,7 +383,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer artifacts.Close()
+	defer func() { _ = artifacts.Close() }()
 	protector, err := newSenderKeyProtector()
 	if err != nil {
 		return err
@@ -389,7 +392,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer outbox.Close()
+	defer func() { _ = outbox.Close() }()
 	stager, err := controller.NewSenderStager(controller.SenderStageOptions{Journal: journal, ArtifactStore: artifacts, BindingResolver: authority, Sender: cfg.sender, SigningKey: cfg.senderSigningPrivate, FileKeyProtector: protector, NewID: newID, ChunkSize: 64 << 10})
 	if err != nil {
 		return err
@@ -435,7 +438,7 @@ func readPlaintextInput(path string) ([]byte, error) {
 	if err != nil {
 		return nil, errors.New("sender input is unavailable")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() > 64<<20 {
 		return nil, errors.New("sender input is unavailable")
@@ -510,7 +513,7 @@ func runMap(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer j.Close()
+	defer func() { _ = j.Close() }()
 	return j.AddMapping(mapping)
 }
 
@@ -531,7 +534,7 @@ func runMapSender(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer j.Close()
+	defer func() { _ = j.Close() }()
 	return j.AddMapping(mapping)
 }
 
@@ -587,7 +590,7 @@ func runRecord(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer j.Close()
+	defer func() { _ = j.Close() }()
 	_, created, err := j.RecordInboundOffer(controller.InboundOffer{PunaroMessageID: message, RelayConversationID: relay, Body: string(body)})
 	if err != nil {
 		return err
@@ -608,7 +611,7 @@ func runApprove(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer j.Close()
+	defer func() { _ = j.Close() }()
 	approved, err := j.ApproveInboundOffer(message, time.Now().UTC())
 	if err != nil {
 		return err
@@ -638,11 +641,13 @@ func id32(raw string) ([32]byte, error) {
 func readBounded(path string) ([]byte, error) {
 	var r io.Reader = os.Stdin
 	if path != "-" {
+		// #nosec G304 -- the local caller selects this operator-supplied body file;
+		// no relay input controls the path.
 		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		r = f
 	}
 	data, err := io.ReadAll(io.LimitReader(r, 32<<10+1))

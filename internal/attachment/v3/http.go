@@ -23,12 +23,21 @@ type AttachmentAuthority interface {
 	PermitAuthorityResolver
 	OperationHolderResolver
 }
+
+// AttachmentAuthorityProvider returns the fresh directory authority required
+// to validate a v3 attachment request.
 type AttachmentAuthorityProvider interface {
 	ResolveAttachmentAuthority(context.Context, time.Time) (AttachmentAuthority, error)
 }
+
+// AttachmentRequestAuthorizer admits an authenticated machine request before
+// the attachment runtime processes its holder permit.
 type AttachmentRequestAuthorizer interface {
 	AuthorizeAttachmentRequest(context.Context, Permit) error
 }
+
+// AttachmentHTTPHandlerOptions supplies the private store and mandatory
+// authority checks for the attachment HTTP handler.
 type AttachmentHTTPHandlerOptions struct {
 	Store     *sourceStore
 	Authority AttachmentAuthorityProvider
@@ -127,6 +136,7 @@ func (h *attachmentHTTPHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Length", strconv.Itoa(len(ciphertext)))
 		w.WriteHeader(http.StatusOK)
+		// #nosec G705 -- verified ciphertext is emitted as octet-stream, never HTML.
 		_, _ = w.Write(ciphertext)
 		return
 	}
@@ -174,6 +184,7 @@ func writeAttachmentCBOR(w http.ResponseWriter, status int, payload []byte) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(status)
+	// #nosec G705 -- payload is canonical CBOR with a non-rendering content type.
 	_, _ = w.Write(payload)
 }
 func attachmentHTTPError(w http.ResponseWriter, status int) {

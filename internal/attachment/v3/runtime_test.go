@@ -32,6 +32,7 @@ func TestAttachmentRuntimeBuildsBothV3HandlersOnlyWithAllAdmissions(t *testing.T
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, time.July, 15, 3, 0, 0, 0, time.UTC)
+	// #nosec G115 -- the test clock is fixed and positive.
 	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: testID(4), holderGen: 1, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(20 * time.Second).Unix())}}
 	provider := runtimeAuthorityProvider{authority: authority}
 	if _, err := NewAttachmentRuntime(AttachmentRuntimeOptions{}); err == nil {

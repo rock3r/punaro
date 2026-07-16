@@ -93,6 +93,7 @@ func sameEnvelopeManifestBinding(e Envelope, m Manifest, raw []byte) bool {
 	return e.Audience == m.Audience && e.TransferID == m.TransferID && e.ConversationID == m.ConversationID && e.SenderDeviceID == m.SenderDeviceID && e.SenderGeneration == m.SenderGeneration && e.RecipientDeviceID == m.RecipientDeviceID && e.RecipientGeneration == m.RecipientGeneration && e.ManifestCommitment == manifestCommitment(raw) && e.SignerKeyID == m.SignerKeyID
 }
 
+// SignEnvelope adds the sender signature to one otherwise valid envelope.
 func SignEnvelope(e *Envelope, private ed25519.PrivateKey) error {
 	if e == nil || len(private) != ed25519.PrivateKeySize || validateEnvelope(*e) != nil {
 		return errors.New("invalid v3 envelope signer")
@@ -124,6 +125,8 @@ type envelopePlaintext struct {
 	RecipientGeneration uint64   `cbor:"4,keyasint"`
 }
 
+// SealRecipientEnvelope encrypts a verified source key to the recipient's
+// current HPKE key and signs the resulting envelope.
 func SealRecipientEnvelope(source VerifiedSource, directory EnvelopeDirectoryKeyResolver, fileKey [32]byte, signer ed25519.PrivateKey, now time.Time) (Envelope, error) {
 	if directory == nil || fileKey == [32]byte{} || len(signer) != ed25519.PrivateKeySize {
 		return Envelope{}, errors.New("invalid v3 envelope key binding")
@@ -241,6 +244,7 @@ func VerifyOfferNotice(notice OfferNotice, directory EnvelopeDirectoryKeyResolve
 	return source, envelope, nil
 }
 
+// EncodeEnvelope returns the canonical wire encoding of a valid envelope.
 func EncodeEnvelope(e Envelope) ([]byte, error) {
 	if err := validateEnvelope(e); err != nil {
 		return nil, err
@@ -248,6 +252,7 @@ func EncodeEnvelope(e Envelope) ([]byte, error) {
 	return canonicalEncoding.Marshal(e.wire())
 }
 
+// DecodeEnvelope accepts only a bounded canonical envelope encoding.
 func DecodeEnvelope(raw []byte) (Envelope, error) {
 	if len(raw) == 0 || len(raw) > maxEnvelopeEncodedBytes {
 		return Envelope{}, errors.New("invalid v3 envelope size")

@@ -10,10 +10,11 @@ import (
 	"strings"
 	"time"
 
-	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
-	"github.com/rock3r/punaro/internal/relay"
 	// sqlite is the local durable adapter outbox driver.
 	_ "modernc.org/sqlite"
+
+	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 // OfferNoticeSender is the narrow network boundary used by the durable offer
@@ -214,7 +215,7 @@ func ensureOfferNoticeActivationColumn(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	active := false
 	for rows.Next() {
 		var cid, notNull, primary int

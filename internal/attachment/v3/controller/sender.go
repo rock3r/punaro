@@ -24,6 +24,7 @@ type SenderIdentity struct {
 
 func (s SenderIdentity) valid() bool { return s.DeviceID != [16]byte{} && s.Generation != 0 }
 
+// SenderStageOptions configures local sender staging and file-key protection.
 type SenderStageOptions struct {
 	Journal         *Journal
 	ArtifactStore   *attachmentv3.ArtifactStore
@@ -53,6 +54,8 @@ type SenderFileKeyProtector interface {
 // key in the private controller journal; plaintext never enters journal state.
 type SenderStager struct{ options SenderStageOptions }
 
+// NewSenderStager constructs a sender stager with a sender-bound journal and
+// host-protected file-key boundary.
 func NewSenderStager(options SenderStageOptions) (*SenderStager, error) {
 	if options.Journal == nil || options.Journal.db == nil || !options.Journal.sender.valid() || options.Journal.sender != options.Sender || options.ArtifactStore == nil || options.BindingResolver == nil || !options.Sender.valid() || len(options.SigningKey) != ed25519.PrivateKeySize || options.FileKeyProtector == nil || options.NewID == nil || options.ChunkSize == 0 || options.ChunkSize > 256<<10 {
 		return nil, errors.New("invalid sender staging worker")

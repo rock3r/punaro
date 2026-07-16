@@ -237,6 +237,7 @@ func VerifyAttachmentOperationRequest(r OperationRecord, permit Permit, holders 
 	return operationUsage(r.Operation, request)
 }
 
+// EncodeOperation returns the canonical wire encoding of a valid operation.
 func EncodeOperation(r OperationRecord) ([]byte, error) {
 	if err := validateOperation(r); err != nil {
 		return nil, err
@@ -244,6 +245,7 @@ func EncodeOperation(r OperationRecord) ([]byte, error) {
 	return canonicalEncoding.Marshal(r.wire())
 }
 
+// DecodeOperation accepts only a bounded canonical operation encoding.
 func DecodeOperation(raw []byte) (OperationRecord, error) {
 	if len(raw) == 0 || len(raw) > maxOperationEncodedBytes {
 		return OperationRecord{}, errors.New("invalid v3 operation record size")

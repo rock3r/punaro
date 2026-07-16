@@ -30,7 +30,7 @@ func TestWriteCompletedReceiptAtomicallyPublishesOnlyVerifiedPlaintext(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	plain := []byte("recipient plaintext")
 	prepared, commitment, err := attachmentv3.PrepareSourceManifest(plain, manifest, private, attachmentv3.SourceArtifactMaterial{FileKey: bytes32(71), ContentSalt: bytes32(72)})
 	if err != nil {
@@ -49,6 +49,7 @@ func TestWriteCompletedReceiptAtomicallyPublishesOnlyVerifiedPlaintext(t *testin
 	if err := WriteCompletedReceiptAtomically(destination, raw, artifact.Chunks, bytes32(71), authority, now.Unix()); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G304 -- destination is the test-controlled temporary output path.
 	written, err := os.ReadFile(destination)
 	if err != nil || !bytes.Equal(written, plain) {
 		t.Fatalf("written=%q err=%v", written, err)

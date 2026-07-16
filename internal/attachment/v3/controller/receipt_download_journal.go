@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"time"
 
@@ -53,10 +54,19 @@ type receiptDownloadOutcomeAttempt struct {
 	permit, operation, result []byte
 }
 
+func receiptSQLiteIndex(value uint64) (int64, error) {
+	if value > math.MaxInt64 {
+		return 0, errors.New("unrepresentable receipt journal index")
+	}
+	return int64(value), nil
+}
+
 func (j *Journal) latestReceiptDownloadOutcomeAttempt(messageID string, phase receiptDownloadPhase, chunk, operationAttempt uint64) (receiptDownloadOutcomeAttempt, bool, error) {
 	var out receiptDownloadOutcomeAttempt
 	var index int64
 	var raw, id, key []byte
+	// #nosec G115 -- chunk and operationAttempt are journal values constrained
+	// by the manifest's 4096-chunk and bounded retry protocol limits.
 	err := j.db.QueryRowContext(context.Background(), `SELECT attempt_index,permit_request,operation_id,idempotency_key,permit,operation,result FROM controller_receipt_download_outcome_attempts WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation_attempt_index=? ORDER BY attempt_index DESC LIMIT 1`, messageID, string(phase), int64(chunk), int64(operationAttempt)).Scan(&index, &raw, &id, &key, &out.permit, &out.operation, &out.result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, false, nil
@@ -79,7 +89,19 @@ func (j *Journal) storeReceiptDownloadOutcomeAttempt(record receiptDownloadRecor
 	if err != nil || attempt.operationID == [16]byte{} || attempt.idempotencyKey == [32]byte{} {
 		return receiptDownloadOutcomeAttempt{}, errors.New("invalid receipt download outcome attempt")
 	}
-	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_outcome_attempts(punaro_message_id,phase,chunk_index,operation_attempt_index,attempt_index,permit_request,operation_id,idempotency_key) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(punaro_message_id,phase,chunk_index,operation_attempt_index,attempt_index) DO NOTHING`, record.messageID, string(phase), int64(chunk), int64(attempt.operationAttempt), int64(attempt.index), raw, attempt.operationID[:], attempt.idempotencyKey[:])
+	chunkIndex, err := receiptSQLiteIndex(chunk)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	operationIndex, err := receiptSQLiteIndex(attempt.operationAttempt)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	attemptIndex, err := receiptSQLiteIndex(attempt.index)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_outcome_attempts(punaro_message_id,phase,chunk_index,operation_attempt_index,attempt_index,permit_request,operation_id,idempotency_key) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(punaro_message_id,phase,chunk_index,operation_attempt_index,attempt_index) DO NOTHING`, record.messageID, string(phase), chunkIndex, operationIndex, attemptIndex, raw, attempt.operationID[:], attempt.idempotencyKey[:])
 	if err != nil {
 		return receiptDownloadOutcomeAttempt{}, err
 	}
@@ -99,7 +121,19 @@ func (j *Journal) storeReceiptDownloadOutcomeCredentials(record receiptDownloadR
 	if err != nil {
 		return receiptDownloadOutcomeAttempt{}, err
 	}
-	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_download_outcome_attempts SET permit=?,operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation_attempt_index=? AND attempt_index=? AND permit IS NULL AND operation IS NULL`, rawPermit, rawOperation, record.messageID, string(phase), int64(chunk), int64(attempt.operationAttempt), int64(attempt.index))
+	chunkIndex, err := receiptSQLiteIndex(chunk)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	operationIndex, err := receiptSQLiteIndex(attempt.operationAttempt)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	attemptIndex, err := receiptSQLiteIndex(attempt.index)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	result, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_download_outcome_attempts SET permit=?,operation=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation_attempt_index=? AND attempt_index=? AND permit IS NULL AND operation IS NULL`, rawPermit, rawOperation, record.messageID, string(phase), chunkIndex, operationIndex, attemptIndex)
 	if err != nil {
 		return receiptDownloadOutcomeAttempt{}, err
 	}
@@ -118,7 +152,19 @@ func (j *Journal) storeReceiptDownloadOutcomeResult(record receiptDownloadRecord
 	if len(result) == 0 {
 		return receiptDownloadOutcomeAttempt{}, errors.New("invalid receipt download outcome result")
 	}
-	update, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_download_outcome_attempts SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation_attempt_index=? AND attempt_index=? AND result IS NULL`, result, record.messageID, string(phase), int64(chunk), int64(attempt.operationAttempt), int64(attempt.index))
+	chunkIndex, err := receiptSQLiteIndex(chunk)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	operationIndex, err := receiptSQLiteIndex(attempt.operationAttempt)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	attemptIndex, err := receiptSQLiteIndex(attempt.index)
+	if err != nil {
+		return receiptDownloadOutcomeAttempt{}, err
+	}
+	update, err := j.db.ExecContext(context.Background(), `UPDATE controller_receipt_download_outcome_attempts SET result=? WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND operation_attempt_index=? AND attempt_index=? AND result IS NULL`, result, record.messageID, string(phase), chunkIndex, operationIndex, attemptIndex)
 	if err != nil {
 		return receiptDownloadOutcomeAttempt{}, err
 	}
@@ -139,6 +185,7 @@ func (j *Journal) storeReceiptDownloadOutcomeResult(record receiptDownloadRecord
 // still transferring.
 func (j *Journal) receiptDownloadActiveOperation(messageID string, phase receiptDownloadPhase, chunk uint64) (receiptDownloadOperation, bool, error) {
 	var attempt int64
+	// #nosec G115 -- chunk is bounded by the validated manifest's 4096 chunks.
 	err := j.db.QueryRowContext(context.Background(), `SELECT attempt_index FROM controller_receipt_download_operation_retries WHERE punaro_message_id=? AND phase=? AND chunk_index=? ORDER BY attempt_index DESC LIMIT 1`, messageID, string(phase), int64(chunk)).Scan(&attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return j.receiptDownloadOperation(messageID, phase, chunk)
@@ -152,6 +199,7 @@ func (j *Journal) receiptDownloadActiveOperation(messageID string, phase receipt
 func (j *Journal) receiptDownloadRetryOperation(messageID string, phase receiptDownloadPhase, chunk, attempt uint64) (receiptDownloadOperation, bool, error) {
 	var record receiptDownloadOperation
 	var request, operationID, key []byte
+	// #nosec G115 -- journal retry indices are bounded by the protocol lifetime.
 	err := j.db.QueryRowContext(context.Background(), `SELECT permit_request,operation_id,idempotency_key,permit,operation,result FROM controller_receipt_download_operation_retries WHERE punaro_message_id=? AND phase=? AND chunk_index=? AND attempt_index=?`, messageID, string(phase), int64(chunk), int64(attempt)).Scan(&request, &operationID, &key, &record.permit, &record.operation, &record.result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return receiptDownloadOperation{}, false, nil
@@ -262,12 +310,15 @@ func (j *Journal) ensureReceiptDownloadOperation(record receiptDownloadRecord, p
 	}
 	expires := now.UTC().Add(20 * time.Second).Unix()
 	manifest, err := attachmentv3.DecodeManifest(record.manifest)
+	// #nosec G115 -- expires derives from UTC Unix time and is checked below.
 	if err != nil || uint64(expires) > manifest.ExpiresAt {
+		// #nosec G115 -- DecodeManifest rejects expiry values above math.MaxInt64.
 		expires = int64(manifest.ExpiresAt)
 	}
 	if expires <= now.UTC().Unix() {
 		return receiptDownloadOperation{}, errors.New("expired receipt download offer")
 	}
+	// #nosec G115 -- negative or expired timestamps are rejected immediately below.
 	request := attachmentv3.PermitRequest{RequestID: requestID, HolderDeviceID: accepted.request.HolderDeviceID, HolderGeneration: accepted.request.HolderGeneration, HolderRole: attachmentv3.PermitHolderRecipient, TransferID: record.transferID, ConversationID: accepted.request.ConversationID, SenderDeviceID: accepted.request.SenderDeviceID, SenderGeneration: accepted.request.SenderGeneration, RecipientDeviceID: accepted.request.RecipientDeviceID, RecipientGeneration: accepted.request.RecipientGeneration, AttemptGeneration: 1, Operation: operation, MembershipCommitment: accepted.request.MembershipCommitment, StagedManifestCommitment: record.manifestCommitment, IssuedAt: uint64(now.UTC().Unix()), ExpiresAt: uint64(expires), MaxBytes: maxBytes, MaxChunks: maxChunks, MaxOperations: 1}
 	if err := signer(&request); err != nil {
 		return receiptDownloadOperation{}, err
@@ -276,6 +327,7 @@ func (j *Journal) ensureReceiptDownloadOperation(record receiptDownloadRecord, p
 	if err != nil {
 		return receiptDownloadOperation{}, err
 	}
+	// #nosec G115 -- chunk is bounded by the validated manifest's 4096 chunks.
 	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_operations(punaro_message_id,phase,chunk_index,permit_request,operation_id,idempotency_key)
 		VALUES (?,?,?,?,?,?) ON CONFLICT(punaro_message_id,phase,chunk_index) DO NOTHING`, record.messageID, string(phase), int64(chunk), rawRequest, opID[:], key[:])
 	if err != nil {
@@ -292,6 +344,7 @@ func (j *Journal) ensureReceiptDownloadOperation(record receiptDownloadRecord, p
 func (j *Journal) receiptDownloadOperation(messageID string, phase receiptDownloadPhase, chunk uint64) (receiptDownloadOperation, bool, error) {
 	var record receiptDownloadOperation
 	var request, operationID, key []byte
+	// #nosec G115 -- chunk is bounded by the validated manifest's 4096 chunks.
 	err := j.db.QueryRowContext(context.Background(), `SELECT permit_request,operation_id,idempotency_key,permit,operation,result FROM controller_receipt_download_operations WHERE punaro_message_id=? AND phase=? AND chunk_index=?`, messageID, string(phase), int64(chunk)).Scan(&request, &operationID, &key, &record.permit, &record.operation, &record.result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return receiptDownloadOperation{}, false, nil
@@ -330,14 +383,18 @@ func (j *Journal) newReceiptDownloadRetryOperation(record receiptDownloadRecord,
 		return receiptDownloadOperation{}, errors.New("invalid receipt download retry manifest")
 	}
 	request := previous.request
+	// #nosec G115 -- callers reject pre-epoch time before creating a permit.
 	request.RequestID, request.IssuedAt = requestID, uint64(now.UTC().Unix())
 	expires := now.UTC().Add(20 * time.Second).Unix()
+	// #nosec G115 -- expires derives from UTC Unix time and is checked below.
 	if uint64(expires) > manifest.ExpiresAt {
+		// #nosec G115 -- DecodeManifest rejects expiry values above math.MaxInt64.
 		expires = int64(manifest.ExpiresAt)
 	}
 	if expires <= now.UTC().Unix() {
 		return receiptDownloadOperation{}, errors.New("expired receipt download retry offer")
 	}
+	// #nosec G115 -- expired/negative values are rejected immediately below.
 	request.ExpiresAt = uint64(expires)
 	if err := signer(&request); err != nil {
 		return receiptDownloadOperation{}, err
@@ -347,6 +404,7 @@ func (j *Journal) newReceiptDownloadRetryOperation(record receiptDownloadRecord,
 		return receiptDownloadOperation{}, err
 	}
 	attempt := previous.attempt + 1
+	// #nosec G115 -- validated manifest chunks and bounded retry attempts fit SQLite ints.
 	_, err = j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_operation_retries(punaro_message_id,phase,chunk_index,attempt_index,permit_request,operation_id,idempotency_key) VALUES(?,?,?,?,?,?,?) ON CONFLICT(punaro_message_id,phase,chunk_index,attempt_index) DO NOTHING`, record.messageID, string(previous.phase), int64(previous.chunk), int64(attempt), raw, opID[:], key[:])
 	if err != nil {
 		return receiptDownloadOperation{}, err
@@ -371,9 +429,21 @@ func (j *Journal) storeReceiptDownloadPermit(record receiptDownloadRecord, opera
 		return receiptDownloadOperation{}, err
 	}
 	table, where := "controller_receipt_download_operations", "punaro_message_id=? AND phase=? AND chunk_index=?"
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
 	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
 		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
 		args = append(args, int64(operation.attempt))
 	}
 	result, err := j.db.ExecContext(context.Background(), `UPDATE `+table+` SET permit=? WHERE `+where+` AND permit IS NULL`, args...)
@@ -400,6 +470,7 @@ func (j *Journal) storeReceiptDownloadOperationSignature(record receiptDownloadR
 	args := []any{raw, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
 		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
+		// #nosec G115 -- retries are bounded by the short-lived permit lifecycle.
 		args = append(args, int64(operation.attempt))
 	}
 	result, err := j.db.ExecContext(context.Background(), `UPDATE `+table+` SET operation=? WHERE `+where+` AND operation IS NULL`, args...)
@@ -422,6 +493,7 @@ func (j *Journal) storeReceiptDownloadResult(record receiptDownloadRecord, opera
 		return errors.New("invalid receipt download result")
 	}
 	table, where := "controller_receipt_download_operations", "punaro_message_id=? AND phase=? AND chunk_index=?"
+	// #nosec G115 -- validated manifest chunks fit the signed SQLite representation.
 	args := []any{result, record.messageID, string(operation.phase), int64(operation.chunk)}
 	if operation.attempt != 0 {
 		table, where = "controller_receipt_download_operation_retries", where+" AND attempt_index=?"
@@ -457,11 +529,13 @@ func (j *Journal) storeReceiptDownloadChunk(record receiptDownloadRecord, index 
 		return errors.New("invalid receipt ciphertext")
 	}
 	commitment := receiptCiphertextCommitment(ciphertext)
+	// #nosec G115 -- index is bounded by the validated manifest's 4096 chunks.
 	_, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_receipt_download_chunks(punaro_message_id,chunk_index,ciphertext,ciphertext_commitment) VALUES (?,?,?,?) ON CONFLICT(punaro_message_id,chunk_index) DO NOTHING`, record.messageID, int64(index), ciphertext, commitment[:])
 	if err != nil {
 		return err
 	}
 	var stored, storedCommitment []byte
+	// #nosec G115 -- index is bounded by the validated manifest's 4096 chunks.
 	err = j.db.QueryRowContext(context.Background(), `SELECT ciphertext,ciphertext_commitment FROM controller_receipt_download_chunks WHERE punaro_message_id=? AND chunk_index=?`, record.messageID, int64(index)).Scan(&stored, &storedCommitment)
 	if err != nil || len(storedCommitment) != 32 || !bytes.Equal(stored, ciphertext) || !bytes.Equal(storedCommitment, commitment[:]) {
 		return errors.New("changed durable receipt ciphertext")
@@ -471,6 +545,7 @@ func (j *Journal) storeReceiptDownloadChunk(record receiptDownloadRecord, index 
 
 func (j *Journal) receiptDownloadChunk(record receiptDownloadRecord, index uint64) ([]byte, bool, error) {
 	var ciphertext, commitment []byte
+	// #nosec G115 -- index is bounded by the validated manifest's 4096 chunks.
 	err := j.db.QueryRowContext(context.Background(), `SELECT ciphertext,ciphertext_commitment FROM controller_receipt_download_chunks WHERE punaro_message_id=? AND chunk_index=?`, record.messageID, int64(index)).Scan(&ciphertext, &commitment)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
@@ -493,7 +568,7 @@ func (j *Journal) receiptDownloadChunks(record receiptDownloadRecord, count uint
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	chunks := make([]attachmentv3.EncryptedChunk, 0, count)
 	for rows.Next() {
 		var index int64

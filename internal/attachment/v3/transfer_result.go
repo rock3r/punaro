@@ -10,6 +10,8 @@ import (
 // their exact permit/operation records before advancing local durable state.
 type TransferState uint64
 
+// Transfer lifecycle states are terminal or transitional outcomes returned by
+// successful v3 attachment operations.
 const (
 	TransferStateSourceUploading TransferState = TransferState(transferSourceUploading)
 	TransferStateSourceReady     TransferState = TransferState(transferSourceReady)

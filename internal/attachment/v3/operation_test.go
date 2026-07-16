@@ -102,11 +102,13 @@ func TestBuildSignedAttachmentOperationDerivesFixedRouteCommitments(t *testing.T
 	}
 	now := time.Date(2026, time.July, 15, 4, 0, 0, 0, time.UTC)
 	permit := testPermit(now)
+	// #nosec G115 -- callers supply a fixed positive test clock.
 	op, err := BuildSignedAttachmentOperation(permit, "POST", "/v3/attachments/05000000000000000000000000000000/source", []byte("manifest"), testID(20), testHash(20), uint64(now.Unix()), uint64(now.Add(time.Second).Unix()), private)
 	if err == nil || op != (OperationRecord{}) {
 		t.Fatal("invalid source-init body was signed")
 	}
 	permit.Operation = permitOperationSourceUpload
+	// #nosec G115 -- callers supply a fixed positive test clock.
 	op, err = BuildSignedAttachmentOperation(permit, "PUT", "/v3/attachments/05000000000000000000000000000000/source/chunks/0", []byte("ciphertext"), testID(21), testHash(21), uint64(now.Unix()), uint64(now.Add(time.Second).Unix()), private)
 	if err != nil {
 		t.Fatal(err)
@@ -161,5 +163,6 @@ func (s operationHolderStub) CurrentDeviceSigningKey(deviceID [16]byte, generati
 
 func testOperation(permit Permit, request OperationRequest, now time.Time) OperationRecord {
 	path, target, body := operationRequestCommitments(request)
+	// #nosec G115 -- every caller supplies a fixed positive test clock.
 	return OperationRecord{PermitSerial: permit.Serial, OperationID: testID(20), Operation: permit.Operation, Method: request.method, PathCommitment: path, TargetCommitment: target, BodyCommitment: body, IdempotencyKey: testHash(24), IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(10 * time.Second).Unix()), StagedManifestCommitment: permit.StagedManifestCommitment}
 }

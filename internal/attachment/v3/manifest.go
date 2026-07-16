@@ -114,6 +114,7 @@ func validateManifest(m Manifest) error {
 	return nil
 }
 
+// SignManifest adds the source device signature to a valid manifest.
 func SignManifest(m *Manifest, private ed25519.PrivateKey) error {
 	if m == nil || len(private) != ed25519.PrivateKeySize || validateManifest(*m) != nil {
 		return errors.New("invalid manifest signer")
@@ -126,6 +127,7 @@ func SignManifest(m *Manifest, private ed25519.PrivateKey) error {
 	return nil
 }
 
+// VerifyManifest reports whether a valid manifest has the supplied signature.
 func VerifyManifest(m Manifest, public ed25519.PublicKey) bool {
 	if len(public) != ed25519.PublicKeySize || validateManifest(m) != nil {
 		return false
@@ -134,6 +136,7 @@ func VerifyManifest(m Manifest, public ed25519.PublicKey) bool {
 	return err == nil && ed25519.Verify(public, payload, m.Signature[:])
 }
 
+// EncodeManifest returns the canonical wire encoding of a valid manifest.
 func EncodeManifest(m Manifest) ([]byte, error) {
 	if err := validateManifest(m); err != nil {
 		return nil, err
@@ -141,6 +144,7 @@ func EncodeManifest(m Manifest) ([]byte, error) {
 	return canonicalEncoding.Marshal(m.wire())
 }
 
+// DecodeManifest accepts only a bounded canonical manifest encoding.
 func DecodeManifest(raw []byte) (Manifest, error) {
 	if len(raw) == 0 || len(raw) > maxManifestEncodedBytes {
 		return Manifest{}, errors.New("invalid manifest size")
@@ -176,6 +180,8 @@ type VerifiedSource struct {
 	commitment [32]byte
 }
 
+// DecodeAndVerifySourceInit decodes a canonical manifest and verifies its
+// signer against a fresh directory view.
 func DecodeAndVerifySourceInit(raw []byte, directory DirectoryKeyResolver, now time.Time) (VerifiedSource, error) {
 	if directory == nil {
 		return VerifiedSource{}, errors.New("missing directory resolver")
@@ -199,11 +205,21 @@ func (v VerifiedSource) valid(now time.Time) bool {
 		v.commitment == blake3.Sum256(v.raw) && validateManifest(v.manifest) == nil &&
 		validateManifestTime(v.manifest, now) == nil
 }
-func (v VerifiedSource) TransferID() [16]byte         { return v.manifest.TransferID }
+
+// TransferID returns the verified source's immutable transfer ID.
+func (v VerifiedSource) TransferID() [16]byte { return v.manifest.TransferID }
+
+// ManifestCommitment returns the canonical manifest commitment.
 func (v VerifiedSource) ManifestCommitment() [32]byte { return v.commitment }
-func (v VerifiedSource) ChunkSize() uint64            { return v.manifest.ChunkSize }
-func (v VerifiedSource) ChunkCount() uint64           { return v.manifest.ChunkCount }
-func (v VerifiedSource) PlaintextSize() uint64        { return v.manifest.PlaintextSize }
+
+// ChunkSize returns the verified source's ciphertext chunk size.
+func (v VerifiedSource) ChunkSize() uint64 { return v.manifest.ChunkSize }
+
+// ChunkCount returns the verified source's bounded chunk count.
+func (v VerifiedSource) ChunkCount() uint64 { return v.manifest.ChunkCount }
+
+// PlaintextSize returns the verified source's original byte count.
+func (v VerifiedSource) PlaintextSize() uint64 { return v.manifest.PlaintextSize }
 
 func validateManifestTime(m Manifest, now time.Time) error {
 	seconds := now.UTC().Unix()

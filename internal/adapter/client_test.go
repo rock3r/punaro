@@ -196,7 +196,7 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 	permit := attachmentv3.Permit{Audience: [32]byte{1}, Serial: [16]byte{2}, IssuerKeyID: [32]byte{3}, HolderDeviceID: [16]byte{4}, HolderGeneration: 1, HolderRole: attachmentv3.PermitHolderSender, TransferID: [16]byte{5}, ConversationID: [16]byte{6}, SenderDeviceID: [16]byte{4}, SenderGeneration: 1, RecipientDeviceID: [16]byte{7}, RecipientGeneration: 1, Operation: attachmentv3.PermitOperationSourceUpload, DirectoryHead: [32]byte{8}, MembershipCommitment: [32]byte{9}, RevocationEpoch: 1, IssuedAt: testUnix(t, clock.Add(-time.Second)), ExpiresAt: testUnix(t, clock.Add(20*time.Second)), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1, StagedManifestCommitment: [32]byte{10}}
 	body := []byte("ciphertext")
 	path := "/v3/attachments/05000000000000000000000000000000/source/chunks/0"
-	op, err := attachmentv3.BuildSignedAttachmentOperation(permit, http.MethodPut, path, body, [16]byte{11}, [32]byte{12}, uint64(clock.Unix()), testUnix(t, clock.Add(time.Second)), holderPrivate)
+	op, err := attachmentv3.BuildSignedAttachmentOperation(permit, http.MethodPut, path, body, [16]byte{11}, [32]byte{12}, testUnix(t, clock), testUnix(t, clock.Add(time.Second)), holderPrivate)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -508,7 +508,7 @@ func testV3OfferNotice(t *testing.T) []byte {
 	t.Helper()
 	private := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
 	now := time.Now().UTC().Truncate(time.Second)
-	manifest := attachmentv3.Manifest{Audience: [32]byte{1}, TransferID: [16]byte{2}, ConversationID: [16]byte{3}, SenderDeviceID: [16]byte{4}, SenderGeneration: 1, RecipientDeviceID: [16]byte{5}, RecipientGeneration: 1, DirectoryHead: [32]byte{6}, MembershipCommitment: [32]byte{7}, RevocationEpoch: 1, IssuedAt: uint64(now.Add(-time.Second).Unix()), ExpiresAt: uint64(now.Add(20 * time.Second).Unix()), ContentSalt: [32]byte{8}, PlaintextCommitment: [32]byte{9}, ChunkSize: 1, ChunkCount: 1, PlaintextSize: 1, SignerKeyID: [32]byte{10}}
+	manifest := attachmentv3.Manifest{Audience: [32]byte{1}, TransferID: [16]byte{2}, ConversationID: [16]byte{3}, SenderDeviceID: [16]byte{4}, SenderGeneration: 1, RecipientDeviceID: [16]byte{5}, RecipientGeneration: 1, DirectoryHead: [32]byte{6}, MembershipCommitment: [32]byte{7}, RevocationEpoch: 1, IssuedAt: testUnix(t, now.Add(-time.Second)), ExpiresAt: testUnix(t, now.Add(20*time.Second)), ContentSalt: [32]byte{8}, PlaintextCommitment: [32]byte{9}, ChunkSize: 1, ChunkCount: 1, PlaintextSize: 1, SignerKeyID: [32]byte{10}}
 	if err := attachmentv3.SignManifest(&manifest, private); err != nil {
 		t.Fatal(err)
 	}

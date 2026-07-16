@@ -46,6 +46,7 @@ func TestPermitHTTPHandlerMintsCanonicalV3SourceInitPermit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G115 -- the test clock is fixed and positive.
 	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(20 * time.Second).Unix())}}
 	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
 	if err != nil {
@@ -55,7 +56,7 @@ func TestPermitHTTPHandlerMintsCanonicalV3SourceInitPermit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpRequest := httptest.NewRequest(http.MethodPost, "/v3/permits", bytes.NewReader(raw))
+	httpRequest := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/permits", bytes.NewReader(raw))
 	httpRequest.Header.Set("Content-Type", "application/cbor")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httpRequest)
@@ -71,7 +72,7 @@ func TestPermitHTTPHandlerMintsCanonicalV3SourceInitPermit(t *testing.T) {
 	}
 	// Any content coding invalidates an otherwise signed body; the handler must
 	// not rely on Header.Get, which misses duplicate/empty values.
-	httpRequest = httptest.NewRequest(http.MethodPost, "/v3/permits", bytes.NewReader(raw))
+	httpRequest = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/permits", bytes.NewReader(raw))
 	httpRequest.Header.Set("Content-Type", "application/cbor")
 	httpRequest.Header.Add("Content-Encoding", "")
 	httpRequest.Header.Add("Content-Encoding", "gzip")
@@ -80,7 +81,7 @@ func TestPermitHTTPHandlerMintsCanonicalV3SourceInitPermit(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("content-encoding status=%d", response.Code)
 	}
-	httpRequest = httptest.NewRequest(http.MethodPost, "/v3/permits", bytes.NewReader(raw))
+	httpRequest = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/permits", bytes.NewReader(raw))
 	httpRequest.Header.Add("Content-Type", "application/cbor")
 	httpRequest.Header.Add("Content-Type", "application/octet-stream")
 	response = httptest.NewRecorder()

@@ -25,6 +25,8 @@ type SenderDeliveryAuthority interface {
 	attachmentv3.OperationHolderResolver
 }
 
+// SenderDeliveryAuthorityProvider returns a fresh root-verified authority view
+// for one outbound sender transition.
 type SenderDeliveryAuthorityProvider interface {
 	ResolveSenderDeliveryAuthority(context.Context, time.Time) (SenderDeliveryAuthority, error)
 }
@@ -42,12 +44,21 @@ type SenderEnvelopeSealer interface {
 	SealSenderEnvelope(attachmentv3.VerifiedSource, attachmentv3.EnvelopeDirectoryKeyResolver, [32]byte, time.Time) (attachmentv3.Envelope, error)
 }
 
+// SenderLocalOperationSigner is the complete sender capability set held by
+// the local privileged implementation.
+type SenderLocalOperationSigner interface {
+	SenderOperationSigner
+	SenderEnvelopeSealer
+}
+
 type localSenderOperationSigner struct {
 	sender  SenderIdentity
 	private ed25519.PrivateKey
 }
 
-func NewLocalSenderOperationSigner(sender SenderIdentity, private ed25519.PrivateKey) *localSenderOperationSigner {
+// NewLocalSenderOperationSigner returns a sender-bound signer that keeps its
+// private key in the local privileged process.
+func NewLocalSenderOperationSigner(sender SenderIdentity, private ed25519.PrivateKey) SenderLocalOperationSigner {
 	return &localSenderOperationSigner{sender: sender, private: append(ed25519.PrivateKey(nil), private...)}
 }
 
@@ -76,6 +87,8 @@ func (s *localSenderOperationSigner) SealSenderEnvelope(source attachmentv3.Veri
 	return attachmentv3.SealRecipientEnvelope(source, directory, fileKey, s.private, now)
 }
 
+// SenderSourceInitializerOptions configures durable source-init and upload
+// processing for a sender-bound journal.
 type SenderSourceInitializerOptions struct {
 	Journal           *Journal
 	AuthorityProvider SenderDeliveryAuthorityProvider
@@ -96,6 +109,8 @@ type SenderSourceInitializer struct {
 	options SenderSourceInitializerOptions
 }
 
+// SenderOfferWorkerOptions configures envelope sealing and durable outbound
+// offer notification for an initialized sender source.
 type SenderOfferWorkerOptions struct {
 	Source              *SenderSourceInitializer
 	FileKeyProtector    SenderFileKeyProtector
@@ -104,6 +119,8 @@ type SenderOfferWorkerOptions struct {
 	OfferNoticeQueue    OfferNoticeQueue
 }
 
+// OfferNoticeQueue durably reserves and activates the relay notice for one
+// completed sender offer.
 type OfferNoticeQueue interface {
 	ReserveV3OfferNotice(context.Context, string, string, []byte, string) error
 	ActivateV3OfferNotice(context.Context, string) error
@@ -116,6 +133,7 @@ type SenderOfferWorker struct {
 	sealer  SenderEnvelopeSealer
 }
 
+// NewSenderOfferWorker constructs a worker that seals and queues relay offers.
 func NewSenderOfferWorker(options SenderOfferWorkerOptions) (*SenderOfferWorker, error) {
 	if options.Source == nil || options.Source.options.Journal == nil || options.FileKeyProtector == nil || options.NewAcceptanceNonce == nil || !validRelayIdentifier(options.RelaySenderEndpoint) || options.OfferNoticeQueue == nil {
 		return nil, errors.New("invalid sender offer worker")
@@ -127,6 +145,8 @@ func NewSenderOfferWorker(options SenderOfferWorkerOptions) (*SenderOfferWorker,
 	return &SenderOfferWorker{options: options, sealer: sealer}, nil
 }
 
+// NewSenderSourceInitializer constructs a worker for the sender source-init
+// and upload lifecycle.
 func NewSenderSourceInitializer(options SenderSourceInitializerOptions) (*SenderSourceInitializer, error) {
 	if options.Journal == nil || options.Journal.db == nil || !options.Journal.sender.valid() || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid sender source initializer")
@@ -634,6 +654,8 @@ type senderOperationRecord struct {
 // returning a terminal result when it did not.
 type SenderOutcomeWorker struct{ source *SenderSourceInitializer }
 
+// NewSenderOutcomeWorker constructs the recovery worker for ambiguous expired
+// sender operations.
 func NewSenderOutcomeWorker(source *SenderSourceInitializer) (*SenderOutcomeWorker, error) {
 	if source == nil || source.options.Journal == nil || source.options.AuthorityProvider == nil || source.options.Signer == nil || source.options.Transport == nil || source.options.NewID == nil || source.options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid sender outcome worker")
@@ -641,6 +663,8 @@ func NewSenderOutcomeWorker(source *SenderSourceInitializer) (*SenderOutcomeWork
 	return &SenderOutcomeWorker{source: source}, nil
 }
 
+// Reconcile resolves an ambiguous sender operation without replaying its
+// expired capability.
 func (w *SenderOutcomeWorker) Reconcile(ctx context.Context, transferID [16]byte, phase senderPhase, chunk uint64) (attachmentv3.TransferResult, error) {
 	if w == nil || transferID == [16]byte{} {
 		return attachmentv3.TransferResult{}, errors.New("invalid sender outcome request")

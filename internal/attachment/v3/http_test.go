@@ -22,13 +22,13 @@ func TestAttachmentHTTPHandlerFailsClosedBeforeAuthorityLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source?x=1", nil)
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source?x=1", nil)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("query status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source", nil)
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source", nil)
 	request.Header.Add("Content-Encoding", "")
 	request.Header.Add("Content-Encoding", "gzip")
 	response = httptest.NewRecorder()
@@ -36,13 +36,13 @@ func TestAttachmentHTTPHandlerFailsClosedBeforeAuthorityLookup(t *testing.T) {
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("duplicate content encoding status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source", nil)
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v3/attachments/05000000000000000000000000000000/source", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("empty source status=%d", response.Code)
 	}
-	request = httptest.NewRequest(http.MethodGet, "/v3/attachments/05000000000000000000000000000000/chunks/0", nil)
+	request = httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v3/attachments/05000000000000000000000000000000/chunks/0", nil)
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {

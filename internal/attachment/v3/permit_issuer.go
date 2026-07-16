@@ -124,6 +124,8 @@ type PermitIssuanceAuthority interface {
 	CurrentPermitBinding(time.Time) (DirectoryPermitBinding, error)
 }
 
+// PermitIssuerOptions configures bounded permit issuance and its durable
+// request ledger.
 type PermitIssuerOptions struct {
 	Store         *sourceStore
 	IssuerKeyID   [32]byte
@@ -154,6 +156,8 @@ type PermitIssuer struct {
 	random        io.Reader
 }
 
+// NewPermitIssuer constructs a permit issuer with bounded policy and a private
+// durable source store.
 func NewPermitIssuer(options PermitIssuerOptions) (*PermitIssuer, error) {
 	if options.Store == nil || options.Store.db == nil || options.IssuerKeyID == [32]byte{} || len(options.PrivateKey) != ed25519.PrivateKeySize || options.MaxLifetime <= 0 || options.MaxLifetime > 30*time.Second || options.MaxBytes == 0 || options.MaxBytes > maxPermitCiphertextBytes || options.MaxChunks == 0 || options.MaxChunks > 4096 || options.MaxOperations == 0 || options.MaxOperations > 4096 || options.MaxActive == 0 || options.MaxActive > maxRetainedPermitRequests {
 		return nil, errors.New("invalid v3 permit issuer configuration")
@@ -167,6 +171,8 @@ func NewPermitIssuer(options PermitIssuerOptions) (*PermitIssuer, error) {
 	return &PermitIssuer{store: options.Store, issuerKeyID: options.IssuerKeyID, privateKey: append(ed25519.PrivateKey(nil), options.PrivateKey...), maxLifetime: options.MaxLifetime, maxBytes: options.MaxBytes, maxChunks: options.MaxChunks, maxOperations: options.MaxOperations, maxActive: options.MaxActive, now: options.Now, random: options.Random}, nil
 }
 
+// Issue validates, signs, and durably records one permit request. Its boolean
+// result reports whether an immutable prior issuance was replayed.
 func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authority PermitIssuanceAuthority) (Permit, bool, error) {
 	if i == nil || i.store == nil || authority == nil || validatePermitRequest(request) != nil {
 		return Permit{}, false, errors.New("invalid v3 permit issuance")
@@ -228,7 +234,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 		if err := SignPermit(&permit, i.privateKey); err != nil || VerifyPermit(permit, authority, now) != nil {
 			return Permit{}, false, errors.New("issuer generated an invalid v3 permit")
 		}
-		stored, replayed, collision, err := i.persistRequest(ctx, request, rawRequest, permit, authority, now)
+		stored, replayed, collision, err := i.persistRequest(ctx, request, rawRequest, permit, now)
 		if err != nil {
 			return Permit{}, false, err
 		}
@@ -240,7 +246,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	return Permit{}, false, errors.New("v3 permit serial collision limit exceeded")
 }
 
-func (i *PermitIssuer) persistRequest(ctx context.Context, request PermitRequest, rawRequest []byte, permit Permit, authority PermitIssuanceAuthority, now time.Time) (Permit, bool, bool, error) {
+func (i *PermitIssuer) persistRequest(ctx context.Context, request PermitRequest, rawRequest []byte, permit Permit, now time.Time) (Permit, bool, bool, error) {
 	rawPermit, err := EncodePermit(permit)
 	if err != nil {
 		return Permit{}, false, false, err
@@ -341,6 +347,7 @@ func minPermitExpiry(values ...uint64) uint64 {
 	return minimum
 }
 
+// EncodePermitRequest returns the canonical wire encoding of a valid request.
 func EncodePermitRequest(request PermitRequest) ([]byte, error) {
 	if err := validatePermitRequest(request); err != nil {
 		return nil, err
@@ -348,6 +355,7 @@ func EncodePermitRequest(request PermitRequest) ([]byte, error) {
 	return canonicalEncoding.Marshal(request.wire())
 }
 
+// DecodePermitRequest accepts only a bounded canonical permit request.
 func DecodePermitRequest(raw []byte) (PermitRequest, error) {
 	if len(raw) == 0 || len(raw) > maxPermitRequestEncodedBytes {
 		return PermitRequest{}, errors.New("invalid v3 permit request")

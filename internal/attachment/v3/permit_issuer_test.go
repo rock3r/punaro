@@ -66,6 +66,7 @@ func TestPermitIssuerMintsV3PermitAndReturnsExactRetry(t *testing.T) {
 	authority := permitIssuanceAuthorityStub{
 		issuerID: requestIssuerID(), issuer: issuerPublic,
 		holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic,
+		// #nosec G115 -- the test clock is fixed and positive.
 		binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(20 * time.Second).Unix())},
 	}
 	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
@@ -114,6 +115,7 @@ func TestPermitIssuerRetainsRequestIdentityAfterPermitExpiry(t *testing.T) {
 	if err := SignPermitRequest(&request, holderPrivate); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G115 -- the test clock is fixed and positive.
 	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(5 * time.Minute).Unix())}}
 	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
 	if err != nil {
@@ -124,7 +126,9 @@ func TestPermitIssuerRetainsRequestIdentityAfterPermitExpiry(t *testing.T) {
 	}
 	clock = clock.Add(30 * time.Second)
 	reusedID := request
+	// #nosec G115 -- the test clock is fixed and positive.
 	reusedID.IssuedAt = uint64(clock.Unix())
+	// #nosec G115 -- the test clock is fixed and positive.
 	reusedID.ExpiresAt = uint64(clock.Add(20 * time.Second).Unix())
 	reusedID.MaxBytes++
 	if err := SignPermitRequest(&reusedID, holderPrivate); err != nil {
@@ -154,6 +158,7 @@ func TestPermitIssuerBoundsRetainedRequestJournal(t *testing.T) {
 	if err := SignPermitRequest(&request, holderPrivate); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G115 -- the test clock is fixed and positive.
 	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(5 * time.Minute).Unix())}}
 	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 1, Now: func() time.Time { return clock }})
 	if err != nil {
@@ -192,6 +197,7 @@ func TestPermitIssuerReturnsOriginalExpiredReceiptForRecovery(t *testing.T) {
 	if err := SignPermitRequest(&request, holderPrivate); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G115 -- the test clock is fixed and positive.
 	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: request.HolderDeviceID, holderGen: request.HolderGeneration, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: uint64(clock.Add(time.Minute).Unix())}}
 	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
 	if err != nil {
@@ -211,5 +217,6 @@ func TestPermitIssuerReturnsOriginalExpiredReceiptForRecovery(t *testing.T) {
 func requestIssuerID() [32]byte { return testHash(3) }
 
 func testPermitRequest(now time.Time) PermitRequest {
+	// #nosec G115 -- the test clock is fixed and positive.
 	return PermitRequest{RequestID: testID(1), HolderDeviceID: testID(4), HolderGeneration: 1, HolderRole: permitHolderSender, TransferID: testID(5), ConversationID: testID(6), SenderDeviceID: testID(4), SenderGeneration: 1, RecipientDeviceID: testID(7), RecipientGeneration: 1, Operation: permitOperationSourceInit, MembershipCommitment: testHash(9), StagedManifestCommitment: testHash(10), IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(20 * time.Second).Unix()), MaxBytes: 1024, MaxChunks: 1, MaxOperations: 1}
 }

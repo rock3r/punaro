@@ -31,6 +31,9 @@ type RecipientAcceptanceAuthority interface {
 	attachmentv3.PermitAuthorityResolver
 	attachmentv3.OperationHolderResolver
 }
+
+// RecipientAcceptanceAuthorityProvider returns a fresh root-verified authority
+// view for one recipient acceptance transition.
 type RecipientAcceptanceAuthorityProvider interface {
 	ResolveRecipientAcceptanceAuthority(context.Context, time.Time) (RecipientAcceptanceAuthority, error)
 }
@@ -116,6 +119,8 @@ func (s *localRecipientOperationSigner) BuildReceiptDownloadOperation(permit att
 	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, body, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
 }
 
+// RecipientAcceptanceWorkerOptions configures the recipient acceptance worker
+// and its local authority boundaries.
 type RecipientAcceptanceWorkerOptions struct {
 	Journal           *Journal
 	AuthorityProvider RecipientAcceptanceAuthorityProvider
@@ -133,6 +138,8 @@ type RecipientAcceptanceWorker struct {
 	options RecipientAcceptanceWorkerOptions
 }
 
+// NewRecipientAcceptanceWorker constructs a recipient acceptance worker with
+// the required sender-independent dependencies.
 func NewRecipientAcceptanceWorker(options RecipientAcceptanceWorkerOptions) (*RecipientAcceptanceWorker, error) {
 	if options.Journal == nil || options.Journal.db == nil || !options.Journal.recipient.valid() || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid recipient acceptance worker")
@@ -483,7 +490,7 @@ func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
 	return request.ExpiresAt <= uint64(now.Unix())
 }
 
-func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, now time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
+func (w *RecipientAcceptanceWorker) finishReceiptOutcome(messageID string, record receiptAcceptanceRecord, raw []byte, _ time.Time, terminal func() (attachmentv3.TransferResult, error)) (attachmentv3.TransferResult, error) {
 	result, err := attachmentv3.DecodeTransferResult(raw)
 	if err != nil || result.TransferID != record.transferID || result.ManifestCommitment != record.manifestCommitment || result.State != attachmentv3.TransferStateAccepted || result.AttemptGeneration != 0 {
 		return terminal()

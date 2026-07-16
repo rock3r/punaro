@@ -49,6 +49,7 @@ func TestOutcomeRedemptionIsFreshAuthorizedAndExactReplay(t *testing.T) {
 	original := permitForManifest(source.manifest, source.raw, now.Add(-31*time.Second))
 	original.Serial = testID(77)
 	original.Operation = permitOperationSourceInit
+	// #nosec G115 -- test clock is fixed and positive.
 	original.ExpiresAt = uint64(now.Add(-1 * time.Second).Unix())
 	if err := SignPermit(&original, issuerPrivate); err != nil {
 		t.Fatal(err)
@@ -120,6 +121,7 @@ func TestOutcomeTerminalizesExpiredSourceInitBeforeLateInitialization(t *testing
 	}
 	original := permitForManifest(manifest, rawManifest, now.Add(-31*time.Second))
 	original.Serial, original.Operation, original.MaxOperations = testID(74), permitOperationSourceInit, 1
+	// #nosec G115 -- test clock is fixed and positive.
 	original.ExpiresAt = uint64(now.Add(-time.Second).Unix())
 	if err := SignPermit(&original, issuerPrivate); err != nil {
 		t.Fatal(err)

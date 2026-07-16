@@ -22,7 +22,7 @@ func FuzzDecodeManifest(f *testing.F) {
 	f.Add(raw)
 	f.Add([]byte{})
 	f.Add(bytes.Repeat([]byte{0xff}, maxManifestEncodedBytes+1))
-	f.Fuzz(func(t *testing.T, raw []byte) {
+	f.Fuzz(func(_ *testing.T, raw []byte) {
 		_, _ = DecodeManifest(raw)
 	})
 }
@@ -53,7 +53,7 @@ func FuzzDecodeOfferNotice(f *testing.F) {
 	f.Add(notice)
 	f.Add(offerNoticePrefix)
 	f.Add(string(bytes.Repeat([]byte{'x'}, maxOfferNoticeBodyBytes+1)))
-	f.Fuzz(func(t *testing.T, body string) {
+	f.Fuzz(func(_ *testing.T, body string) {
 		_, _ = DecodeOfferNotice(body)
 	})
 }
@@ -62,7 +62,7 @@ func FuzzParseAttachmentRoute(f *testing.F) {
 	f.Add(http.MethodGet, "/v3/attachments/01000000000000000000000000000000/chunks/0")
 	f.Add(http.MethodPost, "/v3/attachments/")
 	f.Add("", "")
-	f.Fuzz(func(t *testing.T, method, path string) {
+	f.Fuzz(func(_ *testing.T, method, path string) {
 		_, _ = ParseAttachmentRoute(method, path)
 	})
 }

@@ -85,6 +85,7 @@ func TestPermitExportsOnlyProtocolOperationIdentifiers(t *testing.T) {
 }
 
 func testPermit(now time.Time) Permit {
+	// #nosec G115 -- the test clock is fixed and positive.
 	return Permit{Audience: testHash(1), Serial: testID(2), IssuerKeyID: testHash(3), HolderDeviceID: testID(4), HolderGeneration: 1, HolderRole: permitHolderSender, TransferID: testID(5), ConversationID: testID(6), SenderDeviceID: testID(4), SenderGeneration: 1, RecipientDeviceID: testID(7), RecipientGeneration: 1, Operation: permitOperationSourceInit, DirectoryHead: testHash(8), MembershipCommitment: testHash(9), RevocationEpoch: 1, IssuedAt: uint64(now.Unix()), ExpiresAt: uint64(now.Add(30 * time.Second).Unix()), MaxBytes: maxPermitCiphertextBytes, MaxChunks: 4096, MaxOperations: 1, StagedManifestCommitment: testHash(10)}
 }
 
