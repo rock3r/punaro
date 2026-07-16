@@ -6,6 +6,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,10 @@ func TestValidateInboundOfferRequiresExactImmutableRelayAndDirectoryMapping(t *t
 	mapping.RecipientDeviceID = bytes16(9)
 	if _, err := ValidateInboundOffer(InboundOffer{PunaroMessageID: "message-1", RelayConversationID: "relay-conversation", Body: notice}, mapping); err == nil {
 		t.Fatal("offer with a mismatched recipient device was accepted")
+	}
+	mapping.RecipientDeviceID = bytes16(3)
+	if _, err := ValidateInboundOffer(InboundOffer{PunaroMessageID: strings.Repeat("x", maxRelayIdentifierBytes+1), RelayConversationID: mapping.RelayConversationID, Body: notice}, mapping); err == nil {
+		t.Fatal("oversized mailbox message ID was accepted")
 	}
 }
 

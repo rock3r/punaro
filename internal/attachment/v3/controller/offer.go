@@ -13,6 +13,8 @@ import (
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 )
 
+const maxRelayIdentifierBytes = 256
+
 // Mapping is one immutable local policy binding between a text relay
 // conversation and the independently authenticated v3 directory membership.
 // The mapping must be provisioned by the local operator, never inferred from
@@ -46,17 +48,21 @@ type TransferBindingResolver interface {
 }
 
 func (m Mapping) valid() bool {
-	return strings.TrimSpace(m.RelayConversationID) != "" && m.ConversationID != [16]byte{} &&
+	return validRelayIdentifier(m.RelayConversationID) && m.ConversationID != [16]byte{} &&
 		m.SenderDeviceID != [16]byte{} && m.SenderGeneration != 0 &&
 		m.RecipientDeviceID != [16]byte{} && m.RecipientGeneration != 0 &&
 		m.MembershipCommitment != [32]byte{}
+}
+
+func validRelayIdentifier(value string) bool {
+	return strings.TrimSpace(value) != "" && len(value) <= maxRelayIdentifierBytes && !strings.ContainsAny(value, "\x00\r\n")
 }
 
 // ValidateInboundOffer recognizes only an offer carried in the mapped relay
 // conversation and bound to every immutable directory identity in Mapping.
 // A successful result is discovery data only; it is not acceptance authority.
 func ValidateInboundOffer(inbound InboundOffer, mapping Mapping) (attachmentv3.OfferNotice, error) {
-	if !mapping.valid() || strings.TrimSpace(inbound.PunaroMessageID) == "" || inbound.RelayConversationID != mapping.RelayConversationID {
+	if !mapping.valid() || !validRelayIdentifier(inbound.PunaroMessageID) || !validRelayIdentifier(inbound.RelayConversationID) || inbound.RelayConversationID != mapping.RelayConversationID {
 		return attachmentv3.OfferNotice{}, errors.New("unmapped v3 offer delivery")
 	}
 	notice, err := attachmentv3.DecodeOfferNotice(inbound.Body)
