@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -76,6 +77,56 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 	permit, err := client.IssuePermit(context.Background(), permitRequest)
 	if err != nil || permit != expectedPermit {
 		t.Fatalf("permit=%+v err=%v", permit, err)
+	}
+}
+
+func TestHTTPRelayClientValidatesSenderWithoutMessageMutation(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/sender-validation" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		var request map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["from_endpoint"] != "agent/a" {
+			t.Fatalf("request=%v err=%v", request, err)
+		}
+		_, _ = w.Write([]byte(`{"authorized":true}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", machinePrivate, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.ValidateSender(context.Background(), "conversation-1", "agent/a"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		status   int
+		terminal bool
+	}{{http.StatusForbidden, true}, {http.StatusNotFound, true}, {http.StatusConflict, false}, {http.StatusInternalServerError, false}} {
+		t.Run(http.StatusText(test.status), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(test.status) }))
+			defer server.Close()
+			client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = client.Send(context.Background(), "conversation-1", "agent/a", "offer", "offer-1")
+			var terminal terminalOfferNoticeFailure
+			if err == nil || !errors.As(err, &terminal) || terminal.PermanentOfferNoticeFailure() != test.terminal {
+				t.Fatalf("status=%d err=%v terminal=%v", test.status, err, terminal)
+			}
+		})
 	}
 }
 

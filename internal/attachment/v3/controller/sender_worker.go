@@ -105,7 +105,8 @@ type SenderOfferWorkerOptions struct {
 }
 
 type OfferNoticeQueue interface {
-	EnqueueV3OfferNotice(context.Context, string, string, []byte, string) error
+	ReserveV3OfferNotice(context.Context, string, string, []byte, string) error
+	ActivateV3OfferNotice(context.Context, string) error
 }
 
 // SenderOfferWorker exposes a complete encrypted source through the relay
@@ -127,7 +128,7 @@ func NewSenderOfferWorker(options SenderOfferWorkerOptions) (*SenderOfferWorker,
 }
 
 func NewSenderSourceInitializer(options SenderSourceInitializerOptions) (*SenderSourceInitializer, error) {
-	if options.Journal == nil || options.Journal.db == nil || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
+	if options.Journal == nil || options.Journal.db == nil || !options.Journal.sender.valid() || options.AuthorityProvider == nil || options.Signer == nil || options.Transport == nil || options.NewID == nil || options.NewIdempotencyKey == nil {
 		return nil, errors.New("invalid sender source initializer")
 	}
 	if options.Now == nil {
@@ -165,7 +166,7 @@ func (w *SenderSourceInitializer) Initialize(ctx context.Context, transferID [16
 		return attachmentv3.TransferResult{}, err
 	}
 	mapping, found, err := w.options.Journal.mapping(transfer.relayConversationID)
-	if err != nil || !found || !mapping.valid() {
+	if err != nil || !found || !mapping.valid() || mapping.SenderDeviceID != w.options.Journal.sender.DeviceID || mapping.SenderGeneration != w.options.Journal.sender.Generation {
 		return attachmentv3.TransferResult{}, errors.New("sender source mapping is unavailable")
 	}
 	binding, err := authority.ResolveTransferBinding(ctx, mapping.ConversationID, mapping.SenderDeviceID, mapping.SenderGeneration, mapping.RecipientDeviceID, mapping.RecipientGeneration, mapping.MembershipCommitment, now)
@@ -352,7 +353,7 @@ func (w *SenderSourceInitializer) freshSenderTransfer(ctx context.Context, trans
 		return senderTransferRecord{}, attachmentv3.Manifest{}, err
 	}
 	mapping, found, err := w.options.Journal.mapping(transfer.relayConversationID)
-	if err != nil || !found || !mapping.valid() {
+	if err != nil || !found || !mapping.valid() || mapping.SenderDeviceID != w.options.Journal.sender.DeviceID || mapping.SenderGeneration != w.options.Journal.sender.Generation {
 		return senderTransferRecord{}, attachmentv3.Manifest{}, errors.New("sender source mapping is unavailable")
 	}
 	binding, err := authority.ResolveTransferBinding(ctx, mapping.ConversationID, mapping.SenderDeviceID, mapping.SenderGeneration, mapping.RecipientDeviceID, mapping.RecipientGeneration, mapping.MembershipCommitment, now)
@@ -400,6 +401,9 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
+	if err := w.reserveOfferNotice(ctx, transfer, offer); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
 	record, err := sourceWorker.options.Journal.ensureSenderOperation(transfer, senderPhaseOffer, 0, uint64(len(offer)), now, sourceWorker.options.Signer, sourceWorker.options.NewID, sourceWorker.options.NewIdempotencyKey)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
@@ -409,13 +413,13 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 		if err != nil {
 			return attachmentv3.TransferResult{}, err
 		}
-		return result, w.queueOfferNotice(ctx, transfer, offer)
+		return result, w.activateOfferNotice(ctx, transfer)
 	}
 	permit, operation, err := sourceWorker.credentials(ctx, transfer, senderPhaseOffer, 0, record, offer, authority, now)
 	if err != nil {
 		if reconciled, reconcileErr := sourceWorker.reconcileExpired(ctx, transfer.transferID, senderPhaseOffer, 0, record, now); reconcileErr == nil {
 			if reconciled.State == attachmentv3.TransferStateOffered {
-				return reconciled, w.queueOfferNotice(ctx, transfer, offer)
+				return reconciled, w.activateOfferNotice(ctx, transfer)
 			}
 			return reconciled, nil
 		}
@@ -436,17 +440,36 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 	if err := sourceWorker.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseOffer, 0, raw); err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	if err := w.queueOfferNotice(ctx, transfer, offer); err != nil {
+	if err := w.activateOfferNotice(ctx, transfer); err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
 	return result, nil
 }
 
-func (w *SenderOfferWorker) queueOfferNotice(ctx context.Context, transfer senderTransferRecord, offer []byte) error {
+func (w *SenderOfferWorker) reserveOfferNotice(ctx context.Context, transfer senderTransferRecord, offer []byte) error {
 	if w == nil || w.options.OfferNoticeQueue == nil || !validRelayIdentifier(transfer.relayConversationID) || !validRelayIdentifier(w.options.RelaySenderEndpoint) || len(offer) == 0 {
 		return errors.New("sender offer notice queue is unavailable")
 	}
-	return w.options.OfferNoticeQueue.EnqueueV3OfferNotice(ctx, transfer.relayConversationID, w.options.RelaySenderEndpoint, offer, fmt.Sprintf("v3-offer-%x", transfer.transferID))
+	// Pin the source before reserving the external outbox row. A crash between
+	// these durable commits is conservative: the source remains recoverable and
+	// no remote offer has yet been attempted.
+	if err := w.options.Source.options.Journal.holdSenderOffer(transfer.transferID); err != nil {
+		return err
+	}
+	if err := w.options.OfferNoticeQueue.ReserveV3OfferNotice(ctx, transfer.relayConversationID, w.options.RelaySenderEndpoint, offer, fmt.Sprintf("v3-offer-%x", transfer.transferID)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w *SenderOfferWorker) activateOfferNotice(ctx context.Context, transfer senderTransferRecord) error {
+	if w == nil || w.options.OfferNoticeQueue == nil || transfer.transferID == [16]byte{} {
+		return errors.New("sender offer notice queue is unavailable")
+	}
+	if err := w.options.OfferNoticeQueue.ActivateV3OfferNotice(ctx, fmt.Sprintf("v3-offer-%x", transfer.transferID)); err != nil {
+		return err
+	}
+	return w.options.Source.options.Journal.releaseSenderOfferHold(transfer.transferID)
 }
 
 func (w *SenderOfferWorker) ensureOffer(ctx context.Context, transfer senderTransferRecord, manifest attachmentv3.Manifest, source attachmentv3.VerifiedSource, authority SenderDeliveryAuthority, now time.Time) ([]byte, error) {

@@ -163,6 +163,79 @@ for a future receipt worker. Approval is not acceptance, download, or
 decryption. The controller never accepts arbitrary permit records, URLs,
 Access headers, or device keys on its command line.
 
+### Local v3 sender controller
+
+A source machine uses a distinct sender journal; it must not share the
+recipient controller journal. Provision these private, absolute paths and
+identities through the service-secret mechanism, never through mailbox text or
+command-line key flags:
+
+- `PUNARO_ATTACHMENT_SENDER_JOURNAL`: private sender SQLite journal.
+- `PUNARO_ATTACHMENT_ARTIFACT_STORE`: separate private SQLite reservation
+  store for file-key/salt/nonce uniqueness.
+- `PUNARO_ATTACHMENT_OFFER_OUTBOX`: the same private
+  `attachment-offers.db` path used by the local `punaro-adapter` data
+  directory, so its normal sync loop can recover an undelivered offer notice.
+- `PUNARO_ATTACHMENT_SENDER_ID` and
+  `PUNARO_ATTACHMENT_SENDER_GENERATION`: this machine's directory attachment
+  device and non-zero generation.
+- `PUNARO_ATTACHMENT_SENDER_SIGNING_PRIVATE_KEY_FILE`: absolute private
+  sender signing key path.
+- macOS: `PUNARO_ATTACHMENT_HOST_KEY_SERVICE` and
+  `PUNARO_ATTACHMENT_HOST_KEY_ACCOUNT`, naming a Keychain generic-password
+  whose value is a 32-byte base64 key. Linux/systemd:
+  `PUNARO_ATTACHMENT_HOST_CREDENTIAL_DIRECTORY` and
+  `PUNARO_ATTACHMENT_HOST_CREDENTIAL_NAME`, naming a private LoadCredential
+  file. This host-bound key wraps the per-file key; it is not an environment
+  value or journal field.
+
+The sender additionally needs the same machine credential, relay URL,
+directory root/checkpoint, and optional paired Cloudflare Access service-token
+variables as `receive`. First pin the exact relationship locally with
+`punaro-attachment map-sender` using the same mapping flags as `map`; the
+command rejects a mapping whose source device is not the configured local
+sender. Then send only a local absolute regular input path:
+
+```sh
+punaro-attachment send \
+  --input /absolute/private/source-file \
+  --relay-conversation RELAY_CONVERSATION_ID \
+  --from agent/local-machine/attached-session \
+  --stage-id STABLE_CANONICAL_16_BYTE_BASE64URL_ID
+```
+
+Keep the stage ID until the recipient has confirmed the transfer. Re-running
+the exact command after a crash resumes the already sealed immutable source;
+once an expired source is reaped its ID becomes a non-reusable tombstone, so
+start a new transfer with a new ID rather than retrying it. Never reuse an ID
+for another file or conversation. The command validates its sender endpoint
+and reserves the exact offer outbox capacity before staging; the row becomes
+relay-flushable only after the offer operation succeeds. A crash-held row is
+ignored by the adapter and is never age-reaped. While the signed manifest and
+outcome capability remain valid, rerun the same stage so durable recovery can
+decide whether to activate it. After that lifetime it is deliberately
+fail-closed quarantine: do not delete or hand-edit it; follow the audited
+operator incident procedure, because neither a stale manifest nor a stale
+outcome capability can prove safe delivery. If an immediate relay attempt
+fails, the command returns an error but leaves ambiguous delivery rows for
+`punaro-adapter` to flush. A proven pre-append authorization rejection releases
+only that exact row, allowing an operator to correct the endpoint and retry.
+
+#### Expired held-offer incident procedure
+
+There is intentionally no in-product command that deletes or activates an
+expired inactive offer: its signed manifest and outcome capability can no
+longer establish which remote mutation occurred. Treat this as a local
+availability incident, not a reason to edit SQLite. Stop the sender command
+and adapter, preserve private copies of the sender journal and offer outbox
+with their ownership and permissions intact, and record the stage ID, transfer
+ID, relay conversation, and relevant relay audit window. An authorized
+operator must determine whether the old, now-expired transfer can be ignored.
+After that audit, keep the preserved copies as incident evidence and provision
+new private sender-journal, artifact-store, and offer-outbox paths; create a
+new stage ID and transfer. Do not reuse the quarantined stage ID, do not alter
+the old databases in place, and do not recover by changing the old offer route.
+
 V3 uses the conservative finite source limits compiled into the current
 runtime (64 MiB artifact, 4096 chunks, 256 KiB plaintext chunk; finite sender,
 recipient, conversation, and relay reservations). It is a singleton SQLite

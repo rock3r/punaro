@@ -343,6 +343,32 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 	return conversation, nil
 }
 
+// AuthorizeSender proves the exact live endpoint may append to a conversation
+// without creating a message or idempotency record. Callers use it only as an
+// advisory preflight; AppendMessage repeats every check at mutation time.
+func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now time.Time) error {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(machineID) == "" || strings.TrimSpace(endpoint) == "" {
+		return ErrForbidden
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, endpoint, machineID, now); err != nil {
+		return err
+	}
+	var capabilities Capability
+	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&CapSend == 0 {
+		return ErrForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("authorize message sender: %w", err)
+	}
+	return tx.Commit()
+}
+
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {

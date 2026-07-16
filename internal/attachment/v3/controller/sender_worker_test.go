@@ -19,7 +19,7 @@ import (
 )
 
 func TestSenderSourceInitializerPersistsExactCredentialsBeforeSubmission(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestSenderSourceInitializerPersistsExactCredentialsBeforeSubmission(t *test
 }
 
 func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 }
 
 func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestSenderOutcomeWorkerReconcilesExpiredAmbiguousSourceInit(t *testing.T) {
 }
 
 func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +250,21 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 	if queue.calls != 2 || queue.conversation != mapping.RelayConversationID || queue.endpoint != "sender-endpoint" || string(queue.offer) != string(offer) || queue.key != fmt.Sprintf("v3-offer-%x", manifest.TransferID) {
 		t.Fatalf("queue=%+v", queue)
 	}
+	transfer, err := journal.senderTransfer(manifest.TransferID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queue.err = errors.New("ambiguous outbox commit")
+	if err := offerWorker.reserveOfferNotice(context.Background(), transfer, offer); err == nil {
+		t.Fatal("ambiguous reserve failure accepted")
+	}
+	var holds int
+	if err := journal.db.QueryRow(`SELECT COUNT(*) FROM controller_sender_offer_holds WHERE transfer_id=?`, manifest.TransferID[:]).Scan(&holds); err != nil || holds != 1 {
+		t.Fatalf("holds=%d err=%v", holds, err)
+	}
+	if reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1); err != nil || reaped != 0 {
+		t.Fatalf("held reaped=%d err=%v", reaped, err)
+	}
 }
 
 type offerNoticeQueueStub struct {
@@ -259,11 +274,13 @@ type offerNoticeQueueStub struct {
 	err                         error
 }
 
-func (s *offerNoticeQueueStub) EnqueueV3OfferNotice(_ context.Context, conversation, endpoint string, offer []byte, key string) error {
+func (s *offerNoticeQueueStub) ReserveV3OfferNotice(_ context.Context, conversation, endpoint string, offer []byte, key string) error {
 	s.calls++
 	s.conversation, s.endpoint, s.offer, s.key = conversation, endpoint, append([]byte(nil), offer...), key
 	return s.err
 }
+
+func (s *offerNoticeQueueStub) ActivateV3OfferNotice(context.Context, string) error { return s.err }
 
 func stagedSenderManifest(t *testing.T, mapping Mapping, private ed25519.PrivateKey, now time.Time) (attachmentv3.Manifest, []byte) {
 	t.Helper()

@@ -23,6 +23,7 @@ import (
 type Journal struct {
 	db        *sql.DB
 	recipient RecipientIdentity
+	sender    SenderIdentity
 	acceptMu  sync.Mutex
 	receiptMu sync.Mutex
 	senderMu  sync.Mutex
@@ -81,13 +82,18 @@ const (
 	maxPendingOffers       = 64
 	maxPendingOfferBytes   = 2 << 20
 	maxPendingSenderStages = 64
+	// Sender-stage tombstones preserve the caller-visible invariant that a
+	// stage ID is never recycled into a different encrypted source. Retention is
+	// deliberately bounded; exhausting it fails closed rather than forgetting
+	// an identity which may still be referenced by a delayed offer notice.
+	maxRetainedSenderStageTombstones = 3*4096 + 16
 )
 
 // OpenJournal opens a private non-symlinked SQLite database. The parent is
 // created only with owner permissions and an existing weaker parent is
 // rejected rather than repaired implicitly.
 func OpenJournal(path string) (*Journal, error) {
-	return openJournal(path, RecipientIdentity{})
+	return openJournal(path, RecipientIdentity{}, SenderIdentity{})
 }
 
 // OpenJournalForRecipient creates a controller journal bound to exactly one
@@ -96,10 +102,20 @@ func OpenJournalForRecipient(path string, recipient RecipientIdentity) (*Journal
 	if !recipient.valid() {
 		return nil, errors.New("invalid controller recipient identity")
 	}
-	return openJournal(path, recipient)
+	return openJournal(path, recipient, SenderIdentity{})
 }
 
-func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
+// OpenJournalForSender creates a source journal bound to exactly one local
+// sender device generation. It is mutually exclusive with a recipient-bound
+// journal so a source state database cannot later authorize receipt actions.
+func OpenJournalForSender(path string, sender SenderIdentity) (*Journal, error) {
+	if !sender.valid() {
+		return nil, errors.New("invalid controller sender identity")
+	}
+	return openJournal(path, RecipientIdentity{}, sender)
+}
+
+func openJournal(path string, recipient RecipientIdentity, sender SenderIdentity) (*Journal, error) {
 	if !filepath.IsAbs(path) || strings.TrimSpace(path) == "" {
 		return nil, errors.New("controller journal path must be absolute")
 	}
@@ -150,6 +166,10 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			membership_commitment BLOB NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS controller_recipient_identity (
+			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+			device_id BLOB NOT NULL, generation INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_identity (
 			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
 			device_id BLOB NOT NULL, generation INTEGER NOT NULL
 		)`,
@@ -248,6 +268,13 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			created_at INTEGER NOT NULL,
 			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_stage_tombstones (
+			stage_id BLOB PRIMARY KEY, expired_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_sender_offer_holds (
+			transfer_id BLOB PRIMARY KEY,
+			FOREIGN KEY(transfer_id) REFERENCES controller_sender_transfers(transfer_id)
+		)`,
 		`CREATE TABLE IF NOT EXISTS controller_sender_chunks (
 			transfer_id BLOB NOT NULL, chunk_index INTEGER NOT NULL,
 			ciphertext BLOB NOT NULL, ciphertext_commitment BLOB NOT NULL,
@@ -290,15 +317,31 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate sender key journal: %w", err)
 	}
-	if err := bindJournalRecipient(db, recipient); err != nil {
+	switch {
+	case recipient.valid() && sender.valid():
 		_ = db.Close()
-		return nil, fmt.Errorf("bind controller recipient: %w", err)
+		return nil, errors.New("controller journal cannot bind sender and recipient")
+	case recipient.valid():
+		if err := bindJournalRecipient(db, recipient); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("bind controller recipient: %w", err)
+		}
+	case sender.valid():
+		if err := bindJournalSender(db, sender); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("bind controller sender: %w", err)
+		}
+	default:
+		if err := requireUnboundJournal(db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("bind generic controller journal: %w", err)
+		}
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Journal{db: db, recipient: recipient}, nil
+	return &Journal{db: db, recipient: recipient, sender: sender}, nil
 }
 
 // ensureSenderTransferKeySchema fails closed on an old journal which may
@@ -387,6 +430,15 @@ func ensureSenderTransferKeySchema(db *sql.DB) error {
 // cannot reopen an existing controller journal under another device identity
 // merely by changing its local configuration.
 func bindJournalRecipient(db *sql.DB, recipient RecipientIdentity) error {
+	if db == nil {
+		return errors.New("missing controller journal")
+	}
+	var senderDevice []byte
+	if err := db.QueryRowContext(context.Background(), `SELECT device_id FROM controller_sender_identity WHERE singleton = 1`).Scan(&senderDevice); err == nil {
+		return errors.New("controller journal sender identity mismatch")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	var device []byte
 	var generation uint64
 	err := db.QueryRowContext(context.Background(), `SELECT device_id, generation FROM controller_recipient_identity WHERE singleton = 1`).Scan(&device, &generation)
@@ -408,6 +460,50 @@ func bindJournalRecipient(db *sql.DB, recipient RecipientIdentity) error {
 	return nil
 }
 
+func requireUnboundJournal(db *sql.DB) error {
+	if db == nil {
+		return errors.New("missing controller journal")
+	}
+	for _, table := range []string{"controller_recipient_identity", "controller_sender_identity"} {
+		var count int
+		if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != 0 {
+			return errors.New("controller journal identity mismatch")
+		}
+	}
+	return nil
+}
+
+func bindJournalSender(db *sql.DB, sender SenderIdentity) error {
+	if db == nil {
+		return errors.New("missing controller journal")
+	}
+	var recipientDevice []byte
+	if err := db.QueryRowContext(context.Background(), `SELECT device_id FROM controller_recipient_identity WHERE singleton = 1`).Scan(&recipientDevice); err == nil {
+		return errors.New("controller journal recipient identity mismatch")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	var device []byte
+	var generation uint64
+	err := db.QueryRowContext(context.Background(), `SELECT device_id, generation FROM controller_sender_identity WHERE singleton = 1`).Scan(&device, &generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		if !sender.valid() {
+			return nil
+		}
+		if _, err := db.ExecContext(context.Background(), `INSERT INTO controller_sender_identity(singleton, device_id, generation) VALUES (1, ?, ?) ON CONFLICT(singleton) DO NOTHING`, sender.DeviceID[:], sender.Generation); err != nil {
+			return err
+		}
+		err = db.QueryRowContext(context.Background(), `SELECT device_id, generation FROM controller_sender_identity WHERE singleton = 1`).Scan(&device, &generation)
+	}
+	if err != nil || len(device) != len(sender.DeviceID) || generation == 0 {
+		return errors.New("invalid durable controller sender identity")
+	}
+	if !sender.valid() || !bytes.Equal(device, sender.DeviceID[:]) || generation != sender.Generation {
+		return errors.New("controller journal sender identity mismatch")
+	}
+	return nil
+}
+
 func (j *Journal) Close() error {
 	if j == nil || j.db == nil {
 		return nil
@@ -423,6 +519,9 @@ func (j *Journal) AddMapping(mapping Mapping) error {
 	}
 	if j.recipient.valid() && (mapping.RecipientDeviceID != j.recipient.DeviceID || mapping.RecipientGeneration != j.recipient.Generation) {
 		return errors.New("controller mapping recipient is not local")
+	}
+	if j.sender.valid() && (mapping.SenderDeviceID != j.sender.DeviceID || mapping.SenderGeneration != j.sender.Generation) {
+		return errors.New("controller mapping sender is not local")
 	}
 	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_mappings(
 		relay_conversation_id, conversation_id, sender_device_id, sender_generation,

@@ -88,6 +88,53 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a","members":[{"endpoint":"agent/a","capabilities":["send","receive","admin"]},{"endpoint":"agent/b","capabilities":["receive"]}]}`, "create", "create-1")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d", created.Code)
+	}
+	var conversation Conversation
+	if err := json.NewDecoder(created.Body).Decode(&conversation); err != nil {
+		t.Fatal(err)
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/a"}`, "validate-ok", ""); response.Code != http.StatusOK {
+		t.Fatalf("authorized validation status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b"}`, "validate-no-send", ""); response.Code != http.StatusForbidden {
+		t.Fatalf("no-send validation status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/sender-validation", `{"from_endpoint":"agent/b"}`, "validate-wrong-owner", ""); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong-owner validation status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, table := range []string{"messages", "idempotency"} {
+		var count int
+		if err := store.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("validation mutated %s count=%d err=%v", table, count, err)
+		}
+	}
+}
+
 func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

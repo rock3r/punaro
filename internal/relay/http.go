@@ -84,6 +84,13 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.appendMessage(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/sender-validation"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/sender-validation")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.validateSender(w, body, machineID, conversationID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/deliveries/") && strings.HasSuffix(r.URL.Path, "/ack"):
@@ -96,6 +103,21 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
 	}
+}
+
+func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
+	var request struct {
+		FromEndpoint string `json:"from_endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil || !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	if err := h.store.AuthorizeSender(conversationID, machineID, request.FromEndpoint, now); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authorized": true})
 }
 
 func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {

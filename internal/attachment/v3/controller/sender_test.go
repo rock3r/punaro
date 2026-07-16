@@ -14,7 +14,7 @@ import (
 )
 
 func TestSenderStagerPersistsEncryptedIntentOnlyAfterFreshExactMapping(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSenderStagerPersistsEncryptedIntentOnlyAfterFreshExactMapping(t *testin
 }
 
 func TestSenderStagerRejectsMismatchedLocalSigningKeyBeforeArtifactOrJournalSideEffects(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestSenderStagerRejectsMismatchedLocalSigningKeyBeforeArtifactOrJournalSide
 }
 
 func TestSenderStagerStageIDIsStableAndRejectsChangedPlaintext(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestSenderStagerStageIDIsStableAndRejectsChangedPlaintext(t *testing.T) {
 }
 
 func TestJournalReapsExpiredSenderStagesAndCiphertext(t *testing.T) {
-	journal, err := OpenJournal(filepath.Join(t.TempDir(), "private", "controller.db"))
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +205,17 @@ func TestJournalReapsExpiredSenderStagesAndCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := stager.Stage(context.Background(), bytes16(89), mapping.RelayConversationID, []byte("expired staged plaintext")); err != nil {
+	manifest, err := stager.Stage(context.Background(), bytes16(89), mapping.RelayConversationID, []byte("expired staged plaintext"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.holdSenderOffer(manifest.TransferID); err != nil {
+		t.Fatal(err)
+	}
+	if reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1); err != nil || reaped != 0 {
+		t.Fatalf("held reaped=%d err=%v", reaped, err)
+	}
+	if err := journal.releaseSenderOfferHold(manifest.TransferID); err != nil {
 		t.Fatal(err)
 	}
 	reaped, err := journal.ReapExpiredSenderStages(time.Unix(121, 0).UTC(), 1)
@@ -217,6 +227,12 @@ func TestJournalReapsExpiredSenderStagesAndCiphertext(t *testing.T) {
 		if err := journal.db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil || count != 0 {
 			t.Fatalf("table=%s count=%d err=%v", table, count, err)
 		}
+	}
+	if retired, err := journal.senderStageTombstoned(bytes16(89)); err != nil || !retired {
+		t.Fatalf("reaped stage identity tombstone retired=%t err=%v", retired, err)
+	}
+	if _, err := stager.Stage(context.Background(), bytes16(89), mapping.RelayConversationID, []byte("must never reuse an expired stage identity")); err == nil {
+		t.Fatal("reaped stage ID was silently reused")
 	}
 }
 

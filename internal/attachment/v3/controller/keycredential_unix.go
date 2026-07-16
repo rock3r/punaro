@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,11 +47,11 @@ func (p SystemdCredentialHostKeyProvider) SenderKeyEncryptionKeyID(ctx context.C
 }
 
 func (p SystemdCredentialHostKeyProvider) readCredential() ([]byte, error) {
-	if p.CredentialDirectory == "" || p.CredentialName == "" || filepath.Base(p.CredentialName) != p.CredentialName || strings.ContainsAny(p.CredentialName, `/\\`) {
+	if !filepath.IsAbs(p.CredentialDirectory) || p.CredentialName == "" || filepath.Base(p.CredentialName) != p.CredentialName || strings.ContainsAny(p.CredentialName, `/\\`) {
 		return nil, errors.New("invalid systemd sender key credential reference")
 	}
 	dir, err := os.Lstat(p.CredentialDirectory)
-	if err != nil || !dir.IsDir() || dir.Mode()&os.ModeSymlink != 0 {
+	if err != nil || !dir.IsDir() || dir.Mode()&os.ModeSymlink != 0 || dir.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("systemd sender credential directory is unavailable")
 	}
 	path := filepath.Join(p.CredentialDirectory, p.CredentialName)
@@ -58,7 +59,19 @@ func (p SystemdCredentialHostKeyProvider) readCredential() ([]byte, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
 		return nil, errors.New("systemd sender key credential is unavailable")
 	}
-	raw, err := os.ReadFile(path) // #nosec G304 -- path is an explicit private systemd credential reference, constrained above.
+	// #nosec G304 -- path is an explicit private systemd credential reference,
+	// constrained above. Read the checked descriptor rather than reopening the
+	// path so a replacement cannot select a different wrapping key.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, errors.New("systemd sender key credential is unavailable")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Mode().Perm()&0o077 != 0 {
+		return nil, errors.New("systemd sender key credential is unavailable")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 129))
 	if err != nil || len(raw) == 0 || len(raw) > 128 {
 		return nil, errors.New("systemd sender key credential is unavailable")
 	}

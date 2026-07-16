@@ -140,11 +140,15 @@ Do not bind two machines to one device, and do not treat a mailbox endpoint as
 an attachment identity. The relay refuses a permit request unless its enrolled
 machine credential is bound to the request holder's directory device.
 
-The sender stages and offers ciphertext via the v3 API, then invokes
-`punaro-adapter attachment-notify` (or queues `OfferNoticeOutbox`) with the
-exact canonical offer. This persists the notification before the adapter sends
-it through the existing conversation; retain a transfer-scoped idempotency key
-for that notification. The recipient's normal adapter delivery injects the
+`punaro-attachment send` stages, uploads, and offers ciphertext via the v3
+API. It takes a stable source-stage ID, then writes the exact canonical offer
+to the adapter's `OfferNoticeOutbox` before attempting the ordinary relay
+append. Point `PUNARO_ATTACHMENT_OFFER_OUTBOX` at the same private
+`attachment-offers.db` used by `punaro-adapter`; retain the stage ID to resume
+the same logical source after a local crash **only while its signed manifest
+and outcome capability remain valid**. After expiry, follow the operator
+guide's held-offer incident procedure; do not hand-edit or reuse the old state.
+The recipient's normal adapter delivery injects the
 bounded `punaro/attachment-offer/v3:` notice into its attached mailbox; its
 agent must parse it with `attachment/v3.DecodeOfferNotice` and perform the
 fresh directory, HPKE, permit, accept, download, and completion steps locally.

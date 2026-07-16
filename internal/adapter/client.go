@@ -38,6 +38,20 @@ type HTTPRelayClient struct {
 	accessToken AccessServiceToken
 }
 
+type relayHTTPStatusError struct {
+	status int
+	err    error
+}
+
+func (e *relayHTTPStatusError) Error() string { return e.err.Error() }
+func (e *relayHTTPStatusError) Unwrap() error { return e.err }
+
+// PermanentOfferNoticeFailure is true only for append-route responses whose
+// handler rejects before any message or idempotency row can be created.
+func (e *relayHTTPStatusError) PermanentOfferNoticeFailure() bool {
+	return e != nil && (e.status == http.StatusForbidden || e.status == http.StatusNotFound)
+}
+
 // NewHTTPRelayClient validates and creates a signed client for one machine.
 func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken) (*HTTPRelayClient, error) {
 	baseURL, err := url.Parse(rawURL)
@@ -111,8 +125,22 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 		return relay.Message{}, fmt.Errorf("conversation, sender endpoint, and idempotency key are required")
 	}
 	var message relay.Message
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", map[string]any{"from_endpoint": fromEndpoint, "body": body}, idempotencyKey, &message)
-	return message, err
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", map[string]any{"from_endpoint": fromEndpoint, "body": body}, idempotencyKey, &message)
+	if err != nil {
+		return message, &relayHTTPStatusError{status: status, err: err}
+	}
+	return message, nil
+}
+
+// ValidateSender performs an authenticated, side-effect-free check that an
+// attached local endpoint may send to one conversation. The subsequent Send
+// still authorizes independently, so this cannot become a time-of-check grant.
+func (c *HTTPRelayClient) ValidateSender(ctx context.Context, conversationID, fromEndpoint string) error {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" {
+		return fmt.Errorf("conversation and sender endpoint are required")
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/sender-validation", map[string]any{"from_endpoint": fromEndpoint}, nil)
+	return err
 }
 
 // SendV3OfferNotice makes one idempotent attempt to make a completed attachment

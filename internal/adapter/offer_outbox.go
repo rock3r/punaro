@@ -23,6 +23,8 @@ type OfferNoticeSender interface {
 	Send(context.Context, string, string, string, string) (relay.Message, error)
 }
 
+type terminalOfferNoticeFailure interface{ PermanentOfferNoticeFailure() bool }
+
 // OfferNoticeOutbox persists a completed-offer notification before attempting
 // the normal relay append. A crash after an accepted append but before delete
 // is safe: retrying the exact idempotency key returns the same relay message.
@@ -67,12 +69,16 @@ func OpenOfferNoticeOutbox(database string) (*OfferNoticeOutbox, error) {
 			conversation_id TEXT NOT NULL,
 			from_endpoint TEXT NOT NULL,
 			body TEXT NOT NULL,
+			active INTEGER NOT NULL DEFAULT 1,
 			created_at INTEGER NOT NULL
 		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			return nil, fmt.Errorf("initialize offer notice outbox: %w", err)
 		}
+	}
+	if err := ensureOfferNoticeActivationColumn(db); err != nil {
+		return nil, err
 	}
 	if err := os.Chmod(database, 0o600); err != nil {
 		return nil, fmt.Errorf("set offer notice outbox permissions: %w", err)
@@ -97,6 +103,15 @@ func (o *OfferNoticeOutbox) Close() error {
 // treating recipient discovery as complete. The idempotency key may be retried
 // only with byte-identical routing and offer content.
 func (o *OfferNoticeOutbox) EnqueueV3OfferNotice(ctx context.Context, conversationID, fromEndpoint string, rawOffer []byte, idempotencyKey string) error {
+	if err := o.ReserveV3OfferNotice(ctx, conversationID, fromEndpoint, rawOffer, idempotencyKey); err != nil {
+		return err
+	}
+	return o.ActivateV3OfferNotice(ctx, idempotencyKey)
+}
+
+// ReserveV3OfferNotice claims bounded durable capacity before the irreversible
+// remote offer mutation. Held rows are never flushed by the adapter.
+func (o *OfferNoticeOutbox) ReserveV3OfferNotice(ctx context.Context, conversationID, fromEndpoint string, rawOffer []byte, idempotencyKey string) error {
 	if o == nil || o.db == nil || strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" || strings.TrimSpace(idempotencyKey) == "" || len(conversationID) > maxOfferNoticeConversationBytes || len(fromEndpoint) > maxOfferNoticeEndpointBytes || len(idempotencyKey) > maxOfferNoticeIdempotencyBytes {
 		return errors.New("offer notice routing and outbox are required")
 	}
@@ -128,10 +143,34 @@ func (o *OfferNoticeOutbox) EnqueueV3OfferNotice(ctx context.Context, conversati
 	if pendingCount >= maxOfferNoticeOutboxRows || pendingBytes > int64(maxOfferNoticeOutboxBytes-rowBytes) {
 		return errors.New("v3 offer notice outbox capacity exhausted")
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?)`, idempotencyKey, conversationID, fromEndpoint, body, time.Now().UTC().UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_offer_notice_outbox(idempotency_key, conversation_id, from_endpoint, body, active, created_at) VALUES (?, ?, ?, ?, 0, ?)`, idempotencyKey, conversationID, fromEndpoint, body, time.Now().UTC().UnixMilli()); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ActivateV3OfferNotice makes a previously held exact notice eligible for
+// relay delivery only after the corresponding offer operation is durable.
+func (o *OfferNoticeOutbox) ActivateV3OfferNotice(ctx context.Context, idempotencyKey string) error {
+	if o == nil || o.db == nil || strings.TrimSpace(idempotencyKey) == "" {
+		return errors.New("offer notice activation is required")
+	}
+	result, err := o.db.ExecContext(ctx, `UPDATE v3_offer_notice_outbox SET active=1 WHERE idempotency_key=? AND active=0`, idempotencyKey)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed > 1 {
+		return errors.New("offer notice activation changed")
+	}
+	if changed == 1 {
+		return nil
+	}
+	var active int
+	if err := o.db.QueryRowContext(ctx, `SELECT active FROM v3_offer_notice_outbox WHERE idempotency_key=?`, idempotencyKey).Scan(&active); err != nil || active != 1 {
+		return errors.New("offer notice activation is unavailable")
+	}
+	return nil
 }
 
 func validateOfferNoticeOutboxPath(database string) error {
@@ -167,6 +206,35 @@ func validateOfferNoticeOutboxPath(database string) error {
 	return nil
 }
 
+func ensureOfferNoticeActivationColumn(db *sql.DB) error {
+	if db == nil {
+		return errors.New("offer notice outbox is unavailable")
+	}
+	rows, err := db.QueryContext(context.Background(), `PRAGMA table_info(v3_offer_notice_outbox)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	active := false
+	for rows.Next() {
+		var cid, notNull, primary int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primary); err != nil {
+			return err
+		}
+		active = active || name == "active"
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if active {
+		return nil
+	}
+	_, err = db.ExecContext(context.Background(), `ALTER TABLE v3_offer_notice_outbox ADD COLUMN active INTEGER NOT NULL DEFAULT 1`)
+	return err
+}
+
 // Flush sends every pending offer notice in stable creation order. A failure
 // leaves the current and later rows intact for a subsequent adapter cycle; a
 // successful relay response is deleted only when the exact persisted row still
@@ -175,7 +243,7 @@ func (o *OfferNoticeOutbox) Flush(ctx context.Context, sender OfferNoticeSender)
 	if o == nil || o.db == nil || sender == nil {
 		return errors.New("offer notice outbox and sender are required")
 	}
-	rows, err := o.db.QueryContext(ctx, `SELECT idempotency_key, conversation_id, from_endpoint, body FROM v3_offer_notice_outbox ORDER BY created_at, idempotency_key`)
+	rows, err := o.db.QueryContext(ctx, `SELECT idempotency_key, conversation_id, from_endpoint, body FROM v3_offer_notice_outbox WHERE active=1 ORDER BY created_at, idempotency_key`)
 	if err != nil {
 		return err
 	}
@@ -194,13 +262,20 @@ func (o *OfferNoticeOutbox) Flush(ctx context.Context, sender OfferNoticeSender)
 	}
 	for _, notice := range notices {
 		if _, err := sender.Send(ctx, notice.conversation, notice.endpoint, notice.body, notice.key); err != nil {
+			var terminal terminalOfferNoticeFailure
+			if errors.As(err, &terminal) && terminal.PermanentOfferNoticeFailure() {
+				if _, deleteErr := o.db.ExecContext(ctx, `DELETE FROM v3_offer_notice_outbox WHERE idempotency_key = ? AND conversation_id = ? AND from_endpoint = ? AND body = ?`, notice.key, notice.conversation, notice.endpoint, notice.body); deleteErr != nil {
+					return deleteErr
+				}
+				return fmt.Errorf("terminal v3 offer notice rejection: %w", err)
+			}
 			return fmt.Errorf("deliver v3 offer notice: %w", err)
 		}
 		result, err := o.db.ExecContext(ctx, `DELETE FROM v3_offer_notice_outbox WHERE idempotency_key = ? AND conversation_id = ? AND from_endpoint = ? AND body = ?`, notice.key, notice.conversation, notice.endpoint, notice.body)
 		if err != nil {
 			return err
 		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if affected, err := result.RowsAffected(); err != nil || affected < 0 || affected > 1 {
 			return errors.New("offer notice outbox changed during delivery")
 		}
 	}

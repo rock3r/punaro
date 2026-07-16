@@ -54,7 +54,7 @@ type SenderFileKeyProtector interface {
 type SenderStager struct{ options SenderStageOptions }
 
 func NewSenderStager(options SenderStageOptions) (*SenderStager, error) {
-	if options.Journal == nil || options.Journal.db == nil || options.ArtifactStore == nil || options.BindingResolver == nil || !options.Sender.valid() || len(options.SigningKey) != ed25519.PrivateKeySize || options.FileKeyProtector == nil || options.NewID == nil || options.ChunkSize == 0 || options.ChunkSize > 256<<10 {
+	if options.Journal == nil || options.Journal.db == nil || !options.Journal.sender.valid() || options.Journal.sender != options.Sender || options.ArtifactStore == nil || options.BindingResolver == nil || !options.Sender.valid() || len(options.SigningKey) != ed25519.PrivateKeySize || options.FileKeyProtector == nil || options.NewID == nil || options.ChunkSize == 0 || options.ChunkSize > 256<<10 {
 		return nil, errors.New("invalid sender staging worker")
 	}
 	if options.Now == nil {
@@ -73,6 +73,15 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 		return attachmentv3.Manifest{}, errors.New("invalid sender staging request")
 	}
 	now := s.options.Now().UTC()
+	// Reaping is entirely local: it must keep bounded staging capacity usable
+	// even while the directory or relay is unavailable. Tombstones make a
+	// reaped caller-visible stage ID permanently non-reusable.
+	if _, err := s.options.Journal.ReapExpiredSenderStages(now, maxPendingSenderStages); err != nil {
+		return attachmentv3.Manifest{}, fmt.Errorf("reap expired sender stages: %w", err)
+	}
+	if retired, err := s.options.Journal.senderStageTombstoned(stageID); err != nil || retired {
+		return attachmentv3.Manifest{}, errors.New("sender stage ID is no longer reusable")
+	}
 	mapping, found, err := s.options.Journal.mapping(relayConversationID)
 	if err != nil || !found || mapping.SenderDeviceID != s.options.Sender.DeviceID || mapping.SenderGeneration != s.options.Sender.Generation {
 		return attachmentv3.Manifest{}, errors.New("sender staging mapping is unavailable")
@@ -84,9 +93,6 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 	public := s.options.SigningKey.Public().(ed25519.PublicKey)
 	if binding.Sender.SigningKeyID == [32]byte{} || len(public) != ed25519.PublicKeySize || !bytes.Equal(public, binding.Sender.SigningPublicKey[:]) {
 		return attachmentv3.Manifest{}, errors.New("fresh sender signing identity is unavailable")
-	}
-	if _, err := s.options.Journal.ReapExpiredSenderStages(now, maxPendingSenderStages); err != nil {
-		return attachmentv3.Manifest{}, fmt.Errorf("reap expired sender stages: %w", err)
 	}
 	intent, found, err := s.options.Journal.senderStageIntent(stageID)
 	if err != nil {
@@ -222,7 +228,7 @@ func (j *Journal) ReapExpiredSenderStages(now time.Time, limit int) (int, error)
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(context.Background(), `SELECT stage_id,transfer_id,manifest FROM controller_sender_stage_intents ORDER BY created_at,stage_id`)
+	rows, err := tx.QueryContext(context.Background(), `SELECT intent.stage_id,intent.transfer_id,intent.manifest FROM controller_sender_stage_intents AS intent WHERE NOT EXISTS (SELECT 1 FROM controller_sender_offer_holds AS held WHERE held.transfer_id=intent.transfer_id) ORDER BY intent.created_at,intent.stage_id`)
 	if err != nil {
 		return 0, err
 	}
@@ -248,7 +254,14 @@ func (j *Journal) ReapExpiredSenderStages(now time.Time, limit int) (int, error)
 	if err := rows.Close(); err != nil {
 		return 0, err
 	}
+	var retained int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM controller_sender_stage_tombstones`).Scan(&retained); err != nil || retained+len(expired) > maxRetainedSenderStageTombstones {
+		return 0, errors.New("sender stage identity retention exhausted")
+	}
 	for _, item := range expired {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO controller_sender_stage_tombstones(stage_id,expired_at) VALUES (?,?)`, item.stage, now.UTC().Unix()); err != nil {
+			return 0, err
+		}
 		if _, err := tx.ExecContext(context.Background(), `DELETE FROM controller_sender_chunks WHERE transfer_id=?`, item.transfer); err != nil {
 			return 0, err
 		}
@@ -266,6 +279,43 @@ func (j *Journal) ReapExpiredSenderStages(now time.Time, limit int) (int, error)
 		return 0, err
 	}
 	return len(expired), nil
+}
+
+func (j *Journal) senderStageTombstoned(stageID [16]byte) (bool, error) {
+	if j == nil || j.db == nil || stageID == [16]byte{} {
+		return false, errors.New("invalid sender stage identity")
+	}
+	var stored []byte
+	err := j.db.QueryRowContext(context.Background(), `SELECT stage_id FROM controller_sender_stage_tombstones WHERE stage_id=?`, stageID[:]).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil || len(stored) != len(stageID) || !bytes.Equal(stored, stageID[:]) {
+		return false, errors.New("invalid sender stage identity")
+	}
+	return true, nil
+}
+
+func (j *Journal) holdSenderOffer(transferID [16]byte) error {
+	if j == nil || j.db == nil || transferID == [16]byte{} {
+		return errors.New("invalid sender offer hold")
+	}
+	result, err := j.db.ExecContext(context.Background(), `INSERT INTO controller_sender_offer_holds(transfer_id) VALUES (?) ON CONFLICT(transfer_id) DO NOTHING`, transferID[:])
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed > 1 {
+		return errors.New("invalid sender offer hold")
+	}
+	return nil
+}
+
+func (j *Journal) releaseSenderOfferHold(transferID [16]byte) error {
+	if j == nil || j.db == nil || transferID == [16]byte{} {
+		return errors.New("invalid sender offer hold")
+	}
+	_, err := j.db.ExecContext(context.Background(), `DELETE FROM controller_sender_offer_holds WHERE transfer_id=?`, transferID[:])
+	return err
 }
 
 func (s *SenderStager) persistStaged(mapping Mapping, raw []byte, artifact attachmentv3.SourceArtifact, wrappedKey []byte) error {

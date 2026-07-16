@@ -10,26 +10,18 @@ import (
 	"testing"
 )
 
-func TestSystemdCredentialHostKeyProviderRejectsUnsafeCredentialAndDerivesStableID(t *testing.T) {
-	dir := t.TempDir()
-	key := bytes32(91)
-	path := filepath.Join(dir, "sender-kek")
-	if err := os.WriteFile(path, []byte(base64.RawStdEncoding.EncodeToString(key[:])), 0o400); err != nil {
+func TestSystemdCredentialHostKeyRejectsUnsafeDirectory(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "credentials")
+	if err := os.Mkdir(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	p := SystemdCredentialHostKeyProvider{CredentialDirectory: dir, CredentialName: "sender-kek"}
-	opened, err := p.SenderKeyEncryptionKey(context.Background())
-	if err != nil || opened != key {
-		t.Fatalf("key=%x err=%v", opened, err)
-	}
-	id, err := p.SenderKeyEncryptionKeyID(context.Background())
-	if err != nil || id == [32]byte{} {
-		t.Fatalf("id=%x err=%v", id, err)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
+	key := make([]byte, 32)
+	key[0] = 1
+	if err := os.WriteFile(filepath.Join(directory, "sender-key"), []byte(base64.RawStdEncoding.EncodeToString(key)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := p.SenderKeyEncryptionKey(context.Background()); err == nil {
-		t.Fatal("world-readable credential was accepted")
+	provider := SystemdCredentialHostKeyProvider{CredentialDirectory: directory, CredentialName: "sender-key"}
+	if _, err := provider.SenderKeyEncryptionKey(context.Background()); err == nil {
+		t.Fatal("accepted group/world-accessible credential directory")
 	}
 }

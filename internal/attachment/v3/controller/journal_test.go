@@ -61,6 +61,28 @@ func TestOpenJournalRejectsUnsafeParent(t *testing.T) {
 	}
 }
 
+func TestJournalBindsSenderIdentityAndExcludesRecipientRole(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "private", "controller.db")
+	sender := SenderIdentity{DeviceID: bytes16(71), Generation: 1}
+	journal, err := OpenJournalForSender(path, sender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.AddMapping(Mapping{RelayConversationID: "relay-other", ConversationID: bytes16(74), SenderDeviceID: bytes16(72), SenderGeneration: 1, RecipientDeviceID: bytes16(75), RecipientGeneration: 1, MembershipCommitment: bytes32(76)}); err == nil {
+		t.Fatal("sender journal accepted a non-local source mapping")
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenJournalForSender(path, SenderIdentity{DeviceID: bytes16(72), Generation: 1}); err == nil {
+		t.Fatal("sender journal accepted a changed source identity")
+	}
+	if _, err := OpenJournalForRecipient(path, RecipientIdentity{DeviceID: bytes16(73), Generation: 1}); err == nil {
+		t.Fatal("sender journal accepted a recipient role")
+	}
+}
+
 func TestOpenJournalRejectsUnsafeSQLiteSidecar(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")

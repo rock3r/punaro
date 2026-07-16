@@ -341,19 +341,33 @@ after tombstone retention. This prevents bootstrap by an arbitrary valid
 issuer signature, request-ID replacement after short permit expiry, and
 retry failure after normal source cleanup.
 
-The adapter's v3 helpers create encrypted artifacts only after a local private
-artifact store has reserved file-key, salt, and nonce tuples. They issue
-holder-signed v3 permits and submit permit/operation-bound bytes through the
-same replay-protected machine transport as text. Once the sender has received
-the successful `offer` result, it enqueues the exact canonical, bounded offer
-payload in the local `OfferNoticeOutbox`; the running adapter drains that
-outbox to the existing durable conversation. A crash after relay acceptance
-but before local deletion merely retries the stable relay idempotency key. The
-notice is discovery data only: it is neither a download URL nor an
-authorization grant; the recipient must fresh-verify its manifest/envelope,
-use its local HPKE key, and obtain recipient-held permits before it can accept
-or download. A bounded reaper runs in the daemon and is stopped before its
-SQLite stores close.
+The local sender command opens a sender-only journal and requires its pinned
+source identity to match the pre-approved relationship before staging. It
+creates encrypted artifacts only after a local private artifact store has
+reserved file-key, salt, and nonce tuples; the file key is wrapped by the
+machine Keychain or a private systemd credential and is never placed in that
+journal. It issues holder-signed v3 permits and submits permit/operation-bound
+bytes through the same replay-protected machine transport as text. Every send
+requires a caller-retained stage ID: retries reuse only the exact immutable
+staged transfer, never newly generated source material. Once an expired stage
+is reaped, its ID is retained as a bounded tombstone and is rejected forever;
+the local caller must use a new ID rather than silently creating a second
+transfer. Before the source is allowed to reach `offer`, the sender reserves
+bounded durable capacity for the exact canonical offer in the adapter-owned
+`OfferNoticeOutbox`; held rows are not visible to the relay sync loop. Only
+after the successful `offer` result is durable does it activate that row for
+delivery. An inactive row is never age-reaped: an offer may have been accepted
+immediately before a sender crash, so only sender recovery within the signed
+manifest and outcome-capability lifetime may activate it. Once those records
+expire, the hold is a deliberate fail-closed quarantine rather than a
+recoverable transfer; it remains bounded local capacity until an audited
+operator incident procedure resolves it. A crash after relay acceptance but
+before local deletion merely retries the stable
+relay idempotency key. The notice is discovery data only: it is neither
+a download URL nor an authorization grant; the recipient must fresh-verify its
+manifest/envelope, use its local HPKE key, and obtain recipient-held permits
+before it can accept or download. A bounded reaper runs in the daemon and is
+stopped before its SQLite stores close.
 
 The implementation does not expose a mailbox database, accept public links,
 move file bytes through Telegram, or decrypt at the relay. Recipient-side
@@ -368,8 +382,11 @@ under its relay message ID, deduplicates only byte-identical retries, and
 requires a separate explicit local receipt approval. Before any future
 recipient permit, acceptance, download, or decrypt action, the controller
 must re-fetch and root-verify that exact directory relationship; a notice
-cannot discover a new member or override the binding. Merely receiving a typed
-mailbox offer therefore never starts a data-plane action or writes an output.
+cannot discover a new member or override the binding. The recipient validates
+that the requested output destination is a new regular path before acceptance,
+then uses an atomic no-replace finalization after decryption. Merely receiving
+a typed mailbox offer therefore never starts a data-plane action or writes an
+output.
 
 The legacy `internal/attachment` foundation tests local encrypted-frame,
 replay, fencing, and bounded-store helpers.  Those helpers are intentionally
