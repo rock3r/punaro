@@ -48,14 +48,14 @@ func TestDirectorySnapshotFileSourceRejectsRelayOwnedServiceGroupPath(t *testing
 	if err := os.Mkdir(parent, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(parent, 0o2750); err != nil {
+	if err := os.Chmod(parent, 0o2750); err != nil { // #nosec G302 -- fixture proves a relay-owned service-group path is rejected.
 		t.Fatal(err)
 	}
 	path := filepath.Join(parent, "directory.cbor")
-	if err := os.WriteFile(path, testDirectorySnapshot(t, 3), 0o640); err != nil {
+	if err := os.WriteFile(path, testDirectorySnapshot(t, 3), 0o640); err != nil { // #nosec G306 -- fixture proves group-readable snapshots need root ownership.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o640); err != nil {
+	if err := os.Chmod(path, 0o640); err != nil { // #nosec G302 -- fixture proves group-readable snapshots need root ownership.
 		t.Fatal(err)
 	}
 	source, err := OpenDirectorySnapshotFileSource(path)
@@ -105,7 +105,7 @@ func TestDirectorySnapshotFileSourceRejectsUnsafeOrMalformedSource(t *testing.T)
 	if _, err := OpenDirectorySnapshotFileSource(path); err == nil {
 		t.Fatal("group-writable parent accepted")
 	}
-	if err := os.Chmod(parent, 0o750); err != nil {
+	if err := os.Chmod(parent, 0o750); err != nil { // #nosec G302 -- fixture restores group traversal before testing a group-writable file.
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0o660); err != nil { // #nosec G302 -- intentional insecure test fixture.

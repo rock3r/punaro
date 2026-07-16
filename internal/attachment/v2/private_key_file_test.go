@@ -46,7 +46,7 @@ func TestLoadPrivateEd25519KeyFileRejectsRelayOwnedServiceGroupTraversal(t *test
 	if err := os.Mkdir(directory, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(directory, 0o2750); err != nil {
+	if err := os.Chmod(directory, 0o2750); err != nil { // #nosec G302 -- fixture proves a relay-owned service-group parent is rejected.
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "key")
