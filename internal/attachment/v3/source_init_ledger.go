@@ -63,6 +63,16 @@ func (s *sourceStore) redeemSourceInit(ctx context.Context, directory DirectoryK
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err
 	}
+	// Serialize bootstrap creation with an expired outcome reconciliation. The
+	// row is committed with the source; if an outcome has already terminalized
+	// this exact permit, initialization must not resurrect the transfer.
+	res, err := tx.ExecContext(ctx, `INSERT INTO v3_source_init_fences(permit_serial,transfer_id,manifest_commitment,state) VALUES(?,?,?,'committing') ON CONFLICT(permit_serial) DO NOTHING`, permit.Serial[:], permit.TransferID[:], permit.StagedManifestCommitment[:])
+	if err != nil {
+		return nil, false, err
+	}
+	if changed, err := res.RowsAffected(); err != nil || changed != 1 {
+		return nil, false, errors.New("v3 source-init is fenced")
+	}
 	created, err := s.initializeTx(ctx, tx, source, now)
 	if err != nil || !created {
 		if err == nil {

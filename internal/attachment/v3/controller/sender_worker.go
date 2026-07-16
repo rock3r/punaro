@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
@@ -83,6 +84,9 @@ type SenderSourceInitializerOptions struct {
 	Now               func() time.Time
 	NewID             func() ([16]byte, error)
 	NewIdempotencyKey func() ([32]byte, error)
+	// UploadWindow limits concurrent remote chunk mutations. It defaults to
+	// 16 and is capped so one staged transfer cannot exhaust local resources.
+	UploadWindow uint8
 }
 
 // SenderSourceInitializer advances a locally staged immutable source through
@@ -93,9 +97,15 @@ type SenderSourceInitializer struct {
 }
 
 type SenderOfferWorkerOptions struct {
-	Source             *SenderSourceInitializer
-	FileKeyProtector   SenderFileKeyProtector
-	NewAcceptanceNonce func() ([32]byte, error)
+	Source              *SenderSourceInitializer
+	FileKeyProtector    SenderFileKeyProtector
+	NewAcceptanceNonce  func() ([32]byte, error)
+	RelaySenderEndpoint string
+	OfferNoticeQueue    OfferNoticeQueue
+}
+
+type OfferNoticeQueue interface {
+	EnqueueV3OfferNotice(context.Context, string, string, []byte, string) error
 }
 
 // SenderOfferWorker exposes a complete encrypted source through the relay
@@ -106,7 +116,7 @@ type SenderOfferWorker struct {
 }
 
 func NewSenderOfferWorker(options SenderOfferWorkerOptions) (*SenderOfferWorker, error) {
-	if options.Source == nil || options.Source.options.Journal == nil || options.FileKeyProtector == nil || options.NewAcceptanceNonce == nil {
+	if options.Source == nil || options.Source.options.Journal == nil || options.FileKeyProtector == nil || options.NewAcceptanceNonce == nil || !validRelayIdentifier(options.RelaySenderEndpoint) || options.OfferNoticeQueue == nil {
 		return nil, errors.New("invalid sender offer worker")
 	}
 	sealer, ok := options.Source.options.Signer.(SenderEnvelopeSealer)
@@ -122,6 +132,12 @@ func NewSenderSourceInitializer(options SenderSourceInitializerOptions) (*Sender
 	}
 	if options.Now == nil {
 		options.Now = time.Now
+	}
+	if options.UploadWindow == 0 {
+		options.UploadWindow = 16
+	}
+	if options.UploadWindow > 64 {
+		return nil, errors.New("invalid sender upload window")
 	}
 	return &SenderSourceInitializer{options: options}, nil
 }
@@ -193,74 +209,123 @@ func (w *SenderSourceInitializer) UploadAll(ctx context.Context, transferID [16]
 	if _, err := w.Initialize(ctx, transferID); err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
-	var last attachmentv3.TransferResult
-	for index := uint64(0); ; index++ {
-		w.options.Journal.senderMu.Lock()
-		result, done, err := w.uploadOne(ctx, transferID, index)
-		w.options.Journal.senderMu.Unlock()
-		if err != nil {
-			return attachmentv3.TransferResult{}, err
+	transfer, err := w.options.Journal.senderTransfer(transferID)
+	if err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
+	manifest, err := attachmentv3.DecodeManifest(transfer.manifest)
+	if err != nil || manifest.ChunkCount == 0 {
+		return attachmentv3.TransferResult{}, errors.New("invalid durable sender source")
+	}
+	window := uint64(w.options.UploadWindow)
+	if window > manifest.ChunkCount {
+		window = manifest.ChunkCount
+	}
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type uploadResult struct {
+		result attachmentv3.TransferResult
+		err    error
+	}
+	jobs := make(chan uint64)
+	results := make(chan uploadResult, window)
+	var workers sync.WaitGroup
+	for worker := uint64(0); worker < window; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				result, err := w.uploadOne(workCtx, transferID, index)
+				results <- uploadResult{result: result, err: err}
+				if err != nil {
+					cancel()
+				}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for index := uint64(0); index < manifest.ChunkCount; index++ {
+			select {
+			case jobs <- index:
+			case <-workCtx.Done():
+				return
+			}
 		}
-		last = result
-		if done {
-			return last, nil
+	}()
+	go func() { workers.Wait(); close(results) }()
+	var ready attachmentv3.TransferResult
+	var firstErr error
+	for item := range results {
+		if item.err != nil && firstErr == nil {
+			firstErr = item.err
+			continue
+		}
+		if item.result.State == attachmentv3.TransferStateSourceReady {
+			ready = item.result
 		}
 	}
+	if firstErr != nil {
+		return attachmentv3.TransferResult{}, firstErr
+	}
+	if ready.TransferID == [16]byte{} {
+		return attachmentv3.TransferResult{}, errors.New("sender uploads did not reach source ready")
+	}
+	return ready, nil
 }
 
-func (w *SenderSourceInitializer) uploadOne(ctx context.Context, transferID [16]byte, index uint64) (attachmentv3.TransferResult, bool, error) {
+func (w *SenderSourceInitializer) uploadOne(ctx context.Context, transferID [16]byte, index uint64) (attachmentv3.TransferResult, error) {
 	now := w.options.Now().UTC()
 	if now.Unix() < 0 {
-		return attachmentv3.TransferResult{}, false, errors.New("invalid sender upload clock")
+		return attachmentv3.TransferResult{}, errors.New("invalid sender upload clock")
 	}
 	authority, err := w.options.AuthorityProvider.ResolveSenderDeliveryAuthority(ctx, now)
 	if err != nil || authority == nil {
-		return attachmentv3.TransferResult{}, false, errors.New("fresh sender delivery authority is unavailable")
+		return attachmentv3.TransferResult{}, errors.New("fresh sender delivery authority is unavailable")
 	}
 	transfer, manifest, err := w.freshSenderTransfer(ctx, transferID, authority, now)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
 	if index >= manifest.ChunkCount {
-		return attachmentv3.TransferResult{}, false, errors.New("invalid sender upload index")
+		return attachmentv3.TransferResult{}, errors.New("invalid sender upload index")
 	}
 	chunk, err := w.options.Journal.senderChunk(transfer.transferID, manifest, index)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
+	// Serialize local identity generation and the intent insert, but release
+	// before permit issuance and HTTP so the bounded window is genuinely
+	// concurrent on the network data plane.
+	w.options.Journal.senderMu.Lock()
 	record, err := w.options.Journal.ensureSenderOperation(transfer, senderPhaseSourceUpload, index, uint64(len(chunk)), now, w.options.Signer, w.options.NewID, w.options.NewIdempotencyKey)
+	w.options.Journal.senderMu.Unlock()
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
-	}
-	expected := attachmentv3.TransferStateSourceUploading
-	done := index+1 == manifest.ChunkCount
-	if done {
-		expected = attachmentv3.TransferStateSourceReady
+		return attachmentv3.TransferResult{}, err
 	}
 	if len(record.result) != 0 {
-		result, err := exactSenderResult(record.result, transfer, expected)
-		return result, done, err
+		return exactSenderUploadResult(record.result, transfer)
 	}
 	permit, operation, err := w.credentials(ctx, transfer, senderPhaseSourceUpload, index, record, chunk, authority, now)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
 	_, _, path, err := senderOperationSpec(transfer.transferID, senderPhaseSourceUpload, index)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
 	raw, err := w.options.Transport.DoV3Attachment(ctx, "PUT", path, chunk, permit, operation)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, fmt.Errorf("submit sender source upload: %w", err)
+		return attachmentv3.TransferResult{}, fmt.Errorf("submit sender source upload: %w", err)
 	}
-	result, err := exactSenderResult(raw, transfer, expected)
+	result, err := exactSenderUploadResult(raw, transfer)
 	if err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
 	if err := w.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseSourceUpload, index, raw); err != nil {
-		return attachmentv3.TransferResult{}, false, err
+		return attachmentv3.TransferResult{}, err
 	}
-	return result, done, nil
+	return result, nil
 }
 
 func (w *SenderSourceInitializer) freshSenderTransfer(ctx context.Context, transferID [16]byte, authority SenderDeliveryAuthority, now time.Time) (senderTransferRecord, attachmentv3.Manifest, error) {
@@ -322,7 +387,11 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 		return attachmentv3.TransferResult{}, err
 	}
 	if len(record.result) != 0 {
-		return exactSenderResult(record.result, transfer, attachmentv3.TransferStateOffered)
+		result, err := exactSenderResult(record.result, transfer, attachmentv3.TransferStateOffered)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		return result, w.queueOfferNotice(ctx, transfer, offer)
 	}
 	permit, operation, err := sourceWorker.credentials(ctx, transfer, senderPhaseOffer, 0, record, offer, authority, now)
 	if err != nil {
@@ -343,7 +412,17 @@ func (w *SenderOfferWorker) Offer(ctx context.Context, transferID [16]byte) (att
 	if err := sourceWorker.options.Journal.storeSenderOperationResult(transfer.transferID, senderPhaseOffer, 0, raw); err != nil {
 		return attachmentv3.TransferResult{}, err
 	}
+	if err := w.queueOfferNotice(ctx, transfer, offer); err != nil {
+		return attachmentv3.TransferResult{}, err
+	}
 	return result, nil
+}
+
+func (w *SenderOfferWorker) queueOfferNotice(ctx context.Context, transfer senderTransferRecord, offer []byte) error {
+	if w == nil || w.options.OfferNoticeQueue == nil || !validRelayIdentifier(transfer.relayConversationID) || !validRelayIdentifier(w.options.RelaySenderEndpoint) || len(offer) == 0 {
+		return errors.New("sender offer notice queue is unavailable")
+	}
+	return w.options.OfferNoticeQueue.EnqueueV3OfferNotice(ctx, transfer.relayConversationID, w.options.RelaySenderEndpoint, offer, fmt.Sprintf("v3-offer-%x", transfer.transferID))
 }
 
 func (w *SenderOfferWorker) ensureOffer(ctx context.Context, transfer senderTransferRecord, manifest attachmentv3.Manifest, source attachmentv3.VerifiedSource, authority SenderDeliveryAuthority, now time.Time) ([]byte, error) {
@@ -738,6 +817,14 @@ func exactSenderResult(raw []byte, transfer senderTransferRecord, state attachme
 	result, err := attachmentv3.DecodeTransferResult(raw)
 	if err != nil || result.TransferID != transfer.transferID || result.ManifestCommitment != transfer.commitment || result.State != state || result.AttemptGeneration != 0 {
 		return attachmentv3.TransferResult{}, errors.New("invalid sender source result")
+	}
+	return result, nil
+}
+
+func exactSenderUploadResult(raw []byte, transfer senderTransferRecord) (attachmentv3.TransferResult, error) {
+	result, err := attachmentv3.DecodeTransferResult(raw)
+	if err != nil || result.TransferID != transfer.transferID || result.ManifestCommitment != transfer.commitment || result.AttemptGeneration != 0 || (result.State != attachmentv3.TransferStateSourceUploading && result.State != attachmentv3.TransferStateSourceReady) {
+		return attachmentv3.TransferResult{}, errors.New("invalid sender upload result")
 	}
 	return result, nil
 }

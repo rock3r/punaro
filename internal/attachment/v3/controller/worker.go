@@ -396,8 +396,13 @@ func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, r
 	if err != nil || key == [32]byte{} {
 		return receiptOutcomeAttempt{}, errors.New("generate recipient outcome idempotency identity")
 	}
+	original, err := attachmentv3.DecodePermit(record.permit)
+	if err != nil || original.Operation != attachmentv3.PermitOperationAccept || original.Serial == [16]byte{} {
+		return receiptOutcomeAttempt{}, errors.New("invalid durable recipient acceptance permit for outcome")
+	}
 	request := record.request
 	request.RequestID, request.Operation, request.AttemptGeneration = requestID, attachmentv3.PermitOperationOutcome, 0
+	request.OutcomeOfSerial = original.Serial
 	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(20*time.Second).Unix())
 	if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
 		return receiptOutcomeAttempt{}, err
@@ -648,7 +653,8 @@ func exactAcceptancePermit(permit attachmentv3.Permit, request attachmentv3.Perm
 // outcome permit for another transfer or conversation must never reach the
 // transport layer.
 func exactOutcomeRequest(request attachmentv3.PermitRequest, record receiptAcceptanceRecord, now time.Time) bool {
-	if now.Unix() < 0 || request.RequestID == [16]byte{} || request.HolderDeviceID != record.request.HolderDeviceID || request.HolderGeneration != record.request.HolderGeneration || request.HolderRole != attachmentv3.PermitHolderRecipient || request.TransferID != record.transferID || request.ConversationID != record.request.ConversationID || request.SenderDeviceID != record.request.SenderDeviceID || request.SenderGeneration != record.request.SenderGeneration || request.RecipientDeviceID != record.request.RecipientDeviceID || request.RecipientGeneration != record.request.RecipientGeneration || request.AttemptGeneration != 0 || request.Operation != attachmentv3.PermitOperationOutcome || request.MembershipCommitment != record.request.MembershipCommitment || request.StagedManifestCommitment != record.manifestCommitment || request.MaxBytes != record.request.MaxBytes || request.MaxChunks != record.request.MaxChunks || request.MaxOperations != 1 {
+	original, err := attachmentv3.DecodePermit(record.permit)
+	if err != nil || original.Operation != attachmentv3.PermitOperationAccept || request.OutcomeOfSerial != original.Serial || now.Unix() < 0 || request.RequestID == [16]byte{} || request.HolderDeviceID != record.request.HolderDeviceID || request.HolderGeneration != record.request.HolderGeneration || request.HolderRole != attachmentv3.PermitHolderRecipient || request.TransferID != record.transferID || request.ConversationID != record.request.ConversationID || request.SenderDeviceID != record.request.SenderDeviceID || request.SenderGeneration != record.request.SenderGeneration || request.RecipientDeviceID != record.request.RecipientDeviceID || request.RecipientGeneration != record.request.RecipientGeneration || request.AttemptGeneration != 0 || request.Operation != attachmentv3.PermitOperationOutcome || request.MembershipCommitment != record.request.MembershipCommitment || request.StagedManifestCommitment != record.manifestCommitment || request.MaxBytes != record.request.MaxBytes || request.MaxChunks != record.request.MaxChunks || request.MaxOperations != 1 {
 		return false
 	}
 	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
@@ -661,7 +667,7 @@ func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitR
 	if _, err := attachmentv3.DecodePermit(mustEncodePermit(permit)); err != nil {
 		return false
 	}
-	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
+	if permit.HolderDeviceID != request.HolderDeviceID || permit.HolderGeneration != request.HolderGeneration || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.TransferID != record.transferID || permit.ConversationID != request.ConversationID || permit.SenderDeviceID != request.SenderDeviceID || permit.SenderGeneration != request.SenderGeneration || permit.RecipientDeviceID != request.RecipientDeviceID || permit.RecipientGeneration != request.RecipientGeneration || permit.AttemptGeneration != 0 || permit.Operation != attachmentv3.PermitOperationOutcome || permit.OutcomeOfSerial != request.OutcomeOfSerial || permit.MembershipCommitment != request.MembershipCommitment || permit.StagedManifestCommitment != record.manifestCommitment || permit.MaxBytes != request.MaxBytes || permit.MaxChunks != request.MaxChunks || permit.MaxOperations != 1 {
 		return false
 	}
 	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())

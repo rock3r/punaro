@@ -38,6 +38,7 @@ type PermitRequest struct {
 	Operation                uint64
 	MembershipCommitment     [32]byte
 	StagedManifestCommitment [32]byte
+	OutcomeOfSerial          [16]byte
 	IssuedAt                 uint64
 	ExpiresAt                uint64
 	MaxBytes                 uint64
@@ -67,20 +68,21 @@ type permitRequestWire struct {
 	MaxChunks                uint64                      `cbor:"18,keyasint"`
 	MaxOperations            uint64                      `cbor:"19,keyasint"`
 	StagedManifestCommitment [32]byte                    `cbor:"24,keyasint"`
+	OutcomeOfSerial          [16]byte                    `cbor:"25,keyasint"`
 	Signature                [ed25519.SignatureSize]byte `cbor:"99,keyasint"`
 }
 
 func (r PermitRequest) wire() permitRequestWire {
-	return permitRequestWire{Version: protocolVersion, RequestID: r.RequestID, HolderDeviceID: r.HolderDeviceID, HolderGeneration: r.HolderGeneration, HolderRole: r.HolderRole, TransferID: r.TransferID, ConversationID: r.ConversationID, SenderDeviceID: r.SenderDeviceID, SenderGeneration: r.SenderGeneration, RecipientDeviceID: r.RecipientDeviceID, RecipientGeneration: r.RecipientGeneration, AttemptGeneration: r.AttemptGeneration, Operation: r.Operation, MembershipCommitment: r.MembershipCommitment, IssuedAt: r.IssuedAt, ExpiresAt: r.ExpiresAt, MaxBytes: r.MaxBytes, MaxChunks: r.MaxChunks, MaxOperations: r.MaxOperations, StagedManifestCommitment: r.StagedManifestCommitment, Signature: r.Signature}
+	return permitRequestWire{Version: protocolVersion, RequestID: r.RequestID, HolderDeviceID: r.HolderDeviceID, HolderGeneration: r.HolderGeneration, HolderRole: r.HolderRole, TransferID: r.TransferID, ConversationID: r.ConversationID, SenderDeviceID: r.SenderDeviceID, SenderGeneration: r.SenderGeneration, RecipientDeviceID: r.RecipientDeviceID, RecipientGeneration: r.RecipientGeneration, AttemptGeneration: r.AttemptGeneration, Operation: r.Operation, MembershipCommitment: r.MembershipCommitment, IssuedAt: r.IssuedAt, ExpiresAt: r.ExpiresAt, MaxBytes: r.MaxBytes, MaxChunks: r.MaxChunks, MaxOperations: r.MaxOperations, StagedManifestCommitment: r.StagedManifestCommitment, OutcomeOfSerial: r.OutcomeOfSerial, Signature: r.Signature}
 }
 
 func (r PermitRequest) signedBytes() ([]byte, error) {
-	raw, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: r.RequestID, 3: r.HolderDeviceID, 4: r.HolderGeneration, 5: r.HolderRole, 6: r.TransferID, 7: r.ConversationID, 8: r.SenderDeviceID, 9: r.SenderGeneration, 10: r.RecipientDeviceID, 11: r.RecipientGeneration, 12: r.AttemptGeneration, 13: r.Operation, 14: r.MembershipCommitment, 15: r.IssuedAt, 16: r.ExpiresAt, 17: r.MaxBytes, 18: r.MaxChunks, 19: r.MaxOperations, 24: r.StagedManifestCommitment})
+	raw, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: r.RequestID, 3: r.HolderDeviceID, 4: r.HolderGeneration, 5: r.HolderRole, 6: r.TransferID, 7: r.ConversationID, 8: r.SenderDeviceID, 9: r.SenderGeneration, 10: r.RecipientDeviceID, 11: r.RecipientGeneration, 12: r.AttemptGeneration, 13: r.Operation, 14: r.MembershipCommitment, 15: r.IssuedAt, 16: r.ExpiresAt, 17: r.MaxBytes, 18: r.MaxChunks, 19: r.MaxOperations, 24: r.StagedManifestCommitment, 25: r.OutcomeOfSerial})
 	return append([]byte(permitRequestSignatureDomain), raw...), err
 }
 
 func validatePermitRequest(r PermitRequest) error {
-	if r.RequestID == [16]byte{} || r.HolderDeviceID == [16]byte{} || r.TransferID == [16]byte{} || r.ConversationID == [16]byte{} || r.SenderDeviceID == [16]byte{} || r.RecipientDeviceID == [16]byte{} || r.MembershipCommitment == [32]byte{} || r.StagedManifestCommitment == [32]byte{} || r.HolderGeneration == 0 || r.SenderGeneration == 0 || r.RecipientGeneration == 0 || r.HolderRole < permitHolderSender || r.HolderRole > permitHolderRecipient || r.Operation < permitOperationSourceInit || r.Operation > permitOperationOutcome || r.IssuedAt > math.MaxInt64 || r.ExpiresAt > math.MaxInt64 || r.ExpiresAt <= r.IssuedAt || r.ExpiresAt-r.IssuedAt > 30 || r.MaxBytes == 0 || r.MaxBytes > maxPermitCiphertextBytes || r.MaxChunks == 0 || r.MaxChunks > 4096 || r.MaxOperations == 0 || r.MaxOperations > 4096 {
+	if r.RequestID == [16]byte{} || r.HolderDeviceID == [16]byte{} || r.TransferID == [16]byte{} || r.ConversationID == [16]byte{} || r.SenderDeviceID == [16]byte{} || r.RecipientDeviceID == [16]byte{} || r.MembershipCommitment == [32]byte{} || r.StagedManifestCommitment == [32]byte{} || r.HolderGeneration == 0 || r.SenderGeneration == 0 || r.RecipientGeneration == 0 || r.HolderRole < permitHolderSender || r.HolderRole > permitHolderRecipient || r.Operation < permitOperationSourceInit || r.Operation > permitOperationOutcome || r.IssuedAt > math.MaxInt64 || r.ExpiresAt > math.MaxInt64 || r.ExpiresAt <= r.IssuedAt || r.ExpiresAt-r.IssuedAt > 30 || r.MaxBytes == 0 || r.MaxBytes > maxPermitCiphertextBytes || r.MaxChunks == 0 || r.MaxChunks > 4096 || r.MaxOperations == 0 || r.MaxOperations > 4096 || (r.Operation == permitOperationOutcome && r.OutcomeOfSerial == [16]byte{}) || (r.Operation != permitOperationOutcome && r.OutcomeOfSerial != [16]byte{}) {
 		return errors.New("invalid v3 permit request")
 	}
 	if !validPermitOperation(Permit{HolderDeviceID: r.HolderDeviceID, HolderGeneration: r.HolderGeneration, HolderRole: r.HolderRole, SenderDeviceID: r.SenderDeviceID, SenderGeneration: r.SenderGeneration, RecipientDeviceID: r.RecipientDeviceID, RecipientGeneration: r.RecipientGeneration, AttemptGeneration: r.AttemptGeneration, Operation: r.Operation}) {
@@ -206,7 +208,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 		if _, err := io.ReadFull(i.random, serial[:]); err != nil || serial == [16]byte{} {
 			return Permit{}, false, errors.New("generate v3 permit serial")
 		}
-		permit := Permit{Audience: binding.Audience, Serial: serial, IssuerKeyID: i.issuerKeyID, HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: binding.DirectoryHead, MembershipCommitment: request.MembershipCommitment, RevocationEpoch: binding.RevocationEpoch, IssuedAt: uint64(nowUnix), ExpiresAt: expiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment}
+		permit := Permit{Audience: binding.Audience, Serial: serial, IssuerKeyID: i.issuerKeyID, HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: binding.DirectoryHead, MembershipCommitment: request.MembershipCommitment, RevocationEpoch: binding.RevocationEpoch, IssuedAt: uint64(nowUnix), ExpiresAt: expiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
 		if err := SignPermit(&permit, i.privateKey); err != nil || VerifyPermit(permit, authority, now) != nil {
 			return Permit{}, false, errors.New("issuer generated an invalid v3 permit")
 		}
@@ -337,7 +339,7 @@ func DecodePermitRequest(raw []byte) (PermitRequest, error) {
 	if err := strictDecoding.Unmarshal(raw, &wire); err != nil || wire.Version != protocolVersion {
 		return PermitRequest{}, errors.New("invalid v3 permit request")
 	}
-	request := PermitRequest{RequestID: wire.RequestID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, SenderDeviceID: wire.SenderDeviceID, SenderGeneration: wire.SenderGeneration, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, MembershipCommitment: wire.MembershipCommitment, StagedManifestCommitment: wire.StagedManifestCommitment, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, Signature: wire.Signature}
+	request := PermitRequest{RequestID: wire.RequestID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, SenderDeviceID: wire.SenderDeviceID, SenderGeneration: wire.SenderGeneration, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, MembershipCommitment: wire.MembershipCommitment, StagedManifestCommitment: wire.StagedManifestCommitment, OutcomeOfSerial: wire.OutcomeOfSerial, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, Signature: wire.Signature}
 	canonical, err := EncodePermitRequest(request)
 	if err != nil || !bytes.Equal(raw, canonical) {
 		return PermitRequest{}, errors.New("non-canonical v3 permit request")

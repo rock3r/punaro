@@ -162,7 +162,8 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	offerWorker, err := NewSenderOfferWorker(SenderOfferWorkerOptions{Source: source, FileKeyProtector: protector, NewAcceptanceNonce: func() ([32]byte, error) { return bytes32(79), nil }})
+	queue := &offerNoticeQueueStub{}
+	offerWorker, err := NewSenderOfferWorker(SenderOfferWorkerOptions{Source: source, FileKeyProtector: protector, NewAcceptanceNonce: func() ([32]byte, error) { return bytes32(79), nil }, RelaySenderEndpoint: "sender-endpoint", OfferNoticeQueue: queue})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +189,22 @@ func TestSenderOfferWorkerSealsAndPersistsOfferAfterUpload(t *testing.T) {
 	if transport.issueCalls != 3 || transport.operationCalls != 3 {
 		t.Fatalf("offer retry issued=%d called=%d", transport.issueCalls, transport.operationCalls)
 	}
+	if queue.calls != 2 || queue.conversation != mapping.RelayConversationID || queue.endpoint != "sender-endpoint" || string(queue.offer) != string(offer) || queue.key != fmt.Sprintf("v3-offer-%x", manifest.TransferID) {
+		t.Fatalf("queue=%+v", queue)
+	}
+}
+
+type offerNoticeQueueStub struct {
+	calls                       int
+	conversation, endpoint, key string
+	offer                       []byte
+	err                         error
+}
+
+func (s *offerNoticeQueueStub) EnqueueV3OfferNotice(_ context.Context, conversation, endpoint string, offer []byte, key string) error {
+	s.calls++
+	s.conversation, s.endpoint, s.offer, s.key = conversation, endpoint, append([]byte(nil), offer...), key
+	return s.err
 }
 
 func stagedSenderManifest(t *testing.T, mapping Mapping, private ed25519.PrivateKey, now time.Time) (attachmentv3.Manifest, []byte) {

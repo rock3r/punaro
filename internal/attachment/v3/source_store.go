@@ -181,6 +181,13 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 			expires_at INTEGER NOT NULL, retain_until INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS v3_permit_requests_retain_until ON v3_permit_requests(retain_until)`,
+		// A bootstrap source-init has no transfer row until it commits. This
+		// fence lets an expired outcome lookup atomically terminalize an
+		// ambiguous bootstrap permit before a late initializer can create it.
+		`CREATE TABLE IF NOT EXISTS v3_source_init_fences (
+			permit_serial BLOB PRIMARY KEY, transfer_id BLOB NOT NULL,
+			manifest_commitment BLOB NOT NULL, state TEXT NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS v3_redeemed_operations (
 			permit_serial BLOB NOT NULL, operation_id BLOB NOT NULL, operation INTEGER NOT NULL,
 			method INTEGER NOT NULL, path_commitment BLOB NOT NULL, target_commitment BLOB NOT NULL,
@@ -453,6 +460,9 @@ func (s *sourceStore) reapExpired(ctx context.Context, now time.Time, limit uint
 	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_permit_requests WHERE retain_until <= ?`, now.UTC().Unix()); err != nil {
 		return 0, err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM v3_source_init_fences WHERE permit_serial NOT IN (SELECT permit_serial FROM v3_permit_requests)`); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -661,6 +671,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_crypto_admission": {"scope", "scope_id", "reservations"},
 		"v3_issued_permits":          {"serial", "permit", "transfer_id", "manifest_commitment", "expires_at", "retain_until"},
 		"v3_permit_requests":         {"request_id", "request", "permit", "permit_serial", "holder_device_id", "expires_at", "retain_until"},
+		"v3_source_init_fences":      {"permit_serial", "transfer_id", "manifest_commitment", "state"},
 		"v3_redeemed_operations":     {"permit_serial", "operation_id", "operation", "method", "path_commitment", "target_commitment", "body_commitment", "idempotency_key", "ciphertext_bytes", "ciphertext_chunks", "result"},
 		"v3_ledger_admission":        {"transfer_id", "manifest_commitment", "operations", "result_bytes", "retain_until"},
 		"v3_offers":                  {"transfer_id", "manifest", "envelope", "acceptance_nonce", "acceptance_consumed"},
@@ -709,6 +720,7 @@ func verifySourceStoreSchema(db *sql.DB) error {
 		"v3_source_crypto_admission": {"primarykey(scope,scope_id)"},
 		"v3_issued_permits":          {"serialblobprimarykey", "permitblobnotnullunique", "retain_untilintegernotnull"},
 		"v3_permit_requests":         {"request_idblobprimarykey", "permitblobnotnull", "permit_serialblobnotnullunique", "holder_device_idblobnotnull", "expires_atintegernotnull", "retain_untilintegernotnull"},
+		"v3_source_init_fences":      {"permit_serialblobprimarykey", "transfer_idblobnotnull", "manifest_commitmentblobnotnull", "statetextnotnull"},
 		"v3_redeemed_operations":     {"primarykey(permit_serial,operation_id)", "unique(permit_serial,idempotency_key)"},
 		"v3_ledger_admission":        {"transfer_idblobprimarykey", "manifest_commitmentblobnotnull", "retain_untilintegernotnull"},
 		"v3_offers":                  {"transfer_idblobprimarykey", "acceptance_consumedintegernotnullcheck(acceptance_consumedin(0,1))"},

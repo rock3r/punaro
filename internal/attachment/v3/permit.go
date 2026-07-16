@@ -73,7 +73,10 @@ type Permit struct {
 	MaxChunks                uint64
 	MaxOperations            uint64
 	StagedManifestCommitment [32]byte
-	Signature                [ed25519.SignatureSize]byte
+	// OutcomeOfSerial binds an outcome query to the exact expired operation it
+	// reconciles. It is populated only for PermitOperationOutcome.
+	OutcomeOfSerial [16]byte
+	Signature       [ed25519.SignatureSize]byte
 }
 type permitWire struct {
 	Version                  uint64                      `cbor:"1,keyasint"`
@@ -100,18 +103,19 @@ type permitWire struct {
 	MaxChunks                uint64                      `cbor:"22,keyasint"`
 	MaxOperations            uint64                      `cbor:"23,keyasint"`
 	StagedManifestCommitment [32]byte                    `cbor:"24,keyasint"`
+	OutcomeOfSerial          [16]byte                    `cbor:"25,keyasint"`
 	Signature                [ed25519.SignatureSize]byte `cbor:"99,keyasint"`
 }
 
 func (p Permit) wire() permitWire {
-	return permitWire{Version: protocolVersion, Audience: p.Audience, Serial: p.Serial, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, TransferID: p.TransferID, ConversationID: p.ConversationID, SenderDeviceID: p.SenderDeviceID, SenderGeneration: p.SenderGeneration, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, AttemptGeneration: p.AttemptGeneration, Operation: p.Operation, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, IssuedAt: p.IssuedAt, ExpiresAt: p.ExpiresAt, MaxBytes: p.MaxBytes, MaxChunks: p.MaxChunks, MaxOperations: p.MaxOperations, StagedManifestCommitment: p.StagedManifestCommitment, Signature: p.Signature}
+	return permitWire{Version: protocolVersion, Audience: p.Audience, Serial: p.Serial, IssuerKeyID: p.IssuerKeyID, HolderDeviceID: p.HolderDeviceID, HolderGeneration: p.HolderGeneration, HolderRole: p.HolderRole, TransferID: p.TransferID, ConversationID: p.ConversationID, SenderDeviceID: p.SenderDeviceID, SenderGeneration: p.SenderGeneration, RecipientDeviceID: p.RecipientDeviceID, RecipientGeneration: p.RecipientGeneration, AttemptGeneration: p.AttemptGeneration, Operation: p.Operation, DirectoryHead: p.DirectoryHead, MembershipCommitment: p.MembershipCommitment, RevocationEpoch: p.RevocationEpoch, IssuedAt: p.IssuedAt, ExpiresAt: p.ExpiresAt, MaxBytes: p.MaxBytes, MaxChunks: p.MaxChunks, MaxOperations: p.MaxOperations, StagedManifestCommitment: p.StagedManifestCommitment, OutcomeOfSerial: p.OutcomeOfSerial, Signature: p.Signature}
 }
 func (p Permit) signedBytes() ([]byte, error) {
-	raw, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: p.Audience, 3: p.Serial, 4: p.IssuerKeyID, 5: p.HolderDeviceID, 6: p.HolderGeneration, 7: p.HolderRole, 8: p.TransferID, 9: p.ConversationID, 10: p.SenderDeviceID, 11: p.SenderGeneration, 12: p.RecipientDeviceID, 13: p.RecipientGeneration, 14: p.AttemptGeneration, 15: p.Operation, 16: p.DirectoryHead, 17: p.MembershipCommitment, 18: p.RevocationEpoch, 19: p.IssuedAt, 20: p.ExpiresAt, 21: p.MaxBytes, 22: p.MaxChunks, 23: p.MaxOperations, 24: p.StagedManifestCommitment})
+	raw, err := canonicalEncoding.Marshal(map[uint64]any{1: uint64(protocolVersion), 2: p.Audience, 3: p.Serial, 4: p.IssuerKeyID, 5: p.HolderDeviceID, 6: p.HolderGeneration, 7: p.HolderRole, 8: p.TransferID, 9: p.ConversationID, 10: p.SenderDeviceID, 11: p.SenderGeneration, 12: p.RecipientDeviceID, 13: p.RecipientGeneration, 14: p.AttemptGeneration, 15: p.Operation, 16: p.DirectoryHead, 17: p.MembershipCommitment, 18: p.RevocationEpoch, 19: p.IssuedAt, 20: p.ExpiresAt, 21: p.MaxBytes, 22: p.MaxChunks, 23: p.MaxOperations, 24: p.StagedManifestCommitment, 25: p.OutcomeOfSerial})
 	return append([]byte(permitSignatureDomain), raw...), err
 }
 func validatePermit(p Permit) error {
-	if p.Audience == [32]byte{} || p.Serial == [16]byte{} || p.IssuerKeyID == [32]byte{} || p.HolderDeviceID == [16]byte{} || p.TransferID == [16]byte{} || p.ConversationID == [16]byte{} || p.SenderDeviceID == [16]byte{} || p.RecipientDeviceID == [16]byte{} || p.DirectoryHead == [32]byte{} || p.MembershipCommitment == [32]byte{} || p.StagedManifestCommitment == [32]byte{} || p.HolderGeneration == 0 || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.HolderRole < permitHolderSender || p.HolderRole > permitHolderRecipient || p.Operation < permitOperationSourceInit || p.Operation > permitOperationOutcome || p.IssuedAt > math.MaxInt64 || p.ExpiresAt > math.MaxInt64 || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 30 || p.MaxBytes > maxPermitCiphertextBytes || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 {
+	if p.Audience == [32]byte{} || p.Serial == [16]byte{} || p.IssuerKeyID == [32]byte{} || p.HolderDeviceID == [16]byte{} || p.TransferID == [16]byte{} || p.ConversationID == [16]byte{} || p.SenderDeviceID == [16]byte{} || p.RecipientDeviceID == [16]byte{} || p.DirectoryHead == [32]byte{} || p.MembershipCommitment == [32]byte{} || p.StagedManifestCommitment == [32]byte{} || p.HolderGeneration == 0 || p.SenderGeneration == 0 || p.RecipientGeneration == 0 || p.HolderRole < permitHolderSender || p.HolderRole > permitHolderRecipient || p.Operation < permitOperationSourceInit || p.Operation > permitOperationOutcome || p.IssuedAt > math.MaxInt64 || p.ExpiresAt > math.MaxInt64 || p.ExpiresAt <= p.IssuedAt || p.ExpiresAt-p.IssuedAt > 30 || p.MaxBytes > maxPermitCiphertextBytes || p.MaxChunks > 4096 || p.MaxOperations == 0 || p.MaxOperations > 4096 || (p.Operation == permitOperationOutcome && p.OutcomeOfSerial == [16]byte{}) || (p.Operation != permitOperationOutcome && p.OutcomeOfSerial != [16]byte{}) {
 		return errors.New("invalid v3 permit")
 	}
 	if p.HolderRole == permitHolderSender && (p.HolderDeviceID != p.SenderDeviceID || p.HolderGeneration != p.SenderGeneration) {
@@ -186,7 +190,7 @@ func DecodePermit(raw []byte) (Permit, error) {
 	if wire.Version != protocolVersion {
 		return Permit{}, errors.New("unsupported permit version")
 	}
-	p := Permit{Audience: wire.Audience, Serial: wire.Serial, IssuerKeyID: wire.IssuerKeyID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, SenderDeviceID: wire.SenderDeviceID, SenderGeneration: wire.SenderGeneration, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, DirectoryHead: wire.DirectoryHead, MembershipCommitment: wire.MembershipCommitment, RevocationEpoch: wire.RevocationEpoch, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, StagedManifestCommitment: wire.StagedManifestCommitment, Signature: wire.Signature}
+	p := Permit{Audience: wire.Audience, Serial: wire.Serial, IssuerKeyID: wire.IssuerKeyID, HolderDeviceID: wire.HolderDeviceID, HolderGeneration: wire.HolderGeneration, HolderRole: wire.HolderRole, TransferID: wire.TransferID, ConversationID: wire.ConversationID, SenderDeviceID: wire.SenderDeviceID, SenderGeneration: wire.SenderGeneration, RecipientDeviceID: wire.RecipientDeviceID, RecipientGeneration: wire.RecipientGeneration, AttemptGeneration: wire.AttemptGeneration, Operation: wire.Operation, DirectoryHead: wire.DirectoryHead, MembershipCommitment: wire.MembershipCommitment, RevocationEpoch: wire.RevocationEpoch, IssuedAt: wire.IssuedAt, ExpiresAt: wire.ExpiresAt, MaxBytes: wire.MaxBytes, MaxChunks: wire.MaxChunks, MaxOperations: wire.MaxOperations, StagedManifestCommitment: wire.StagedManifestCommitment, OutcomeOfSerial: wire.OutcomeOfSerial, Signature: wire.Signature}
 	if err := validatePermit(p); err != nil {
 		return Permit{}, err
 	}

@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+func TestPermitLedgerActiveBoundCoversMaximumAttachmentLifecycle(t *testing.T) {
+	const maximumChunks = 4096
+	// Sender source-init + every upload, recipient begin + every download,
+	// and the remaining lifecycle/recovery operations all fit below the
+	// bounded per-source permit retention ceiling.
+	if maxActivePermitsPerSource < 2*maximumChunks+16 {
+		t.Fatalf("active permit bound=%d cannot cover max lifecycle", maxActivePermitsPerSource)
+	}
+}
+
 func TestPermitLedgerIsAtomicAndReturnsExactReplayResult(t *testing.T) {
 	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
 	if err != nil {

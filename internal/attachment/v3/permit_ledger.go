@@ -10,8 +10,12 @@ import (
 )
 
 const (
-	maxOperationResultBytes   = 256
-	maxActivePermitsPerSource = 4096
+	maxOperationResultBytes = 256
+	// One max-geometry transfer can legitimately use an exact sender permit
+	// per upload and an exact recipient permit per download, plus lifecycle
+	// and bounded reconciliation permits. This is a per-source storage bound,
+	// not a per-permit operation quota.
+	maxActivePermitsPerSource = 3 * 4096
 )
 
 type permitMutation func(context.Context, *sql.Tx) ([]byte, error)
@@ -54,9 +58,29 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	var outcomeOrigin Permit
+	if permit.Operation == permitOperationOutcome {
+		outcomeOrigin, err = outcomeOriginPermitTx(ctx, tx, permit, now)
+		if err != nil {
+			return err
+		}
+	}
 	spec, found, err := loadSpecTx(ctx, tx, permit.TransferID)
-	if err != nil || !found || spec.ManifestCommitment != permit.StagedManifestCommitment {
+	if err != nil || (!found && permit.Operation != permitOperationOutcome) || (found && spec.ManifestCommitment != permit.StagedManifestCommitment) {
 		return errors.New("unknown v3 staged source")
+	}
+	// An expired source-init is the only valid outcome whose source may still
+	// be absent. Its exact issuance-row correlation is checked above; the
+	// outcome handler will atomically either observe the source or terminalize
+	// the bootstrap fence before it can be resurrected.
+	if !found {
+		if outcomeOrigin.Operation != permitOperationSourceInit {
+			return errors.New("missing v3 outcome source")
+		}
+		if err := insertIssuedPermitTx(ctx, tx, s, permit, raw, permitExpiry, now); err != nil {
+			return err
+		}
+		return tx.Commit()
 	}
 	manifest, err := DecodeManifest(spec.Manifest)
 	if err != nil || !sourceInitPermitBinding(permit, manifest, spec.Manifest) {
@@ -71,6 +95,13 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM v3_issued_permits WHERE transfer_id = ? AND retain_until > ?`, permit.TransferID[:], now.UTC().Unix()).Scan(&active); err != nil || active >= maxActivePermitsPerSource {
 		return errors.New("v3 permit admission exhausted")
 	}
+	if err := insertIssuedPermitTx(ctx, tx, s, permit, raw, permitExpiry, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func insertIssuedPermitTx(ctx context.Context, tx *sql.Tx, s *sourceStore, permit Permit, raw []byte, permitExpiry int64, now time.Time) error {
 	retainUntil := now.UTC().Add(s.limits.TombstoneRetention).Unix()
 	if retainUntil < permitExpiry {
 		retainUntil = permitExpiry
@@ -78,7 +109,25 @@ func (s *sourceStore) issuePermit(ctx context.Context, permit Permit, authority 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_issued_permits(serial, permit, transfer_id, manifest_commitment, expires_at, retain_until) VALUES (?, ?, ?, ?, ?, ?)`, permit.Serial[:], raw, permit.TransferID[:], permit.StagedManifestCommitment[:], permit.ExpiresAt, retainUntil); err != nil {
 		return errors.New("v3 permit serial collision")
 	}
-	return tx.Commit()
+	return nil
+}
+
+// outcomeOriginPermitTx recovers the exact short-lived capability being
+// reconciled. A transfer ID alone is insufficient: it would let a holder use
+// a valid outcome permit to probe or terminalize a different ambiguous phase.
+func outcomeOriginPermitTx(ctx context.Context, tx *sql.Tx, outcome Permit, now time.Time) (Permit, error) {
+	if outcome.Operation != permitOperationOutcome || outcome.OutcomeOfSerial == [16]byte{} || now.Unix() < 0 {
+		return Permit{}, errors.New("invalid v3 outcome origin")
+	}
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT permit FROM v3_permit_requests WHERE permit_serial = ?`, outcome.OutcomeOfSerial[:]).Scan(&raw); err != nil {
+		return Permit{}, errors.New("unknown v3 outcome origin")
+	}
+	original, err := DecodePermit(raw)
+	if err != nil || original.Serial != outcome.OutcomeOfSerial || original.Operation == permitOperationOutcome || original.ExpiresAt > uint64(now.Unix()) || original.TransferID != outcome.TransferID || original.ConversationID != outcome.ConversationID || original.SenderDeviceID != outcome.SenderDeviceID || original.SenderGeneration != outcome.SenderGeneration || original.RecipientDeviceID != outcome.RecipientDeviceID || original.RecipientGeneration != outcome.RecipientGeneration || original.MembershipCommitment != outcome.MembershipCommitment || original.StagedManifestCommitment != outcome.StagedManifestCommitment || original.HolderDeviceID != outcome.HolderDeviceID || original.HolderGeneration != outcome.HolderGeneration || original.HolderRole != outcome.HolderRole {
+		return Permit{}, errors.New("mismatched v3 outcome origin")
+	}
+	return original, nil
 }
 
 // permitCompatibleSourceStatus keeps unsupported future endpoint permits
