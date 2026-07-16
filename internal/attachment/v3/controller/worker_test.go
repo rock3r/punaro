@@ -26,7 +26,7 @@ func TestRecipientAcceptanceWorkerPersistsAndReplaysOnlyExactAcceptedOperation(t
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
-	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(6), 100, 130)}
 	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRecipientAcceptanceWorkerRetriesOnlyPersistedCredentialsAfterRemoteFail
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
-	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(6), 100, 130)}
 	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestRecipientAcceptanceReconcilesExpiredUncertainOutcome(t *testing.T) {
 	if transport.operationCalls != 1 || transport.operation.Operation != attachmentv3.PermitOperationAccept {
 		t.Fatalf("initial operation=%+v calls=%d", transport.operation, transport.operationCalls)
 	}
-	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.Now = func() time.Time { return time.Unix(125, 0).UTC() }
 	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
 	transport.operationErr = nil
 	result, err := worker.Accept(context.Background(), inbound)
@@ -213,7 +213,7 @@ func TestRecipientAcceptanceReconcilesExpiredUncertainOutcome(t *testing.T) {
 	}
 }
 
-func TestRecipientAcceptanceRenewsExpiredOutcomeAttemptAfterAmbiguousLookup(t *testing.T) {
+func TestRecipientAcceptanceDoesNotExtendOutcomeBeyondOfferLifetime(t *testing.T) {
 	worker, inbound, transport := newAcceptanceWorkerForNegativeTest(t, nil)
 	// The accept can have committed at the relay even though its response was
 	// lost. Its local record is therefore uncertain before the first lookup.
@@ -221,7 +221,7 @@ func TestRecipientAcceptanceRenewsExpiredOutcomeAttemptAfterAmbiguousLookup(t *t
 	if _, err := worker.Accept(context.Background(), inbound); err == nil {
 		t.Fatal("ambiguous acceptance failure was accepted")
 	}
-	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.Now = func() time.Time { return time.Unix(125, 0).UTC() }
 	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
 	transport.operationErr = errTest("outcome response lost")
 	if _, err := worker.Accept(context.Background(), inbound); err == nil {
@@ -231,18 +231,17 @@ func TestRecipientAcceptanceRenewsExpiredOutcomeAttemptAfterAmbiguousLookup(t *t
 		t.Fatalf("first outcome lookup was not attempted safely issue=%d calls=%d op=%+v", transport.issueCalls, transport.operationCalls, transport.operation)
 	}
 	firstOutcomeOperation := transport.operation
-	// Once the first lookup permit expires, the worker must persist and use a
-	// new capability. Reusing the old one would make a crash at this exact
-	// boundary permanently unrecoverable.
-	worker.options.Now = func() time.Time { return time.Unix(155, 0).UTC() }
+	// Once the offer itself expires, the worker must not mint a new lookup
+	// capability. Extending its authority beyond the signed offer lifetime
+	// would turn a transient relay outage into a post-expiry read capability.
+	worker.options.Now = func() time.Time { return time.Unix(131, 0).UTC() }
 	worker.options.NewID = sequenceID(bytes16(95), bytes16(96))
 	transport.operationErr = nil
-	result, err := worker.Accept(context.Background(), inbound)
-	if err != nil || result.State != attachmentv3.TransferStateAccepted {
-		t.Fatalf("renewed outcome result=%+v err=%v", result, err)
+	if _, err := worker.Accept(context.Background(), inbound); err == nil {
+		t.Fatal("outcome authority was extended past the offer lifetime")
 	}
-	if transport.issueCalls != 3 || transport.operationCalls != 3 || transport.operation.Operation != attachmentv3.PermitOperationOutcome || transport.operation == firstOutcomeOperation {
-		t.Fatalf("expired outcome capability was reused issue=%d calls=%d op=%+v first=%+v", transport.issueCalls, transport.operationCalls, transport.operation, firstOutcomeOperation)
+	if transport.issueCalls != 2 || transport.operationCalls != 2 || transport.operation != firstOutcomeOperation {
+		t.Fatalf("post-expiry outcome reached transport issue=%d calls=%d op=%+v first=%+v", transport.issueCalls, transport.operationCalls, transport.operation, firstOutcomeOperation)
 	}
 }
 
@@ -252,7 +251,7 @@ func TestRecipientAcceptanceRejectsOutcomePermitForAnotherTransferBeforeTranspor
 	if _, err := worker.Accept(context.Background(), inbound); err == nil {
 		t.Fatal("ambiguous acceptance failure was accepted")
 	}
-	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.Now = func() time.Time { return time.Unix(125, 0).UTC() }
 	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
 	transport.operationErr = nil
 	transport.wrongTransfer = true
@@ -274,7 +273,7 @@ func TestRecipientAcceptanceRejectsOutcomeAcceptedResultAtDownloadAttempt(t *tes
 	if _, err := worker.Accept(context.Background(), inbound); err == nil {
 		t.Fatal("ambiguous acceptance failure was accepted")
 	}
-	worker.options.Now = func() time.Time { return time.Unix(130, 0).UTC() }
+	worker.options.Now = func() time.Time { return time.Unix(125, 0).UTC() }
 	worker.options.NewID = sequenceID(bytes16(93), bytes16(94))
 	transport.operationErr = nil
 	transport.result = acceptedTransferResultWithAttempt(t, notice.Manifest.TransferID, blake3.Sum256(notice.ManifestRaw), 120, 1)
@@ -302,7 +301,7 @@ func newAcceptanceWorkerForNegativeTest(t *testing.T, override RecipientOperatio
 	if err := journal.AddMapping(mapping); err != nil {
 		t.Fatal(err)
 	}
-	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNotice(t, mapping)}
+	inbound := InboundOffer{PunaroMessageID: "message-1", RelayConversationID: mapping.RelayConversationID, Body: testOfferNoticeWith(t, mapping, bytes16(6), 100, 130)}
 	if _, _, err := journal.RecordInboundOffer(inbound); err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +539,7 @@ func (a acceptanceAuthorityStub) CurrentDeviceSigningKey([16]byte, uint64) (ed25
 }
 func testAcceptanceAuthority(t *testing.T, mapping Mapping, holder ed25519.PrivateKey) RecipientAcceptanceAuthorityProvider {
 	issuer, _ := testOfferSigner()
-	return acceptanceAuthorityProviderStub{authority: acceptanceAuthorityStub{bindingResolverStub: &bindingResolverStub{binding: testCurrentBinding(mapping, 120)}, offerDirectoryStub: testOfferDirectory(t), issuer: issuer, holder: holder.Public().(ed25519.PublicKey)}}
+	return acceptanceAuthorityProviderStub{authority: acceptanceAuthorityStub{bindingResolverStub: &bindingResolverStub{binding: testCurrentBinding(mapping, 130)}, offerDirectoryStub: testOfferDirectory(t), issuer: issuer, holder: holder.Public().(ed25519.PublicKey)}}
 }
 
 func (s *acceptanceTransportStub) IssueV3Permit(_ context.Context, request attachmentv3.PermitRequest) (attachmentv3.Permit, error) {

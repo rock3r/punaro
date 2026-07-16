@@ -23,6 +23,7 @@ type Journal struct {
 	db        *sql.DB
 	recipient RecipientIdentity
 	acceptMu  sync.Mutex
+	receiptMu sync.Mutex
 	senderMu  sync.Mutex
 }
 
@@ -148,6 +149,29 @@ func openJournal(path string, recipient RecipientIdentity) (*Journal, error) {
 			permit BLOB, operation BLOB, result BLOB,
 			PRIMARY KEY(punaro_message_id, attempt_index),
 			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_reconciliation(punaro_message_id)
+		)`,
+		// The recipient keeps only opaque relay ciphertext and exact signed
+		// operation records. Its HPKE-unwrapped file key is intentionally never
+		// journalled: after restart it is re-opened from the immutable offer using
+		// the local recipient key.
+		`CREATE TABLE IF NOT EXISTS controller_receipt_downloads (
+			punaro_message_id TEXT PRIMARY KEY, transfer_id BLOB NOT NULL,
+			manifest BLOB NOT NULL, envelope BLOB NOT NULL, output_path TEXT NOT NULL,
+			manifest_commitment BLOB NOT NULL, state TEXT NOT NULL,
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_acceptances(punaro_message_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_receipt_download_chunks (
+			punaro_message_id TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			ciphertext BLOB NOT NULL, ciphertext_commitment BLOB NOT NULL,
+			PRIMARY KEY(punaro_message_id, chunk_index),
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_downloads(punaro_message_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS controller_receipt_download_operations (
+			punaro_message_id TEXT NOT NULL, phase TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+			permit_request BLOB NOT NULL, operation_id BLOB NOT NULL, idempotency_key BLOB NOT NULL,
+			permit BLOB, operation BLOB, result BLOB,
+			PRIMARY KEY(punaro_message_id, phase, chunk_index),
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_receipt_downloads(punaro_message_id)
 		)`,
 		`CREATE TABLE IF NOT EXISTS controller_sender_transfers (
 			transfer_id BLOB PRIMARY KEY, relay_conversation_id TEXT NOT NULL,

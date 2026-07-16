@@ -148,6 +148,28 @@ func TestOfferAndAcceptAdvanceOneTimeLifecycle(t *testing.T) {
 	if err != nil || !replayed || !bytes.Equal(ciphertext, bytes.Repeat([]byte{1}, 20)) {
 		t.Fatalf("download retry replayed=%v err=%v", replayed, err)
 	}
+	// A receiver can crash after the relay commits its receipt fence but before
+	// the ciphertext reaches durable local storage. A newly issued, separately
+	// signed recipient download is therefore allowed to fetch the same immutable
+	// relay-selected bytes; it cannot replace the receipt commitment or access a
+	// different chunk.
+	recoveryPermit := downloadPermit
+	recoveryPermit.Serial = testID(196)
+	if err := SignPermit(&recoveryPermit, issuerPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.issuePermit(context.Background(), recoveryPermit, authority, now); err != nil {
+		t.Fatal(err)
+	}
+	recoveryOperation := testOperation(recoveryPermit, downloadRequest, now)
+	recoveryOperation.OperationID, recoveryOperation.IdempotencyKey = testID(197), testHash(197)
+	if err := SignOperation(&recoveryOperation, recipientPrivate); err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, _, replayed, err = store.redeemDownload(context.Background(), recoveryPermit, recoveryOperation, downloadRoute, downloadRequest, authority, holders, now)
+	if err != nil || replayed || !bytes.Equal(ciphertext, bytes.Repeat([]byte{1}, 20)) {
+		t.Fatalf("recovery download replayed=%v err=%v", replayed, err)
+	}
 	completePermit := beginPermit
 	completePermit.Operation, completePermit.Serial = permitOperationComplete, testID(97)
 	if err := SignPermit(&completePermit, issuerPrivate); err != nil {

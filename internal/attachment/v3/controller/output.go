@@ -10,7 +10,7 @@ import (
 )
 
 // WriteCompletedReceiptAtomically decrypts a fully verified v3 artifact and
-// publishes plaintext only through an fsync+rename boundary. Callers must use
+// publishes plaintext only through an fsync+no-replace boundary. Callers must use
 // it after their durable complete result: no partial or unauthenticated bytes
 // are ever written to the requested destination.
 func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chunks []attachmentv3.EncryptedChunk, fileKey [32]byte, directory attachmentv3.DirectoryKeyResolver, nowUnix int64) error {
@@ -53,7 +53,15 @@ func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chu
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, destination); err != nil {
+	// Link is deliberately used instead of rename: after the preflight above,
+	// another local process could create destination. A same-directory hard link
+	// atomically fails when that name already exists, whereas rename would
+	// replace an attacker- or operator-created file. The temporary file and its
+	// final name are in the same directory, so this cannot cross filesystems.
+	if err := os.Link(tmpName, destination); err != nil {
+		return err
+	}
+	if err := os.Remove(tmpName); err != nil {
 		return err
 	}
 	dir, err := os.Open(parent)

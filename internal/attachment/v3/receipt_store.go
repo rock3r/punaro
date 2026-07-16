@@ -104,18 +104,25 @@ func (s *sourceStore) redeemDownload(ctx context.Context, permit Permit, operati
 		return nil, nil, false, errors.New("v3 permit operation quota exhausted")
 	}
 	var existing []byte
+	alreadyReceived := false
 	err = tx.QueryRowContext(ctx, `SELECT ciphertext_commitment FROM v3_receipt_chunks WHERE transfer_id = ? AND attempt_generation = 1 AND chunk_index = ?`, permit.TransferID[:], route.ChunkIndex).Scan(&existing)
 	if err == nil {
 		if !bytes.Equal(existing, commitment[:]) {
 			return nil, nil, false, errors.New("v3 receipt commitment replacement")
 		}
-		return nil, nil, false, errors.New("v3 chunk was already received")
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+		// The receipt fence deliberately remains immutable, but a separately
+		// authorized recipient download may recover its relay-selected bytes
+		// after a crash between HTTP receipt and its own local durable write.
+		// This never changes the chunk index or commitment and the new operation
+		// is still subject to a fresh recipient permit and quota.
+		alreadyReceived = true
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO v3_receipt_chunks(transfer_id, attempt_generation, chunk_index, ciphertext_commitment) VALUES (?, 1, ?, ?)`, permit.TransferID[:], route.ChunkIndex, commitment[:]); err != nil {
-		return nil, nil, false, err
+	if !alreadyReceived {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO v3_receipt_chunks(transfer_id, attempt_generation, chunk_index, ciphertext_commitment) VALUES (?, 1, ?, ?)`, permit.TransferID[:], route.ChunkIndex, commitment[:]); err != nil {
+			return nil, nil, false, err
+		}
 	}
 	result, err = encodeTransferResult(permit.TransferID, permit.StagedManifestCommitment, transferTransferring, 1, expires)
 	if err != nil || len(result) > maxOperationResultBytes {

@@ -45,6 +45,23 @@ type RecipientOperationSigner interface {
 	BuildOutcomeOperation(attachmentv3.Permit, string, string, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error)
 }
 
+// RecipientDownloadSigner is deliberately separate from acceptance so callers
+// may keep an acceptance-only signer at a less privileged boundary. It can
+// sign only the three post-accept receipt operations for its bound recipient.
+type RecipientDownloadSigner interface {
+	SignReceiptDownloadPermit(*attachmentv3.PermitRequest) error
+	BuildReceiptDownloadOperation(attachmentv3.Permit, string, string, []byte, [16]byte, [32]byte, uint64, uint64) (attachmentv3.OperationRecord, error)
+}
+
+// RecipientLocalOperationSigner is the narrow complete capability set held by
+// the local privileged implementation. Keeping the constructor typed as this
+// public intersection lets a caller pass it to either worker without exposing
+// the concrete private-key holder.
+type RecipientLocalOperationSigner interface {
+	RecipientOperationSigner
+	RecipientDownloadSigner
+}
+
 type localRecipientOperationSigner struct {
 	recipient RecipientIdentity
 	private   ed25519.PrivateKey
@@ -53,7 +70,7 @@ type localRecipientOperationSigner struct {
 // NewLocalRecipientOperationSigner creates the private key-owning signer used
 // by a local privileged worker. The key remains in process and is never
 // accepted from a mailbox body or emitted through this package's CLI.
-func NewLocalRecipientOperationSigner(recipient RecipientIdentity, private ed25519.PrivateKey) RecipientOperationSigner {
+func NewLocalRecipientOperationSigner(recipient RecipientIdentity, private ed25519.PrivateKey) RecipientLocalOperationSigner {
 	return &localRecipientOperationSigner{recipient: recipient, private: append(ed25519.PrivateKey(nil), private...)}
 }
 
@@ -83,6 +100,20 @@ func (s *localRecipientOperationSigner) BuildOutcomeOperation(permit attachmentv
 		return attachmentv3.OperationRecord{}, errors.New("invalid local recipient outcome operation")
 	}
 	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, nil, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
+}
+
+func (s *localRecipientOperationSigner) SignReceiptDownloadPermit(request *attachmentv3.PermitRequest) error {
+	if s == nil || !s.recipient.valid() || request == nil || len(s.private) != ed25519.PrivateKeySize || request.HolderDeviceID != s.recipient.DeviceID || request.HolderGeneration != s.recipient.Generation || request.HolderRole != attachmentv3.PermitHolderRecipient || request.AttemptGeneration != 1 || (request.Operation != attachmentv3.PermitOperationBegin && request.Operation != attachmentv3.PermitOperationDownload && request.Operation != attachmentv3.PermitOperationComplete) {
+		return errors.New("invalid local recipient download signing request")
+	}
+	return attachmentv3.SignPermitRequest(request, s.private)
+}
+
+func (s *localRecipientOperationSigner) BuildReceiptDownloadOperation(permit attachmentv3.Permit, method, path string, body []byte, operationID [16]byte, idempotencyKey [32]byte, issuedAt, expiresAt uint64) (attachmentv3.OperationRecord, error) {
+	if s == nil || !s.recipient.valid() || len(s.private) != ed25519.PrivateKeySize || permit.HolderDeviceID != s.recipient.DeviceID || permit.HolderGeneration != s.recipient.Generation || permit.HolderRole != attachmentv3.PermitHolderRecipient || permit.AttemptGeneration != 1 || (permit.Operation != attachmentv3.PermitOperationBegin && permit.Operation != attachmentv3.PermitOperationDownload && permit.Operation != attachmentv3.PermitOperationComplete) {
+		return attachmentv3.OperationRecord{}, errors.New("invalid local recipient download operation")
+	}
+	return attachmentv3.BuildSignedAttachmentOperation(permit, method, path, body, operationID, idempotencyKey, issuedAt, expiresAt, s.private)
 }
 
 type RecipientAcceptanceWorkerOptions struct {
@@ -400,10 +431,21 @@ func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, r
 	if err != nil || original.Operation != attachmentv3.PermitOperationAccept || original.Serial == [16]byte{} {
 		return receiptOutcomeAttempt{}, errors.New("invalid durable recipient acceptance permit for outcome")
 	}
+	manifestExpiry, err := w.options.Journal.receiptOfferExpiry(messageID)
+	if err != nil {
+		return receiptOutcomeAttempt{}, errors.New("recipient outcome offer expiry is unavailable")
+	}
 	request := record.request
 	request.RequestID, request.Operation, request.AttemptGeneration = requestID, attachmentv3.PermitOperationOutcome, 0
 	request.OutcomeOfSerial = original.Serial
-	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(now.Add(20*time.Second).Unix())
+	expires := now.Add(20 * time.Second).Unix()
+	if expires > manifestExpiry {
+		expires = manifestExpiry
+	}
+	if expires <= now.Unix() {
+		return receiptOutcomeAttempt{}, errors.New("recipient outcome exceeds manifest lifetime")
+	}
+	request.IssuedAt, request.ExpiresAt = uint64(now.Unix()), uint64(expires)
 	if err := w.options.Signer.SignOutcomePermit(&request); err != nil {
 		return receiptOutcomeAttempt{}, err
 	}
@@ -416,6 +458,17 @@ func (w *RecipientAcceptanceWorker) newReceiptOutcomeAttempt(messageID string, r
 		index = previous.index + 1
 	}
 	return w.options.Journal.storeReceiptOutcomeAttempt(messageID, receiptOutcomeAttempt{index: index, request: raw, operationID: opID, idempotencyKey: key})
+}
+
+func (j *Journal) receiptOfferExpiry(messageID string) (int64, error) {
+	if j == nil || j.db == nil || messageID == "" {
+		return 0, errors.New("invalid receipt offer expiry")
+	}
+	var expiry int64
+	if err := j.db.QueryRowContext(context.Background(), `SELECT expires_at FROM controller_inbound_offers WHERE punaro_message_id=?`, messageID).Scan(&expiry); err != nil || expiry < 0 {
+		return 0, errors.New("invalid receipt offer expiry")
+	}
+	return expiry, nil
 }
 
 func outcomeAttemptExpired(outcome receiptOutcomeAttempt, now time.Time) bool {
