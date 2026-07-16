@@ -92,6 +92,13 @@ func TestRecipientDownloadWorkerPersistsVerifiedCiphertextAndPublishesAfterCompl
 	}
 }
 
+func TestReceiptCiphertextLengthAllowsEmptyArtifact(t *testing.T) {
+	manifest := attachmentv3.Manifest{ChunkSize: 1, ChunkCount: 1, PlaintextSize: 0}
+	if got, err := receiptCiphertextLength(manifest, 0); err != nil || got != 16 {
+		t.Fatalf("length=%d err=%v", got, err)
+	}
+}
+
 type receiptDownloadTransport struct {
 	*acceptanceTransportStub
 	accepted, transferring, completed []byte

@@ -261,8 +261,14 @@ func receiptDownloadRoute(transferID [16]byte, phase receiptDownloadPhase, chunk
 }
 
 func receiptCiphertextLength(manifest attachmentv3.Manifest, index uint64) (uint64, error) {
-	if manifest.ChunkSize == 0 || manifest.ChunkCount == 0 || index >= manifest.ChunkCount || manifest.PlaintextSize == 0 || index > ^uint64(0)/manifest.ChunkSize {
+	if manifest.ChunkSize == 0 || manifest.ChunkCount == 0 || index >= manifest.ChunkCount || index > ^uint64(0)/manifest.ChunkSize {
 		return 0, errors.New("invalid receipt manifest geometry")
+	}
+	if manifest.PlaintextSize == 0 {
+		if manifest.ChunkCount != 1 || index != 0 {
+			return 0, errors.New("invalid receipt manifest geometry")
+		}
+		return 16, nil
 	}
 	start := index * manifest.ChunkSize
 	if start >= manifest.PlaintextSize {
