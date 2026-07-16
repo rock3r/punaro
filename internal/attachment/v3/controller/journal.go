@@ -77,6 +77,11 @@ func OpenJournal(path string) (*Journal, error) {
 			offer BLOB NOT NULL, transfer_id BLOB NOT NULL,
 			FOREIGN KEY(relay_conversation_id) REFERENCES controller_mappings(relay_conversation_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS controller_receipt_approvals (
+			punaro_message_id TEXT PRIMARY KEY, offer_commitment BLOB NOT NULL,
+			approved_at INTEGER NOT NULL,
+			FOREIGN KEY(punaro_message_id) REFERENCES controller_inbound_offers(punaro_message_id)
+		)`,
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
