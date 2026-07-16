@@ -1,12 +1,15 @@
 package controller
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
 	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/zeebo/blake3"
 )
 
 // WriteCompletedReceiptAtomically decrypts a fully verified v3 artifact and
@@ -70,4 +73,30 @@ func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chu
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+// completedReceiptOutputMatches is used only to recover the narrow crash
+// window after no-replace publication but before the journal's written marker.
+// It does not trust an existing filename: the file must be regular, private,
+// bounded, and match the already authenticated manifest plaintext commitment.
+func completedReceiptOutputMatches(record receiptDownloadRecord) (bool, error) {
+	manifest, err := attachmentv3.DecodeManifest(record.manifest)
+	if err != nil || manifest.TransferID != record.transferID || blake3.Sum256(record.manifest) != record.manifestCommitment || !filepath.IsAbs(record.outputPath) {
+		return false, errors.New("invalid durable receipt output")
+	}
+	info, err := os.Lstat(record.outputPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || uint64(info.Size()) != manifest.PlaintextSize || manifest.PlaintextSize > 64<<20 {
+		return false, errors.New("unsafe existing receipt output")
+	}
+	plain, err := os.ReadFile(record.outputPath)
+	if err != nil || uint64(len(plain)) != manifest.PlaintextSize {
+		return false, errors.New("unsafe existing receipt output")
+	}
+	var size [8]byte
+	binary.BigEndian.PutUint64(size[:], manifest.PlaintextSize)
+	commitment := blake3.Sum256(append(append(append([]byte("punaro/attachment/plaintext/v3\x00"), manifest.ContentSalt[:]...), size[:]...), plain...))
+	return bytes.Equal(commitment[:], manifest.PlaintextCommitment[:]), nil
 }

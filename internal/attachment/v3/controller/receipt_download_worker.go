@@ -74,6 +74,23 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 	if now.Unix() < 0 {
 		return attachmentv3.TransferResult{}, errors.New("invalid recipient download clock")
 	}
+	if existing, found, err := journal.receiptDownload(inbound.PunaroMessageID); err != nil {
+		return attachmentv3.TransferResult{}, err
+	} else if found && existing.outputPath == destination {
+		if existing.state == receiptDownloadWritten {
+			return w.completedResult(existing)
+		}
+		matched, err := completedReceiptOutputMatches(existing)
+		if err != nil {
+			return attachmentv3.TransferResult{}, err
+		}
+		if matched {
+			if err := journal.markReceiptDownloadWritten(existing); err != nil {
+				return attachmentv3.TransferResult{}, err
+			}
+			return w.completedResult(existing)
+		}
+	}
 	accepted, err := w.options.Acceptance.Accept(ctx, inbound)
 	if err != nil {
 		return attachmentv3.TransferResult{}, err
@@ -139,6 +156,18 @@ func (w *RecipientDownloadWorker) Receive(ctx context.Context, inbound InboundOf
 }
 
 func (w *RecipientDownloadWorker) advance(ctx context.Context, record receiptDownloadRecord, phase receiptDownloadPhase, chunk, maxBytes, maxChunks uint64, expected attachmentv3.TransferState, authority RecipientAcceptanceAuthority, now time.Time) (attachmentv3.TransferResult, error) {
+	// Each remote capability is deliberately minted from a fresh clock and
+	// authority view. A large transfer must not reuse Receive's start time and
+	// accidentally issue already-expired permits after earlier chunks took time.
+	now = w.options.Now().UTC()
+	if now.Unix() < 0 {
+		return attachmentv3.TransferResult{}, errors.New("invalid recipient download clock")
+	}
+	var err error
+	authority, err = w.options.AuthorityProvider.ResolveRecipientAcceptanceAuthority(ctx, now)
+	if err != nil || authority == nil {
+		return attachmentv3.TransferResult{}, errors.New("fresh recipient download authority is unavailable")
+	}
 	if phase == receiptDownloadChunk {
 		if _, found, err := w.options.Acceptance.options.Journal.receiptDownloadChunk(record, chunk); err != nil || found {
 			if err != nil {
