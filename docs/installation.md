@@ -106,6 +106,25 @@ and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
 follow the [alpha onboarding revocation procedure](alpha-text-relay.md#onboard-and-revoke-a-machine): remove attached aliases, remove the relay enrollment, revoke the machine's Access token, stop the service, and securely erase its key.
 
+### Migrate a pre-v3 client key
+
+Older client installers wrote a harmless trailing newline after the encoded
+machine private key. Attachment v3 correctly requires the canonical raw
+base64url form, so migrate an existing enrolled key in place before its first
+v3 preflight. This preserves the same public key and does **not** require a
+relay enrollment change:
+
+```sh
+punaro-keygen --normalize-legacy-private-key-file \
+  "$HOME/.config/punaro/machine.key"
+```
+
+Use the actual absolute `PUNARO_MACHINE_PRIVATE_KEY_FILE` path from
+`adapter.env`. The command accepts only a private, non-symlinked regular file
+with exactly one legacy trailing newline, validates the complete Ed25519 key,
+and atomically replaces it with the canonical form. It never prints key
+material. New client installations already use the canonical format.
+
 ## 4. Provision and enable controlled attachment v3
 
 Attachment v3 has an explicit, multi-role setup. Do not enable it by setting
