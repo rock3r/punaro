@@ -75,7 +75,11 @@ func (j *Journal) ApprovedInboundOffer(messageID string) (InboundOffer, error) {
 	if !bytes.Equal(approval, commitment[:]) {
 		return InboundOffer{}, errors.New("approved inbound offer is unavailable")
 	}
-	return InboundOffer{PunaroMessageID: messageID, RelayConversationID: relayConversationID, Body: string(offer)}, nil
+	body, err := attachmentv3.EncodeOfferNotice(offer)
+	if err != nil {
+		return InboundOffer{}, errors.New("approved inbound offer is unavailable")
+	}
+	return InboundOffer{PunaroMessageID: messageID, RelayConversationID: relayConversationID, Body: body}, nil
 }
 
 func (r RecipientIdentity) valid() bool { return r.DeviceID != [16]byte{} && r.Generation != 0 }

@@ -53,6 +53,37 @@ the enrolled machine's signed request and, when configured, Cloudflare Access.
 The directory endpoint is a validation aid for enrollment, directory
 publishing, and revocation drills. It does not itself enable file transfer.
 
+### Receiver egress preflight
+
+Every attachment receiver must be permitted by its local outbound policy to
+make authenticated HTTPS requests to the Access-protected relay. An adapter
+that happens to have a working persistent connection, or a successful `curl`
+health probe, does not prove that a newly started attachment receiver can
+complete its own TLS handshake and signed `GET /v2/directory` request.
+
+Every directory publisher, relay, sender, and receiver also needs working NTP
+time synchronization. Directory snapshots and permits are deliberately
+short-lived and reject future-dated, expired, or otherwise invalid time
+windows. Do not compensate for clock drift by lengthening validity windows or
+disabling freshness checks: repair the host's normal time synchronization,
+then run the receiver preflight again.
+
+Before enabling controlled attachment delivery on each machine, and after an
+Access, firewall, certificate, network, or directory-publisher change, run
+the locally provisioned receiver command:
+
+```sh
+punaro-attachment check
+```
+
+`check` makes one fresh authenticated directory request and verifies its pinned
+root trust and durable anti-rollback checkpoint. It does **not** read an offer,
+issue a permit, create a transfer, or write an output file. Treat any failure
+as a deployment blocker: authorize the receiver executable's required HTTPS
+egress or repair the configured relay/Access path, then run the same check
+again. Do not bypass it with a public link, mailbox payload, Telegram upload,
+or a direct peer channel.
+
 An operator may additionally exercise only the permit-issuance prerequisite by
 setting `PUNARO_PERMIT_ISSUANCE_ENABLED=true`. This requires the directory
 service above and all of the following explicit inputs:
