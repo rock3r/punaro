@@ -183,7 +183,7 @@ func VerifyOperation(r OperationRecord, permit Permit, holders OperationHolderRe
 		return errors.New("invalid v3 operation permit binding")
 	}
 	seconds := now.UTC().Unix()
-	if seconds < 0 || r.IssuedAt > uint64(seconds) || r.ExpiresAt <= uint64(seconds) {
+	if seconds < 0 || !issuedWithinClockSkew(r.IssuedAt, seconds) || r.ExpiresAt <= uint64(seconds) {
 		return errors.New("expired v3 operation record")
 	}
 	holder, err := holders.CurrentDeviceSigningKey(permit.HolderDeviceID, permit.HolderGeneration)

@@ -70,7 +70,7 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 snapshot="$work_dir/snapshot"
-"$PUNARO_DIRECTORY_BINARY" build --config "$PUNARO_DIRECTORY_MANIFEST" --root-private-key-file "$PUNARO_DIRECTORY_ROOT_PRIVATE_KEY" --output "$snapshot" --ttl 30s >/dev/null
+"$PUNARO_DIRECTORY_BINARY" build --config "$PUNARO_DIRECTORY_MANIFEST" --root-private-key-file "$PUNARO_DIRECTORY_ROOT_PRIVATE_KEY" --output "$snapshot" --ttl 2m >/dev/null
 
 # The root key never leaves this host. Only its signed snapshot crosses this hop.
 remote_stage=$(ssh_pve "$PUNARO_PVE_SSH_TARGET" mktemp /tmp/punaro-directory.XXXXXXXX)

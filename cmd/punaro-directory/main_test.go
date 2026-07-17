@@ -67,6 +67,19 @@ func TestBuildSnapshotRejectsInvalidPublicManifest(t *testing.T) {
 	}
 }
 
+func TestRunBuildRejectsDirectoryTTLAbovePracticalLimit(t *testing.T) {
+	root := t.TempDir()
+	err := runBuild([]string{
+		"--config", filepath.Join(root, "config.json"),
+		"--root-private-key-file", filepath.Join(root, "root.key"),
+		"--output", filepath.Join(root, "snapshot.cbor"),
+		"--ttl", "5m1s",
+	})
+	if err == nil || err.Error() != "--ttl must be between 1s and 5m" {
+		t.Fatalf("err=%v, want practical TTL range rejection", err)
+	}
+}
+
 func TestPrivateOutputsRequirePrivateParentAndNeverOverwrite(t *testing.T) {
 	unsafe := filepath.Join(t.TempDir(), "unsafe")
 	if err := os.Mkdir(unsafe, 0o700); err != nil {

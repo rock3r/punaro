@@ -18,6 +18,15 @@ type permitIssuanceAuthorityStub struct {
 	binding   DirectoryPermitBinding
 }
 
+func testUnix(t *testing.T, value time.Time) uint64 {
+	t.Helper()
+	seconds := value.Unix()
+	if seconds < 0 {
+		t.Fatal("test time precedes Unix epoch")
+	}
+	return uint64(seconds) // #nosec G115 -- the negative Unix-time case returns above.
+}
+
 func (s permitIssuanceAuthorityStub) CurrentPermitIssuerKey(keyID [32]byte) (ed25519.PublicKey, error) {
 	if keyID != s.issuerID {
 		return nil, errors.New("unknown issuer")
@@ -93,6 +102,43 @@ func TestPermitIssuerMintsV3PermitAndReturnsExactRetry(t *testing.T) {
 	}
 	if _, _, err := issuer.Issue(context.Background(), request, authority); err == nil {
 		t.Fatal("changed request reused v3 issuance ID")
+	}
+}
+
+func TestPermitIssuerAllowsBoundedFutureRequestClockSkew(t *testing.T) {
+	issuerPublic, issuerPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderPublic, holderPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 15, 1, 0, 0, 0, time.UTC)
+	store, err := openSourceStore(privateDatabase(t), defaultSourceLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.close() })
+	authority := permitIssuanceAuthorityStub{issuerID: requestIssuerID(), issuer: issuerPublic, holderID: testID(4), holderGen: 1, holder: holderPublic, binding: DirectoryPermitBinding{Audience: testHash(1), DirectoryHead: testHash(8), RevocationEpoch: 4, ExpiresAt: testUnix(t, clock.Add(2*time.Minute))}}
+	issuer, err := NewPermitIssuer(PermitIssuerOptions{Store: store, IssuerKeyID: requestIssuerID(), PrivateKey: issuerPrivate, MaxLifetime: 30 * time.Second, MaxBytes: 1 << 20, MaxChunks: 4, MaxOperations: 2, MaxActive: 4, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testPermitRequest(clock.Add(60 * time.Second))
+	if err := SignPermitRequest(&request, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := issuer.Issue(context.Background(), request, authority); err != nil {
+		t.Fatalf("bounded future-issued request rejected: %v", err)
+	}
+	request = testPermitRequest(clock.Add(61 * time.Second))
+	request.RequestID = testID(111)
+	if err := SignPermitRequest(&request, holderPrivate); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := issuer.Issue(context.Background(), request, authority); err == nil {
+		t.Fatal("request beyond bounded future clock skew accepted")
 	}
 }
 

@@ -196,6 +196,41 @@ func TestVerifyAndAdvanceDirectoryHeadRejectsEquivocationAndMissingProof(t *test
 	}
 }
 
+func TestVerifyDirectoryHeadAllowsBoundedClockSkewAndPracticalLifetime(t *testing.T) {
+	rootPublic, rootPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
+	trust := DirectoryTrust{Audience: directoryBytes32(1), RootKeyID: directoryBytes32(2), RootPublicKey: rootPublic, Checkpoints: &memoryCheckpointStore{checkpoints: make(map[[32]byte]DirectoryCheckpoint)}}
+
+	accepted := signedDirectoryHead(t, rootPrivate, DirectoryHead{
+		Audience: trust.Audience, RootKeyID: trust.RootKeyID, TreeSize: 1, TreeRoot: directoryBytes32(3), Sequence: 1,
+		IssuedAt: testUnix(t, now.Add(60*time.Second)), ExpiresAt: testUnix(t, now.Add(5*time.Minute)),
+	})
+	raw, err := EncodeDirectoryHead(accepted)
+	if err != nil {
+		t.Fatalf("encode bounded-skew head: %v", err)
+	}
+	if _, err := verifyDirectoryHead(raw, trust, now); err != nil {
+		t.Fatalf("bounded future clock skew rejected: %v", err)
+	}
+
+	rejected := accepted
+	rejected.IssuedAt = testUnix(t, now.Add(61*time.Second))
+	rejected.ExpiresAt = testUnix(t, now.Add(5*time.Minute+time.Second))
+	if err := SignDirectoryHead(&rejected, rootPrivate); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = EncodeDirectoryHead(rejected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyDirectoryHead(raw, trust, now); err == nil {
+		t.Fatal("directory head beyond bounded future clock skew accepted")
+	}
+}
+
 func TestSQLiteCheckpointStoreConcurrentAdvancesCannotDowngradeCheckpoint(t *testing.T) {
 	t.Parallel()
 	parent := filepath.Join(t.TempDir(), "private")

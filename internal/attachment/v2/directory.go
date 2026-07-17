@@ -15,6 +15,11 @@ const (
 	directoryNodeDomain = "punaro/attachment/directory-node/v2\x00"
 	maxDirectoryLeaves  = 4096
 	maxDirectoryHead    = 4 << 10
+	// Directory snapshots are refreshed frequently, but they must survive
+	// ordinary scheduling, transport, and NTP convergence delays. Permits stay
+	// much shorter-lived and are independently bound to a fresh directory view.
+	maxDirectoryHeadLifetimeSeconds = 5 * 60
+	maxDirectoryFutureSkewSeconds   = 60
 )
 
 // DirectoryHead is the root-signed, canonical, short-lived authority snapshot
@@ -90,7 +95,7 @@ func (h DirectoryHead) wire() directoryHeadWire {
 }
 
 func validateDirectoryHead(h DirectoryHead) error {
-	if isZero32(h.Audience) || isZero32(h.RootKeyID) || isZero32(h.TreeRoot) || h.TreeSize == 0 || h.TreeSize > maxDirectoryLeaves || h.Sequence == 0 || h.ExpiresAt <= h.IssuedAt || h.ExpiresAt-h.IssuedAt > 30 {
+	if isZero32(h.Audience) || isZero32(h.RootKeyID) || isZero32(h.TreeRoot) || h.TreeSize == 0 || h.TreeSize > maxDirectoryLeaves || h.Sequence == 0 || h.ExpiresAt <= h.IssuedAt || h.ExpiresAt-h.IssuedAt > maxDirectoryHeadLifetimeSeconds {
 		return errors.New("invalid directory head")
 	}
 	return nil
@@ -167,7 +172,7 @@ func verifyDirectoryHead(raw []byte, trust DirectoryTrust, now time.Time) (Direc
 		return DirectoryHead{}, errors.New("invalid directory signature")
 	}
 	nowUnix := now.UTC().Unix()
-	if nowUnix < 0 || head.IssuedAt > uint64(nowUnix) || head.IssuedAt > uint64(nowUnix)+120 || head.ExpiresAt <= uint64(nowUnix) {
+	if nowUnix < 0 || head.IssuedAt > uint64(nowUnix)+maxDirectoryFutureSkewSeconds || head.ExpiresAt <= uint64(nowUnix) {
 		return DirectoryHead{}, errors.New("stale directory head")
 	}
 	return head, nil

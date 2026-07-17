@@ -62,11 +62,12 @@ health probe, does not prove that a newly started attachment receiver can
 complete its own TLS handshake and signed `GET /v2/directory` request.
 
 Every directory publisher, relay, sender, and receiver also needs working NTP
-time synchronization. Directory snapshots and permits are deliberately
-short-lived and reject future-dated, expired, or otherwise invalid time
-windows. Do not compensate for clock drift by lengthening validity windows or
-disabling freshness checks: repair the host's normal time synchronization,
-then run the receiver preflight again.
+time synchronization. A directory head may be valid for up to five minutes
+and accepts at most 60 seconds of future clock skew; per-operation permits
+remain valid for at most 30 seconds. This margin handles normal scheduling and
+NTP convergence, but never extends expiry or replaces NTP. Do not disable
+freshness checks: repair a materially drifting host, then run the receiver
+preflight again.
 
 Before enabling controlled attachment delivery on each machine, and after an
 Access, firewall, certificate, network, or directory-publisher change, run
@@ -297,7 +298,7 @@ The manifest has only `audience`, `root_key_id`, `sequence`,
 of `device`, `membership`, or `issuer`. Unknown or
 duplicate fields are rejected. Build a short-lived snapshot from that
 non-secret JSON manifest using `build --config ... --root-private-key-file ...
---output ... --ttl 30s`, then atomically publish that new file at
+--output ... --ttl 2m`, then atomically publish that new file at
 `PUNARO_DIRECTORY_SNAPSHOT_FILE`. Keep the root and issuer private keys
 separate from the relay runtime; only the issuer key belongs in the relay's
 private credential directory. Never place device private keys, root keys, or
@@ -305,12 +306,12 @@ issuer keys in the manifest, an environment file, or source control.
 
 For a Proxmox-contained relay, use
 [`scripts/publish-directory-snapshot.sh`](../scripts/publish-directory-snapshot.sh)
-from the separate root-key host. It builds one fresh 30-second snapshot and
+from the separate root-key host. It builds one fresh two-minute snapshot and
 copies only that signed snapshot through the Proxmox host, then changes mode
 and atomically renames it inside the target container. Put its environment in
 an owner-only service configuration and schedule the next publication only
-after the prior 30-second snapshot and every permit it could have issued have
-expired (for example, a 31-second interval). Do not rotate a still-valid head:
+after the prior two-minute snapshot and every permit it could have issued have
+expired (for example, a 121-second interval). Do not rotate a still-valid head:
 permits bind to that exact signed head. Do not run it on the relay or copy the
 root key into the container. This deliberately creates a brief unready
 rollover boundary; callers must retry a fresh operation after it. If a publish

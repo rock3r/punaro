@@ -44,6 +44,35 @@ func TestOperationRecordBindsV3RequestPermitAndStagedSource(t *testing.T) {
 	}
 }
 
+func TestOperationAllowsBoundedFutureClockSkew(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	permit := testPermit(now.Add(60 * time.Second))
+	permit.Operation = permitOperationSourceUpload
+	_, request, err := NewAttachmentOperationRequest("PUT", "/v3/attachments/05000000000000000000000000000000/source/chunks/0", []byte("ciphertext"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testOperation(permit, request, now.Add(60*time.Second))
+	if err := SignOperation(&record, private); err != nil {
+		t.Fatal(err)
+	}
+	holders := operationHolderStub{device: permit.HolderDeviceID, generation: permit.HolderGeneration, key: public}
+	if err := VerifyOperation(record, permit, holders, now); err != nil {
+		t.Fatalf("bounded future-issued operation rejected: %v", err)
+	}
+	record = testOperation(permit, request, now.Add(61*time.Second))
+	if err := SignOperation(&record, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyOperation(record, permit, holders, now); err == nil {
+		t.Fatal("operation beyond bounded future clock skew accepted")
+	}
+}
+
 func TestDownloadOperationAdmissionDoesNotTakeCiphertextFromCaller(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

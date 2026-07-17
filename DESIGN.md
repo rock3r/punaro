@@ -451,7 +451,10 @@ lists what is not yet a supported production operation.
   mailbox boundary.
 - Use SQLite-aware online backups or checkpoint/quiesce before snapshots; do
   not assume a live Proxmox snapshot is a consistent database backup. Monitor
-  NTP/clock skew because leases and credentials are time-bound.
+  NTP/clock skew because leases and credentials are time-bound. Attachment
+  directory heads permit at most 60 seconds of future skew and remain valid
+  for at most five minutes; permits and operation records remain bounded to
+  30 seconds and never receive an expiry extension for skew.
 
 ## Implementation plan
 

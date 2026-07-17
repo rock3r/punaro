@@ -470,7 +470,7 @@ func (r *DirectorySnapshotResolver) ValidateManifestAuthority(manifest Manifest,
 // ValidateV3ManifestAdmissionAuthority is the v3-only source-init authority
 // check. It retains v2's exact current head, epoch, device, key, and
 // membership requirements, but allows v3's separately bounded immutable
-// Manifest to outlive the 30-second directory head. v2 callers must continue
+// Manifest to outlive the five-minute directory head. v2 callers must continue
 // using ValidateManifestAuthority.
 func (r *DirectorySnapshotResolver) ValidateV3ManifestAdmissionAuthority(manifest Manifest, now time.Time) (ed25519.PublicKey, error) {
 	return r.validateManifestAuthority(manifest, now, false)
@@ -485,7 +485,7 @@ func (r *DirectorySnapshotResolver) validateManifestAuthority(manifest Manifest,
 		return nil, errors.New("invalid manifest directory authority")
 	}
 	headCommitment, err := directoryHeadCommitment(r.head)
-	if err != nil || manifest.Audience != r.head.Audience || manifest.RevocationEpoch != r.head.RevocationEpoch || manifest.DirectoryHead != headCommitment || manifest.IssuedAt > uint64(nowUnix) || manifest.ExpiresAt <= uint64(nowUnix) || (requireManifestWithinHead && manifest.ExpiresAt > r.head.ExpiresAt) {
+	if err != nil || manifest.Audience != r.head.Audience || manifest.RevocationEpoch != r.head.RevocationEpoch || manifest.DirectoryHead != headCommitment || manifest.IssuedAt > uint64(nowUnix)+maxDirectoryFutureSkewSeconds || manifest.ExpiresAt <= uint64(nowUnix) || (requireManifestWithinHead && manifest.ExpiresAt > r.head.ExpiresAt) {
 		return nil, errors.New("invalid manifest directory authority")
 	}
 	sender, found := r.device(manifest.SenderDeviceID, manifest.SenderGeneration)
@@ -506,7 +506,7 @@ func (r *DirectorySnapshotResolver) ValidateRetainedManifestAuthority(manifest M
 		return nil, errors.New("invalid retained manifest directory authority")
 	}
 	nowUnix := now.UTC().Unix()
-	if nowUnix < 0 || manifest.Audience != r.head.Audience || manifest.IssuedAt > uint64(nowUnix) || manifest.ExpiresAt <= uint64(nowUnix) {
+	if nowUnix < 0 || manifest.Audience != r.head.Audience || manifest.IssuedAt > uint64(nowUnix)+maxDirectoryFutureSkewSeconds || manifest.ExpiresAt <= uint64(nowUnix) {
 		return nil, errors.New("invalid retained manifest directory authority")
 	}
 	sender, found := r.device(manifest.SenderDeviceID, manifest.SenderGeneration)
@@ -549,7 +549,7 @@ func (r *DirectorySnapshotResolver) fresh(now time.Time) bool {
 		return false
 	}
 	nowUnix := uint64(unix)
-	return r.head.IssuedAt <= nowUnix && r.head.ExpiresAt > nowUnix
+	return r.head.IssuedAt <= nowUnix+maxDirectoryFutureSkewSeconds && r.head.ExpiresAt > nowUnix
 }
 
 func (r *DirectorySnapshotResolver) current() bool {

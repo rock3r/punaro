@@ -167,7 +167,7 @@ func VerifyPermit(p Permit, authority PermitAuthorityResolver, now time.Time) er
 		return errors.New("invalid permit")
 	}
 	seconds := now.UTC().Unix()
-	if seconds < 0 || p.IssuedAt > uint64(seconds) || p.ExpiresAt <= uint64(seconds) {
+	if seconds < 0 || !issuedWithinClockSkew(p.IssuedAt, seconds) || p.ExpiresAt <= uint64(seconds) {
 		return errors.New("expired permit")
 	}
 	key, err := authority.ValidatePermitAuthority(p, now)
