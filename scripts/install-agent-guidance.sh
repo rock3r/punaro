@@ -38,7 +38,7 @@ Use the local `agent-mailbox` MCP for Punaro-delivered mail. Call `mailbox_statu
 
 install_guidance_file() {
 	path=$1
-	if [ -e "$path" ] && [ ! -f "$path" ]; then fail "guidance target is not a regular file: $path"; fi
+	if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then fail "guidance target is not a regular file: $path"; fi
 	if [ -f "$path" ] && grep -Fqx '<!-- punaro-agent-guidance:start -->' "$path"; then
 		grep -Fqx '<!-- punaro-agent-guidance:end -->' "$path" || fail "incomplete existing Punaro guidance block: $path"
 		return
