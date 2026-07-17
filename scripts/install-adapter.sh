@@ -103,7 +103,7 @@ repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 [ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
 if [ "$mailbox_bin" = agent-mailbox ]; then
-	command -v agent-mailbox >/dev/null 2>&1 || fail 'agent-mailbox is required; install it before onboarding this machine'
+	mailbox_bin=$(command -v agent-mailbox) || fail 'agent-mailbox is required; install it before onboarding this machine'
 elif [ ! -x "$mailbox_bin" ]; then
 	fail 'agent-mailbox path is not executable'
 fi
@@ -206,7 +206,14 @@ if [ "$enable" -eq 1 ]; then
 		service_dir="$HOME/.config/systemd/user"
 		service_file="$service_dir/punaro-adapter.service"
 		mkdir -p "$service_dir"
-		install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
+		if [ "$mailbox_state_dir" = "$HOME/.local/state/ai-agent/mailbox" ]; then
+			install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
+		else
+			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir|" \
+				"$repo_dir/deploy/systemd/user/punaro-adapter.service" >"$service_file"
+			chmod 600 "$service_file"
+			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+		fi
 		if [ "$enable" -eq 1 ]; then
 			systemctl --user daemon-reload
 			systemctl --user enable --now punaro-adapter.service

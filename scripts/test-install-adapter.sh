@@ -15,6 +15,7 @@ home="$fixture_dir/home"
 mailbox="$fixture_dir/agent-mailbox"
 mailbox_log="$fixture_dir/mailbox.log"
 guidance_project="$fixture_dir/project"
+mailbox_state="$fixture_dir/custom-mailbox"
 mkdir -p "$home" "$guidance_project"
 
 cat >"$mailbox" <<'EOF'
@@ -34,6 +35,7 @@ run_install() {
 		--relay-url https://relay.example.test \
 		--machine-id macbook \
 		--agent-mailbox-bin "$mailbox" \
+		--mailbox-state-dir "$mailbox_state" \
 		--agent-guidance-dir "$guidance_project"
 }
 
@@ -62,6 +64,7 @@ if [ "$(uname -s)" = Darwin ]; then
 	[ -f "$plist" ] || { printf '%s\n' 'LaunchAgent was not installed' >&2; exit 1; }
 else
 	[ -f "$home/.config/systemd/user/punaro-adapter.service" ] || { printf '%s\n' 'user systemd unit was not installed' >&2; exit 1; }
+	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
 fi
 [ "$(file_mode "$key")" = 600 ] || { printf '%s\n' 'machine key permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$config")" = 600 ] || { printf '%s\n' 'adapter environment permissions are not 0600' >&2; exit 1; }
@@ -81,6 +84,14 @@ fi
 cp "$enrollment" "$fixture_dir/enrollment.before"
 run_install >"$fixture_dir/second.out"
 cmp "$fixture_dir/enrollment.before" "$enrollment"
+
+default_home="$fixture_dir/default-home"
+mkdir -p "$default_home"
+PATH="$fixture_dir:$PATH" HOME="$default_home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id default-path >"$fixture_dir/default.out"
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox" "$default_home/.config/punaro/adapter.env"
 
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1
