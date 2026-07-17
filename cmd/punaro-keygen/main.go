@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -85,15 +86,15 @@ func normalizeLegacyPrivateKey(path string) error {
 	}
 	parent := filepath.Dir(path)
 	parentInfo, err := os.Lstat(parent)
-	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o077 != 0 {
-		return errors.New("legacy private key parent must be private and non-symlinked")
+	if err != nil || !isPrivateOwnedDirectory(parentInfo) {
+		return errors.New("legacy private key parent must be private, owned, and non-symlinked")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("legacy private key file must be private and non-symlinked")
+	if err != nil || !isPrivateOwnedRegularFile(info) {
+		return errors.New("legacy private key file must be private, owned, and non-symlinked")
 	}
 	// #nosec G304 -- path is an explicit migration target, constrained above to a
-	// private, absolute, non-symlinked regular file.
+	// private, owned, absolute, non-symlinked regular file.
 	file, err := os.Open(path)
 	if err != nil {
 		return errors.New("legacy private key is unavailable")
@@ -138,6 +139,16 @@ func normalizeLegacyPrivateKey(path string) error {
 		return fmt.Errorf("replace legacy private key: %w", err)
 	}
 	return nil
+}
+
+func isPrivateOwnedDirectory(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0 && int(stat.Uid) == os.Geteuid()
+}
+
+func isPrivateOwnedRegularFile(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0 && int(stat.Uid) == os.Geteuid()
 }
 
 func newMachineKey(id, prefix string) (ed25519.PrivateKey, relay.Machine, error) {
