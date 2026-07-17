@@ -105,6 +105,12 @@ service above and all of the following explicit inputs:
   For v3 it bounds retained issuance identities per holder (including
   short-lived retry tombstones), while the source store separately enforces
   aggregate transfer capacity. An exact retry does not consume another slot.
+  Size this for the whole attachment lifecycle, not just one permit: a
+  maximum-size v3 transfer can require a few hundred per-device issuance
+  identities across upload and receipt download. `512` is the practical
+  minimum for a single 64 MiB transfer with ordinary retries; increase it
+  deliberately for concurrent large transfers while retaining the configured
+  per-holder bound.
 - At least one `PUNARO_RELAY_MACHINES_JSON` record with an
   `attachment_device_id`, encoded as canonical raw-base64url 16-byte data.
   Each device ID may be bound to only one machine. The permit route rejects a
