@@ -115,11 +115,12 @@ v3 preflight. This preserves the same public key and does **not** require a
 relay enrollment change:
 
 ```sh
-punaro-keygen --normalize-legacy-private-key-file \
+go run ./cmd/punaro-keygen --normalize-legacy-private-key-file \
   "$HOME/.config/punaro/machine.key"
 ```
 
-Use the actual absolute `PUNARO_MACHINE_PRIVATE_KEY_FILE` path from
+Run this from the same reviewed Punaro checkout used for client installation,
+and use the actual absolute `PUNARO_MACHINE_PRIVATE_KEY_FILE` path from
 `adapter.env`. The command accepts only a private, non-symlinked regular file
 with exactly one legacy trailing newline, validates the complete Ed25519 key,
 and atomically replaces it with the canonical form. It never prints key
