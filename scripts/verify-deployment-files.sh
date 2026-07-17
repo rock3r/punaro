@@ -70,15 +70,15 @@ for expected in \
 	'close_fds=True' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal' \
-	'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' \
-	'/root/.punaro-directory-stage' \
-	'install -d -o root -g punaro -m 2750 /var/lib/punaro/private' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /etc/punaro/directory' \
+	'/etc/punaro/.punaro-directory-stage' \
+	'install -d -o root -g punaro -m 2750 /etc/punaro/directory' \
 	'chown root:punaro' \
 	'[ ! -L' \
 	'[ ! -L \"\$parent\" ]' \
 	'stat -c %d' \
 	'--ttl 2m' \
-	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' \
+	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /etc/punaro/directory' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE contains unsafe characters' \
 	'directory_snapshot_published'; do
 	if ! grep -Fq -- "$expected" "$snapshot_publisher"; then

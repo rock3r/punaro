@@ -82,37 +82,28 @@ path_in_root() {
 config_file=$(path_in_root etc/punaro/punaro.env)
 credentials_dir=$(path_in_root etc/punaro/credentials)
 issuer_destination="$credentials_dir/v3-issuer.private"
-private_dir=$(path_in_root var/lib/punaro/private)
-snapshot_destination="$private_dir/v3-directory.snapshot"
-v3_state_dir=$(path_in_root var/lib/punaro/attachment-v3)
-relay_state_dir=$(path_in_root var/lib/punaro)
+directory_dir=$(path_in_root etc/punaro/directory)
+snapshot_destination="$directory_dir/v3-directory.snapshot"
 [ -f "$config_file" ] && [ ! -L "$config_file" ] || fail 'install-server must create a regular relay configuration before v3 configuration'
-[ -d "$relay_state_dir" ] && [ ! -L "$relay_state_dir" ] || fail 'relay state directory must be a non-symlink directory'
-if [ -e "$private_dir" ] || [ -L "$private_dir" ]; then
-	[ -d "$private_dir" ] && [ ! -L "$private_dir" ] || fail 'existing directory snapshot parent must be a non-symlink directory'
-fi
-if [ -e "$v3_state_dir" ] || [ -L "$v3_state_dir" ]; then
-	[ -d "$v3_state_dir" ] && [ ! -L "$v3_state_dir" ] || fail 'existing v3 state directory must be a non-symlink directory'
+if [ -e "$directory_dir" ] || [ -L "$directory_dir" ]; then
+	[ -d "$directory_dir" ] && [ ! -L "$directory_dir" ] || fail 'directory snapshot parent must be a non-symlink directory'
 fi
 
 verify_live_v3_paths() {
-	[ -d "$relay_state_dir" ] && [ ! -L "$relay_state_dir" ] || fail 'relay state directory must be a non-symlink directory'
-	[ "$(stat -c %U "$relay_state_dir")" = punaro ] && [ "$(stat -c %a "$relay_state_dir")" = 700 ] || fail 'relay state directory has unexpected ownership or mode'
-	[ -d "$private_dir" ] && [ ! -L "$private_dir" ] || fail 'directory snapshot parent must be a non-symlink directory'
-	[ "$(stat -c %U "$private_dir")" = root ] && [ "$(stat -c %G "$private_dir")" = punaro ] && [ "$(stat -c %a "$private_dir")" = 2750 ] || fail 'directory snapshot parent has unexpected ownership or mode'
-	[ -d "$v3_state_dir" ] && [ ! -L "$v3_state_dir" ] || fail 'v3 state directory must be a non-symlink directory'
-	[ "$(stat -c %U "$v3_state_dir")" = punaro ] && [ "$(stat -c %G "$v3_state_dir")" = punaro ] && [ "$(stat -c %a "$v3_state_dir")" = 700 ] || fail 'v3 state directory has unexpected ownership or mode'
+	[ -d "$directory_dir" ] && [ ! -L "$directory_dir" ] || fail 'directory snapshot parent must be a non-symlink directory'
+	[ "$(stat -c %U "$directory_dir")" = root ] && [ "$(stat -c %G "$directory_dir")" = punaro ] && [ "$(stat -c %a "$directory_dir")" = 2750 ] || fail 'directory snapshot parent has unexpected ownership or mode'
 }
 
 if [ "$root_dir" = / ]; then
 	install -d -o root -g punaro -m 0750 "$credentials_dir"
-	install -d -o root -g punaro -m 2750 "$private_dir"
-	install -d -o punaro -g punaro -m 0700 "$v3_state_dir"
+	# This directory is below the root-owned configuration hierarchy, never the
+	# service-owned state directory. Root therefore never repairs or writes
+	# through a path that the relay account can replace with a symlink.
+	install -d -o root -g punaro -m 2750 "$directory_dir"
 	verify_live_v3_paths
 else
 	install -d -m 0700 "$credentials_dir"
-	[ -d "$private_dir" ] || install -d -m 0700 "$private_dir"
-	[ -d "$v3_state_dir" ] || install -d -m 0700 "$v3_state_dir"
+	install -d -m 0700 "$directory_dir"
 fi
 issuer_stage="$issuer_destination.v3-next"
 snapshot_stage="$snapshot_destination.v3-next"
@@ -127,7 +118,7 @@ trap cleanup_staged EXIT HUP INT TERM
 
 render_error=$(mktemp "${TMPDIR:-/tmp}/punaro-attachment-relay-render.XXXXXXXX")
 if ! python3 - "$config_file" "$authority_public" "$relay_machines_file" \
-	'/etc/punaro/credentials/v3-issuer.private' '/var/lib/punaro/private/v3-directory.snapshot' \
+	'/etc/punaro/credentials/v3-issuer.private' '/etc/punaro/directory/v3-directory.snapshot' \
 	'/var/lib/punaro/attachment-v3/source.db' <<'PY' 2>"$render_error"
 import base64
 import json
@@ -143,7 +134,11 @@ def read_json(path):
 def valid(value, size):
     if not isinstance(value, str) or "=" in value:
         raise ValueError("invalid public value")
-    if len(base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))) != size:
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except Exception as error:
+        raise ValueError("invalid public value") from error
+    if len(decoded) != size or base64.urlsafe_b64encode(decoded).rstrip(b"=").decode() != value:
         raise ValueError("unexpected public value length")
     return value
 
@@ -162,20 +157,38 @@ if not isinstance(machines, list) or not machines:
 bound = 0
 seen_ids = set()
 seen_devices = set()
+allowed_machine_fields = {"id", "public_key", "endpoint_prefixes", "endpoints", "attachment_device_id"}
+normalized_machines = []
 for machine in machines:
-    if not isinstance(machine, dict) or not isinstance(machine.get("id"), str) or machine["id"] in seen_ids:
+    if not isinstance(machine, dict) or set(machine) - allowed_machine_fields:
+        raise ValueError("relay machine enrollment contains unsupported or secret fields")
+    if not isinstance(machine.get("id"), str) or machine["id"] in seen_ids:
         raise ValueError("relay machine enrollment contains invalid or duplicate machine IDs")
+    if not isinstance(machine.get("public_key"), str):
+        raise ValueError("relay machine enrollment contains an invalid public_key")
+    public_key = valid(machine["public_key"], 32)
+    for field in ("endpoint_prefixes", "endpoints"):
+        if field in machine and machine[field] is not None and (not isinstance(machine[field], list) or not all(isinstance(value, str) for value in machine[field])):
+            raise ValueError("relay machine enrollment contains invalid endpoints")
     seen_ids.add(machine["id"])
     device = machine.get("attachment_device_id")
-    if device is not None:
+    normalized = {"id": machine["id"], "public_key": public_key}
+    for field in ("endpoint_prefixes", "endpoints"):
+        if field in machine and machine[field] is not None:
+            normalized[field] = machine[field]
+    if device not in (None, ""):
         valid(device, 16)
         if device in seen_devices:
             raise ValueError("relay machine enrollment reuses an attachment_device_id")
         seen_devices.add(device)
+        normalized["attachment_device_id"] = device
         bound += 1
+    elif device == "":
+        normalized["attachment_device_id"] = ""
+    normalized_machines.append(normalized)
 if bound == 0:
     raise ValueError("relay machine enrollment must contain an attachment_device_id binding")
-machines_json = json.dumps(machines, sort_keys=True, separators=(",", ":"))
+machines_json = json.dumps(normalized_machines, sort_keys=True, separators=(",", ":"))
 
 managed = {
     "PUNARO_DIRECTORY_ENABLED",
@@ -240,8 +253,8 @@ rm -f -- "$render_error"
 [ -f "$config_stage" ] && [ ! -L "$config_stage" ] || fail 'could not safely render staged relay configuration'
 
 if [ "$root_dir" = / ]; then
-	# The service account owns its state parent. Recheck immediately before
-	# privileged writes so a renamed directory or planted symlink fails closed.
+	# The directory is root-owned; recheck immediately before privileged writes
+	# so any unexpected local tampering fails closed.
 	verify_live_v3_paths
 	install -m 0600 -o punaro -g punaro "$issuer_private_key" "$issuer_stage"
 	install -m 0640 -o root -g punaro "$directory_snapshot" "$snapshot_stage"

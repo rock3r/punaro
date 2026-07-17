@@ -46,7 +46,7 @@ sh "$repo_dir/scripts/configure-attachment-v3-relay.sh" --root "$stage" \
 
 config="$stage/etc/punaro/punaro.env"
 issuer="$stage/etc/punaro/credentials/v3-issuer.private"
-published_snapshot="$stage/var/lib/punaro/private/v3-directory.snapshot"
+published_snapshot="$stage/etc/punaro/directory/v3-directory.snapshot"
 [ -f "$issuer" ] || { printf '%s\n' 'relay issuer key was not installed' >&2; exit 1; }
 [ -f "$published_snapshot" ] || { printf '%s\n' 'relay directory snapshot was not installed' >&2; exit 1; }
 [ "$(file_mode "$issuer")" = 600 ] || { printf '%s\n' 'relay issuer key is not private' >&2; exit 1; }
@@ -55,6 +55,7 @@ grep -Fqx 'PUNARO_PERMIT_ISSUANCE_ENABLED=false' "$config"
 grep -Fqx 'PUNARO_ATTACHMENTS_ENABLED=false' "$config"
 grep -Fqx 'PUNARO_ATTACHMENT_RELAY_ENABLED=false' "$config"
 grep -Fqx 'PUNARO_DIRECTORY_ENABLED=true' "$config"
+grep -Fqx 'PUNARO_DIRECTORY_SNAPSHOT_FILE=/etc/punaro/directory/v3-directory.snapshot' "$config"
 grep -Fq "PUNARO_RELAY_MACHINES_JSON=[{\"attachment_device_id\":\"$device_id\"" "$config"
 if grep -Fq -- "$(cat "$authority/issuer.private")" "$config" "$fixture_dir/out"; then
 	printf '%s\n' 'relay configuration leaked the issuer private key' >&2; exit 1
@@ -64,15 +65,15 @@ grep -Fq 'systemctl restart punarod.service' "$repo_dir/scripts/configure-attach
 symlink_stage="$fixture_dir/symlink-stage"
 sh "$repo_dir/scripts/install-server.sh" --root "$symlink_stage" >/dev/null
 mkdir "$fixture_dir/redirected-state"
-ln -s "$fixture_dir/redirected-state" "$symlink_stage/var/lib/punaro/attachment-v3"
+ln -s "$fixture_dir/redirected-state" "$symlink_stage/etc/punaro/directory"
 set +e
 sh "$repo_dir/scripts/configure-attachment-v3-relay.sh" --root "$symlink_stage" \
 	--authority-public "$authority/public.json" --issuer-private-key "$authority/issuer.private" \
 	--directory-snapshot "$snapshot" --relay-machines-file "$machines" >"$fixture_dir/symlink-state.out" 2>&1
 status=$?
 set -e
-[ "$status" -eq 2 ] || { printf '%s\n' 'relay configuration followed a service-owned state symlink' >&2; exit 1; }
-grep -Fqx 'existing v3 state directory must be a non-symlink directory' "$fixture_dir/symlink-state.out"
+[ "$status" -eq 2 ] || { printf '%s\n' 'relay configuration followed a directory snapshot symlink' >&2; exit 1; }
+grep -Fqx 'directory snapshot parent must be a non-symlink directory' "$fixture_dir/symlink-state.out"
 
 printf '%s\n' '[{"id":"macbook","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/macbook/"]}]' >"$fixture_dir/no-device-binding.json"
 set +e
@@ -83,5 +84,15 @@ status=$?
 set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'relay configuration accepted unbound machines' >&2; exit 1; }
 grep -Fqx 'relay machine enrollment must contain an attachment_device_id binding' "$fixture_dir/no-binding.out"
+
+printf '%s\n' "[{\"id\":\"macbook\",\"public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"endpoint_prefixes\":[\"agent/macbook/\"],\"attachment_device_id\":\"$device_id\",\"private_key\":\"forbidden\"}]" >"$fixture_dir/private-machine-field.json"
+set +e
+sh "$repo_dir/scripts/configure-attachment-v3-relay.sh" --root "$stage" \
+	--authority-public "$authority/public.json" --issuer-private-key "$authority/issuer.private" \
+	--directory-snapshot "$snapshot" --relay-machines-file "$fixture_dir/private-machine-field.json" >"$fixture_dir/private-machine-field.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'relay configuration accepted a private machine field' >&2; exit 1; }
+grep -Fqx 'relay machine enrollment contains unsupported or secret fields' "$fixture_dir/private-machine-field.out"
 
 printf '%s\n' attachment_v3_relay_configuration_tests_passed

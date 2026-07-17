@@ -196,7 +196,9 @@ controlled deployment rather than an unattended file-sharing feature.
      --enable
    ```
 
-   The helper copies the issuer key and snapshot into service-private paths,
+   The helper copies the issuer key into an owner-controlled credential path
+   and the snapshot into root-owned, service-group-readable
+   `/etc/punaro/directory`,
    writes v3-only limits and directory trust, disables v2 switches, and starts
    `punarod` only when the enrollment contains at least one explicit device
    binding. It does not use 1Password references, Cloudflare account details,

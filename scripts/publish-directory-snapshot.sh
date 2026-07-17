@@ -26,13 +26,13 @@ else
 	scp_pve() { scp -q -o BatchMode=yes -o ConnectTimeout=10 "$@"; }
 fi
 
-container_snapshot_file=${PUNARO_CONTAINER_SNAPSHOT_FILE:-/var/lib/punaro/private/v3-directory.snapshot}
-case "$container_snapshot_file" in /var/lib/punaro/private/*) ;; *) printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' >&2; exit 2;; esac
+container_snapshot_file=${PUNARO_CONTAINER_SNAPSHOT_FILE:-/etc/punaro/directory/v3-directory.snapshot}
+case "$container_snapshot_file" in /etc/punaro/directory/*) ;; *) printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /etc/punaro/directory' >&2; exit 2;; esac
 case "$container_snapshot_file" in *[!A-Za-z0-9_./-]*) printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE contains unsafe characters' >&2; exit 2;; esac
 case "$container_snapshot_file/" in *'//'*) printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical' >&2; exit 2;; esac
 case "$container_snapshot_file/" in *'/../'*) printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal' >&2; exit 2;; esac
 container_snapshot_parent=$(dirname "$container_snapshot_file")
-[ "$container_snapshot_parent" = /var/lib/punaro/private ] || { printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private' >&2; exit 2; }
+[ "$container_snapshot_parent" = /etc/punaro/directory ] || { printf '%s\n' 'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /etc/punaro/directory' >&2; exit 2; }
 
 # Keep an advisory lock across exec, so the kernel releases it after a crash,
 # kill -9, or reboot. The file itself may persist safely; only its live lock
@@ -78,14 +78,15 @@ case "$remote_stage" in /tmp/punaro-directory.*) ;; *) printf '%s\n' 'Proxmox re
 case "$remote_stage" in *[!A-Za-z0-9_./-]*) printf '%s\n' 'Proxmox returned an unsafe staging path' >&2; exit 1;; esac
 scp_pve "$snapshot" "$PUNARO_PVE_SSH_TARGET:$remote_stage"
 # The relay account cannot write either this staging directory or the final
-# snapshot parent.  `pct push` therefore cannot be redirected through a
-# service-created symlink, and the final same-filesystem rename is atomic.
-ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'install -d -o root -g root -m 700 /root/.punaro-directory-stage; install -d -o root -g punaro -m 2750 /var/lib/punaro/private'"
-container_stage=$(ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$(mktemp /root/.punaro-directory-stage/snapshot.XXXXXXXX); chmod 600 \"\$stage\"; printf %s \"\$stage\"'")
-case "$container_stage" in /root/.punaro-directory-stage/snapshot.*) ;; *) printf '%s\n' 'container returned an unsafe staging path' >&2; exit 1;; esac
+# snapshot parent.  Both are under the root-owned /etc/punaro hierarchy, so
+# root never publishes through service-owned paths. The final same-filesystem
+# rename is atomic.
+ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'install -d -o root -g root -m 700 /etc/punaro/.punaro-directory-stage; install -d -o root -g punaro -m 2750 /etc/punaro/directory'"
+container_stage=$(ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$(mktemp /etc/punaro/.punaro-directory-stage/snapshot.XXXXXXXX); chmod 600 \"\$stage\"; printf %s \"\$stage\"'")
+case "$container_stage" in /etc/punaro/.punaro-directory-stage/snapshot.*) ;; *) printf '%s\n' 'container returned an unsafe staging path' >&2; exit 1;; esac
 case "$container_stage" in *[!A-Za-z0-9_./-]*) printf '%s\n' 'container returned an unsafe staging path' >&2; exit 1;; esac
 ssh_pve "$PUNARO_PVE_SSH_TARGET" pct push "$PUNARO_PVE_CONTAINER_ID" "$remote_stage" "$container_stage"
-ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$1; target=\$2; parent=\$(dirname \"\$target\"); [ \"\$parent\" = /var/lib/punaro/private ]; [ ! -L \"\$parent\" ]; [ -f \"\$stage\" ]; [ ! -L \"\$stage\" ]; [ \"\$(stat -c %U \"\$parent\")\" = root ]; [ \"\$(stat -c %G \"\$parent\")\" = punaro ]; [ \"\$(stat -c %a \"\$parent\")\" = 2750 ]; [ \"\$(stat -c %d /root/.punaro-directory-stage)\" = \"\$(stat -c %d \"\$parent\")\" ]; chown root:punaro \"\$stage\"; chmod 640 \"\$stage\"; mv -f -- \"\$stage\" \"\$target\"' sh '$container_stage' '$container_snapshot_file'"
+ssh_pve "$PUNARO_PVE_SSH_TARGET" "pct exec $PUNARO_PVE_CONTAINER_ID -- /bin/sh -ceu 'stage=\$1; target=\$2; parent=\$(dirname \"\$target\"); [ \"\$parent\" = /etc/punaro/directory ]; [ ! -L \"\$parent\" ]; [ -f \"\$stage\" ]; [ ! -L \"\$stage\" ]; [ \"\$(stat -c %U \"\$parent\")\" = root ]; [ \"\$(stat -c %G \"\$parent\")\" = punaro ]; [ \"\$(stat -c %a \"\$parent\")\" = 2750 ]; [ \"\$(stat -c %d /etc/punaro/.punaro-directory-stage)\" = \"\$(stat -c %d \"\$parent\")\" ]; chown root:punaro \"\$stage\"; chmod 640 \"\$stage\"; mv -f -- \"\$stage\" \"\$target\"' sh '$container_stage' '$container_snapshot_file'"
 container_stage=
 ssh_pve "$PUNARO_PVE_SSH_TARGET" rm -f -- "$remote_stage"
 remote_stage=

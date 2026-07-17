@@ -262,7 +262,10 @@ is present. It will remain fail-closed until all gates in the
 CBOR record core: verified signed manifests, manifest commitments,
 recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
-that reserves file-key/content-salt/nonce uniqueness before encryption. It has
+that reserves file-key/content-salt/nonce uniqueness before encryption. The
+published directory snapshot is group-readable by the relay but lives below a
+root-owned configuration hierarchy; privileged installers and publishers never
+create, repair, or write snapshot paths below service-owned state. It has
 canonical permits whose issuer, sender/recipient membership, device
 generations, directory head, epoch, and expiry are all checked against the
 same fresh directory snapshot, plus a private SQLite serial and
