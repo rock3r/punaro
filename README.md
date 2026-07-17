@@ -30,6 +30,7 @@ wake-up hints containing an opaque conversation ID and sequence only.
 
 Read the [architecture and security design](DESIGN.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
+[installation guide](docs/installation.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
 [Telegram gateway guide](docs/telegram-gateway.md),
 [attachment RFC](docs/attachments-v2-rfc.md),

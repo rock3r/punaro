@@ -6,10 +6,24 @@ example=deploy/systemd/user/punaro-adapter.env.example
 launch_agent=deploy/launchd/punaro-adapter.plist
 snapshot_publisher=scripts/publish-directory-snapshot.sh
 snapshot_publisher_test=scripts/test-publish-directory-snapshot.sh
+adapter_installer=scripts/install-adapter.sh
+client_installer=scripts/install-client.sh
+adapter_installer_test=scripts/test-install-adapter.sh
+server_installer=scripts/install-server.sh
+server_installer_test=scripts/test-install-server.sh
+agent_guidance_installer=scripts/install-agent-guidance.sh
+agent_guidance_installer_test=scripts/test-install-agent-guidance.sh
 
-for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test"; do
+for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
+		exit 1
+	fi
+done
+
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
+	if [ ! -x "$executable" ]; then
+		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1
 	fi
 done
@@ -32,6 +46,9 @@ if grep -Eq 'PUNARO_CF_ACCESS_CLIENT_(ID|SECRET)=' "$launch_agent"; then
 fi
 
 "$snapshot_publisher_test"
+"$adapter_installer_test"
+"$server_installer_test"
+"$agent_guidance_installer_test"
 
 for expected in \
 	'PUNARO_DIRECTORY_ROOT_PRIVATE_KEY' \

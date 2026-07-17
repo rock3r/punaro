@@ -1,0 +1,4 @@
+interface:
+  display_name: "Punaro Mailbox"
+  short_description: "Wait for and handle Punaro mailbox messages"
+  default_prompt: "Use $punaro-mailbox to wait for and handle the next Punaro message safely."
