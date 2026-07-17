@@ -424,7 +424,7 @@ func (w *RecipientDownloadWorker) receiptDownloadOutcomeCredentials(ctx context.
 func exactReceiptDownloadOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptDownloadRecord, original receiptDownloadOperation, now time.Time) bool {
 	origin, err := attachmentv3.DecodePermit(original.permit)
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	if err != nil || request.OutcomeOfSerial != origin.Serial || request.RequestID == [16]byte{} || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 || request.TransferID != record.transferID || request.StagedManifestCommitment != record.manifestCommitment || request.HolderRole != attachmentv3.PermitHolderRecipient || request.IssuedAt > uint64(now.Unix()) || request.ExpiresAt <= uint64(now.Unix()) {
+	if err != nil || request.OutcomeOfSerial != origin.Serial || request.RequestID == [16]byte{} || request.Operation != attachmentv3.PermitOperationOutcome || request.AttemptGeneration != 0 || request.TransferID != record.transferID || request.StagedManifestCommitment != record.manifestCommitment || request.HolderRole != attachmentv3.PermitHolderRecipient || !attachmentv3.IssuedWithinClockSkew(request.IssuedAt, now) || request.ExpiresAt <= uint64(now.Unix()) {
 		return false
 	}
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.

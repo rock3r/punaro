@@ -274,3 +274,10 @@ func validateManifestTime(m Manifest, now time.Time) error {
 func issuedWithinClockSkew(issued uint64, nowUnix int64) bool {
 	return nowUnix >= 0 && issued <= uint64(nowUnix)+uint64(MaxFutureClockSkew/time.Second)
 }
+
+// IssuedWithinClockSkew reports whether a signed record's issue time is within
+// the protocol's bounded future-clock-skew allowance. It never grants any
+// expiry grace; callers must check expiration independently.
+func IssuedWithinClockSkew(issued uint64, now time.Time) bool {
+	return issuedWithinClockSkew(issued, now.UTC().Unix())
+}

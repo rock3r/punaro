@@ -84,9 +84,10 @@ membership commitment, revocation epoch, and expiry.
 
 An immutable v3 Manifest may live for at most ten minutes. Directory heads may
 live for at most five minutes; permits remain independently short-lived (at
-most 30 seconds). Verifiers tolerate up to 60 seconds of future clock skew for
-signed attachment records, including the root-signed directory head, but never
-extend any record's expiry. After strict source-init, each operation obtains a
+most 30 seconds). Verifiers, including durable sender and recipient
+controllers, tolerate up to 60 seconds of future clock skew for signed
+attachment records, including the root-signed directory head, but never extend
+any record's expiry. After strict source-init, each operation obtains a
 new permit from a fresh current directory view. That permit remains exactly
 bound to the Manifest commitment, transfer
 identities, and membership commitment, but its directory head and revocation

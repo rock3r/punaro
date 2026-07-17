@@ -713,7 +713,7 @@ func exactAcceptancePermit(permit attachmentv3.Permit, request attachmentv3.Perm
 		return false
 	}
 	// #nosec G115 -- the initial nonnegative-time predicate makes this comparison fail closed.
-	return now.Unix() >= 0 && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return now.Unix() >= 0 && attachmentv3.IssuedWithinClockSkew(permit.IssuedAt, now) && permit.ExpiresAt > uint64(now.Unix())
 }
 
 // exactOutcomeRequest and exactOutcomePermit bind a reconciliation lookup to
@@ -727,7 +727,7 @@ func exactOutcomeRequest(request attachmentv3.PermitRequest, record receiptAccep
 		return false
 	}
 	// #nosec G115 -- the caller rejects pre-epoch time before this capability check.
-	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
+	return attachmentv3.IssuedWithinClockSkew(request.IssuedAt, now) && request.ExpiresAt > uint64(now.Unix())
 }
 
 func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, record receiptAcceptanceRecord, now time.Time) bool {
@@ -741,7 +741,7 @@ func exactOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitR
 		return false
 	}
 	// #nosec G115 -- the caller rejects pre-epoch time before this capability check.
-	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && attachmentv3.IssuedWithinClockSkew(permit.IssuedAt, now) && permit.ExpiresAt > uint64(now.Unix())
 }
 func mustEncodePermit(permit attachmentv3.Permit) []byte {
 	raw, err := attachmentv3.EncodePermit(permit)

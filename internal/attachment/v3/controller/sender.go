@@ -152,7 +152,7 @@ func (s *SenderStager) Stage(ctx context.Context, stageID [16]byte, relayConvers
 
 func exactStagedManifest(manifest attachmentv3.Manifest, mapping Mapping, binding attachmentv2.DirectoryTransferBinding, now time.Time) bool {
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	return now.Unix() >= 0 && manifest.IssuedAt <= uint64(now.Unix()) && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= manifest.IssuedAt+uint64(attachmentv3.MaxManifestLifetime/time.Second)
+	return now.Unix() >= 0 && attachmentv3.IssuedWithinClockSkew(manifest.IssuedAt, now) && manifest.Audience == binding.Permit.Audience && manifest.ConversationID == mapping.ConversationID && manifest.SenderDeviceID == mapping.SenderDeviceID && manifest.SenderGeneration == mapping.SenderGeneration && manifest.RecipientDeviceID == mapping.RecipientDeviceID && manifest.RecipientGeneration == mapping.RecipientGeneration && manifest.MembershipCommitment == mapping.MembershipCommitment && manifest.SignerKeyID == binding.Sender.SigningKeyID && manifest.ExpiresAt > uint64(now.Unix()) && manifest.ExpiresAt <= manifest.IssuedAt+uint64(attachmentv3.MaxManifestLifetime/time.Second)
 }
 
 func newSourceArtifactMaterial() (attachmentv3.SourceArtifactMaterial, error) {
