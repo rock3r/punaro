@@ -68,6 +68,38 @@ func TestSenderSourceInitializerPersistsExactCredentialsBeforeSubmission(t *test
 	}
 }
 
+func TestSenderSourceInitializerAllowsBoundedFuturePermitIssue(t *testing.T) {
+	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = journal.Close() }()
+	mapping := Mapping{RelayConversationID: "relay-conversation", ConversationID: bytes16(1), SenderDeviceID: bytes16(2), SenderGeneration: 1, RecipientDeviceID: bytes16(3), RecipientGeneration: 1, MembershipCommitment: bytes32(4)}
+	if err := journal.AddMapping(mapping); err != nil {
+		t.Fatal(err)
+	}
+	_, senderPrivate, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(100, 0).UTC()
+	manifest, raw := stagedSenderManifest(t, mapping, senderPrivate, now)
+	if err := insertStagedSenderTransfer(journal, mapping, manifest, raw); err != nil {
+		t.Fatal(err)
+	}
+	transport := &senderTransportStub{result: sourceUploadingTransferResult(t, manifest.TransferID, attachmentCommitment(t, raw), int64(manifest.ExpiresAt)), permitIssueOffsetSeconds: 3} // #nosec G115 -- test fixture Manifest validation bounds expiry.
+	worker, err := NewSenderSourceInitializer(SenderSourceInitializerOptions{
+		Journal: journal, AuthorityProvider: senderAuthorityProviderStub{authority: testSenderAuthority(t, mapping, senderPrivate)}, Signer: NewLocalSenderOperationSigner(SenderIdentity{DeviceID: mapping.SenderDeviceID, Generation: mapping.SenderGeneration}, senderPrivate), Transport: transport,
+		Now: func() time.Time { return now }, NewID: sequenceID(bytes16(70), bytes16(71)), NewIdempotencyKey: sequenceKey(bytes32(72)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worker.Initialize(context.Background(), manifest.TransferID); err != nil {
+		t.Fatalf("bounded future-issued permit rejected: %v", err)
+	}
+}
+
 func TestSenderSourceInitializerUploadsDurableChunksBeforeReady(t *testing.T) {
 	journal, err := OpenJournalForSender(filepath.Join(t.TempDir(), "private", "controller.db"), SenderIdentity{DeviceID: bytes16(2), Generation: 1})
 	if err != nil {
@@ -353,12 +385,13 @@ type senderTransportStub struct {
 	body                       []byte
 	issueCalls, operationCalls int
 	operationErr               error
+	permitIssueOffsetSeconds   uint64
 }
 
 func (s *senderTransportStub) IssueV3Permit(_ context.Context, request attachmentv3.PermitRequest) (attachmentv3.Permit, error) {
 	s.issueCalls++
 	s.request = request
-	s.permit = attachmentv3.Permit{Audience: bytes32(31), Serial: bytes16(80), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(32), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
+	s.permit = attachmentv3.Permit{Audience: bytes32(31), Serial: bytes16(80), IssuerKeyID: bytes32(81), HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: bytes32(32), MembershipCommitment: request.MembershipCommitment, RevocationEpoch: 1, IssuedAt: request.IssuedAt + s.permitIssueOffsetSeconds, ExpiresAt: request.ExpiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
 	_, signer := testOfferSigner()
 	if err := attachmentv3.SignPermit(&s.permit, signer); err != nil {
 		return attachmentv3.Permit{}, err

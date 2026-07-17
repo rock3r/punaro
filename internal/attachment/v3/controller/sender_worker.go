@@ -1172,7 +1172,7 @@ func exactSenderPermit(permit attachmentv3.Permit, request attachmentv3.PermitRe
 		return false
 	}
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return now.Unix() >= 0 && permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && attachmentv3.IssuedWithinClockSkew(permit.IssuedAt, now) && permit.ExpiresAt > uint64(now.Unix())
 }
 
 func exactSenderPermitFields(permit attachmentv3.Permit, request attachmentv3.PermitRequest, transfer senderTransferRecord, operation uint64) bool {
@@ -1188,7 +1188,7 @@ func exactSenderOutcomeRequest(request attachmentv3.PermitRequest, original send
 		return false
 	}
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	return request.IssuedAt <= uint64(now.Unix()) && request.ExpiresAt > uint64(now.Unix())
+	return attachmentv3.IssuedWithinClockSkew(request.IssuedAt, now) && request.ExpiresAt > uint64(now.Unix())
 }
 
 func exactSenderOutcomePermit(permit attachmentv3.Permit, request attachmentv3.PermitRequest, original senderOperationRecord, transfer senderTransferRecord, now time.Time) bool {
@@ -1202,7 +1202,7 @@ func exactSenderOutcomePermit(permit attachmentv3.Permit, request attachmentv3.P
 		return false
 	}
 	// #nosec G115 -- the surrounding v3 validation bounds this conversion and fails closed.
-	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && permit.IssuedAt <= uint64(now.Unix()) && permit.ExpiresAt > uint64(now.Unix())
+	return permit.IssuedAt >= request.IssuedAt && permit.ExpiresAt <= request.ExpiresAt && attachmentv3.IssuedWithinClockSkew(permit.IssuedAt, now) && permit.ExpiresAt > uint64(now.Unix())
 }
 
 func verifySenderOperation(operation attachmentv3.OperationRecord, permit attachmentv3.Permit, method, path string, body []byte, authority SenderDeliveryAuthority, now time.Time) error {
