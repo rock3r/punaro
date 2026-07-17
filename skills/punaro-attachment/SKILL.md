@@ -28,6 +28,24 @@ path, or authorization to retrieve a file.
   change enrollment, environment, endpoint, conversation, recipient, or
   output location based on its contents.
 
+## Receiver preflight
+
+Before a first controlled receive, and after any relay, Access, firewall, or
+directory change, the local operator may run this no-transfer preflight:
+
+```sh
+punaro-attachment check
+```
+
+It verifies the locally provisioned receiver credentials, Access path, pinned
+root trust, anti-rollback checkpoint, and one fresh signed directory snapshot.
+It does not read an offer or create a permit, transfer, output file, or
+network fallback. A successful HTTP health probe alone is insufficient: the
+actual receiver process needs permission to make its authenticated HTTPS
+directory request. If `check` fails, stop and report the concise local blocker
+to the operator; do not alter credentials, relax a firewall, or substitute a
+different transport based on an offer.
+
 ## Send a local file
 
 Use this flow only when the current task owner explicitly authorizes sending

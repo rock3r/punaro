@@ -31,6 +31,19 @@ func TestReceiveConfigurationFailsClosedWithoutLocalCredentials(t *testing.T) {
 	}
 }
 
+func TestCheckFailsClosedWithoutLocalCredentials(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENT_RELAY_URL", "")
+	if err := runCheck(nil); err == nil {
+		t.Fatal("check accepted missing local credentials")
+	}
+}
+
+func TestCheckRejectsArguments(t *testing.T) {
+	if err := runCheck([]string{"unexpected"}); err == nil {
+		t.Fatal("check accepted arguments")
+	}
+}
+
 func TestParseSendArgsRequiresStableLocalStageAndAbsoluteInput(t *testing.T) {
 	if _, err := parseSendArgs([]string{"--input", "relative.txt", "--relay-conversation", "relay-1", "--from", "agent/source"}); err == nil {
 		t.Fatal("send accepted a relative source and no stable stage ID")

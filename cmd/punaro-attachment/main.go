@@ -203,17 +203,55 @@ func main() {
 		err = runRecord(os.Args[2:])
 	case len(os.Args) >= 2 && os.Args[1] == "approve":
 		err = runApprove(os.Args[2:])
+	case len(os.Args) >= 2 && os.Args[1] == "check":
+		err = runCheck(os.Args[2:])
 	case len(os.Args) >= 2 && os.Args[1] == "receive":
 		err = runReceive(os.Args[2:])
 	case len(os.Args) >= 2 && os.Args[1] == "send":
 		err = runSend(os.Args[2:])
 	default:
-		err = fmt.Errorf("supported commands: map, map-sender, record, approve, receive, send")
+		err = fmt.Errorf("supported commands: map, map-sender, record, approve, check, receive, send")
 	}
 	if err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, "punaro-attachment:", err)
 		os.Exit(2)
 	}
+}
+
+// runCheck verifies only the receiver's locally provisioned relay, machine,
+// Access, root-trust and anti-rollback configuration against one fresh signed
+// directory snapshot. It neither reads an offer nor creates a transfer, permit
+// or output file, making it suitable as a deployment preflight.
+func runCheck(args []string) error {
+	if len(args) != 0 {
+		return errors.New("check takes no arguments")
+	}
+	cfg, err := loadReceiveConfig()
+	if err != nil {
+		return err
+	}
+	client, err := adapter.NewHTTPRelayClient(cfg.relayURL, cfg.machineID, cfg.machinePrivate, nil, cfg.accessToken)
+	if err != nil {
+		return errors.New("attachment relay client is unavailable")
+	}
+	checkpoints, err := attachmentv2.OpenSQLiteCheckpointStore(cfg.checkpointPath)
+	if err != nil {
+		return errors.New("attachment directory checkpoint is unavailable")
+	}
+	defer func() { _ = checkpoints.Close() }()
+	fresh, err := attachmentv2.NewFreshDirectoryAuthorityProvider(client, attachmentv2.DirectoryTrust{Audience: cfg.directoryAudience, RootKeyID: cfg.directoryRootKeyID, RootPublicKey: cfg.directoryRootPublic, Checkpoints: checkpoints})
+	if err != nil {
+		return errors.New("attachment directory trust is unavailable")
+	}
+	directory, err := attachmentv3.NewDirectoryAuthorityAdapter(fresh)
+	if err != nil {
+		return errors.New("attachment directory authority is unavailable")
+	}
+	if _, err := directory.ResolveAttachmentAuthority(context.Background(), time.Now().UTC()); err != nil {
+		return errors.New("fresh attachment directory is unavailable")
+	}
+	_, err = fmt.Fprintln(os.Stdout, `{"directory":"ok"}`)
+	return err
 }
 
 type receiveAuthorityProvider struct {
