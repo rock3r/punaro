@@ -95,10 +95,20 @@ if [ -e "$v3_state_dir" ] || [ -L "$v3_state_dir" ]; then
 	[ -d "$v3_state_dir" ] && [ ! -L "$v3_state_dir" ] || fail 'existing v3 state directory must be a non-symlink directory'
 fi
 
+verify_live_v3_paths() {
+	[ -d "$relay_state_dir" ] && [ ! -L "$relay_state_dir" ] || fail 'relay state directory must be a non-symlink directory'
+	[ "$(stat -c %U "$relay_state_dir")" = punaro ] && [ "$(stat -c %a "$relay_state_dir")" = 700 ] || fail 'relay state directory has unexpected ownership or mode'
+	[ -d "$private_dir" ] && [ ! -L "$private_dir" ] || fail 'directory snapshot parent must be a non-symlink directory'
+	[ "$(stat -c %U "$private_dir")" = root ] && [ "$(stat -c %G "$private_dir")" = punaro ] && [ "$(stat -c %a "$private_dir")" = 2750 ] || fail 'directory snapshot parent has unexpected ownership or mode'
+	[ -d "$v3_state_dir" ] && [ ! -L "$v3_state_dir" ] || fail 'v3 state directory must be a non-symlink directory'
+	[ "$(stat -c %U "$v3_state_dir")" = punaro ] && [ "$(stat -c %G "$v3_state_dir")" = punaro ] && [ "$(stat -c %a "$v3_state_dir")" = 700 ] || fail 'v3 state directory has unexpected ownership or mode'
+}
+
 if [ "$root_dir" = / ]; then
 	install -d -o root -g punaro -m 0750 "$credentials_dir"
-	[ -d "$private_dir" ] || install -d -o root -g punaro -m 2750 "$private_dir"
-	[ -d "$v3_state_dir" ] || install -d -o punaro -g punaro -m 0700 "$v3_state_dir"
+	install -d -o root -g punaro -m 2750 "$private_dir"
+	install -d -o punaro -g punaro -m 0700 "$v3_state_dir"
+	verify_live_v3_paths
 else
 	install -d -m 0700 "$credentials_dir"
 	[ -d "$private_dir" ] || install -d -m 0700 "$private_dir"
@@ -230,6 +240,9 @@ rm -f -- "$render_error"
 [ -f "$config_stage" ] && [ ! -L "$config_stage" ] || fail 'could not safely render staged relay configuration'
 
 if [ "$root_dir" = / ]; then
+	# The service account owns its state parent. Recheck immediately before
+	# privileged writes so a renamed directory or planted symlink fails closed.
+	verify_live_v3_paths
 	install -m 0600 -o punaro -g punaro "$issuer_private_key" "$issuer_stage"
 	install -m 0640 -o root -g punaro "$directory_snapshot" "$snapshot_stage"
 else
