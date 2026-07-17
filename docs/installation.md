@@ -133,7 +133,8 @@ controlled deployment rather than an unattended file-sharing feature.
    ./scripts/provision-attachment-v3.sh client \
      --directory "$HOME/.config/punaro/attachment-v3" \
      --authority-public "$HOME/.config/punaro/attachment-authority/public.json" \
-     --machine-id laptop-review --role receiver
+     --machine-id laptop-review --relay-url https://relay.example.invalid \
+     --role receiver
    ```
 
    A sender-capable client additionally requires an existing host-bound
@@ -146,7 +147,8 @@ controlled deployment rather than an unattended file-sharing feature.
    ./scripts/provision-attachment-v3.sh client \
      --directory "$HOME/.config/punaro/attachment-v3-sender" \
      --authority-public "$HOME/.config/punaro/attachment-authority/public.json" \
-     --machine-id laptop-review --role both \
+     --machine-id laptop-review --relay-url https://relay.example.invalid \
+     --role both \
      --host-key-service punaro.attachment-v3 \
      --host-key-account laptop-review
    ```
@@ -160,9 +162,10 @@ controlled deployment rather than an unattended file-sharing feature.
    ```
 
    Source the ordinary `adapter.env` followed by this new owner-only
-   `attachment-v3.env` only in the local controller process. Do not add either
-   to the adapter service or an agent prompt. The service token remains in the
-   existing owner-only `adapter.env` and is distinct per machine.
+   `attachment-v3.env` only in the local controller process. The latter carries
+   the attachment relay URL; the former carries the distinct machine identity
+   and any Access service token. Do not add either to the adapter service or an
+   agent prompt.
 
 3. On the authority machine, inspect the public device record and add it to
    the directory manifest. This advances the manifest sequence but does not

@@ -85,7 +85,25 @@ issuer_destination="$credentials_dir/v3-issuer.private"
 private_dir=$(path_in_root var/lib/punaro/private)
 snapshot_destination="$private_dir/v3-directory.snapshot"
 v3_state_dir=$(path_in_root var/lib/punaro/attachment-v3)
+relay_state_dir=$(path_in_root var/lib/punaro)
 [ -f "$config_file" ] && [ ! -L "$config_file" ] || fail 'install-server must create a regular relay configuration before v3 configuration'
+[ -d "$relay_state_dir" ] && [ ! -L "$relay_state_dir" ] || fail 'relay state directory must be a non-symlink directory'
+if [ -e "$private_dir" ] || [ -L "$private_dir" ]; then
+	[ -d "$private_dir" ] && [ ! -L "$private_dir" ] || fail 'existing directory snapshot parent must be a non-symlink directory'
+fi
+if [ -e "$v3_state_dir" ] || [ -L "$v3_state_dir" ]; then
+	[ -d "$v3_state_dir" ] && [ ! -L "$v3_state_dir" ] || fail 'existing v3 state directory must be a non-symlink directory'
+fi
+
+if [ "$root_dir" = / ]; then
+	install -d -o root -g punaro -m 0750 "$credentials_dir"
+	[ -d "$private_dir" ] || install -d -o root -g punaro -m 2750 "$private_dir"
+	[ -d "$v3_state_dir" ] || install -d -o punaro -g punaro -m 0700 "$v3_state_dir"
+else
+	install -d -m 0700 "$credentials_dir"
+	[ -d "$private_dir" ] || install -d -m 0700 "$private_dir"
+	[ -d "$v3_state_dir" ] || install -d -m 0700 "$v3_state_dir"
+fi
 issuer_stage="$issuer_destination.v3-next"
 snapshot_stage="$snapshot_destination.v3-next"
 config_stage="$config_file.v3-next"
@@ -212,13 +230,9 @@ rm -f -- "$render_error"
 [ -f "$config_stage" ] && [ ! -L "$config_stage" ] || fail 'could not safely render staged relay configuration'
 
 if [ "$root_dir" = / ]; then
-	install -d -o root -g punaro -m 0750 "$credentials_dir"
-	install -d -o root -g punaro -m 2750 "$private_dir"
-	install -d -o punaro -g punaro -m 0700 "$v3_state_dir"
 	install -m 0600 -o punaro -g punaro "$issuer_private_key" "$issuer_stage"
 	install -m 0640 -o root -g punaro "$directory_snapshot" "$snapshot_stage"
 else
-	install -d -m 0700 "$credentials_dir" "$private_dir" "$v3_state_dir"
 	install -m 0600 "$issuer_private_key" "$issuer_stage"
 	install -m 0600 "$directory_snapshot" "$snapshot_stage"
 fi
@@ -233,7 +247,8 @@ fi
 
 if [ "$enable" -eq 1 ]; then
 	systemctl daemon-reload
-	systemctl enable --now punarod.service
+	systemctl enable punarod.service
+	systemctl restart punarod.service
 	systemctl is-active --quiet punarod.service
 fi
 

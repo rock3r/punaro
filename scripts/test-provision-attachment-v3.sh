@@ -35,14 +35,14 @@ case "$(uname -s)" in
 	Darwin)
 		sh "$repo_dir/scripts/provision-attachment-v3.sh" client \
 			--directory "$client" --authority-public "$authority/public.json" --machine-id macbook \
-			--role both --host-key-service punaro.test --host-key-account macbook >"$fixture_dir/client.out"
+			--relay-url https://relay.example.invalid --role both --host-key-service punaro.test --host-key-account macbook >"$fixture_dir/client.out"
 		grep -Fqx 'PUNARO_ATTACHMENT_HOST_KEY_SERVICE=punaro.test' "$client/attachment-v3.env"
 		grep -Fqx 'PUNARO_ATTACHMENT_HOST_KEY_ACCOUNT=macbook' "$client/attachment-v3.env"
 		;;
 	*)
 		sh "$repo_dir/scripts/provision-attachment-v3.sh" client \
 			--directory "$client" --authority-public "$authority/public.json" --machine-id macbook \
-			--role both --host-credential-directory /run/credentials/punaro --host-credential-name sender-key >"$fixture_dir/client.out"
+			--relay-url https://relay.example.invalid --role both --host-credential-directory /run/credentials/punaro --host-credential-name sender-key >"$fixture_dir/client.out"
 		grep -Fqx 'PUNARO_ATTACHMENT_HOST_CREDENTIAL_DIRECTORY=/run/credentials/punaro' "$client/attachment-v3.env"
 		grep -Fqx 'PUNARO_ATTACHMENT_HOST_CREDENTIAL_NAME=sender-key' "$client/attachment-v3.env"
 		;;
@@ -54,6 +54,7 @@ done
 [ -f "$client/attachment-v3.env" ] || { printf '%s\n' 'missing attachment environment' >&2; exit 1; }
 [ -f "$client/device-enrollment.json" ] || { printf '%s\n' 'missing public device enrollment' >&2; exit 1; }
 [ "$(file_mode "$client/attachment-v3.env")" = 600 ] || { printf '%s\n' 'attachment environment is not private' >&2; exit 1; }
+grep -Fqx 'PUNARO_ATTACHMENT_RELAY_URL=https://relay.example.invalid' "$client/attachment-v3.env"
 grep -Fq '"attachment_device_id"' "$client/device-enrollment.json"
 if grep -Fq -- "$(cat "$client/device-signing.private")" "$client/device-enrollment.json"; then
 	printf '%s\n' 'client enrollment leaked the signing private key' >&2; exit 1
@@ -71,13 +72,13 @@ chmod 700 "$fake_bin/uname"
 linux_client="$fixture_dir/linux-client"
 PATH="$fake_bin:$PATH" sh "$repo_dir/scripts/provision-attachment-v3.sh" client \
 	--directory "$linux_client" --authority-public "$authority/public.json" --machine-id linuxbox \
-	--role sender --host-credential-directory /run/credentials/punaro --host-credential-name sender-key >"$fixture_dir/linux-client.out"
+	--relay-url https://relay.example.invalid --role sender --host-credential-directory /run/credentials/punaro --host-credential-name sender-key >"$fixture_dir/linux-client.out"
 grep -Fqx 'PUNARO_ATTACHMENT_HOST_CREDENTIAL_DIRECTORY=/run/credentials/punaro' "$linux_client/attachment-v3.env"
 grep -Fqx 'PUNARO_ATTACHMENT_HOST_CREDENTIAL_NAME=sender-key' "$linux_client/attachment-v3.env"
 
 set +e
 sh "$repo_dir/scripts/provision-attachment-v3.sh" client --directory "$fixture_dir/insecure" \
-	--authority-public "$authority/public.json" --machine-id macbook --role sender >"$fixture_dir/sender-without-host-key.out" 2>&1
+	--authority-public "$authority/public.json" --machine-id macbook --relay-url https://relay.example.invalid --role sender >"$fixture_dir/sender-without-host-key.out" 2>&1
 status=$?
 set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'sender provisioning accepted a missing host key reference' >&2; exit 1; }

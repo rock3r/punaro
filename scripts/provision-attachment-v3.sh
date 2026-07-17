@@ -11,7 +11,7 @@ usage() {
 Usage:
   scripts/provision-attachment-v3.sh authority --directory ABSOLUTE_PRIVATE_DIRECTORY
   scripts/provision-attachment-v3.sh client --directory ABSOLUTE_PRIVATE_DIRECTORY \
-    --authority-public ABSOLUTE_PUBLIC_JSON --machine-id ID \
+    --authority-public ABSOLUTE_PUBLIC_JSON --machine-id ID --relay-url HTTPS_URL \
     --role receiver|sender|both \
     [--host-key-service SERVICE --host-key-account ACCOUNT] \
     [--host-credential-directory DIRECTORY --host-credential-name NAME] \
@@ -172,6 +172,7 @@ client() {
 	directory=
 	authority_public=
 	machine_id=
+	relay_url=
 	role=
 	host_key_service=
 	host_key_account=
@@ -183,6 +184,7 @@ client() {
 			--directory) [ "$#" -ge 2 ] || fail '--directory requires a value'; directory=$2; shift 2 ;;
 			--authority-public) [ "$#" -ge 2 ] || fail '--authority-public requires a value'; authority_public=$2; shift 2 ;;
 			--machine-id) [ "$#" -ge 2 ] || fail '--machine-id requires a value'; machine_id=$2; shift 2 ;;
+			--relay-url) [ "$#" -ge 2 ] || fail '--relay-url requires a value'; relay_url=$2; shift 2 ;;
 			--role) [ "$#" -ge 2 ] || fail '--role requires a value'; role=$2; shift 2 ;;
 			--host-key-service) [ "$#" -ge 2 ] || fail '--host-key-service requires a value'; host_key_service=$2; shift 2 ;;
 			--host-key-account) [ "$#" -ge 2 ] || fail '--host-key-account requires a value'; host_key_account=$2; shift 2 ;;
@@ -196,11 +198,14 @@ client() {
 	[ -n "$directory" ] || fail 'client requires --directory'
 	[ -n "$authority_public" ] || fail 'client requires --authority-public'
 	[ -n "$machine_id" ] || fail 'client requires --machine-id'
+	[ -n "$relay_url" ] || fail 'client requires --relay-url'
 	case "$role" in receiver|sender|both) ;; *) fail '--role must be receiver, sender, or both' ;; esac
+	case "$relay_url" in https://*) ;; *) fail 'relay URL must use https://' ;; esac
 	require_absolute_new_directory "$directory" 'client directory'
 	require_absolute_regular_file "$authority_public" 'authority public record'
 	require_safe_dotenv_value "$directory" 'client directory'
 	require_safe_dotenv_value "$adapter_data_dir" 'adapter data directory'
+	require_safe_dotenv_value "$relay_url" 'relay URL'
 	require_machine_id "$machine_id"
 	host_platform=$(uname -s)
 	if [ "$role" = sender ] || [ "$role" = both ]; then
@@ -230,13 +235,13 @@ client() {
 	new_id 32 "$build_dir/hpke-key-id.json"
 	chmod 600 "$directory/device-signing.private" "$directory/device-hpke.private"
 
-	python3 - "$directory" "$authority_public" "$machine_id" "$role" "$host_platform" "$adapter_data_dir" "$host_key_service" "$host_key_account" "$host_credential_directory" "$host_credential_name" "$build_dir/device-id.json" "$build_dir/signing-key-id.json" "$build_dir/device-signing.public.json" "$build_dir/hpke-key-id.json" "$build_dir/device-hpke.public.json" <<'PY'
+	python3 - "$directory" "$authority_public" "$machine_id" "$relay_url" "$role" "$host_platform" "$adapter_data_dir" "$host_key_service" "$host_key_account" "$host_credential_directory" "$host_credential_name" "$build_dir/device-id.json" "$build_dir/signing-key-id.json" "$build_dir/device-signing.public.json" "$build_dir/hpke-key-id.json" "$build_dir/device-hpke.public.json" <<'PY'
 import base64
 import json
 import os
 import sys
 
-(directory, authority_path, machine_id, role, host_platform, adapter_data_dir, host_service,
+(directory, authority_path, machine_id, relay_url, role, host_platform, adapter_data_dir, host_service,
  host_account, host_credential_directory, host_credential_name, device_id_path,
  signing_id_path, signing_path, hpke_id_path, hpke_path) = sys.argv[1:]
 
@@ -288,7 +293,8 @@ os.chmod(public_path, 0o600)
 
 env = [
     "# Created by Punaro attachment-v3 provisioning. This owner-only file contains paths, not credentials.",
-    "# Source adapter.env first; it supplies relay URL, machine key, and any Cloudflare Access service token.",
+    "# Source adapter.env first; it supplies the machine key and any Cloudflare Access service token.",
+    f"PUNARO_ATTACHMENT_RELAY_URL={relay_url}",
     f"PUNARO_ATTACHMENT_DIRECTORY_CHECKPOINT_FILE={directory}/directory-checkpoints.db",
     f"PUNARO_DIRECTORY_AUDIENCE={audience}",
     f"PUNARO_DIRECTORY_ROOT_KEY_ID={root_key_id}",

@@ -24,7 +24,7 @@ sh "$repo_dir/scripts/install-server.sh" --root "$stage" >/dev/null
 sh "$repo_dir/scripts/provision-attachment-v3.sh" authority --directory "$authority" >/dev/null
 sh "$repo_dir/scripts/provision-attachment-v3.sh" client \
 	--directory "$client" --authority-public "$authority/public.json" --machine-id macbook \
-	--role receiver >/dev/null
+	--relay-url https://relay.example.invalid --role receiver >/dev/null
 sh "$repo_dir/scripts/provision-attachment-v3.sh" authority-add-device \
 	--directory "$authority" --device-enrollment "$client/device-enrollment.json" >/dev/null
 
@@ -59,6 +59,20 @@ grep -Fq "PUNARO_RELAY_MACHINES_JSON=[{\"attachment_device_id\":\"$device_id\"" 
 if grep -Fq -- "$(cat "$authority/issuer.private")" "$config" "$fixture_dir/out"; then
 	printf '%s\n' 'relay configuration leaked the issuer private key' >&2; exit 1
 fi
+grep -Fq 'systemctl restart punarod.service' "$repo_dir/scripts/configure-attachment-v3-relay.sh"
+
+symlink_stage="$fixture_dir/symlink-stage"
+sh "$repo_dir/scripts/install-server.sh" --root "$symlink_stage" >/dev/null
+mkdir "$fixture_dir/redirected-state"
+ln -s "$fixture_dir/redirected-state" "$symlink_stage/var/lib/punaro/attachment-v3"
+set +e
+sh "$repo_dir/scripts/configure-attachment-v3-relay.sh" --root "$symlink_stage" \
+	--authority-public "$authority/public.json" --issuer-private-key "$authority/issuer.private" \
+	--directory-snapshot "$snapshot" --relay-machines-file "$machines" >"$fixture_dir/symlink-state.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'relay configuration followed a service-owned state symlink' >&2; exit 1; }
+grep -Fqx 'existing v3 state directory must be a non-symlink directory' "$fixture_dir/symlink-state.out"
 
 printf '%s\n' '[{"id":"macbook","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/macbook/"]}]' >"$fixture_dir/no-device-binding.json"
 set +e
