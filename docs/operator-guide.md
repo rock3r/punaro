@@ -146,6 +146,14 @@ leave both `PUNARO_ATTACHMENTS_ENABLED` and
 directory, root trust, issuer key, permit limits, and enrolled
 `attachment_device_id` records listed above, provide:
 
+Use the reviewed provisioning helpers in
+[the installation guide](installation.md#4-provision-and-enable-controlled-attachment-v3)
+to create these files and enable the relay. They intentionally separate the
+offline root authority, relay issuer, and per-client device keys; they never
+copy a root key to the relay or accept a wrapping key/token as a command-line
+value. Manual configuration must preserve the same separation and private file
+permissions.
+
 - `PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE`: an absolute path beneath an
   existing private, non-symlinked `0700` directory. The daemon creates a
   `0600` SQLite file there; do not put it on NFS, a shared filesystem, or a

@@ -16,10 +16,11 @@ current `punarod` binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
 this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
-adds explicit Telegram topic routing and a restricted Bot API client. The full
-attachment data plane remains a testable foundation and enablement fails closed
-before listening. A separately opt-in permit issuer exists only for
-directory/authorization drills; it does not mount a transfer route. The
+adds explicit Telegram topic routing and a restricted Bot API client. V3
+attachments are a separately provisioned, controlled runtime: the offline
+root key, relay issuer key, and per-client device keys are distinct, and the
+relay starts v3 only with a current signed directory plus explicit
+machine-to-device bindings. Legacy v2 switches still fail closed. The
 authoritative release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
 
@@ -261,7 +262,10 @@ is present. It will remain fail-closed until all gates in the
 CBOR record core: verified signed manifests, manifest commitments,
 recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
-that reserves file-key/content-salt/nonce uniqueness before encryption. It has
+that reserves file-key/content-salt/nonce uniqueness before encryption. The
+published directory snapshot is group-readable by the relay but lives below a
+root-owned configuration hierarchy; privileged installers and publishers never
+create, repair, or write snapshot paths below service-owned state. It has
 canonical permits whose issuer, sender/recipient membership, device
 generations, directory head, epoch, and expiry are all checked against the
 same fresh directory snapshot, plus a private SQLite serial and

@@ -29,9 +29,9 @@ assert_rejected() {
 	[ "$output" = "$expected" ] || { printf '%s\n' "unexpected validation result for $path: $output" >&2; exit 1; }
 }
 
-assert_rejected /var/lib/punaro/private/../../etc/passwd 'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal'
-assert_rejected /var/lib/punaro/private//snapshot 'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical'
-assert_rejected /var/lib/punaro/private/nested/snapshot 'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /var/lib/punaro/private'
+assert_rejected /etc/punaro/directory/../../etc/passwd 'PUNARO_CONTAINER_SNAPSHOT_FILE must not contain parent traversal'
+assert_rejected /etc/punaro/directory//snapshot 'PUNARO_CONTAINER_SNAPSHOT_FILE must be canonical'
+assert_rejected /etc/punaro/directory/nested/snapshot 'PUNARO_CONTAINER_SNAPSHOT_FILE must be directly below /etc/punaro/directory'
 
 publisher_env() {
 	env \
