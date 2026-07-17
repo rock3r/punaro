@@ -200,8 +200,10 @@ func TestApprovedInboundOfferRequiresMatchingImmutableApproval(t *testing.T) {
 	if approved, err := journal.ApproveInboundOffer(inbound.PunaroMessageID, time.Unix(100, 0)); err != nil || !approved {
 		t.Fatalf("approved=%t err=%v", approved, err)
 	}
-	if got, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err != nil || got.PunaroMessageID != inbound.PunaroMessageID || got.RelayConversationID != inbound.RelayConversationID || got.Body == "" {
+	if got, err := journal.ApprovedInboundOffer(inbound.PunaroMessageID); err != nil || got.PunaroMessageID != inbound.PunaroMessageID || got.RelayConversationID != inbound.RelayConversationID || got.Body != inbound.Body {
 		t.Fatalf("got=%+v err=%v", got, err)
+	} else if _, created, err := journal.RecordInboundOffer(got); err != nil || created {
+		t.Fatalf("approved offer could not be revalidated: created=%t err=%v", created, err)
 	}
 	tampered := bytes32(99)
 	if _, err := journal.db.ExecContext(context.Background(), `UPDATE controller_receipt_approvals SET offer_commitment=? WHERE punaro_message_id=?`, tampered[:], inbound.PunaroMessageID); err != nil {
