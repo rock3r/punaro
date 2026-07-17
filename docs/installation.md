@@ -207,12 +207,12 @@ controlled deployment rather than an unattended file-sharing feature.
 
 5. Before mapping, approving, or receiving an offer, receiver-capable clients
    run `punaro-attachment check` with the two owner-only environment files
-   loaded. Sender-only clients instead use their first `punaro-attachment
-   map-sender` operation as the preflight; it fresh-verifies the same signed
-   directory while also requiring that the source device match the local sender
-   identity. A stale, missing, rolled-back, or mismatched directory fails
-   closed. Continue publishing a fresh snapshot (at most five minutes old; the
-   supplied publisher uses two minutes) for the lifetime of the service.
+   loaded. Sender-only clients use `punaro-attachment map-sender` only to pin
+   the local relationship; their first `punaro-attachment send` fresh-verifies
+   the signed directory before it accepts a source. A stale, missing,
+   rolled-back, or mismatched directory fails closed. Continue publishing a
+   fresh snapshot (at most five minutes old; the supplied publisher uses two
+   minutes) for the lifetime of the service.
 
 ## Agent mailbox behavior
 
