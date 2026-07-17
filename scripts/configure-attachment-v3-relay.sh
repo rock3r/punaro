@@ -26,7 +26,10 @@ EOF
 fail() { printf '%s\n' "$1" >&2; exit 2; }
 
 file_mode() {
-	if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+	case "$(uname -s)" in
+		Darwin) stat -f %Lp "$1" ;;
+		*) stat -c %a "$1" ;;
+	esac
 }
 
 require_absolute_regular_file() {

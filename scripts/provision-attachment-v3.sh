@@ -54,7 +54,10 @@ require_absolute_private_directory() {
 		*) fail "$2 must be an absolute path" ;;
 	esac
 	[ -d "$1" ] && [ ! -L "$1" ] || fail "$2 must be a non-symlink directory"
-	if stat -f %Lp "$1" >/dev/null 2>&1; then mode=$(stat -f %Lp "$1"); else mode=$(stat -c %a "$1"); fi
+	case "$(uname -s)" in
+		Darwin) mode=$(stat -f %Lp "$1") ;;
+		*) mode=$(stat -c %a "$1") ;;
+	esac
 	[ "$mode" = 700 ] || fail "$2 must have mode 0700"
 }
 

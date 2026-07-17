@@ -7,6 +7,13 @@ fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-attachment-relay-test.XXXXXXXX")
 cleanup() { chmod -R u+w -- "$fixture_dir" 2>/dev/null || true; rm -rf -- "$fixture_dir"; }
 trap cleanup EXIT HUP INT TERM
 
+file_mode() {
+	case "$(uname -s)" in
+		Darwin) stat -f %Lp "$1" ;;
+		*) stat -c %a "$1" ;;
+	esac
+}
+
 stage="$fixture_dir/stage"
 authority="$fixture_dir/authority"
 client="$fixture_dir/client"
@@ -42,7 +49,7 @@ issuer="$stage/etc/punaro/credentials/v3-issuer.private"
 published_snapshot="$stage/var/lib/punaro/private/v3-directory.snapshot"
 [ -f "$issuer" ] || { printf '%s\n' 'relay issuer key was not installed' >&2; exit 1; }
 [ -f "$published_snapshot" ] || { printf '%s\n' 'relay directory snapshot was not installed' >&2; exit 1; }
-[ "$(stat -f %Lp "$issuer" 2>/dev/null || stat -c %a "$issuer")" = 600 ] || { printf '%s\n' 'relay issuer key is not private' >&2; exit 1; }
+[ "$(file_mode "$issuer")" = 600 ] || { printf '%s\n' 'relay issuer key is not private' >&2; exit 1; }
 grep -Fqx 'PUNARO_ATTACHMENT_V3_ENABLED=true' "$config"
 grep -Fqx 'PUNARO_PERMIT_ISSUANCE_ENABLED=false' "$config"
 grep -Fqx 'PUNARO_ATTACHMENTS_ENABLED=false' "$config"

@@ -12,7 +12,10 @@ authority="$fixture_dir/authority"
 client="$fixture_dir/client"
 
 file_mode() {
-	if stat -f %Lp "$1" >/dev/null 2>&1; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
+	case "$(uname -s)" in
+		Darwin) stat -f %Lp "$1" ;;
+		*) stat -c %a "$1" ;;
+	esac
 }
 
 sh "$repo_dir/scripts/provision-attachment-v3.sh" authority --directory "$authority" >"$fixture_dir/authority.out"
