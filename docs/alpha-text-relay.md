@@ -6,6 +6,8 @@ release gates remain closed.
 
 ## Machine enrollment
 
+For a standard machine, start with the [client installer](installation.md#2-install-one-client-machine). It creates the same exclusive prefix and key below, retains the public enrollment record locally, and deliberately stops before operator approval and service activation. The manual commands remain available for an audited or custom deployment.
+
 On each adapter machine, generate an exclusive endpoint namespace and a private
 machine key. Use an explicit, machine-scoped `agent/<machine>/` namespace for
 the mailbox aliases attached to that machine. Do not enroll a broad client

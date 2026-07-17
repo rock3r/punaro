@@ -5,6 +5,12 @@ separately deployable Telegram bridge, and a controlled v3 attachment-runtime
 validation surface. It is not a released public service or production file
 transfer system. Do not use it to carry sensitive production work yet.
 
+For the supported server/client installation sequence, see the
+[installation guide](installation.md). The server installer creates only the
+loopback systemd relay and its owner-controlled configuration; Cloudflare
+Tunnel, Access, machine enrollment, and attachment release gates remain
+explicit operator actions.
+
 ## Run locally
 
 Use Go for the current local smoke test:
