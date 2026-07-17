@@ -11,17 +11,21 @@ client_installer=scripts/install-client.sh
 adapter_installer_test=scripts/test-install-adapter.sh
 server_installer=scripts/install-server.sh
 server_installer_test=scripts/test-install-server.sh
+attachment_provisioner=scripts/provision-attachment-v3.sh
+attachment_provisioner_test=scripts/test-provision-attachment-v3.sh
+attachment_relay_configurer=scripts/configure-attachment-v3-relay.sh
+attachment_relay_configurer_test=scripts/test-configure-attachment-v3-relay.sh
 agent_guidance_installer=scripts/install-agent-guidance.sh
 agent_guidance_installer_test=scripts/test-install-agent-guidance.sh
 
-for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
+for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
 
-for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
 	if [ ! -x "$executable" ]; then
 		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1
@@ -48,6 +52,8 @@ fi
 "$snapshot_publisher_test"
 "$adapter_installer_test"
 "$server_installer_test"
+"$attachment_provisioner_test"
+"$attachment_relay_configurer_test"
 "$agent_guidance_installer_test"
 
 for expected in \

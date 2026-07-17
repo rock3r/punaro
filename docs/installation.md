@@ -106,6 +106,106 @@ and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
 follow the [alpha onboarding revocation procedure](alpha-text-relay.md#onboard-and-revoke-a-machine): remove attached aliases, remove the relay enrollment, revoke the machine's Access token, stop the service, and securely erase its key.
 
+## 4. Provision and enable controlled attachment v3
+
+Attachment v3 has an explicit, multi-role setup. Do not enable it by setting
+environment variables by hand: the provisioning helpers create private key
+files with owner-only permissions, keep raw key values out of command output,
+and make the public approval artifacts separate from secrets. It remains a
+controlled deployment rather than an unattended file-sharing feature.
+
+1. On a trusted, offline authority machine, create the directory authority:
+
+   ```sh
+   ./scripts/provision-attachment-v3.sh authority \
+     --directory "$HOME/.config/punaro/attachment-authority"
+   ```
+
+   Keep `root.private` in that directory offline. It signs the short-lived
+   directory snapshot and must never be copied to the relay, a client, a
+   message, or a repository. The relay receives the separate `issuer.private`
+   only through an approved private transfer or secret-management mechanism.
+
+2. On each client, create one directory device and its local controller
+   configuration. The client key material stays on that client:
+
+   ```sh
+   ./scripts/provision-attachment-v3.sh client \
+     --directory "$HOME/.config/punaro/attachment-v3" \
+     --authority-public "$HOME/.config/punaro/attachment-authority/public.json" \
+     --machine-id laptop-review --role receiver
+   ```
+
+   A sender-capable client additionally requires an existing host-bound
+   wrapping-key reference. On macOS this names a Keychain generic-password
+   item; on Linux it must be a systemd `LoadCredential` reference. The secret
+   value is never accepted by Punaro's scripts, `.env` files, or command-line
+   arguments:
+
+   ```sh
+   ./scripts/provision-attachment-v3.sh client \
+     --directory "$HOME/.config/punaro/attachment-v3-sender" \
+     --authority-public "$HOME/.config/punaro/attachment-authority/public.json" \
+     --machine-id laptop-review --role both \
+     --host-key-service punaro.attachment-v3 \
+     --host-key-account laptop-review
+   ```
+
+   On Linux, replace the last two flags with the private systemd credential
+   reference:
+
+   ```sh
+   --host-credential-directory /run/credentials/punaro-attachment \
+   --host-credential-name sender-key
+   ```
+
+   Source the ordinary `adapter.env` followed by this new owner-only
+   `attachment-v3.env` only in the local controller process. Do not add either
+   to the adapter service or an agent prompt. The service token remains in the
+   existing owner-only `adapter.env` and is distinct per machine.
+
+3. On the authority machine, inspect the public device record and add it to
+   the directory manifest. This advances the manifest sequence but does not
+   sign or publish it yet:
+
+   ```sh
+   ./scripts/provision-attachment-v3.sh authority-add-device \
+     --directory "$HOME/.config/punaro/attachment-authority" \
+     --device-enrollment /approved/path/device-enrollment.json
+   ```
+
+   Add the device ID from that same public record to the corresponding public
+   machine enrollment as `attachment_device_id`; one transport machine maps to
+   exactly one directory device. Then use
+   `scripts/publish-directory-snapshot.sh` with the authority's root key to
+   publish a fresh snapshot. It deliberately sends only the signed snapshot to
+   the relay.
+
+4. On the Linux relay, after `install-server.sh` and after reviewing the
+   public machine enrollment JSON, activate the v3 runtime:
+
+   ```sh
+   ./scripts/configure-attachment-v3-relay.sh \
+     --authority-public /secure/authority/public.json \
+     --issuer-private-key /secure/relay-input/issuer.private \
+     --directory-snapshot /secure/relay-input/current.snapshot \
+     --relay-machines-file /secure/relay-input/machines.json \
+     --enable
+   ```
+
+   The helper copies the issuer key and snapshot into service-private paths,
+   writes v3-only limits and directory trust, disables v2 switches, and starts
+   `punarod` only when the enrollment contains at least one explicit device
+   binding. It does not use 1Password references, Cloudflare account details,
+   tokens, or host-specific values. For image/package checks, use `--root
+   /absolute/staging-root` without `--enable`.
+
+5. Before mapping, approving, sending, or receiving an offer on every client,
+   run `punaro-attachment check` with the two owner-only environment files
+   loaded. A stale, missing, rolled-back, or mismatched signed directory fails
+   closed. Continue publishing a fresh snapshot (at most five minutes old;
+   the supplied publisher uses two minutes) for the lifetime of the service.
+
 ## Agent mailbox behavior
 
 Agents use the local `agent-mailbox` MCP, not a remote Punaro MCP. Call

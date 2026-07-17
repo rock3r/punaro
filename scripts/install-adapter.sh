@@ -231,6 +231,7 @@ printf '%s\n' 'Punaro adapter installed. The service is not useful until this pu
 cat "$enrollment_file"
 printf '%s\n' '' \
 	'Next: approve that record on the relay; create a distinct Cloudflare Access service token for this machine; add it to the owner-only adapter.env; bind and attach the desired agent aliases; then rerun this command with --enable.' \
+	'Optional controlled attachments: use scripts/provision-attachment-v3.sh after the machine enrollment is approved; it creates separate local device material and never modifies this adapter configuration.' \
 	"Verify with: $service_hint"
 if [ -z "$agent_guidance_dir" ]; then
 	printf '%s\n' "Optional agent guidance: $repo_dir/scripts/install-agent-guidance.sh --directory /path/to/project"
