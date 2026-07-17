@@ -138,6 +138,18 @@ func normalizeLegacyPrivateKey(path string) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace legacy private key: %w", err)
 	}
+	// #nosec G304 -- parent was verified as the private, owned directory above.
+	directory, err := os.Open(parent)
+	if err != nil {
+		return fmt.Errorf("open private key parent after replacement: %w", err)
+	}
+	if err := directory.Sync(); err != nil {
+		_ = directory.Close()
+		return fmt.Errorf("sync private key parent after replacement: %w", err)
+	}
+	if err := directory.Close(); err != nil {
+		return fmt.Errorf("close private key parent after replacement: %w", err)
+	}
 	return nil
 }
 
