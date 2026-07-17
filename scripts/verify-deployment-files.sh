@@ -54,7 +54,7 @@ for expected in \
 	'[ ! -L' \
 	'[ ! -L \"\$parent\" ]' \
 	'stat -c %d' \
-	'--ttl 30s' \
+	'--ttl 2m' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE must be below /var/lib/punaro/private' \
 	'PUNARO_CONTAINER_SNAPSHOT_FILE contains unsafe characters' \
 	'directory_snapshot_published'; do

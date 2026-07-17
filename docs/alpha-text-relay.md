@@ -212,8 +212,9 @@ advance its revocation state and publish the signed snapshot, then remove its
 relay enrollment and revoke its Access token as in the preceding section. The
 next permit or attachment operation refreshes the directory and fails closed;
 the daemon's bounded reaper releases expired state after the ten-minute
-manifest lifetime; each directory head and permit remains valid for at most
-30 seconds. This cannot recall ciphertext already delivered to a recipient.
+manifest lifetime; each directory head remains valid for at most five minutes
+and each permit for at most 30 seconds. This cannot recall ciphertext already
+delivered to a recipient.
 
 Create a new explicit conversation from an attached creator endpoint with one
 or more declared members:

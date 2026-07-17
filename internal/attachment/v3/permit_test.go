@@ -36,6 +36,28 @@ func TestPermitUsesV3DomainAndBindsStagedManifest(t *testing.T) {
 	}
 }
 
+func TestPermitAllowsBoundedFutureClockSkew(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
+	permit := testPermit(now.Add(60 * time.Second))
+	if err := SignPermit(&permit, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPermit(permit, permitAuthorityStub{key: public}, now); err != nil {
+		t.Fatalf("bounded future-issued permit rejected: %v", err)
+	}
+	permit = testPermit(now.Add(61 * time.Second))
+	if err := SignPermit(&permit, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyPermit(permit, permitAuthorityStub{key: public}, now); err == nil {
+		t.Fatal("permit beyond bounded future clock skew accepted")
+	}
+}
+
 func TestPermitRejectsInvalidHolderOperationAndAttempt(t *testing.T) {
 	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
 	for _, operation := range []uint64{permitOperationSourceInit, permitOperationSourceUpload, permitOperationOffer, permitOperationCancel} {

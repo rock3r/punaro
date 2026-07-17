@@ -179,9 +179,13 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	}
 	now := i.now().UTC()
 	nowUnix := now.Unix()
-	if nowUnix < 0 || request.IssuedAt > uint64(nowUnix) {
+	if nowUnix < 0 {
 		return Permit{}, false, errors.New("invalid v3 permit request time")
 	}
+	if !issuedWithinClockSkew(request.IssuedAt, nowUnix) {
+		return Permit{}, false, errors.New("invalid v3 permit request time")
+	}
+	nowSeconds := uint64(nowUnix)
 	holder, err := authority.CurrentDeviceSigningKey(request.HolderDeviceID, request.HolderGeneration)
 	if err != nil || len(holder) != ed25519.PublicKeySize {
 		return Permit{}, false, errors.New("unknown v3 permit request holder")
@@ -199,7 +203,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 	// expired) permit gives the controller the precise serial needed for an
 	// outcome query. Replacing it with a fresh serial would strand a committed
 	// source-init behind an unrecoverable ambiguity.
-	if request.ExpiresAt <= uint64(nowUnix) {
+	if request.ExpiresAt <= nowSeconds {
 		stored, found, err := i.existingRequest(ctx, request.RequestID, rawRequest)
 		if err != nil {
 			return Permit{}, false, err
@@ -222,7 +226,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 		return Permit{}, false, errors.New("invalid v3 issuer clock")
 	}
 	expiresAt := minPermitExpiry(request.ExpiresAt, binding.ExpiresAt, uint64(issuerExpiry))
-	if expiresAt <= uint64(nowUnix) || request.MaxBytes > i.maxBytes || request.MaxChunks > i.maxChunks || request.MaxOperations > i.maxOperations {
+	if expiresAt <= nowSeconds || request.MaxBytes > i.maxBytes || request.MaxChunks > i.maxChunks || request.MaxOperations > i.maxOperations {
 		return Permit{}, false, errors.New("v3 permit request exceeds issuer policy")
 	}
 	for attempt := 0; attempt < 8; attempt++ {
@@ -230,7 +234,7 @@ func (i *PermitIssuer) Issue(ctx context.Context, request PermitRequest, authori
 		if _, err := io.ReadFull(i.random, serial[:]); err != nil || serial == [16]byte{} {
 			return Permit{}, false, errors.New("generate v3 permit serial")
 		}
-		permit := Permit{Audience: binding.Audience, Serial: serial, IssuerKeyID: i.issuerKeyID, HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: binding.DirectoryHead, MembershipCommitment: request.MembershipCommitment, RevocationEpoch: binding.RevocationEpoch, IssuedAt: uint64(nowUnix), ExpiresAt: expiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
+		permit := Permit{Audience: binding.Audience, Serial: serial, IssuerKeyID: i.issuerKeyID, HolderDeviceID: request.HolderDeviceID, HolderGeneration: request.HolderGeneration, HolderRole: request.HolderRole, TransferID: request.TransferID, ConversationID: request.ConversationID, SenderDeviceID: request.SenderDeviceID, SenderGeneration: request.SenderGeneration, RecipientDeviceID: request.RecipientDeviceID, RecipientGeneration: request.RecipientGeneration, AttemptGeneration: request.AttemptGeneration, Operation: request.Operation, DirectoryHead: binding.DirectoryHead, MembershipCommitment: request.MembershipCommitment, RevocationEpoch: binding.RevocationEpoch, IssuedAt: nowSeconds, ExpiresAt: expiresAt, MaxBytes: request.MaxBytes, MaxChunks: request.MaxChunks, MaxOperations: request.MaxOperations, StagedManifestCommitment: request.StagedManifestCommitment, OutcomeOfSerial: request.OutcomeOfSerial}
 		if err := SignPermit(&permit, i.privateKey); err != nil || VerifyPermit(permit, authority, now) != nil {
 			return Permit{}, false, errors.New("issuer generated an invalid v3 permit")
 		}

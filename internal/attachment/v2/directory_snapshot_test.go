@@ -72,6 +72,15 @@ func TestDirectorySnapshotResolverBindsManifestAndRecipientKeysToFreshMembership
 	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err != nil {
 		t.Fatalf("v3 strict admission rejected exact ten-minute manifest: %v", err)
 	}
+	manifest.IssuedAt = testUnix(t, clock.Add(60*time.Second))
+	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err != nil {
+		t.Fatalf("v3 admission rejected bounded future clock skew: %v", err)
+	}
+	manifest.IssuedAt = testUnix(t, clock.Add(61*time.Second))
+	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err == nil {
+		t.Fatal("v3 admission accepted excessive future clock skew")
+	}
+	manifest.IssuedAt = testUnix(t, clock.Add(-time.Second))
 	admissionHead := manifest.DirectoryHead
 	manifest.DirectoryHead = directoryBytes32(99)
 	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err == nil {
@@ -80,6 +89,22 @@ func TestDirectorySnapshotResolverBindsManifestAndRecipientKeysToFreshMembership
 	manifest.DirectoryHead, manifest.RevocationEpoch = admissionHead, 2
 	if _, err := resolver.ValidateV3ManifestAdmissionAuthority(manifest, clock); err == nil {
 		t.Fatal("v3 strict admission accepted a different revocation epoch")
+	}
+
+	futureHead := head
+	futureHead.IssuedAt = testUnix(t, clock.Add(60*time.Second))
+	futureHead.ExpiresAt = testUnix(t, clock.Add(5*time.Minute))
+	futureHead = signedDirectoryHead(t, rootPrivate, futureHead)
+	futureRaw, err := EncodeDirectoryHead(futureHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureResolver, err := NewDirectorySnapshotResolver(futureRaw, DirectoryTrust{Audience: audience, RootKeyID: rootID, RootPublicKey: rootPublic, Checkpoints: &memoryCheckpointStore{checkpoints: make(map[[32]byte]DirectoryCheckpoint)}}, clock, nil, entries)
+	if err != nil {
+		t.Fatalf("future-skew directory resolver: %v", err)
+	}
+	if _, _, err := futureResolver.CurrentRecipientHPKEKey(bytes16(5), 2); err != nil {
+		t.Fatalf("bounded future-skew directory head was not usable: %v", err)
 	}
 }
 

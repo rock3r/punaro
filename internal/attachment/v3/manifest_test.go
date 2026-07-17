@@ -37,13 +37,13 @@ func TestDecodeAndVerifySourceInitDerivesImmutableSource(t *testing.T) {
 	}
 }
 
-func TestDecodeAndVerifySourceInitRejectsFutureOrUnrepresentableTime(t *testing.T) {
+func TestDecodeAndVerifySourceInitAllowsBoundedFutureClockSkew(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.July, 15, 0, 0, 0, 0, time.UTC)
-	manifest := testManifest(now.Add(time.Second))
+	manifest := testManifest(now.Add(60 * time.Second))
 	if err := SignManifest(&manifest, private); err != nil {
 		t.Fatal(err)
 	}
@@ -51,8 +51,19 @@ func TestDecodeAndVerifySourceInitRejectsFutureOrUnrepresentableTime(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := DecodeAndVerifySourceInit(raw, manifestAuthorityStub{public: public}, now); err != nil {
+		t.Fatalf("bounded future-issued manifest rejected: %v", err)
+	}
+	manifest = testManifest(now.Add(61 * time.Second))
+	if err := SignManifest(&manifest, private); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = EncodeManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := DecodeAndVerifySourceInit(raw, manifestAuthorityStub{public: public}, now); err == nil {
-		t.Fatal("future-issued manifest accepted")
+		t.Fatal("manifest beyond bounded future clock skew accepted")
 	}
 	manifest.IssuedAt = ^uint64(0) - 20
 	manifest.ExpiresAt = ^uint64(0) - 10

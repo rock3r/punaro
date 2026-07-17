@@ -36,12 +36,12 @@ procedure that requires explicit operator approval.
 
 A directory head is a canonical signed record containing version, audience,
 root key ID, tree size, tree root, sequence, issued time, expiry, and revocation
-epoch.  Its maximum validity is 30 seconds.  Each adapter persists its last
+epoch.  Its maximum validity is five minutes.  Each adapter persists its last
 accepted `(sequence, tree root, revocation epoch)` in anti-rollback storage;
 every newer head needs a consistency proof from that checkpoint.  The adapter
-rejects a head that is expired, has `expires_at > issued_at + 30 seconds`, is
-issued more than 120 seconds from trusted local time, is not yet effective
-(`issued_at > local_time`), decreases sequence or epoch, lacks a valid
+rejects a head that is expired, has `expires_at > issued_at + 5 minutes`, is
+issued more than 60 seconds from trusted local time, decreases sequence or
+epoch, lacks a valid
 consistency/inclusion proof, or has the wrong audience.  A missing fresh head is a hard failure, not an
 offline grace period.  Two valid heads for the same audience and sequence with
 different roots are equivocation: freeze that audience, retain the evidence,
@@ -165,9 +165,8 @@ The manifest's maximum encoded size is 4 KiB and an envelope's is 16 KiB.
 `manifest_commitment` is BLAKE3-256 over the complete canonical signed Manifest
 encoding, including field `99`; a Manifest is not eligible for commitment until
 its signature has been verified against the fresh directory key-ID binding.
-Manifests have a maximum 30-second lifetime, may not be issued more than 120
-seconds in the future, are not accepted before `issued_at <= local_time`, and
-are accepted only when a fresh directory head proves
+Manifests have a maximum 30-second lifetime, may not be issued more than 60
+seconds in the future, and are accepted only when a fresh directory head proves
 the sender/recipient inclusions, the exact membership commitment, and the exact
 revocation epoch recorded by the Manifest.  A newer head or epoch, a changed
 membership commitment, an expired Manifest, or an unprovable historic head is
@@ -470,11 +469,11 @@ recipient-signed `offered -> accepted` transition. A retry returns the original
 redemption result; a distinct operation cannot consume the nonce again.
 
 Revocation stops new offers, acceptances, uploads, downloads, permits, and
-signaling immediately after a fresh directory view.  Direct transport closes
-on revocation notification or permit expiry.  Because a permit cannot outlive
-its 30-second directory head, the documented residual exposure is at most 30
-seconds after publication of a correctly authenticated revoking head for bytes
-already in flight; delivered plaintext is never recalled.
+signaling after the participant has fetched the fresh directory view. Direct
+transport closes on revocation notification or permit expiry. A cached signed
+directory head can remain usable for up to five minutes, so this is the maximum
+revocation-propagation exposure for bytes already in flight; delivered
+plaintext is never recalled.
 
 ## Transport and resource safety
 

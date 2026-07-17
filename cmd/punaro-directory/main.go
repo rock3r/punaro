@@ -97,15 +97,15 @@ func runBuild(args []string) error {
 	configPath := fs.String("config", "", "non-secret directory JSON manifest")
 	rootPath := fs.String("root-private-key-file", "", "absolute private Ed25519 root key file")
 	output := fs.String("output", "", "absolute snapshot output file")
-	ttl := fs.Duration("ttl", 30*time.Second, "snapshot lifetime (1s-30s)")
+	ttl := fs.Duration("ttl", 2*time.Minute, "snapshot lifetime (1s-5m)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *configPath == "" || *rootPath == "" || *output == "" || !filepath.IsAbs(*configPath) || !filepath.IsAbs(*rootPath) || !filepath.IsAbs(*output) {
 		return errors.New("--config, --root-private-key-file, and --output must be absolute paths")
 	}
-	if *ttl < time.Second || *ttl > 30*time.Second {
-		return errors.New("--ttl must be between 1s and 30s")
+	if *ttl < time.Second || *ttl > 5*time.Minute {
+		return errors.New("--ttl must be between 1s and 5m")
 	}
 	raw, err := os.ReadFile(*configPath)
 	if err != nil {

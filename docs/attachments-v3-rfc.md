@@ -82,10 +82,13 @@ body must bind the identical audience, transfer/conversation IDs,
 sender/recipient generations, manifest commitment, directory-head commitment,
 membership commitment, revocation epoch, and expiry.
 
-An immutable v3 Manifest may live for at most ten minutes. Directory heads and
-permits remain independently short-lived (at most 30 seconds). After strict
-source-init, each operation obtains a new permit from a fresh current directory
-view. That permit remains exactly bound to the Manifest commitment, transfer
+An immutable v3 Manifest may live for at most ten minutes. Directory heads may
+live for at most five minutes; permits remain independently short-lived (at
+most 30 seconds). Verifiers tolerate up to 60 seconds of future clock skew for
+signed attachment records, including the root-signed directory head, but never
+extend any record's expiry. After strict source-init, each operation obtains a
+new permit from a fresh current directory view. That permit remains exactly
+bound to the Manifest commitment, transfer
 identities, and membership commitment, but its directory head and revocation
 epoch are the current values and may therefore differ from the Manifest's
 admission provenance. Every operation rejects a current missing/revoked

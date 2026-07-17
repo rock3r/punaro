@@ -19,6 +19,10 @@ const (
 	// MaxManifestLifetime bounds immutable v3 transfer state. Directory heads
 	// and operation permits remain independently short-lived (at most 30s).
 	MaxManifestLifetime = 10 * time.Minute
+	// MaxFutureClockSkew tolerates ordinary NTP convergence and scheduling
+	// differences between enrolled machines. It never extends an expiry and is
+	// not a substitute for normal time synchronization.
+	MaxFutureClockSkew = time.Minute
 )
 
 var (
@@ -258,11 +262,15 @@ func (v VerifiedSource) PlaintextSize() uint64 { return v.manifest.PlaintextSize
 
 func validateManifestTime(m Manifest, now time.Time) error {
 	seconds := now.UTC().Unix()
-	if seconds < 0 || m.ExpiresAt > math.MaxInt64 || m.IssuedAt > uint64(seconds) {
+	if seconds < 0 || !issuedWithinClockSkew(m.IssuedAt, seconds) || m.ExpiresAt > math.MaxInt64 {
 		return errors.New("invalid manifest time")
 	}
 	if uint64(seconds) >= m.ExpiresAt {
 		return errors.New("expired manifest")
 	}
 	return nil
+}
+
+func issuedWithinClockSkew(issued uint64, nowUnix int64) bool {
+	return nowUnix >= 0 && issued <= uint64(nowUnix)+uint64(MaxFutureClockSkew/time.Second)
 }
