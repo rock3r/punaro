@@ -61,6 +61,13 @@ that happens to have a working persistent connection, or a successful `curl`
 health probe, does not prove that a newly started attachment receiver can
 complete its own TLS handshake and signed `GET /v2/directory` request.
 
+Every directory publisher, relay, sender, and receiver also needs working NTP
+time synchronization. Directory snapshots and permits are deliberately
+short-lived and reject future-dated, expired, or otherwise invalid time
+windows. Do not compensate for clock drift by lengthening validity windows or
+disabling freshness checks: repair the host's normal time synchronization,
+then run the receiver preflight again.
+
 Before enabling controlled attachment delivery on each machine, and after an
 Access, firewall, certificate, network, or directory-publisher change, run
 the locally provisioned receiver command:
