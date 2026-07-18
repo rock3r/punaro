@@ -24,11 +24,11 @@ func OpenSQLiteSourceReadyStore(path string) (*SQLiteSourceReadyStore, error) {
 		return nil, err
 	}
 	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !isPrivateStateParent(info) {
 		return nil, errors.New("source-ready parent must be private and non-symlinked")
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !isPrivateStateFile(info) {
 			return nil, errors.New("source-ready database must be private and non-symlinked")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

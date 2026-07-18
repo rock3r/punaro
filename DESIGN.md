@@ -364,6 +364,11 @@ machine Keychain, Windows DPAPI CurrentUser boundary, or a private systemd
 credential and is never placed in that journal. Windows deployment uses an
 exclusive current-user ACL and an interactive per-user Scheduled Task; it does
 not expose the wrapping key through an environment variable or task argument.
+On Unix, attachment journals, keys, snapshots, and durable stores additionally
+require owner-only permission bits. On Windows, those same paths must remain
+regular, non-reparse files below the installer-managed ACL: Go's `FileMode`
+cannot represent NTFS ACL ownership, so treating POSIX mode bits as an ACL
+would reject secure Windows state or create a false security boundary.
 It issues holder-signed v3 permits and submits permit/operation-bound
 bytes through the same replay-protected machine transport as text. Every send
 requires a caller-retained stage ID: retries reuse only the exact immutable

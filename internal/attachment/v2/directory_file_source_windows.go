@@ -4,7 +4,12 @@ package v2
 
 import "os"
 
-// Punaro's relay is supported only on hardened Linux service hosts. A Windows
-// build must therefore fail closed for group-readable snapshot paths, whose
-// ACL ownership cannot be represented safely by POSIX mode bits.
-func rootOwnsGroupAccessiblePath(info os.FileInfo) bool { return info.Mode().Perm()&0o070 == 0 }
+// The installer owns the ACL for configured Windows state. Retain the
+// no-reparse-point/type boundary without treating POSIX mode bits as ACLs.
+func safeDirectorySnapshotParent(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+func safeDirectorySnapshotFile(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0
+}

@@ -76,18 +76,6 @@ func (s *DirectorySnapshotFileSource) CurrentDirectorySnapshot() ([]byte, error)
 	return append([]byte(nil), raw...), nil
 }
 
-// A separately privileged publisher may own the path while the relay runs in
-// its non-writable service group. Group read/execute on the directory and
-// group read on the snapshot are therefore safe; writes and all world access
-// would let an untrusted account replace or probe the configured authority.
-func safeDirectorySnapshotParent(info os.FileInfo) bool {
-	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o027 == 0 && rootOwnsGroupAccessiblePath(info)
-}
-
-func safeDirectorySnapshotFile(info os.FileInfo) bool {
-	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o037 == 0 && rootOwnsGroupAccessiblePath(info)
-}
-
 // FetchDirectorySnapshot makes the private publisher usable as the daemon's
 // fresh authority source. Context is accepted for the common fetcher contract;
 // local bounded file I/O has no independently cancellable operation.

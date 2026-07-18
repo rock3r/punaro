@@ -59,6 +59,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./internal/attachment/v3/controller
+      - run: go test ./internal/attachment/v2 -run '^TestWindows'
+      - run: go test ./internal/adapter -run '^TestWindows'
+      - run: go test ./cmd/punaro-attachment -run '^TestWindows'
       - run: go vet ./...
       - run: go build ./...
       - shell: pwsh

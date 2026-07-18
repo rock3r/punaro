@@ -129,26 +129,17 @@ func openJournal(path string, recipient RecipientIdentity, sender SenderIdentity
 	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return nil, fmt.Errorf("create controller journal parent: %w", err)
 	}
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return nil, errors.New("controller journal parent must be private and non-symlinked")
+	if err := validateJournalParent(parent); err != nil {
+		return nil, err
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("controller journal database must be private and non-symlinked")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateJournalFile(path, "controller journal database must be private and non-symlinked"); err != nil {
 		return nil, err
 	}
 	// SQLite may recover a private rollback journal under DELETE mode, but WAL
 	// artifacts would let stale, separately mutable state affect the database.
 	// Validate any rollback journal before SQLite sees it and fail closed on WAL
 	// sidecars, which this controller never uses.
-	if info, err := os.Lstat(path + "-journal"); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("controller journal rollback journal must be private and non-symlinked")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateJournalFile(path+"-journal", "controller journal rollback journal must be private and non-symlinked"); err != nil {
 		return nil, err
 	}
 	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
