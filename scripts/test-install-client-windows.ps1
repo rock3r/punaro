@@ -36,15 +36,16 @@ try {
     [System.IO.Directory]::CreateDirectory($project) | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $project 'CLAUDE.md'), '# Existing guidance', [System.Text.Encoding]::UTF8)
 
-    $script:registeredTask = $null
+    $global:punaroRegisteredTask = $null
+    $global:punaroRegisteredSettings = $null
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
     function New-ScheduledTaskTrigger { param([switch]$AtLogOn, [string]$User) return [pscustomobject]@{ User = $User } }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
     function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit } }
     function Register-ScheduledTask {
         param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [string]$Description, [switch]$Force)
-        $script:registeredTask = $TaskName
-        $script:registeredSettings = $Settings
+        $global:punaroRegisteredTask = $TaskName
+        $global:punaroRegisteredSettings = $Settings
         return [pscustomobject]@{}
     }
 
@@ -54,8 +55,8 @@ try {
     foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Windows client installer did not create $path" }
     }
-    if ($script:registeredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
-    if ($script:registeredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
+    if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
+    if ($global:punaroRegisteredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
 } finally {
