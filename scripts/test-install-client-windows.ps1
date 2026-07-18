@@ -13,7 +13,7 @@ foreach ($path in $paths) {
     $tokens = $null
     $errors = $null
     [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
-    if ($null -ne $errors -and $errors.Count -ne 0) { throw "PowerShell parse failure in $path: $($errors[0].Message)" }
+    if ($null -ne $errors -and $errors.Count -ne 0) { throw "PowerShell parse failure in ${path}: $($errors[0].Message)" }
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
