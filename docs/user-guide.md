@@ -28,11 +28,11 @@ Tunnel credentials remain separate systemd credentials because they are
 secrets. The [operator guide](operator-guide.md) covers that ingress and
 ongoing verification.
 
-For a client that may send attachments on macOS, use the client installer with
-`--attachment-authority-public ... --attachment-role both`. It creates a
-device-only Keychain wrapping key locally; the key value is never printed or
-given to an agent. The public device enrollment still needs authority approval
-before attachments can be exchanged.
+For a client that may send attachments, use the client installer with an
+explicit `both` role. macOS creates a device-only Keychain wrapping key;
+Windows creates a DPAPI CurrentUser-protected wrapping key. In both cases the
+raw key is never printed or given to an agent, and the public device enrollment
+still needs authority approval before attachments can be exchanged.
 
 ## What you can do today
 

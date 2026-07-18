@@ -1,4 +1,4 @@
-.PHONY: test test-race vet staticcheck golangci vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
+.PHONY: test test-race vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
 
 test:
 	go test -covermode=atomic ./...
@@ -17,7 +17,11 @@ golangci:
 		trap 'rm -f "$$lint_dir/golangci-lint"; rmdir "$$lint_dir"' EXIT; \
 		GOBIN="$$lint_dir" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.1; \
 		"$$lint_dir/golangci-lint" run ./...; \
-		GOOS=linux "$$lint_dir/golangci-lint" run ./...
+		GOOS=linux "$$lint_dir/golangci-lint" run ./...; \
+		GOOS=windows "$$lint_dir/golangci-lint" run ./...
+
+windows-build:
+	GOOS=windows go build ./...
 
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
@@ -31,7 +35,7 @@ secrets:
 deployment-lint:
 	./scripts/verify-deployment-files.sh
 
-lint: vet staticcheck golangci deployment-lint
+lint: vet staticcheck golangci windows-build deployment-lint
 
 security: vuln gosec secrets
 

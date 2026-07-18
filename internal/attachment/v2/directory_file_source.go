@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // DirectorySnapshotFileSource exposes an operator-published complete directory
@@ -87,17 +86,6 @@ func safeDirectorySnapshotParent(info os.FileInfo) bool {
 
 func safeDirectorySnapshotFile(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o037 == 0 && rootOwnsGroupAccessiblePath(info)
-}
-
-// A path that grants any group access must be owned by the privileged
-// publisher, not by the relay process that consumes it. Paths with no group
-// access retain the conventional single-service owner-only deployment model.
-func rootOwnsGroupAccessiblePath(info os.FileInfo) bool {
-	if info.Mode().Perm()&0o070 == 0 {
-		return true
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && stat.Uid == 0
 }
 
 // FetchDirectorySnapshot makes the private publisher usable as the daemon's

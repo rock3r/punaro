@@ -360,8 +360,11 @@ The local sender command opens a sender-only journal and requires its pinned
 source identity to match the pre-approved relationship before staging. It
 creates encrypted artifacts only after a local private artifact store has
 reserved file-key, salt, and nonce tuples; the file key is wrapped by the
-machine Keychain or a private systemd credential and is never placed in that
-journal. It issues holder-signed v3 permits and submits permit/operation-bound
+machine Keychain, Windows DPAPI CurrentUser boundary, or a private systemd
+credential and is never placed in that journal. Windows deployment uses an
+exclusive current-user ACL and an interactive per-user Scheduled Task; it does
+not expose the wrapping key through an environment variable or task argument.
+It issues holder-signed v3 permits and submits permit/operation-bound
 bytes through the same replay-protected machine transport as text. Every send
 requires a caller-retained stage ID: retries reuse only the exact immutable
 staged transfer, never newly generated source material. Once an expired stage

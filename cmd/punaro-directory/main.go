@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"syscall"
 	"time"
 
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
@@ -391,17 +390,6 @@ func writeSnapshot(path string, raw []byte) error {
 	return closeErr
 }
 
-func requirePrivateParent(path string) (os.FileInfo, error) {
-	info, err := os.Lstat(filepath.Dir(path))
-	if err != nil {
-		return nil, errors.New("output parent must be an existing private directory owned by the invoking user")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 || int(stat.Uid) != os.Geteuid() {
-		return nil, errors.New("output parent must be an existing private directory owned by the invoking user")
-	}
-	return info, nil
-}
 func openNewPrivateOutput(path string, expected os.FileInfo) (*os.File, error) {
 	parent := filepath.Dir(path)
 	root, err := os.OpenRoot(parent)
@@ -423,10 +411,5 @@ func openNewPrivateOutput(path string, expected os.FileInfo) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
-}
-func sameDirectory(a, b os.FileInfo) bool {
-	left, lok := a.Sys().(*syscall.Stat_t)
-	right, rok := b.Sys().(*syscall.Stat_t)
-	return lok && rok && left.Dev == right.Dev && left.Ino == right.Ino && left.Uid == right.Uid
 }
 func fail(err error) { _, _ = fmt.Fprintln(os.Stderr, "punaro-directory:", err); os.Exit(2) }
