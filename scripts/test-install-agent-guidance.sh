@@ -19,6 +19,7 @@ for file in "$project/AGENTS.md" "$project/CLAUDE.md"; do
 done
 [ -f "$project/.agents/skills/punaro-mailbox/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-reply/SKILL.md" ]
+[ -f "$project/.agents/skills/punaro-attachment/SKILL.md" ]
 
 linked_project="$fixture_dir/linked-project"
 outside="$fixture_dir/outside"

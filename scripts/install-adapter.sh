@@ -19,12 +19,33 @@ Options:
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
   --agent-guidance-dir PATH   Add Punaro guidance and skills to this project
+  --attachment-authority-public PATH
+                            Provision this machine for attachment v3 using
+                            this approved public authority record
+  --attachment-role ROLE      receiver, sender, or both (requires --attachment-authority-public)
+  --attachment-directory PATH Private attachment-v3 directory (default: ~/.config/punaro/attachment-v3)
+  --attachment-host-key-service SERVICE
+                            macOS Keychain service for sender wrapping keys
+                            (default: punaro.attachment-v3)
+  --attachment-host-key-account ACCOUNT
+                            macOS Keychain account for sender wrapping keys
+                            (default: machine ID)
+  --attachment-host-credential-directory PATH
+                            Linux systemd credential directory for sender wrapping keys
+  --attachment-host-credential-name NAME
+                            Linux systemd credential name for sender wrapping keys
   --enable                    Start the per-user service after installation
   --help                      Show this help
 
 Access credentials are deliberately not accepted as arguments. Add this
 machine's distinct service-token pair to the owner-only adapter.env file after
 the relay enrollment record has been approved.
+
+Attachment sender setup is opt-in. On macOS the installer creates a fresh,
+device-only Keychain wrapping key directly; its value is never printed or
+passed as an argument. On Linux, sender setup requires an existing systemd
+LoadCredential reference because the installer cannot safely create a
+credential for a user service.
 EOF
 }
 
@@ -57,6 +78,15 @@ mailbox_bin=agent-mailbox
 mailbox_state_dir=
 attached_group=group/punaro-attached
 agent_guidance_dir=
+attachment_authority_public=
+attachment_role=
+attachment_directory=
+# Keep the stable Keychain service namespace separate from its protocol version.
+attachment_host_key_service=punaro.attachment
+attachment_host_key_service="${attachment_host_key_service}-v3"
+attachment_host_key_account=
+attachment_host_credential_directory=
+attachment_host_credential_name=
 enable=0
 
 while [ "$#" -gt 0 ]; do
@@ -67,6 +97,13 @@ while [ "$#" -gt 0 ]; do
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
 		--agent-guidance-dir) [ "$#" -ge 2 ] || fail '--agent-guidance-dir requires a value'; agent_guidance_dir=$2; shift 2 ;;
+		--attachment-authority-public) [ "$#" -ge 2 ] || fail '--attachment-authority-public requires a value'; attachment_authority_public=$2; shift 2 ;;
+		--attachment-role) [ "$#" -ge 2 ] || fail '--attachment-role requires a value'; attachment_role=$2; shift 2 ;;
+		--attachment-directory) [ "$#" -ge 2 ] || fail '--attachment-directory requires a value'; attachment_directory=$2; shift 2 ;;
+		--attachment-host-key-service) [ "$#" -ge 2 ] || fail '--attachment-host-key-service requires a value'; attachment_host_key_service=$2; shift 2 ;;
+		--attachment-host-key-account) [ "$#" -ge 2 ] || fail '--attachment-host-key-account requires a value'; attachment_host_key_account=$2; shift 2 ;;
+		--attachment-host-credential-directory) [ "$#" -ge 2 ] || fail '--attachment-host-credential-directory requires a value'; attachment_host_credential_directory=$2; shift 2 ;;
+		--attachment-host-credential-name) [ "$#" -ge 2 ] || fail '--attachment-host-credential-name requires a value'; attachment_host_credential_name=$2; shift 2 ;;
 		--enable) enable=1; shift ;;
 		--help) usage; exit 0 ;;
 		*) fail "unknown option: $1" ;;
@@ -87,6 +124,13 @@ case "$relay_url" in
 	*) fail 'relay URL must use https://' ;;
 esac
 
+if [ -n "$attachment_authority_public$attachment_role$attachment_directory$attachment_host_key_account$attachment_host_credential_directory$attachment_host_credential_name" ]; then
+	[ -n "$attachment_authority_public" ] && [ -n "$attachment_role" ] || fail 'attachment setup requires both --attachment-authority-public and --attachment-role'
+	case "$attachment_role" in receiver|sender|both) ;; *) fail '--attachment-role must be receiver, sender, or both' ;; esac
+	case "$attachment_authority_public" in /*) ;; *) fail 'attachment authority public record must be an absolute path' ;; esac
+	[ -f "$attachment_authority_public" ] && [ ! -L "$attachment_authority_public" ] || fail 'attachment authority public record must be a non-symlink regular file'
+fi
+
 if [ -z "$mailbox_state_dir" ]; then
 	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
 fi
@@ -97,6 +141,10 @@ require_safe_value "$mailbox_bin" 'agent-mailbox path'
 require_safe_value "$mailbox_state_dir" 'mailbox state directory'
 require_safe_value "$attached_group" 'attached group'
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
+require_safe_value "$attachment_host_key_service" 'attachment host key service'
+if [ -n "$attachment_host_key_account" ]; then require_safe_value "$attachment_host_key_account" 'attachment host key account'; fi
+if [ -n "$attachment_host_credential_directory" ]; then require_safe_value "$attachment_host_credential_directory" 'attachment host credential directory'; fi
+if [ -n "$attachment_host_credential_name" ]; then require_safe_value "$attachment_host_credential_name" 'attachment host credential name'; fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -126,9 +174,14 @@ trap cleanup EXIT HUP INT TERM
 (
 	cd "$repo_dir"
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-attachment" ./cmd/punaro-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
+	if [ "$(uname -s)" = Darwin ] && { [ "$attachment_role" = sender ] || [ "$attachment_role" = both ]; }; then
+		go build -trimpath -buildvcs=true -o "$build_dir/punaro-keychain" ./cmd/punaro-keychain
+	fi
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
+install -m 700 "$build_dir/punaro-attachment" "$bin_dir/punaro-attachment"
 
 if [ -e "$key_file" ] || [ -L "$key_file" ]; then
 	regular_private_file "$key_file" || fail 'existing machine key must be a non-symlink regular 0600 file'
@@ -189,6 +242,53 @@ if ! "$mailbox_bin" --state-dir "$mailbox_state_dir" group create --group "$atta
 	fi
 fi
 
+if [ -n "$attachment_role" ]; then
+	if [ -z "$attachment_directory" ]; then
+		attachment_directory="$config_dir/attachment-v3"
+	fi
+	case "$attachment_directory" in /*) ;; *) fail 'attachment directory must be an absolute path' ;; esac
+	require_safe_value "$attachment_directory" 'attachment directory'
+	attachment_env="$attachment_directory/attachment-v3.env"
+	attachment_enrollment="$attachment_directory/device-enrollment.json"
+	if [ -e "$attachment_directory" ] || [ -L "$attachment_directory" ]; then
+		[ -d "$attachment_directory" ] && [ ! -L "$attachment_directory" ] && [ "$(file_mode "$attachment_directory")" = 700 ] || fail 'existing attachment directory must be a non-symlink private 0700 directory'
+		regular_private_file "$attachment_env" || fail 'existing attachment environment must be a non-symlink regular 0600 file'
+		regular_private_file "$attachment_enrollment" || fail 'existing attachment enrollment must be a non-symlink regular 0600 file'
+		grep -Fqx "PUNARO_ATTACHMENT_RELAY_URL=$relay_url" "$attachment_env" || fail 'existing attachment environment belongs to a different relay'
+		grep -Fq "\"machine_id\":\"$machine_id\"" "$attachment_enrollment" || fail 'existing attachment enrollment belongs to a different machine'
+		if ! grep -Fq "\"role\":\"$attachment_role\"" "$attachment_enrollment"; then
+			case "$attachment_role" in
+				sender|both)
+					if grep -Fq '"role":"receiver"' "$attachment_enrollment"; then
+						fail 'existing attachment setup is receiver-only; use a new --attachment-directory for sender or both and approve its new public enrollment'
+					fi
+					;;
+			esac
+			fail 'existing attachment setup role does not match --attachment-role; use a new --attachment-directory and approve its new public enrollment'
+		fi
+	else
+		set -- client --directory "$attachment_directory" --authority-public "$attachment_authority_public" --machine-id "$machine_id" --relay-url "$relay_url" --role "$attachment_role" --adapter-data-dir "$state_dir"
+		case "$(uname -s)" in
+			Darwin)
+				if [ "$attachment_role" = sender ] || [ "$attachment_role" = both ]; then
+					[ -n "$attachment_host_key_account" ] || attachment_host_key_account=$machine_id
+					install -m 700 "$build_dir/punaro-keychain" "$bin_dir/punaro-keychain"
+					"$bin_dir/punaro-keychain" --service "$attachment_host_key_service" --account "$attachment_host_key_account"
+					set -- "$@" --host-key-service "$attachment_host_key_service" --host-key-account "$attachment_host_key_account"
+				fi
+				;;
+			Linux)
+				if [ "$attachment_role" = sender ] || [ "$attachment_role" = both ]; then
+					[ -n "$attachment_host_credential_directory" ] && [ -n "$attachment_host_credential_name" ] || fail 'Linux attachment sender setup requires --attachment-host-credential-directory and --attachment-host-credential-name'
+					set -- "$@" --host-credential-directory "$attachment_host_credential_directory" --host-credential-name "$attachment_host_credential_name"
+				fi
+				;;
+			*) fail "unsupported platform: $(uname -s)" ;;
+		esac
+		"$repo_dir/scripts/provision-attachment-v3.sh" "$@"
+	fi
+fi
+
 case "$(uname -s)" in
 	Darwin)
 		service_dir="$HOME/Library/LaunchAgents"
@@ -231,7 +331,7 @@ printf '%s\n' 'Punaro adapter installed. The service is not useful until this pu
 cat "$enrollment_file"
 printf '%s\n' '' \
 	'Next: approve that record on the relay; create a distinct Cloudflare Access service token for this machine; add it to the owner-only adapter.env; bind and attach the desired agent aliases; then rerun this command with --enable.' \
-	'Optional controlled attachments: use scripts/provision-attachment-v3.sh after the machine enrollment is approved; it creates separate local device material and never modifies this adapter configuration.' \
+	'Optional controlled attachments: pass --attachment-authority-public and --attachment-role on this installer to provision this machine; the public attachment enrollment still requires authority approval before transfer is possible.' \
 	"Verify with: $service_hint"
 if [ -z "$agent_guidance_dir" ]; then
 	printf '%s\n' "Optional agent guidance: $repo_dir/scripts/install-agent-guidance.sh --directory /path/to/project"

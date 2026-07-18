@@ -361,15 +361,25 @@ just to fetch Access keys. Configure `PUNARO_ACCESS_ISSUER` and
   mode must not allow group or world writes. A stale snapshot is a hard Access
   verification failure.
 
-For the systemd profile install `deploy/systemd/punaro-jwks-refresh.service`,
-`punaro-jwks-refresh.timer`, and `refresh-jwks`. Create
-`/etc/punaro/jwks` as `root:punaro` mode `2750` (setgid); configure a root-owned,
-mode-`0600` `/etc/punaro/jwks-refresh.env` with the public HTTPS JWKS URL and
-`PUNARO_ACCESS_JWKS_FILE=/etc/punaro/jwks/current.json`. Enable the timer and
-run the service once before starting the relay. The setgid directory gives an
+For a new Linux relay, `install-server.sh --machines-file ... --access-issuer
+... --access-audience ... --access-jwks-url ... --enable` installs
+`deploy/systemd/punaro-jwks-refresh.service`, `punaro-jwks-refresh.timer`, and
+`refresh-jwks` for you. It creates `/etc/punaro/jwks` as `root:punaro` mode
+`2750` (setgid), writes a root-owned mode-`0600`
+`/etc/punaro/jwks-refresh.env` with the public HTTPS JWKS URL and
+`PUNARO_ACCESS_JWKS_FILE=/etc/punaro/jwks/current.json`, refreshes it once, and
+enables the timer before it restarts the relay to apply the rendered
+configuration. The setgid directory gives an
 atomic snapshot the non-writable `punaro` group without granting the refresh
-unit `CAP_CHOWN`; the script writes it mode-`0640` and refuses redirects, an empty response,
-oversized content, non-HTTPS URLs, or an output path outside that directory.
+unit `CAP_CHOWN`; the script writes it mode-`0640` and refuses redirects, an
+empty response, oversized content, non-HTTPS URLs, or an output path outside
+that directory.
+
+For an existing manually managed relay, install the same three assets and
+create the directory and environment file with those exact ownership and mode
+requirements before enabling the timer. Do not put an Access service-token
+secret in `punaro.env`; the relay validates end-user Access JWTs, while clients
+keep their distinct service-token pairs in their own `adapter.env` files.
 
 `/readyz` is deliberately unavailable until the configured JWKS source has
 been parsed into at least one valid RS256 signing key. It rechecks that source
