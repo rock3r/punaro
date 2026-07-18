@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -78,7 +79,7 @@ func TestRecipientDownloadWorkerPersistsVerifiedCiphertextAndPublishesAfterCompl
 	if err != nil || !bytes.Equal(written, plain) {
 		t.Fatalf("written=%q err=%v", written, err)
 	}
-	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(destination); err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("mode=%v err=%v", info.Mode(), err)
 	}
 	calls := transport.operationCalls
