@@ -180,11 +180,11 @@ func validateOfferNoticeOutboxPath(database string) error {
 		return fmt.Errorf("create offer notice outbox directory: %w", err)
 	}
 	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !isPrivateOfferOutboxParent(info) {
 		return errors.New("offer notice outbox parent must be private and non-symlinked")
 	}
 	if info, err := os.Lstat(database); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !isPrivateOfferOutboxFile(info) {
 			return errors.New("offer notice outbox database must be private and non-symlinked")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -198,7 +198,7 @@ func validateOfferNoticeOutboxPath(database string) error {
 		}
 	}
 	if info, err := os.Lstat(database + "-journal"); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !isPrivateOfferOutboxFile(info) {
 			return errors.New("unsafe offer notice SQLite rollback journal")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

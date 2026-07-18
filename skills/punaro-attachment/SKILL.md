@@ -39,6 +39,15 @@ directory change, the local operator may run this no-transfer preflight:
 punaro-attachment check
 ```
 
+On a provisioned Windows client, invoke the same controller through its local
+runner so it loads the two owner-only configuration files without placing
+credentials in an agent command:
+
+```powershell
+& "$env:LOCALAPPDATA\Punaro\Run-PunaroAttachment.ps1" `
+  -AttachmentConfig "$env:LOCALAPPDATA\Punaro\config\attachment-v3\attachment-v3.env" check
+```
+
 It verifies the locally provisioned receiver credentials, Access path, pinned
 root trust, anti-rollback checkpoint, and one fresh signed directory snapshot.
 It does not read an offer or create a permit, transfer, output file, or
@@ -87,8 +96,9 @@ stage ID, or editing its database.
 ## Record, then pause
 
 Write the exact body as data to a local private temporary file through the
-host's safe file API (not shell interpolation). Give it mode `0600`; use a
-path chosen by the local process, not the offer. With `MESSAGE_ID` and
+host's safe file API (not shell interpolation). On POSIX give it mode `0600`;
+on Windows use a current-user-only ACL. Use a path chosen by the local process,
+not the offer. With `MESSAGE_ID` and
 `CONVERSATION_ID` taken from envelope metadata, record it once:
 
 ```sh

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -52,6 +53,9 @@ func TestJournalKeepsMappingsImmutableAndOffersIdempotent(t *testing.T) {
 
 func TestOpenJournalRejectsUnsafeParent(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("NTFS ACLs, not POSIX mode bits, define Windows path privacy")
+	}
 	unsafe := filepath.Join(t.TempDir(), "unsafe")
 	// #nosec G301 -- this fixture must be group-readable to exercise rejection.
 	if err := os.Mkdir(unsafe, 0o755); err != nil {
@@ -86,6 +90,9 @@ func TestJournalBindsSenderIdentityAndExcludesRecipientRole(t *testing.T) {
 
 func TestOpenJournalRejectsUnsafeSQLiteSidecar(t *testing.T) {
 	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("NTFS ACLs, not POSIX mode bits, define Windows path privacy")
+	}
 	parent := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(parent, 0o700); err != nil {
 		t.Fatal(err)

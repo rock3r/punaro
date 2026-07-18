@@ -82,6 +82,44 @@ namespace `agent/laptop-review/`, builds `punaro-adapter`, creates the local
 launchd (macOS) or user-systemd (Linux) service definition, and prints a
 public enrollment JSON record. It does not start the adapter yet.
 
+### Windows 10/11 client
+
+Install `agent-mailbox.exe` and Go first. Run this from the reviewed checkout
+in a normal interactive PowerShell session for the Windows user that owns that
+mailbox:
+
+```powershell
+powershell -NoProfile -File .\scripts\install-client.ps1 `
+  -RelayUrl https://relay.example.invalid `
+  -MachineId windows-review `
+  -AgentGuidanceDir C:\src\agent-project
+```
+
+The installer writes private state below `%LOCALAPPDATA%\Punaro`, applies an
+exclusive ACL for the current user, and registers the **Punaro Adapter** task
+to run only in that user's interactive session. It does not weaken PowerShell
+execution policy, accept Access secrets as arguments, or run as a Windows
+service. Add that machine's distinct Access token pair manually to
+`%LOCALAPPDATA%\Punaro\config\adapter.env`, then rerun with `-Enable` and
+verify with:
+
+```powershell
+Get-ScheduledTask -TaskName 'Punaro Adapter'
+```
+
+For a Windows sender-capable attachment client, add
+`-AttachmentAuthorityPublic C:\approved\public.json -AttachmentRole both`.
+The installer creates a fresh DPAPI CurrentUser-protected wrapping key in the
+private attachment directory; the raw key is never printed, accepted as an
+argument, or placed in an environment file. The public device enrollment still
+requires authority approval. Invoke the local controller with the checked-in
+runner, supplying the explicit attachment environment file:
+
+```powershell
+& "$env:LOCALAPPDATA\Punaro\Run-PunaroAttachment.ps1" `
+  -AttachmentConfig "$env:LOCALAPPDATA\Punaro\config\attachment-v3\attachment-v3.env" check
+```
+
 `--agent-guidance-dir` is optional and explicit. It adds a marked block to the
 project's `AGENTS.md` and any existing `CLAUDE.md`, `GEMINI.md`, or `CODEX.md`,
 then installs the portable `punaro-mailbox`, `punaro-reply`, and

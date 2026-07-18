@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -197,6 +198,9 @@ func TestSourceStoreReadinessRejectsLifecycleReadyMismatch(t *testing.T) {
 func TestSourceStoreRejectsRelativeOrInsecureParent(t *testing.T) {
 	if _, err := openSourceStore("source.db", defaultSourceLimits()); err == nil {
 		t.Fatal("relative source store accepted")
+	}
+	if runtime.GOOS == "windows" {
+		return
 	}
 	parent := t.TempDir()
 	// #nosec G302 -- this fixture must be group-readable to exercise rejection.

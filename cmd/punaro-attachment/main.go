@@ -162,12 +162,12 @@ func loadX25519PrivateKeyFile(path string) (*ecdh.PrivateKey, error) {
 	// #nosec G703 -- the caller supplies an absolute operator-provisioned
 	// credential path; relay input never controls it.
 	parent, err := os.Lstat(filepath.Dir(path))
-	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeX25519KeyParent(parent) {
 		return nil, errors.New("private key parent is unavailable")
 	}
 	// #nosec G703 -- see the credential-path trust boundary above.
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeX25519KeyFile(info) {
 		return nil, errors.New("private key is unavailable")
 	}
 	// #nosec G304,G703 -- this absolute operator-provisioned credential path passed
@@ -178,7 +178,7 @@ func loadX25519PrivateKeyFile(path string) (*ecdh.PrivateKey, error) {
 	}
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safeX25519KeyFile(opened) || !os.SameFile(info, opened) {
 		return nil, errors.New("private key is unavailable")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, int64(base64.RawURLEncoding.EncodedLen(32)+1)))

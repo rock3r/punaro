@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"syscall"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -62,11 +62,13 @@ func TestDirectorySnapshotFileSourceRejectsRelayOwnedServiceGroupPath(t *testing
 	if err == nil || source != nil {
 		t.Fatal("relay-owned service-group snapshot accepted")
 	}
-	if !safeDirectorySnapshotParent(directorySnapshotTestInfo{mode: os.ModeDir | 0o2750, uid: 0}) {
-		t.Fatal("root-owned service-group parent rejected")
-	}
-	if !safeDirectorySnapshotFile(directorySnapshotTestInfo{mode: 0o640, uid: 0}) {
-		t.Fatal("root-owned service-group snapshot rejected")
+	if runtime.GOOS != "windows" {
+		if !safeDirectorySnapshotParent(directorySnapshotTestInfo{mode: os.ModeDir | 0o2750, uid: 0}) {
+			t.Fatal("root-owned service-group parent rejected")
+		}
+		if !safeDirectorySnapshotFile(directorySnapshotTestInfo{mode: 0o640, uid: 0}) {
+			t.Fatal("root-owned service-group snapshot rejected")
+		}
 	}
 }
 
@@ -139,4 +141,4 @@ func (i directorySnapshotTestInfo) Size() int64        { return 0 }
 func (i directorySnapshotTestInfo) Mode() os.FileMode  { return i.mode }
 func (i directorySnapshotTestInfo) ModTime() time.Time { return time.Time{} }
 func (i directorySnapshotTestInfo) IsDir() bool        { return i.mode.IsDir() }
-func (i directorySnapshotTestInfo) Sys() any           { return &syscall.Stat_t{Uid: i.uid} }
+func (i directorySnapshotTestInfo) Sys() any           { return directorySnapshotTestSys(i.uid) }

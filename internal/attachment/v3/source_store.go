@@ -93,15 +93,10 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 		return nil, errors.New("source store path is required")
 	}
 	parent := filepath.Dir(path)
-	info, err := os.Lstat(parent)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err := validateSourceStoreParent(parent); err != nil {
 		return nil, errors.New("source store parent must be private and non-symlinked")
 	}
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("source store database must be private and non-symlinked")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateSourceStoreFile(path, "source store database must be private and non-symlinked"); err != nil {
 		return nil, err
 	}
 	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
@@ -114,11 +109,7 @@ func openSourceStore(path string, limits sourceLimits) (*sourceStore, error) {
 	// A rollback journal is evidence of an interrupted transaction. SQLite is
 	// responsible for recovering it, but never follow a link or accept a
 	// non-private file before letting SQLite open the database.
-	if info, err := os.Lstat(path + "-journal"); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-			return nil, errors.New("unsafe SQLite rollback journal")
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	if err := validateSourceStoreFile(path+"-journal", "unsafe SQLite rollback journal"); err != nil {
 		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)

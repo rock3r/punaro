@@ -17,15 +17,21 @@ attachment_relay_configurer=scripts/configure-attachment-v3-relay.sh
 attachment_relay_configurer_test=scripts/test-configure-attachment-v3-relay.sh
 agent_guidance_installer=scripts/install-agent-guidance.sh
 agent_guidance_installer_test=scripts/test-install-agent-guidance.sh
+windows_client_installer=scripts/install-client.ps1
+windows_guidance_installer=scripts/install-agent-guidance.ps1
+windows_client_installer_test=scripts/test-install-client-windows.sh
+windows_adapter_runner=deploy/windows/Run-PunaroAdapter.ps1
+windows_attachment_runner=deploy/windows/Run-PunaroAttachment.ps1
+windows_environment_importer=deploy/windows/Import-PunaroEnvironment.ps1
 
-for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
+for path in "$unit" "$example" "$launch_agent" "$snapshot_publisher" "$snapshot_publisher_test" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_attachment_runner" "$windows_environment_importer"; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
 
-for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test"; do
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_provisioner" "$attachment_provisioner_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test"; do
 	if [ ! -x "$executable" ]; then
 		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1
@@ -55,6 +61,7 @@ fi
 "$attachment_provisioner_test"
 "$attachment_relay_configurer_test"
 "$agent_guidance_installer_test"
+"$windows_client_installer_test"
 
 for expected in \
 	'PUNARO_DIRECTORY_ROOT_PRIVATE_KEY' \

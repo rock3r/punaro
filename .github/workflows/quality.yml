@@ -49,3 +49,21 @@ jobs:
         run: docker build --tag punaro:ci .
       - name: Verify container command set
         run: sh scripts/verify-container-binaries.sh
+
+  windows:
+    name: Windows client build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./internal/attachment/v3/controller
+      - run: go test ./internal/attachment/v3 -run '^TestWindows'
+      - run: go test ./internal/attachment/v2 -run '^TestWindows'
+      - run: go test ./internal/adapter -run '^TestWindows'
+      - run: go test ./cmd/punaro-attachment -run '^TestWindows'
+      - run: go vet ./...
+      - run: go build ./...
+      - shell: pwsh
+        run: ./scripts/test-install-client-windows.ps1

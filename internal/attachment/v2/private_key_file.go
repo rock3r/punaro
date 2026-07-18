@@ -28,7 +28,7 @@ func LoadPrivateEd25519KeyFile(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("private key parent must be private and non-symlinked")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safePrivateKeyFile(info) {
 		return nil, errors.New("private key file must be private and non-symlinked")
 	}
 	// #nosec G304,G703 -- path is locally configured and checked for a private,
@@ -39,7 +39,7 @@ func LoadPrivateEd25519KeyFile(path string) (ed25519.PrivateKey, error) {
 	}
 	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
-	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Mode().Perm()&0o077 != 0 {
+	if err != nil || !safePrivateKeyFile(opened) || !os.SameFile(info, opened) {
 		return nil, errors.New("private key is unavailable")
 	}
 	encodedLength := base64.RawURLEncoding.EncodedLen(ed25519.PrivateKeySize)
@@ -57,8 +57,4 @@ func LoadPrivateEd25519KeyFile(path string) (ed25519.PrivateKey, error) {
 		return nil, errors.New("invalid private key")
 	}
 	return key, nil
-}
-
-func safePrivateKeyParent(info os.FileInfo) bool {
-	return info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o027 == 0 && rootOwnsGroupAccessiblePath(info)
 }

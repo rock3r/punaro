@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -151,16 +150,6 @@ func normalizeLegacyPrivateKey(path string) error {
 		return fmt.Errorf("close private key parent after replacement: %w", err)
 	}
 	return nil
-}
-
-func isPrivateOwnedDirectory(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0 && int(stat.Uid) == os.Geteuid()
-}
-
-func isPrivateOwnedRegularFile(info os.FileInfo) bool {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0 && int(stat.Uid) == os.Geteuid()
 }
 
 func newMachineKey(id, prefix string) (ed25519.PrivateKey, relay.Machine, error) {

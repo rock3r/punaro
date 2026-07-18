@@ -30,11 +30,11 @@ func OpenSQLiteCheckpointStore(path string) (*SQLiteCheckpointStore, error) {
 		return nil, fmt.Errorf("create directory checkpoint directory: %w", err)
 	}
 	parentInfo, err := os.Lstat(parent)
-	if err != nil || !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 || parentInfo.Mode().Perm()&0o077 != 0 {
+	if err != nil || !isPrivateStateParent(parentInfo) {
 		return nil, errors.New("directory checkpoint parent must be private and non-symlinked")
 	}
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		if !isPrivateStateFile(info) {
 			return nil, errors.New("directory checkpoint database must be private and non-symlinked")
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
