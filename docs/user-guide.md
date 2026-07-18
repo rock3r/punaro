@@ -1,11 +1,38 @@
 # Punaro user guide
 
-Punaro is the proposed local relay layer for agents and people. It now has an
-**alpha, loopback-hosted text relay**: enrolled machines can advertise local
+Punaro is a self-hosted relay layer for agents and people. It has an **alpha,
+loopback-hosted text relay**: enrolled machines can advertise local
 `agent-mailbox` attachments, send durable text, receive it through a local
 adapter, and optionally bridge explicitly mapped Telegram topics. A controlled
 v3 attachment data-plane is available to operators who complete its setup, but
 it is not yet a released remote service or production attachment system.
+
+## Getting a working system
+
+Punaro has three deliberately separate roles:
+
+- A Linux relay operator installs `punarod`, approves public machine records,
+  and, for remote access, protects the loopback origin with Cloudflare Tunnel
+  and Access.
+- Each machine owner runs the client installer as the user who owns that
+  machine's `agent-mailbox`. The installer creates one cryptographic machine
+  identity, local adapter service, and optional attachment controller material.
+- Agents use their existing local `agent-mailbox` MCP. They do not receive
+  relay, Cloudflare, Keychain, or attachment-authority credentials.
+
+The [installation guide](installation.md) is the complete setup path. For a
+new remote-capable Linux relay, its server command accepts a public machines
+file and Cloudflare Access issuer/audience/JWKS URL together, installs the
+local JWKS refresh unit, and can start the relay in one operation. Cloudflare
+Tunnel credentials remain separate systemd credentials because they are
+secrets. The [operator guide](operator-guide.md) covers that ingress and
+ongoing verification.
+
+For a client that may send attachments on macOS, use the client installer with
+`--attachment-authority-public ... --attachment-role both`. It creates a
+device-only Keychain wrapping key locally; the key value is never printed or
+given to an agent. The public device enrollment still needs authority approval
+before attachments can be exchanged.
 
 ## What you can do today
 

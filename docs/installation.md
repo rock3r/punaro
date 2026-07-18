@@ -13,32 +13,52 @@ into a shell. Neither installer accepts or prints secret values.
 
 ## 1. Install the server
 
-On the Linux relay host, as root:
+First collect the **public** client enrollment records into one JSON array on
+the relay host. The client installer prints each record; it contains a public
+key and endpoint prefix, never a private key or Access token. On the Linux
+relay host, as root:
 
 ```sh
 git clone https://github.com/rock3r/punaro.git
 cd punaro
 git checkout <reviewed-release-or-commit>
-./scripts/install-server.sh
+./scripts/install-server.sh \
+  --machines-file /root/punaro/public-machines.json \
+  --access-issuer https://team.cloudflareaccess.example \
+  --access-audience <access-application-audience> \
+  --access-jwks-url https://team.cloudflareaccess.example/cdn-cgi/access/certs \
+  --enable
 ```
 
 This creates the unprivileged `punaro` service account, installs `punarod` and
-its hardened unit, creates `/etc/punaro/punaro.env` as an owner-managed file,
-and leaves the service stopped. It does not install a public listener,
-Cloudflare Tunnel, Access policy, or any machine enrollment.
+its hardened unit, creates `/etc/punaro/punaro.env`, installs the hardened
+local JWKS refresh service and timer, refreshes JWKS once, and starts the relay
+only after the public enrollment array is present. The relay remains bound to
+loopback. It does **not** accept or install a Cloudflare Tunnel token, create a
+Cloudflare Access application, or copy any client secret.
 
-Configure the relay before starting it. Add only public enrollment records to
-`PUNARO_RELAY_MACHINES_JSON`; never place a client private key, Access service
-token, or message body in this file. If internet-facing, configure a
-Cloudflare Tunnel to the loopback origin and configure Access issuer, audience,
-and protected JWKS refresh/file according to the [operator guide](operator-guide.md).
+On a later `--enable` run, the installer restarts the relay after updating the
+configuration so the requested enrollment and Access settings take effect.
 
-After at least one machine record is present:
+`--access-*` is strongly recommended for an internet-reachable deployment.
+All three Access options are required together; they are public identifiers and
+URLs. The installer writes the JWKS URL only to root-owned
+`/etc/punaro/jwks-refresh.env`, while the relay reads the refreshed local
+snapshot. If you are deliberately deploying only on a trusted LAN, omit all
+three `--access-*` options. `--machines-file` is optional when staging files,
+but required to enable a relay without manually editing configuration.
+
+Configure Cloudflare Tunnel and its Access policy separately to route the
+chosen hostname to `http://127.0.0.1:8080`. Put the tunnel token into the
+documented systemd `LoadCredential` location, never in the installer, an env
+file, shell history, or source control. See the [operator guide](operator-guide.md)
+for the tunnel service and maintenance checks.
+
+Verify the finished server:
 
 ```sh
-systemctl daemon-reload
-systemctl enable --now punarod.service
 curl --fail http://127.0.0.1:8080/readyz
+systemctl status punarod.service punaro-jwks-refresh.timer
 ```
 
 The server installer also supports `--root /absolute/staging-root` to build a
@@ -64,8 +84,9 @@ public enrollment JSON record. It does not start the adapter yet.
 
 `--agent-guidance-dir` is optional and explicit. It adds a marked block to the
 project's `AGENTS.md` and any existing `CLAUDE.md`, `GEMINI.md`, or `CODEX.md`,
-then installs the portable `punaro-mailbox` and `punaro-reply` skills below
-that project's `.agents/skills`. It never overwrites a differing local skill.
+then installs the portable `punaro-mailbox`, `punaro-reply`, and
+`punaro-attachment` skills below that project's `.agents/skills`. It never
+overwrites a differing local skill.
 Run `./scripts/install-agent-guidance.sh --directory /path/to/project` later
 if you decline it during client setup.
 
@@ -147,7 +168,30 @@ controlled deployment rather than an unattended file-sharing feature.
    only through an approved private transfer or secret-management mechanism.
 
 2. On each client, create one directory device and its local controller
-   configuration. The client key material stays on that client:
+   configuration. The recommended path is the client installer, which also
+   installs `punaro-attachment` alongside the text adapter. For a
+   sender-capable macOS client, it creates the one device-only Keychain
+   wrapping key internally: no key value is printed, passed in an argument,
+   or written to an environment file.
+
+   ```sh
+   ./scripts/install-client.sh \
+     --relay-url https://relay.example.invalid \
+     --machine-id laptop-review \
+     --attachment-authority-public /approved/path/public.json \
+     --attachment-role both
+   ```
+
+   The public authority record is safe to copy to the client. The generated
+   `device-enrollment.json` is public approval input, but its surrounding
+   directory and controller configuration remain owner-only. The authority
+   must still approve the record before transfer can work. A device role is
+   immutable: a later installer run will not silently upgrade `receiver` to
+   `sender` or `both`. Create a new `--attachment-directory` for the broader
+   role and have the authority approve its new public enrollment.
+
+   The lower-level provisioner remains useful for staged/offline setup. The
+   client key material stays on that client:
 
    ```sh
    ./scripts/provision-attachment-v3.sh client \
@@ -157,11 +201,13 @@ controlled deployment rather than an unattended file-sharing feature.
      --role receiver
    ```
 
-   A sender-capable client additionally requires an existing host-bound
-   wrapping-key reference. On macOS this names a Keychain generic-password
-   item; on Linux it must be a systemd `LoadCredential` reference. The secret
-   value is never accepted by Punaro's scripts, `.env` files, or command-line
-   arguments:
+   A sender-capable client additionally requires a host-bound wrapping-key
+   reference. The installer above creates the macOS Keychain item for a new
+   sender automatically. When using the lower-level provisioner, the item
+   must already exist. On Linux it must be a systemd `LoadCredential`
+   reference; provisioning deliberately does not create a user-service
+   credential. The secret value is never accepted by Punaro's scripts, `.env`
+   files, or command-line arguments:
 
    ```sh
    ./scripts/provision-attachment-v3.sh client \
