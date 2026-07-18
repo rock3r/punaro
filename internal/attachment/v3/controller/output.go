@@ -60,14 +60,7 @@ func WriteCompletedReceiptAtomically(destination string, rawManifest []byte, chu
 	if err := os.Remove(tmpName); err != nil {
 		return err
 	}
-	// #nosec G304 -- parent was absolute, lstat-validated, and used for the
-	// no-replace write boundary above.
-	dir, err := os.Open(parent)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = dir.Close() }()
-	return dir.Sync()
+	return syncReceiptOutputParent(parent)
 }
 
 // validateReceiptOutputDestination is the pre-acceptance filesystem gate for
@@ -106,7 +99,7 @@ func completedReceiptOutputMatches(record receiptDownloadRecord) (bool, error) {
 		return false, nil
 	}
 	// #nosec G115 -- regular-file size is nonnegative before conversion.
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || uint64(info.Size()) != manifest.PlaintextSize || manifest.PlaintextSize > 64<<20 {
+	if err != nil || !safeCompletedReceiptOutput(info) || uint64(info.Size()) != manifest.PlaintextSize || manifest.PlaintextSize > 64<<20 {
 		return false, errors.New("unsafe existing receipt output")
 	}
 	plain, err := os.ReadFile(record.outputPath)

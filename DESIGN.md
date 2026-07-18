@@ -369,6 +369,10 @@ require owner-only permission bits. On Windows, those same paths must remain
 regular, non-reparse files below the installer-managed ACL: Go's `FileMode`
 cannot represent NTFS ACL ownership, so treating POSIX mode bits as an ACL
 would reject secure Windows state or create a false security boundary.
+Completed receipt files are flushed before their no-replace publication. Unix
+also flushes the containing directory; Windows cannot apply that Unix directory
+fsync contract, so it relies on the flushed file plus the atomic NTFS metadata
+operation while preserving the installer-managed ACL and no-reparse checks.
 It issues holder-signed v3 permits and submits permit/operation-bound
 bytes through the same replay-protected machine transport as text. Every send
 requires a caller-retained stage ID: retries reuse only the exact immutable

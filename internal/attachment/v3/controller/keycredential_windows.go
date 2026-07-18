@@ -85,13 +85,20 @@ func (p DPAPIHostKeyProvider) read() ([]byte, error) {
 	if err := validateDPAPIHostKeyPath(p.File, false); err != nil {
 		return nil, err
 	}
+	// Capture the vetted identity immediately before opening. The descriptor is
+	// checked against it below so a replacement cannot select a different DPAPI
+	// blob between validation and read.
+	expected, err := os.Lstat(p.File)
+	if err != nil || !expected.Mode().IsRegular() || expected.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("windows DPAPI sender key file is unavailable")
+	}
 	file, err := os.Open(p.File)
 	if err != nil {
 		return nil, errors.New("windows DPAPI sender key file is unavailable")
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil || !info.Mode().IsRegular() || !os.SameFile(expected, info) {
 		return nil, errors.New("windows DPAPI sender key file is unavailable")
 	}
 	protected, err := io.ReadAll(io.LimitReader(file, maxDPAPIHostKeyBlob+1))

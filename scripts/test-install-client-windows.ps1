@@ -17,7 +17,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'SetAccessRuleProtection($true, $false)', 'PUNARO_ATTACHMENT_HOST_DPAPI_FILE', 'punaro-dpapi.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', 'PUNARO_ATTACHMENT_HOST_DPAPI_FILE', 'punaro-dpapi.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
@@ -40,10 +40,11 @@ try {
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
     function New-ScheduledTaskTrigger { param([switch]$AtLogOn, [string]$User) return [pscustomobject]@{ User = $User } }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
-    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries) return [pscustomobject]@{} }
+    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit } }
     function Register-ScheduledTask {
         param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [string]$Description, [switch]$Force)
         $script:registeredTask = $TaskName
+        $script:registeredSettings = $Settings
         return [pscustomobject]@{}
     }
 
@@ -54,6 +55,7 @@ try {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Windows client installer did not create $path" }
     }
     if ($script:registeredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
+    if ($script:registeredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
 } finally {

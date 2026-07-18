@@ -15,6 +15,7 @@ done
 
 for expected in \
 	'LogonType Interactive' \
+	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
 	'SetAccessRuleProtection($true, $false)' \
 	'PUNARO_ATTACHMENT_HOST_DPAPI_FILE' \
 	'punaro-dpapi.exe' \
