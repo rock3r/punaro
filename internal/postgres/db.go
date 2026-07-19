@@ -313,7 +313,8 @@ WITH objects AS (
         to_regclass('auth.device_credentials_principal_active') AS credential_principal_oid,
         to_regclass('auth.device_credentials_secret_digest') AS credential_digest_oid,
         to_regclass('auth.legacy_auth_state') AS legacy_state_oid,
-        to_regclass('auth.legacy_machines') AS legacy_machines_oid
+        to_regclass('auth.legacy_machines') AS legacy_machines_oid,
+        to_regprocedure('auth.complete_legacy_exchange(uuid,uuid)') AS legacy_exchange_oid
 ), ownership AS (
     SELECT count(*) = 9 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
     FROM pg_class, objects
@@ -322,7 +323,26 @@ WITH objects AS (
 SELECT
     owner_oid IS NOT NULL AND enrollments_oid IS NOT NULL AND enrollment_grants_oid IS NOT NULL
     AND credentials_oid IS NOT NULL AND enrollment_binding_oid IS NOT NULL AND credential_principal_oid IS NOT NULL AND credential_digest_oid IS NOT NULL
-    AND legacy_state_oid IS NOT NULL AND legacy_machines_oid IS NOT NULL AND ownership.owned
+    AND legacy_state_oid IS NOT NULL AND legacy_machines_oid IS NOT NULL AND legacy_exchange_oid IS NOT NULL AND ownership.owned
+    AND COALESCE((
+        SELECT pg_get_userbyid(proowner) = 'punaro_owner'
+          AND prosecdef AND prokind = 'f' AND provolatile = 'v' AND proretset
+          AND prorettype = 'boolean'::regtype AND pronargs = 2
+          AND prolang = (SELECT oid FROM pg_language WHERE lanname = 'sql')
+          AND COALESCE(proconfig = ARRAY['search_path=pg_catalog']::text[], false)
+          AND md5(btrim(prosrc, E' \n\r\t')) = 'b831dc95c00ef6f4a55a96076131c769'
+        FROM pg_proc WHERE oid = legacy_exchange_oid
+    ), false)
+    AND has_function_privilege('punaro_app', legacy_exchange_oid, 'EXECUTE')
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_proc AS routine
+        CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl, acldefault('f', routine.proowner))) AS acl_entry
+        WHERE routine.oid = legacy_exchange_oid AND acl_entry.privilege_type = 'EXECUTE'
+          AND (
+              acl_entry.grantee NOT IN (routine.proowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+              OR (acl_entry.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app') AND acl_entry.is_grantable)
+          )
+    )
     AND EXISTS (
         SELECT 1 FROM pg_attribute AS attribute
         JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum

@@ -131,6 +131,34 @@ CREATE TABLE auth.legacy_machines (
     CHECK ((state = 'migrated') = (migrated_credential_lookup_id IS NOT NULL))
 );
 
+CREATE FUNCTION auth.complete_legacy_exchange(p_legacy_principal_id uuid, p_credential_lookup_id uuid)
+RETURNS SETOF boolean
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $legacy_exchange$
+UPDATE auth.legacy_machines AS machine
+SET state = 'migrated',
+    migrated_credential_lookup_id = credential.lookup_id,
+    changed_at = statement_timestamp()
+FROM auth.device_credentials AS credential
+WHERE machine.principal_id = p_legacy_principal_id
+  AND machine.state = 'pending'
+  AND credential.lookup_id = p_credential_lookup_id
+  AND EXISTS (
+      SELECT 1
+      FROM auth.pending_enrollments AS enrollment
+      WHERE enrollment.legacy_principal_id = machine.principal_id
+        AND enrollment.credential_lookup_id = credential.lookup_id
+        AND enrollment.redeemed_principal_id = credential.principal_id
+        AND enrollment.redeemed_at IS NOT NULL
+  )
+RETURNING true
+$legacy_exchange$;
+
+REVOKE ALL ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) TO punaro_app;
+
 ALTER TABLE audit.events DROP CONSTRAINT events_action_check;
 ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN (
     'principal.create', 'project.create', 'grant.create', 'grant.delete',

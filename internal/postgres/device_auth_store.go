@@ -335,7 +335,7 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var registeredPublicKey []byte
 		var legacyState string
 		var migratedLookupID sql.NullString
-		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1 FOR UPDATE`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyExchangeTranscript(redeem, codeDigest), legacyProof.Signature) {
+		if err := tx.QueryRowContext(ctx, `SELECT public_key, state, migrated_credential_lookup_id::text FROM auth.legacy_machines WHERE principal_id = $1`, requiredLegacy.String).Scan(&registeredPublicKey, &legacyState, &migratedLookupID); err != nil || subtle.ConstantTimeCompare(registeredPublicKey, legacyProof.PublicKey) != 1 || !ed25519.Verify(legacyProof.PublicKey, legacyExchangeTranscript(redeem, codeDigest), legacyProof.Signature) {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 		if redemptionKey.Valid {
@@ -389,11 +389,8 @@ SELECT $2, scope, project_id, capability FROM auth.pending_enrollment_grants WHE
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
 	if requiredLegacy.Valid {
-		result, err := tx.ExecContext(ctx, `UPDATE auth.legacy_machines SET state = 'migrated', migrated_credential_lookup_id = $2, changed_at = statement_timestamp() WHERE principal_id = $1 AND state = 'pending'`, requiredLegacy.String, lookup)
-		if err != nil {
-			return DeviceCredential{}, errors.New("legacy exchange could not be recorded")
-		}
-		if count, err := result.RowsAffected(); err != nil || count != 1 {
+		var transitioned bool
+		if err := tx.QueryRowContext(ctx, `SELECT transitioned FROM auth.complete_legacy_exchange($1, $2) AS result(transitioned)`, requiredLegacy.String, lookup).Scan(&transitioned); err != nil || !transitioned {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 	}

@@ -234,6 +234,25 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err != nil {
 		t.Fatal(err)
 	}
+	evidenceTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := evidenceTx.ExecContext(ctx, `UPDATE auth.pending_enrollments
+SET redeemed_at = statement_timestamp(), redemption_key = $2, redeemed_principal_id = $3, credential_lookup_id = $4
+WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupID); err != nil {
+		_ = evidenceTx.Rollback()
+		t.Fatal(err)
+	}
+	var mismatchedTransition bool
+	err = evidenceTx.QueryRowContext(ctx, `SELECT transitioned FROM auth.complete_legacy_exchange($1, $2) AS result(transitioned)`, legacy.PrincipalID, credential.LookupID).Scan(&mismatchedTransition)
+	if !errors.Is(err, sql.ErrNoRows) {
+		_ = evidenceTx.Rollback()
+		t.Fatalf("legacy exchange accepted mismatched redemption principal: transitioned=%t err=%v", mismatchedTransition, err)
+	}
+	if err := evidenceTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
 	legacyRedeem := RedeemEnrollment{EnrollmentID: legacyPending.ID, ClientBinding: legacyRequest.ClientBinding, Code: legacyPending.Code, IdempotencyKey: uuid.NewString()}
 	if _, err := app.RedeemEnrollment(ctx, legacyRedeem); !errors.Is(err, ErrInvalidEnrollment) {
 		t.Fatalf("legacy exchange without verified legacy principal error=%v", err)
