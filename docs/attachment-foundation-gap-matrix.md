@@ -1,8 +1,10 @@
 # Attachment foundation gap matrix
 
 The `internal/attachment` package is a deliberately unmounted test foundation,
-not an implementation of [attachment v2](attachments-v2-rfc.md).  Passing its
-tests proves local helper behavior only.  It is not security-release evidence.
+not an implementation of [attachment v2](attachments-v2-rfc.md). Passing its
+tests proves local helper behavior only. Attachment v2/v3 are now superseded as
+the production direction by the [trusted-relay plan](big-brain-plan.md), but
+this matrix is preserved as historical implementation and review evidence.
 
 | RFC control | Foundation state | Release action |
 | --- | --- | --- |
@@ -16,6 +18,7 @@ tests proves local helper behavior only.  It is not security-release evidence.
 | Expiry, cancellation, reaping, quotas | Global limits have no lifecycle | Add per-principal limits and a crash-safe reaper. |
 | Authenticated direct transport | Test WebRTC helper only | Bind signed transcript/candidates; enforce the RFC in-flight, rate, lifetime, and concurrency limits. |
 
-No item in this table may be marked complete by documentation alone.  Each
+No item in this table may be marked complete by documentation alone. Each
 requires an implementation change, focused tests, conformance vectors where
-applicable, and a reviewed release-evidence record.
+applicable, and a reviewed evidence record. Completion still does not reopen a
+superseded production path; that requires an explicit plan amendment.

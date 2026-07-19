@@ -132,10 +132,11 @@ anti-rollback checkpoint and issuance idempotency under
 
 The attachment operation routes are not mounted. Both
 `PUNARO_ATTACHMENT_RELAY_ENABLED=true` and the legacy
-`PUNARO_ATTACHMENTS_ENABLED=true` fail closed until the complete attachment v2
-release gates, including capacity/reaping and source-ready evidence, are met.
-Permit issuance is not a transfer release and does not relax any attachment
-release gate.
+`PUNARO_ATTACHMENTS_ENABLED=true` remain unconditionally fail-closed because
+attachment v2 is a superseded production direction. Completing its preserved
+historical gates does not reopen it. Permit issuance is validation evidence,
+not a transfer release; changing this state would require an explicit amendment
+to the accepted direction and a separately reviewed runtime-exposure change.
 
 ### Controlled v3 attachment runtime
 
@@ -403,13 +404,12 @@ The supplied systemd units are a baseline. `cloudflared.service` and
 `LoadCredential`; keep the source file root-owned `0600` under
 `/etc/punaro/credentials`, inject it directly from a secret manager, and never
 place it in an environment file, command line, repository, or shell history.
-Before using any unit on Linux, run a smoke test under the target distribution,
-verify SQLite WAL behavior, and record `systemd-analyze security` for every
-unit together with the exact systemd version in release evidence. Every
-reported exposure must be either eliminated or have a named, time-bounded
-security exception; an unreviewed score or an "inspect" result is not
-acceptance. Keep the listener on loopback and use a separately reviewed ingress
-only after the public-runtime release gate is complete.
+The supplied units describe the current alpha SQLite path, not the accepted
+PostgreSQL/OCI production shape. Before using them on Linux, run a smoke test
+under the target distribution, verify SQLite WAL behavior, and record
+`systemd-analyze security` with the exact systemd version. Keep the listener on
+loopback and use a separately reviewed ingress only after the applicable
+public-runtime release gate is complete.
 
 ## Operations and incident response
 

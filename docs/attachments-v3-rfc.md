@@ -1,9 +1,12 @@
 # Attachment transfer v3: source staging amendment
 
-**Status:** controlled-validation pre-release. This amendment defines the only
-acceptable remedy for the v2 source-upload bootstrap cycle. It permits only the
-explicit, machine-authenticated v3 validation mount; it does not open the
-production attachment release gate.
+**Status:** superseded production direction; preserved controlled-validation
+record. This amendment defines the v3 remedy for the v2 source-upload bootstrap
+cycle and still governs the explicitly enabled validation mount. The accepted
+production replacement is the trusted-relay lifecycle in
+[`big-brain-plan.md`](big-brain-plan.md). V3 code, tests, records, and evidence
+remain intact until a separately reviewed retirement change; satisfying this
+RFC does not authorize a production attachment release.
 
 ## Compatibility
 

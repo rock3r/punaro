@@ -1,27 +1,47 @@
 # Punaro — the chicken coop relay
 
-Punaro is a small, central, self-hosted relay for conversations among coding
-agents on several computers and a human operator through Telegram. It does **not** expose
-or share a machine's local `agent_mailbox` state. Each computer retains its
-local mailbox; a local adapter translates between that mailbox and Punaro.
+Punaro is a central, self-hosted collaboration service for conversations,
+trusted attachment exchange, and shared memory among coding agents on several
+computers and a human operator through Telegram. It does **not** expose or
+share a machine's local `agent_mailbox` state. Each computer retains its local
+mailbox; a native local client translates between that mailbox and Punaro.
 
-The first production target is a dedicated unprivileged Linux LXC. The relay is
-written in Go. Go matches the existing `agent-mailbox` toolchain, produces a
-single static-ish service binary, and keeps the runtime small and auditable.
+The accepted production direction is a versioned OCI application image with
+Docker Compose as the reference single-node deployment. The service is written
+in Go. Go matches the existing `agent-mailbox` toolchain, produces small
+auditable binaries, and supports native clients on the existing platforms.
+
+## Architectural authority
+
+[`docs/big-brain-plan.md`](docs/big-brain-plan.md) is the accepted direction
+for the platform, threat model, migration, Big Brain, trusted attachments, and
+operations. [`docs/platform-contracts.md`](docs/platform-contracts.md) fixes
+the Phase A compatibility contracts that implementation slices must preserve.
+
+This document records both the accepted target and the current alpha. Where a
+current SQLite, Ed25519, systemd, or attachment-v2/v3 description differs from
+the accepted target, it describes preserved implementation evidence or a
+migration source, not the future production direction. Compose Pi integration
+remains in the accepted plan but is outside the currently authorized Punaro
+delivery scope.
 
 ## Implementation status
 
-This document describes the target architecture, not a released service. The
-current `punarod` binary provides a loopback-only alpha text relay: explicit
+The accepted target is not yet a released service. The current `punarod`
+binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
 this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
 adds explicit Telegram topic routing and a restricted Bot API client. V3
-attachments are a separately provisioned, controlled runtime: the offline
+attachments remain a separately provisioned, controlled validation runtime:
+the offline
 root key, relay issuer key, and per-client device keys are distinct, and the
 relay starts v3 only with a current signed directory plus explicit
-machine-to-device bindings. Legacy v2 switches still fail closed. The
-authoritative release conditions are in
+machine-to-device bindings. Legacy v2 switches still fail closed. Neither v2
+nor v3 is the future production attachment direction; their code, tests, and
+review evidence remain intact until the trusted-relay replacement passes its
+own release gates and an explicit retirement change is reviewed. The current
+executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
 
 ## Goals
@@ -34,50 +54,57 @@ authoritative release conditions are in
 - Local agent sessions are visible only while their local adapter advertises
   them as attached.
 - No message payload in WebSocket wake-up frames.
+- Bounded trusted-relay attachment upload and safe native download.
+- Shared revisioned memory with lexical and optional semantic retrieval.
+- Operator-friendly backup, restore, upgrade, recovery, and revocation.
+- Proportionate authorization and resource controls for a trusted self-hosted
+  installation.
 
-## Non-goals for v1
+## Non-goals
 
-- Federating arbitrary third-party relays.
-- A generic remote MCP endpoint or remote filesystem access.
-- End-to-end encryption against the relay operator. The NUC relay is trusted
-  to route message bodies and encrypts data at rest.
-- Multi-node high availability. Backups and restore are preferred first.
+- Hostile public multi-tenant SaaS operation or compliance-grade isolation.
+- End-to-end confidentiality from the Punaro operator, host root, database
+  administrator, or trusted LAN.
+- Application-managed encryption at rest, zero-knowledge storage, or a secrets
+  manager.
+- Multi-node high availability, federation, or remote filesystem access.
+- Treating model-visible content as routing, authorization, URL-fetch, secret
+  resolution, or execution authority.
 
-## Deployment
+## Accepted deployment direction
 
 ```text
-Telegram Bot API                         workstation A
-      |                                      agent-mailbox
-      v                                           ^
-Telegram gateway <-> Punaro relay <----> local adapter
-                       ^    ^                  (outbound HTTPS + WS)
-                       |    |
-                 SQLite WAL  Cloudflare Tunnel + Access
-                       |              ^
-                     backups           |
-                                   workstation B
+native client ---- authenticated HTTPS ----+
+Telegram gateway ---------------------------+--> punarod
+remote MCP gateway -- scoped OAuth ---------+      |-- PostgreSQL authority
+                                                    |-- private blob volume
+                                                    `-- optional brain workers
 ```
 
-The intended production deployment will run the following as separate,
-unprivileged systemd services in a dedicated
-Debian LXC:
+The reference deployment runs `punarod` and PostgreSQL by default. Optional
+Compose profiles run the brain worker, Telegram gateway, remote MCP gateway,
+Cloudflare ingress, and scheduled backup command. One versioned application
+image supplies role subcommands. Containers run non-root with a read-only root,
+dropped capabilities, `no-new-privileges`, bounded temporary storage, and no
+Docker socket. PostgreSQL and blob storage are never host-published.
 
-1. `punarod`: the Go HTTP API, WebSocket notifier, queue, and registry.
-2. `punaro-telegram`: the Telegram long-polling gateway. It is the only
-   component that reads the Telegram bot token.
-3. `cloudflared`: a named outbound tunnel which exposes only `punarod`'s TLS
-   HTTP listener through an Access-protected hostname.
-
-Bind `punarod` to loopback or the private LXC interface; do not publish its
-port from Proxmox. The Cloudflare tunnel is the sole internet ingress. A
-separate private LAN listener is optional for emergency administration, but is
-not part of v1.
-
-Use SQLite in WAL mode on a persistent LXC volume for v1. Back up the database
-and the configuration/secrets manifests with encryption. Do not put the SQLite
-database on NFS. Migrate to PostgreSQL only for a multi-relay deployment.
+PostgreSQL is the only authoritative server database. SQLite remains a native
+client recovery store and a server migration/parity source until cutover. The
+current SQLite/systemd deployment remains an alpha compatibility path while
+the staged migration is implemented; it is not the target production shape.
+Internet ingress always uses TLS. An explicitly enabled trusted-LAN HTTP mode
+may accept only validated private or link-local bind and source addresses.
 
 ## Identities and authorization
+
+The accepted target uses host-local first ownership, short-lived single-use
+enrollment codes, and one revocable high-entropy device credential per
+installation. PostgreSQL stores only an indexed SHA-256 digest. Capabilities
+are explicit across project, conversation, memory, and attachment scopes, and
+the server applies authorized-scope predicates before any data-dependent
+ranking or lookup. The current Ed25519 machine enrollment below remains a
+staged migration source and is disabled only after intended clients exchange
+credentials or are explicitly retired.
 
 Punaro separates three principals:
 
@@ -248,15 +275,16 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.
 
-## Attachment-transfer v2 foundation
+## Superseded attachment-transfer v2 foundation
 
-Attachment transfer uses a separate encrypted data plane; it never puts file
+Attachment v2 is preserved experimental evidence, not the accepted production
+direction. It uses a separate encrypted data plane; it never puts file
 bytes, file keys, or recipient redemption material in a normal Punaro message
 or WebSocket hint. The current code includes an unmounted strict HTTP handler;
 `punarod` deliberately refuses to mount it even when attachment configuration
-is present. It will remain fail-closed until all gates in the
-[attachment RFC](docs/attachments-v2-rfc.md) and
-[security release checklist](docs/security-release-gates.md) are complete.
+is present. It remains fail-closed. Its historical RFC and release checklist
+remain useful validation evidence but cannot authorize production exposure
+under the new direction.
 
 `internal/attachment/v2` currently provides a strict canonical
 CBOR record core: verified signed manifests, manifest commitments,
@@ -332,9 +360,10 @@ must only construct its verified-manifest input after fresh directory
 verification; the directory-distribution prerequisite now exists, but the
 remaining attachment runtime does not.
 
-## Attachment-transfer v3 controlled runtime
+## Superseded attachment-transfer v3 controlled runtime
 
-V3 is a distinct record, signature, and route namespace that solves the v2
+V3 is preserved experimental evidence, not the accepted production direction.
+It is a distinct record, signature, and route namespace that solves the v2
 source-staging bootstrap cycle. It does not reinterpret any v2 manifest,
 permit, operation, or envelope. Its explicit runtime is constructed only when
 all of these are present: a private shared source store, a fresh root-verified
@@ -434,19 +463,23 @@ that state.
 
 ## Safety controls and operations
 
-This is a target operating model.  Current executable safeguards are limited
+The accepted target operating model is specified by the Big Brain plan and
+platform contracts. Current executable safeguards are limited
 to loopback binding, fail-closed attachments, a restricted container context,
 and static/container configuration checks.  The operator guide explicitly
 lists what is not yet a supported production operation.
 
-- TLS only; no HTTP listener exposed outside loopback/private LXC network.
+- Internet ingress is TLS-only. Trusted-LAN HTTP requires explicit enablement
+  plus validated private or link-local bind and source addresses; public
+  addresses never qualify.
   Access issuer/JWKS metadata is HTTPS-only and its JWKS client must not follow
   redirects. The daemon must either prove safe direct JWKS egress or, for the
   systemd profile, consume a fresh root-managed local snapshot refreshed by a
   separately constrained unit before reporting ready.
-- Firewall the LXC so only `cloudflared` reaches the relay listener. Strip
-  incoming `CF-*` and forwarding headers before any reverse-proxy boundary;
-  never treat a client-supplied identity header as authenticated.
+- For the optional Cloudflare profile, firewall the host so only `cloudflared`
+  reaches the relay listener. Strip incoming `CF-*` and forwarding headers
+  before any reverse-proxy boundary; never treat a client-supplied identity
+  header as authenticated.
 - Rate limits per machine, conversation, and Telegram user; bounded queues and
   explicit backpressure/expiry policies.
 - Maximum message body and metadata sizes; reject unknown JSON fields where
@@ -474,15 +507,13 @@ lists what is not yet a supported production operation.
 
 ## Implementation plan
 
-1. Build `punarod` with SQLite, machine enrollment, conversations, durable
-   append/fetch/ack, and CLI integration tests.
-2. Build one macOS Go adapter against the existing `agent-mailbox` CLI and run
-   it alongside the current bridge without changing production routing.
-3. Add Telegram gateway as a separate process and migrate one topic.
-4. Add the best-effort WebSocket notifier and reconnect/poll instrumentation.
-5. Deploy to a dedicated LXC, configure Cloudflare Access/Tunnel, and run a
-   restore, direct-origin-bypass, and credential-revocation drill before
-   exposing it remotely.
+Implementation follows the independently mergeable migration phases in
+[`docs/big-brain-plan.md`](docs/big-brain-plan.md): compatibility contracts,
+PostgreSQL foundation, mail migration, trusted attachments, lexical Big Brain,
+semantic retrieval, and independently optional dreaming and remote MCP. Compose
+Pi integration remains a future plan phase but is excluded from the currently
+authorized Punaro delivery scope. Every slice retains a safe rollback boundary,
+passes the full quality gate, and ships through a separately reviewed PR.
 
 ## Required adversarial acceptance tests
 
@@ -508,8 +539,11 @@ The implementation is not internet-exposure-ready until these cases pass:
 ## Explicit decisions
 
 - Go, not Rust, for v1.
-- Proxmox LXC on the NUC is production; this Mac is development only.
+- Versioned OCI images and Docker Compose are the reference production path;
+  a dedicated Linux LXC remains a valid OCI host.
+- PostgreSQL is the sole authoritative server database after cutover; SQLite is
+  retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.
-- The relay is an application-level protocol, not a remotely exposed MCP or
-  `agent_mailbox` database.
+- Remote MCP is an optional OAuth-scoped adapter over the Punaro service, never
+  a remotely exposed `agent_mailbox` database.
 - Default authorization is deny; explicit conversation membership grants reach.

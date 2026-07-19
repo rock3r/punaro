@@ -86,19 +86,27 @@ Telegram or the mailbox relay. A provisioned agent may use the controlled
 task-owner-approved send or receipt; it is not an automatic download or a
 substitute for operator enrollment.
 
-## How future attachments will behave
+## How production attachments will behave
 
-When released, attachments will be limited to enrolled devices in an approved
-conversation.  They will be end-to-end encrypted, recipient-specific, bounded
-in size and lifetime, and subject to revocation.  They will not use Telegram
-as a file relay or create public download links.  The exact release conditions
-are in the [security release gates](security-release-gates.md).
+The accepted production direction is a conventional trusted relay over
+authenticated TLS, described in the
+[platform and Big Brain plan](big-brain-plan.md#trusted-relay-attachments).
+Punaro's operator and server may read stored bytes; end-to-end confidentiality
+from them is not promised. An authorized sender reserves bounded capacity,
+uploads an exact size and digest, and publishes an immutable artifact only
+after durable finalization and reauthorization. The message append transaction
+snapshots authorized recipients. Downloads remain authenticated, bounded, and
+digest-verified, with safe no-replace client finalization.
 
-Revocation will stop new authorized transfer activity; it cannot recall bytes
-already delivered to a recipient.  The remaining in-flight exposure will be
-explicitly bounded in the released protocol and release evidence.
+Production attachments will not use Telegram as a file relay, create public
+download links, fetch URLs, or derive filesystem paths from display names.
+Revocation stops new authorized activity but cannot recall bytes already
+downloaded. Partial uploads are never downloadable, and filesystem/database
+skew is reconciled explicitly. Trusted-relay release gates will be added with
+its implementation; the preserved v2/v3 gates cannot authorize production.
 
-Until then, use the established mailbox and Telegram workflows for text-only
+Until then, v3 remains only a separately enabled controlled validation surface.
+Use the established mailbox and Telegram workflows for text-only
 coordination and keep files in an approved storage system. The adapter may use
 payload-free WebSocket wake-up hints to trigger an early poll, but reconnecting
 and periodic polling remain the correctness mechanism.

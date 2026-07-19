@@ -1,10 +1,14 @@
 # Attachment transfer v2 RFC
 
-**Status:** pre-release security contract.  Attachment v2 is not available in
-`punarod`; enabling it must continue to fail at startup until every release
-gate in [`security-release-gates.md`](security-release-gates.md) is satisfied.
+**Status:** superseded production direction; preserved experimental security
+contract. Attachment v2 is not available in `punarod` and its production
+switches remain fail-closed. The accepted replacement is the trusted-relay
+lifecycle in [`big-brain-plan.md`](big-brain-plan.md). This RFC remains intact
+as implementation and review evidence; completing its historical checklist no
+longer authorizes production exposure.
 
-This is the single source of truth for a *released* attachment v2.  It
+This is the single source of truth for interpreting preserved attachment v2
+records and tests. It
 supersedes every issue comment and design draft.  The current Go attachment
 foundation predates this RFC, is non-normative and non-conformant, and is not
 evidence for any RFC gate.  It must never be promoted unchanged.  Its exact
