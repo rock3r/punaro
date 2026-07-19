@@ -210,10 +210,12 @@ WITH objects AS (
        AND bool_and(pg_get_userbyid(proowner) = 'punaro_owner')
        AND bool_and(prosecdef)
        AND bool_and(proconfig = ARRAY['search_path=pg_catalog']::text[])
+       -- PostgreSQL prosrc retains the dollar-quoted boundary newlines; btrim
+       -- removes only ordinary spaces, so these are catalog-exact fingerprints.
        AND bool_and(
-           (oid = guard_oid AND md5(btrim(prosrc)) = '41e8a2a4da5bd7808324e6d578683255')
-           OR (oid = audit_prune_oid AND md5(btrim(prosrc)) = '3d2f09c73e6a7be1c16e7430482ed6ea')
-           OR (oid = jobs_prune_oid AND md5(btrim(prosrc)) = 'db608e8aa6217526decd4ff30635c134')
+		   (oid = guard_oid AND md5(btrim(prosrc)) = '56cb3ea6402ffbf41f360cf4c8ba392f')
+		   OR (oid = audit_prune_oid AND md5(btrim(prosrc)) = 'd477a1e8ffc27e7a7c652975bdd06057')
+		   OR (oid = jobs_prune_oid AND md5(btrim(prosrc)) = 'ea4a8de811f6f8f9d5804f30fcd03869')
        ) AS owned
     FROM pg_proc, objects
     WHERE oid = ANY(ARRAY[guard_oid, audit_prune_oid, jobs_prune_oid])
