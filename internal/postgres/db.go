@@ -381,7 +381,7 @@ SELECT
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[4]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(octet_length(secret_digest) = 32)')
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(generation >= 1)')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[6,8]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((expires_at IS NULL) OR (expires_at > created_at))')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[8,6]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((expires_at IS NULL) OR (expires_at > created_at))')
     AND EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[10,11,12,13]::smallint[] AND convalidated
