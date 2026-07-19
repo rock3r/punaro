@@ -89,6 +89,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	for migrateErr := range errorsSeen {
 		if migrateErr != nil {
 			logControlPlaneCatalog(ctx, t, ownerDB)
+			logDeviceAuthCatalog(ctx, t, ownerDB)
 			t.Fatalf("concurrent migration failed: %v", migrateErr)
 		}
 	}
@@ -847,6 +848,34 @@ FROM pg_index WHERE indexrelid = to_regclass('auth.capability_grants_active_uniq
 		t.Logf("control-plane trigger diagnostics unavailable: %v", err)
 	} else {
 		t.Logf("control-plane trigger type=%d enabled=%s", triggerType, triggerEnabled)
+	}
+}
+
+func logDeviceAuthCatalog(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `SELECT conrelid::regclass::text, conname, conkey::text, pg_get_expr(conbin, conrelid)
+FROM pg_constraint
+WHERE contype = 'c' AND conrelid = ANY(ARRAY[
+    to_regclass('auth.principals'),
+    to_regclass('auth.installation_owner'),
+    to_regclass('auth.pending_enrollments'),
+    to_regclass('auth.pending_enrollment_grants'),
+    to_regclass('auth.device_credentials'),
+    to_regclass('auth.legacy_machines'),
+    to_regclass('audit.events')
+]) ORDER BY conrelid::regclass::text, conname`)
+	if err != nil {
+		t.Logf("device-auth constraint diagnostics unavailable: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var relation, name, keys, expression string
+		if err := rows.Scan(&relation, &name, &keys, &expression); err != nil {
+			t.Logf("device-auth constraint diagnostic malformed: %v", err)
+			return
+		}
+		t.Logf("device-auth constraint relation=%s name=%s keys=%s expression=%q", relation, name, keys, expression)
 	}
 }
 
