@@ -119,7 +119,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 	restored, err := restoreBackup(ctx, request)
 	if err != nil {
-		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwnerDSN), manifest.State)
+		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwner, targetApp, targetOwnerDSN), manifest.State)
 	}
 	if restored.InstallationID != manifest.State.InstallationID || restored.TimelineID == manifest.State.TimelineID || restored.ChangeSequence != manifest.State.ChangeSequence {
 		t.Fatalf("restored state=%#v manifest=%#v", restored, manifest.State)
@@ -136,7 +136,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 }
 
-func restoreTargetDiagnostic(ctx context.Context, ownerDSN string) string {
+func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, ownerDSN string) string {
 	db, err := sql.Open("pgx", ownerDSN)
 	if err != nil {
 		return "open-failed"
@@ -150,7 +150,12 @@ func restoreTargetDiagnostic(ctx context.Context, ownerDSN string) string {
 	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM jobs.restore_events`).Scan(&eventCount); err != nil {
 		return "events-unavailable"
 	}
-	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d", installationID, timelineID, changeSequence, eventCount)
+	appState, appErr := inspectSchema(ctx, appDSNFile)
+	admin, adminErr := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+	if admin != nil {
+		_ = admin.Close()
+	}
+	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d app-state=%s/%d app-err=%v admin-err=%v", installationID, timelineID, changeSequence, eventCount, appState.Classification, appState.Version, appErr, adminErr)
 }
 
 func testInstallation(t *testing.T) string {
