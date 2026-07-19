@@ -139,13 +139,17 @@ func migrateConn(ctx context.Context, conn *sql.Conn, manifest Manifest) (Schema
 }
 
 func verifyMigrationRoles(ctx context.Context, conn *sql.Conn) error {
+	return verifyMigrationRolesNamed(ctx, conn, "punaro_app")
+}
+
+func verifyMigrationRolesNamed(ctx context.Context, conn *sql.Conn, appRole string) error {
 	var appExists, appUnsafe, ownerCanCreate bool
 	if err := conn.QueryRowContext(ctx, `
 SELECT
-    EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app'),
+    EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1),
     EXISTS (
         SELECT 1 FROM pg_roles AS app
-        WHERE app.rolname = 'punaro_app'
+        WHERE app.rolname = $1
           AND (app.rolsuper OR app.rolcreatedb OR app.rolcreaterole OR app.rolreplication OR app.rolbypassrls OR app.rolinherit OR NOT app.rolcanlogin
                OR has_database_privilege(app.rolname, current_database(), 'CREATE')
                OR has_schema_privilege(app.rolname, 'public', 'CREATE')
@@ -160,8 +164,8 @@ SELECT
                )
                OR EXISTS (
                    SELECT 1 FROM pg_roles AS assumable
-                   WHERE assumable.rolname <> 'punaro_app'
-                     AND pg_has_role('punaro_app', assumable.oid, 'MEMBER')
+                   WHERE assumable.rolname <> $1
+                     AND pg_has_role($1, assumable.oid, 'MEMBER')
                )
                OR EXISTS (
                    SELECT 1 FROM pg_namespace
@@ -178,7 +182,7 @@ SELECT
                    WHERE namespace.nspname !~ '^pg_' AND namespace.nspname <> 'information_schema' AND object.proowner = app.oid
                ))
     ),
-    session_user = current_user AND current_user = 'punaro_owner' AND has_database_privilege(current_user, current_database(), 'CREATE')`).Scan(&appExists, &appUnsafe, &ownerCanCreate); err != nil {
+    session_user = current_user AND current_user = 'punaro_owner' AND has_database_privilege(current_user, current_database(), 'CREATE')`, appRole).Scan(&appExists, &appUnsafe, &ownerCanCreate); err != nil {
 		return errors.New("PostgreSQL migration roles cannot be verified")
 	}
 	if !appExists || appUnsafe || !ownerCanCreate {

@@ -432,11 +432,19 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DROP SCHEMA jobs CASCADE; REVOKE CONNECT ON DATABASE punaro FROM punaro_app; DROP ROLE punaro_app`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `DROP SCHEMA jobs CASCADE`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Migrate(ctx, Config{DSNFile: ownerFile}); err == nil {
-		t.Fatal("migrator accepted a missing application role")
+	ownerConn, err = ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyMigrationRolesNamed(ctx, ownerConn, "punaro_guaranteed_missing_app"); err == nil {
+		_ = ownerConn.Close()
+		t.Fatal("migration role verifier accepted a missing application role")
+	}
+	if err := ownerConn.Close(); err != nil {
+		t.Fatal(err)
 	}
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {

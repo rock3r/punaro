@@ -119,7 +119,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 	restored, err := restoreBackup(ctx, request)
 	if err != nil {
-		t.Fatalf("real restore: %v", err)
+		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwnerDSN), manifest.State)
 	}
 	if restored.InstallationID != manifest.State.InstallationID || restored.TimelineID == manifest.State.TimelineID || restored.ChangeSequence != manifest.State.ChangeSequence {
 		t.Fatalf("restored state=%#v manifest=%#v", restored, manifest.State)
@@ -134,6 +134,23 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	if retried, err := restoreBackup(ctx, request); err != nil || retried != restored {
 		t.Fatalf("same-command resume state=%#v err=%v", retried, err)
 	}
+}
+
+func restoreTargetDiagnostic(ctx context.Context, ownerDSN string) string {
+	db, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		return "open-failed"
+	}
+	defer func() { _ = db.Close() }()
+	var installationID, timelineID string
+	var changeSequence, eventCount int64
+	if err := db.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&installationID, &timelineID, &changeSequence); err != nil {
+		return "state-unavailable"
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM jobs.restore_events`).Scan(&eventCount); err != nil {
+		return "events-unavailable"
+	}
+	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d", installationID, timelineID, changeSequence, eventCount)
 }
 
 func testInstallation(t *testing.T) string {
