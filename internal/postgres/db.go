@@ -363,7 +363,8 @@ SELECT
         SELECT 1 FROM pg_index
         WHERE indexrelid = enrollment_binding_oid AND indrelid = enrollments_oid
           AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '3'::int2vector
-          AND pg_get_expr(indpred, indrelid) = '(redeemed_at IS NULL)'
+          AND (($1 = 3 AND pg_get_expr(indpred, indrelid) = '(redeemed_at IS NULL)')
+               OR ($1 >= 4 AND pg_get_expr(indpred, indrelid) = '((redeemed_at IS NULL) AND (invalidated_at IS NULL))'))
     )
     AND EXISTS (
         SELECT 1 FROM pg_index

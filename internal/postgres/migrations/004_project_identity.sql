@@ -19,6 +19,11 @@ ADD COLUMN invalidated_at timestamptz,
 ADD CONSTRAINT pending_enrollments_invalidation_check
 CHECK (invalidated_at IS NULL OR invalidated_at >= created_at);
 
+DROP INDEX auth.pending_enrollments_active_binding;
+CREATE INDEX pending_enrollments_active_binding
+ON auth.pending_enrollments (client_binding)
+WHERE redeemed_at IS NULL AND invalidated_at IS NULL;
+
 CREATE FUNCTION auth.guard_pending_enrollment_invalidation()
 RETURNS trigger
 LANGUAGE plpgsql
