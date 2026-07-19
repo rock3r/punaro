@@ -261,7 +261,8 @@ if (Test-Path -LiteralPath $configFile) {
 & $mailbox '--state-dir' $MailboxStateDir 'group' 'create' '--group' $AttachedGroup
 if ($LASTEXITCODE -ne 0) {
     $groups = Invoke-Program -Program $mailbox -Arguments @('--state-dir', $MailboxStateDir, 'group', 'list', '--json') -Description 'attachment group lookup' | ConvertFrom-Json
-    if ($groups -notcontains $AttachedGroup) { Stop-Install 'could not create the local Punaro attachment group' }
+    $groupAddresses = @($groups | ForEach-Object { $_.address })
+    if ($groupAddresses -notcontains $AttachedGroup) { Stop-Install 'could not create the local Punaro attachment group' }
 }
 
 if (-not [string]::IsNullOrWhiteSpace($AttachmentRole)) {
@@ -274,7 +275,7 @@ try {
     $windowsPowerShell = if (-not [string]::IsNullOrWhiteSpace($powerShellCommand.Path)) { $powerShellCommand.Path } else { $powerShellCommand.Source }
     if ([string]::IsNullOrWhiteSpace($windowsPowerShell)) { Stop-Install 'Windows PowerShell is required to register the adapter task' }
 } catch { Stop-Install 'Windows PowerShell is required to register the adapter task' }
-$action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoProfile -NonInteractive -File "{0}"' -f $runner)
+$action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $runner)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
