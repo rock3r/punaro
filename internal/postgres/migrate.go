@@ -177,9 +177,10 @@ func bootstrapTracker(ctx context.Context, conn *sql.Conn, first Migration) erro
 		return errors.New("PostgreSQL migration bootstrap could not start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `
-CREATE SCHEMA jobs;
-CREATE TABLE jobs.schema_migrations (
+	if _, err := tx.ExecContext(ctx, `CREATE SCHEMA jobs`); err != nil {
+		return errors.New("PostgreSQL migration bootstrap failed")
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE jobs.schema_migrations (
     version bigint PRIMARY KEY,
     name text NOT NULL,
     checksum char(64) NOT NULL,
@@ -187,8 +188,10 @@ CREATE TABLE jobs.schema_migrations (
     status text NOT NULL CHECK (status IN ('applying', 'applied')),
     started_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     applied_at timestamptz
-);
-INSERT INTO jobs.schema_migrations (version, name, checksum, compatibility_floor, status)
+);`); err != nil {
+		return errors.New("PostgreSQL migration bootstrap failed")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs.schema_migrations (version, name, checksum, compatibility_floor, status)
 VALUES ($1, $2, $3, $4, 'applying')`, first.Version, first.Name, first.Checksum, first.CompatibilityFloor); err != nil {
 		return errors.New("PostgreSQL migration bootstrap failed")
 	}
