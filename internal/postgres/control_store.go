@@ -212,15 +212,15 @@ func (d *Database) HasCapability(ctx context.Context, principalID, projectID str
 
 const capabilityMatchSQL = `
 FROM auth.principals AS principal
-JOIN auth.capability_grants AS grant ON grant.principal_id = principal.id
-WHERE principal.id = $1 AND principal.disabled_at IS NULL AND grant.revoked_at IS NULL
-  AND grant.capability = $3
+JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+WHERE principal.id = $1 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+  AND capability_grant.capability = $3
   AND (
-      ($2::uuid IS NULL AND grant.scope = 'installation' AND grant.project_id IS NULL)
+      ($2::uuid IS NULL AND capability_grant.scope = 'installation' AND capability_grant.project_id IS NULL)
       OR
       ($2::uuid IS NOT NULL
        AND EXISTS (SELECT 1 FROM relay.projects WHERE id = $2)
-       AND ((grant.scope = 'project' AND grant.project_id = $2) OR (grant.scope = 'all_projects' AND grant.project_id IS NULL)))
+       AND ((capability_grant.scope = 'project' AND capability_grant.project_id = $2) OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL)))
   )`
 
 func hasCapability(ctx context.Context, q queryer, principalID, projectID string, capability Capability) (bool, error) {
@@ -235,8 +235,8 @@ func hasCapability(ctx context.Context, q queryer, principalID, projectID string
 
 func lockCapability(ctx context.Context, tx *sql.Tx, principalID, projectID string, capability Capability) (bool, error) {
 	var grantID string
-	err := tx.QueryRowContext(ctx, `SELECT grant.id::text `+capabilityMatchSQL+`
-ORDER BY grant.id LIMIT 1 FOR SHARE OF principal, grant`, principalID, nullableID(projectID), capability).Scan(&grantID)
+	err := tx.QueryRowContext(ctx, `SELECT capability_grant.id::text `+capabilityMatchSQL+`
+ORDER BY capability_grant.id LIMIT 1 FOR SHARE OF principal, capability_grant`, principalID, nullableID(projectID), capability).Scan(&grantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
