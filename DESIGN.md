@@ -563,8 +563,9 @@ collapses well-known equivalent syntax; ambiguous locators fail closed.
 Unclaimed identities require both project write and explicit attach authority.
 A claimed identity can only be reconciled through an expiring, generation-bound
 preview followed by one bounded transaction that reauthorizes the same actor,
-locks both active project rows in deterministic order, and discloses every
-capability-level content-access expansion. Memberships are not unioned. The
+locks both active project rows in deterministic order, and identifies every
+principal with any capability-level content-access expansion. Memberships are
+not unioned. The
 retired project IDs and any older aliases are flattened directly to the active
 canonical project, but an alias supplies no authority by itself. Per-project
 identity, grant, alias-rewrite, preview, and pruning limits are hard bounds.

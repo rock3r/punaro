@@ -437,14 +437,12 @@ VALUES ($1, 'local_git', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', $3),
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `WITH inserted AS (
-    INSERT INTO relay.projects (display_name, created_by)
-    SELECT 'bounded historical alias ' || value::text, $2 FROM generate_series(1, 1000) AS value
+    INSERT INTO relay.projects (display_name, created_by, merged_into, merged_at)
+    SELECT 'bounded historical alias ' || value::text, $2, $1, statement_timestamp()
+    FROM generate_series(1, 1000) AS value
     RETURNING id
-), retired AS (
-    UPDATE relay.projects SET merged_into = $1, merged_at = statement_timestamp()
-    WHERE id IN (SELECT id FROM inserted) RETURNING id
 ) INSERT INTO relay.project_lookup_aliases (alias_project_id, canonical_project_id)
-SELECT id, $1 FROM retired`, aliasBoundSource.ProjectID, actor.ID); err != nil {
+SELECT id, $1 FROM inserted`, aliasBoundSource.ProjectID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.PreviewProjectIdentityMerge(ctx, ProjectMergePreviewRequest{ActorPrincipalID: actor.ID, SourceProjectID: aliasBoundSource.ProjectID, IdempotencyKey: "99999999-9999-4999-8999-999999999982", Kind: ProjectIdentityGitRemote, Locator: "https://alias-bounds.example/Owner/Canonical.git"}); !errors.Is(err, ErrProjectMergeTooLarge) {
