@@ -325,7 +325,7 @@ WHERE id = $1`, preview.PreviewID, maxLiveProjectPreviewsActor-liveActorPreviews
 	}
 	var queuedSourceJobID string
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO jobs.outbox (project_id, kind, payload, max_attempts)
-VALUES ($1, 'project.created', jsonb_build_object('project_id', $1::text), 4) RETURNING id::text`, source.ProjectID).Scan(&queuedSourceJobID); err != nil {
+VALUES ($1::uuid, 'project.created', jsonb_build_object('project_id', ($1::uuid)::text), 4) RETURNING id::text`, source.ProjectID).Scan(&queuedSourceJobID); err != nil {
 		t.Fatal(err)
 	}
 	var pendingSourceEnrollmentID string
