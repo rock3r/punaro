@@ -351,6 +351,11 @@ SELECT
           AND pg_get_expr(default_value.adbin, default_value.adrelid) = '0'
     )
     AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'auth.principals'::regclass AND contype = 'c' AND conkey = ARRAY[6]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(auth_generation >= 0)'
+    )
+    AND EXISTS (
         SELECT 1 FROM pg_index
         WHERE indexrelid = enrollment_binding_oid AND indrelid = enrollments_oid
           AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '3'::int2vector
@@ -371,27 +376,50 @@ SELECT
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%CHECK (singleton)%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'c' AND conkey = ARRAY[1]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = 'singleton')
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(secret_digest) = 32%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%generation >= 1%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%expires_at IS NULL%expires_at > created_at%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%rotation_code_digest IS NULL%rotation_expected_generation IS NULL%rotation_expires_at IS NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[4]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(octet_length(secret_digest) = 32)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(generation >= 1)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[6,8]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((expires_at IS NULL) OR (expires_at > created_at))')
+    AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = credentials_oid AND contype = 'c' AND conkey = ARRAY[10,11,12,13]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(((rotation_code_digest IS NULL) AND (rotation_expected_generation IS NULL) AND (rotation_expires_at IS NULL) AND (rotation_completed_at IS NULL)) OR ((rotation_code_digest IS NOT NULL) AND (rotation_expected_generation >= 1) AND (rotation_expires_at IS NOT NULL)))'
+    )
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[13]::smallint[] AND confrelid = credentials_oid AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[14]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(code_digest) = 32%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%credential_ttl_seconds%31536000%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%redeemed_at IS NULL%redemption_key IS NULL%redeemed_principal_id IS NULL%credential_lookup_id IS NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(octet_length(code_digest) = 32)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND conkey = ARRAY[8]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((credential_ttl_seconds IS NULL) OR ((credential_ttl_seconds >= 60) AND (credential_ttl_seconds <= 31536000)))')
+    AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = enrollments_oid AND contype = 'c' AND conkey = ARRAY[10,11,12,13]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(((redeemed_at IS NULL) AND (redemption_key IS NULL) AND (redeemed_principal_id IS NULL) AND (credential_lookup_id IS NULL)) OR ((redeemed_at IS NOT NULL) AND (redemption_key IS NOT NULL) AND (redeemed_principal_id IS NOT NULL) AND (credential_lookup_id IS NOT NULL)))'
+    )
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'p' AND conkey = ARRAY[1,2]::smallint[] AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = enrollments_oid AND confdeltype = 'c' AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'relay.projects'::regclass AND convalidated)
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%scope = ''installation''%scope = ANY%project_id IS NOT NULL%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(public_key) = 32%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%state = ''migrated''%migrated_credential_lookup_id IS NOT NULL%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'audit.events'::regclass AND conname = 'events_action_check' AND convalidated AND pg_get_constraintdef(oid) LIKE '%owner.bootstrap%' AND pg_get_constraintdef(oid) LIKE '%legacy.disable%')
-    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'audit.events'::regclass AND conname = 'events_target_kind_check' AND convalidated AND pg_get_constraintdef(oid) LIKE '%enrollment%' AND pg_get_constraintdef(oid) LIKE '%credential%' AND pg_get_constraintdef(oid) LIKE '%legacy_machine%')
+    AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = enrollment_grants_oid AND contype = 'c' AND conkey = ARRAY[3,4,5]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(((scope = ''installation''::text) AND (project_id IS NULL) AND (capability = ''project.create''::text)) OR ((scope = ANY (ARRAY[''project''::text, ''all_projects''::text])) AND (((scope = ''project''::text) AND (project_id IS NOT NULL)) OR ((scope = ''all_projects''::text) AND (project_id IS NULL))) AND (capability <> ''project.create''::text)))'
+    )
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND conkey = ARRAY[2]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(octet_length(public_key) = 32)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND conkey = ARRAY[4]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(state = ANY (ARRAY[''pending''::text, ''migrated''::text, ''retired''::text]))')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND conkey = ARRAY[4,5]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((state = ''migrated''::text) = (migrated_credential_lookup_id IS NOT NULL))')
+    AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'audit.events'::regclass AND conname = 'events_action_check'
+          AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text]))'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'audit.events'::regclass AND conname = 'events_target_kind_check'
+          AND contype = 'c' AND conkey = ARRAY[7]::smallint[] AND convalidated
+          AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text]))'
+    )
     AND has_table_privilege('punaro_app', owner_oid, 'SELECT')
     AND NOT has_table_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
     AND NOT has_any_column_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,REFERENCES')
