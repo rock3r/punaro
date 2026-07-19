@@ -21,7 +21,10 @@ var (
 	ErrNotFound            = errors.New("control-plane record was not found")
 )
 
-const maxJobDelay = 24 * time.Hour
+const (
+	maxJobDelay               = 24 * time.Hour
+	projectJobMutationLockKey = int64(0x50756e61726f4a4f)
+)
 
 // Grant mutations are rare administrative operations. One transaction-scoped
 // lock gives every actor/target pair the same lock order and prevents reciprocal
@@ -144,6 +147,16 @@ func (d *Database) GrantCapability(ctx context.Context, actorPrincipalID string,
 	if err := lockGrantMutations(ctx, tx); err != nil {
 		return "", err
 	}
+	switch grant.Scope {
+	case ScopeProject:
+		if _, err := lockDirectActiveProject(ctx, tx, grant.ProjectID); err != nil {
+			return "", err
+		}
+	case ScopeAllProjects:
+		if err := lockGlobalProjectACL(ctx, tx); err != nil {
+			return "", err
+		}
+	}
 	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, grant.Scope, grant.ProjectID)
 	if err != nil {
 		return "", err
@@ -167,6 +180,9 @@ WHERE principal_id = $1 AND scope = $2 AND project_id IS NOT DISTINCT FROM $3::u
 		return "", errors.New("capability grant could not be created")
 	}
 	if inserted {
+		if err := advanceGrantGenerations(ctx, tx, grant.Scope, grant.ProjectID); err != nil {
+			return "", err
+		}
 		control := &ControlTx{tx: tx}
 		if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: grant.ProjectID, Action: AuditGrantCreate, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
 			return "", err
@@ -204,6 +220,16 @@ FROM auth.capability_grants WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan
 	if err != nil {
 		return errors.New("capability grant could not be locked")
 	}
+	switch scope {
+	case ScopeProject:
+		if _, err := lockDirectActiveProject(ctx, tx, projectID.String); err != nil {
+			return err
+		}
+	case ScopeAllProjects:
+		if err := lockGlobalProjectACL(ctx, tx); err != nil {
+			return err
+		}
+	}
 	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, scope, projectID.String)
 	if err != nil {
 		return err
@@ -217,6 +243,9 @@ FROM auth.capability_grants WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan
 	}
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return ErrNotFound
+	}
+	if err := advanceGrantGenerations(ctx, tx, scope, projectID.String); err != nil {
+		return err
 	}
 	control := &ControlTx{tx: tx}
 	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: projectID.String, Action: AuditGrantDelete, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
@@ -251,6 +280,40 @@ func lockGrantMutations(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+func lockGlobalProjectACL(ctx context.Context, tx *sql.Tx) error {
+	var singleton bool
+	if err := tx.QueryRowContext(ctx, `SELECT singleton FROM auth.project_acl_state WHERE singleton FOR UPDATE`).Scan(&singleton); err != nil || !singleton {
+		return errors.New("global project authorization could not be locked")
+	}
+	return nil
+}
+
+func advanceGrantGenerations(ctx context.Context, tx *sql.Tx, scope GrantScope, projectID string) error {
+	switch scope {
+	case ScopeProject:
+		result, err := tx.ExecContext(ctx, `UPDATE relay.projects SET acl_generation = acl_generation + 1, content_generation = content_generation + 1 WHERE id = $1 AND merged_into IS NULL`, projectID)
+		if err != nil {
+			return errors.New("project authorization generation could not advance")
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return ErrMergedProject
+		}
+	case ScopeAllProjects:
+		result, err := tx.ExecContext(ctx, `UPDATE auth.project_acl_state SET global_generation = global_generation + 1 WHERE singleton`)
+		if err != nil {
+			return errors.New("global project authorization generation could not advance")
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return errors.New("global project authorization generation is unavailable")
+		}
+	case ScopeInstallation:
+		return nil
+	default:
+		return errors.New("invalid grant generation scope")
+	}
+	return nil
+}
+
 func lockAllProjectsAdministration(ctx context.Context, tx *sql.Tx, actorPrincipalID string) (bool, error) {
 	var grantID string
 	err := tx.QueryRowContext(ctx, `SELECT capability_grant.id::text
@@ -278,12 +341,22 @@ func (d *Database) HasCapability(ctx context.Context, principalID, projectID str
 	if !known {
 		return false, errors.New("invalid authorization query")
 	}
-	if projectID == "" {
+	switch {
+	case projectID == "":
 		if allowedScopes&allowInstallation == 0 {
 			return false, errors.New("invalid authorization query")
 		}
-	} else if !validOpaqueID(projectID) || allowedScopes&(allowProject|allowAllProjects) == 0 {
+	case !validOpaqueID(projectID) || allowedScopes&(allowProject|allowAllProjects) == 0:
 		return false, errors.New("invalid authorization query")
+	default:
+		canonicalID, err := resolveCanonicalActiveProject(ctx, d.db, projectID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		projectID = canonicalID
 	}
 	return hasCapability(ctx, d.db, principalID, projectID, capability)
 }
@@ -297,7 +370,7 @@ WHERE principal.id = $1 AND principal.disabled_at IS NULL AND capability_grant.r
       ($2::uuid IS NULL AND capability_grant.scope = 'installation' AND capability_grant.project_id IS NULL)
       OR
       ($2::uuid IS NOT NULL
-       AND EXISTS (SELECT 1 FROM relay.projects WHERE id = $2)
+	       AND EXISTS (SELECT 1 FROM relay.projects WHERE id = $2 AND merged_into IS NULL)
        AND ((capability_grant.scope = 'project' AND capability_grant.project_id = $2) OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL)))
   )`
 
@@ -309,6 +382,24 @@ func hasCapability(ctx context.Context, q queryer, principalID, projectID string
 		return false, errors.New("authorization could not be evaluated")
 	}
 	return allowed, nil
+}
+
+func resolveCanonicalActiveProject(ctx context.Context, q queryer, projectID string) (string, error) {
+	var canonicalID string
+	err := q.QueryRowContext(ctx, `SELECT active.id::text
+FROM relay.projects AS requested
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id = requested.id
+JOIN relay.projects AS active ON active.id = COALESCE(alias.canonical_project_id, requested.id)
+WHERE requested.id = $1 AND active.merged_into IS NULL
+  AND ((requested.merged_into IS NULL AND alias.alias_project_id IS NULL)
+       OR (requested.merged_into = alias.canonical_project_id))`, projectID).Scan(&canonicalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", errors.New("project lookup alias could not be resolved")
+	}
+	return canonicalID, nil
 }
 
 func lockCapability(ctx context.Context, tx *sql.Tx, principalID, projectID string, capability Capability) (bool, error) {
@@ -481,6 +572,12 @@ func (t *ControlTx) EnqueueJob(ctx context.Context, job EnqueueJob) (string, err
 	if t == nil || t.tx == nil || job.Validate() != nil {
 		return "", errors.New("invalid job")
 	}
+	if err := lockProjectJobMutations(ctx, t.tx, false); err != nil {
+		return "", err
+	}
+	if _, err := lockDirectActiveProject(ctx, t.tx, job.ProjectID); err != nil {
+		return "", err
+	}
 	var id string
 	err := t.tx.QueryRowContext(ctx, `INSERT INTO jobs.outbox (project_id, kind, payload, max_attempts, available_at)
 VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond')) RETURNING id::text`, nullableID(job.ProjectID), job.Kind, []byte(job.Payload), job.MaxAttempts, job.Delay.Microseconds()).Scan(&id)
@@ -492,6 +589,13 @@ VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond'))
 	}
 	if err := t.AppendAudit(ctx, AuditEvent{PrincipalID: job.ActorPrincipalID, ProjectID: job.ProjectID, Action: AuditJobEnqueue, Outcome: AuditSucceeded, TargetKind: AuditTargetJob, TargetID: id}); err != nil {
 		return "", err
+	}
+	advanced, err := t.tx.ExecContext(ctx, `UPDATE relay.projects SET content_generation = content_generation + 1 WHERE id = $1 AND merged_into IS NULL`, job.ProjectID)
+	if err != nil {
+		return "", errors.New("project content generation could not advance")
+	}
+	if count, err := advanced.RowsAffected(); err != nil || count != 1 {
+		return "", ErrMergedProject
 	}
 	return id, nil
 }
@@ -523,6 +627,9 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 		return nil, errors.New("job claim transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `WITH exhausted AS (
 	SELECT job.id, job.project_id, job.lease_holder FROM jobs.outbox AS job
     WHERE job.kind = $1 AND job.state = 'running' AND job.lease_until <= statement_timestamp() AND job.attempts >= job.max_attempts
@@ -573,8 +680,8 @@ SELECT lease_holder, project_id, 'job.fail', 'succeeded', 'job', id FROM failed`
       AND EXISTS (
           SELECT 1 FROM authorized_grants AS capability_grant
           WHERE job.project_id IS NOT NULL
-            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
-                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+	            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
+	                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
       )
 	ORDER BY COALESCE(candidate.lease_until, candidate.available_at), candidate.created_at, candidate.id
     LIMIT $2
@@ -691,6 +798,10 @@ func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (au
 	if err != nil {
 		return authorizedJobLease{}, errors.New("job lease transaction cannot start")
 	}
+	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
+		_ = tx.Rollback()
+		return authorizedJobLease{}, err
+	}
 	var kind, holder, projectID string
 	err = tx.QueryRowContext(ctx, `SELECT kind, lease_holder::text, COALESCE(project_id::text, '')
 FROM jobs.outbox
@@ -719,6 +830,17 @@ FOR UPDATE`, lease.ID, lease.Token, lease.Generation).Scan(&kind, &holder, &proj
 		return authorizedJobLease{}, ErrStaleLease
 	}
 	return authorizedJobLease{tx: tx, Holder: holder, ProjectID: projectID}, nil
+}
+
+func lockProjectJobMutations(ctx context.Context, tx *sql.Tx, exclusive bool) error {
+	statement := `SELECT pg_catalog.pg_advisory_xact_lock_shared($1)`
+	if exclusive {
+		statement = `SELECT pg_catalog.pg_advisory_xact_lock($1)`
+	}
+	if _, err := tx.ExecContext(ctx, statement, projectJobMutationLockKey); err != nil {
+		return errors.New("project job mutation cannot be serialized")
+	}
+	return nil
 }
 
 // PruneTerminalJobs removes only a bounded batch of old terminal rows.

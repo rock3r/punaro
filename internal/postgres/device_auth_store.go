@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"sort"
 	"strconv"
 	"time"
 
@@ -163,6 +164,12 @@ func (a *Administration) BootstrapOwner(ctx context.Context, label string) (Prin
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, bootstrapLockKey); err != nil {
 		return Principal{}, errors.New("owner bootstrap cannot be serialized")
 	}
+	if err := lockGrantMutations(ctx, tx); err != nil {
+		return Principal{}, err
+	}
+	if err := lockGlobalProjectACL(ctx, tx); err != nil {
+		return Principal{}, err
+	}
 	var initialized bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.installation_owner)`).Scan(&initialized); err != nil {
 		return Principal{}, errors.New("owner state is unavailable")
@@ -180,6 +187,9 @@ func (a *Administration) BootstrapOwner(ctx context.Context, label string) (Prin
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, capability) VALUES
 ($1, 'installation', 'project.create'), ($1, 'all_projects', 'project.administer')`, owner.ID); err != nil {
 		return Principal{}, errors.New("owner authority could not be installed")
+	}
+	if err := advanceGrantGenerations(ctx, tx, ScopeAllProjects, ""); err != nil {
+		return Principal{}, err
 	}
 	control := &ControlTx{tx: tx}
 	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: owner.ID, Action: AuditOwnerBootstrap, Outcome: AuditSucceeded, TargetKind: AuditTargetPrincipal, TargetID: owner.ID}); err != nil {
@@ -221,23 +231,24 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 		}
 		return PendingEnrollment{}, ErrForbidden
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, enrollmentMutationLockKey); err != nil {
-		return PendingEnrollment{}, errors.New("enrollment mutation cannot be serialized")
+	if err := lockEnrollmentMutations(ctx, tx); err != nil {
+		return PendingEnrollment{}, err
 	}
 	if err := pruneExpiredEnrollments(ctx, tx, 100); err != nil {
 		return PendingEnrollment{}, err
 	}
 	var pendingCount int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM auth.pending_enrollments WHERE redeemed_at IS NULL AND expires_at > statement_timestamp()`).Scan(&pendingCount); err != nil || pendingCount >= maxPendingEnrollments {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM auth.pending_enrollments WHERE redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp()`).Scan(&pendingCount); err != nil || pendingCount >= maxPendingEnrollments {
 		return PendingEnrollment{}, errors.New("pending enrollment capacity is unavailable")
 	}
 	var bindingExists bool
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE client_binding = $1 AND redeemed_at IS NULL AND expires_at > statement_timestamp())`, request.ClientBinding).Scan(&bindingExists); err != nil || bindingExists {
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE client_binding = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp())`, request.ClientBinding).Scan(&bindingExists); err != nil || bindingExists {
 		return PendingEnrollment{}, errors.New("client already has a pending enrollment")
 	}
-	for _, projectID := range request.ProjectIDs {
-		var exists bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.projects WHERE id = $1)`, projectID).Scan(&exists); err != nil || !exists {
+	projectIDs := append([]string(nil), request.ProjectIDs...)
+	sort.Strings(projectIDs)
+	for _, projectID := range projectIDs {
+		if _, err := lockDirectActiveProject(ctx, tx, projectID); err != nil {
 			return PendingEnrollment{}, errors.New("enrollment project is unavailable")
 		}
 	}
@@ -314,13 +325,17 @@ func (d *Database) redeemEnrollment(ctx context.Context, redeem RedeemEnrollment
 		return DeviceCredential{}, errors.New("enrollment redemption cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockGrantMutations(ctx, tx); err != nil {
+		return DeviceCredential{}, err
+	}
 	var storedCode []byte
 	var storedBinding, label, issuer string
 	var usable bool
 	var redemptionKey, principalID, lookupID, requiredLegacy sql.NullString
 	var credentialTTL sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT code_digest, client_binding::text, label, issuer_principal_id::text,
-expires_at > statement_timestamp(), redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, credential_ttl_seconds, legacy_principal_id::text
+expires_at > statement_timestamp() AND invalidated_at IS NULL,
+redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, credential_ttl_seconds, legacy_principal_id::text
 FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &usable, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
 	if err != nil || storedBinding != redeem.ClientBinding || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 || requiredLegacy.Valid != (legacyProof != nil) {
 		return DeviceCredential{}, ErrInvalidEnrollment
@@ -358,6 +373,10 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		}
 		return DeviceCredential{PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
 	}
+	projectIDs, allProjects, err := lockPendingEnrollmentGrantTargets(ctx, tx, redeem.EnrollmentID)
+	if err != nil {
+		return DeviceCredential{}, err
+	}
 	if ok, err := lockInstallationOwner(ctx, tx, issuer); err != nil || !ok {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
@@ -380,6 +399,16 @@ RETURNING expires_at`, lookup, principalID.String, label, secretDigest[:], nulla
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, project_id, capability)
 SELECT $2, scope, project_id, capability FROM auth.pending_enrollment_grants WHERE enrollment_id = $1 ORDER BY ordinal`, redeem.EnrollmentID, principalID.String); err != nil {
 		return DeviceCredential{}, errors.New("device grants could not be installed")
+	}
+	for _, projectID := range projectIDs {
+		if err := advanceGrantGenerations(ctx, tx, ScopeProject, projectID); err != nil {
+			return DeviceCredential{}, err
+		}
+	}
+	if allProjects {
+		if err := advanceGrantGenerations(ctx, tx, ScopeAllProjects, ""); err != nil {
+			return DeviceCredential{}, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE auth.pending_enrollments SET redeemed_at = statement_timestamp(), redemption_key = $2, redeemed_principal_id = $3, credential_lookup_id = $4 WHERE id = $1 AND redeemed_at IS NULL`, redeem.EnrollmentID, redeem.IdempotencyKey, principalID.String, lookup)
 	if err != nil {
@@ -668,7 +697,7 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
     SELECT id FROM auth.pending_enrollments
-	WHERE expires_at <= statement_timestamp()
+	WHERE expires_at <= statement_timestamp() OR invalidated_at IS NOT NULL
     ORDER BY expires_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates
@@ -677,6 +706,13 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 SELECT count(*) FROM deleted_enrollments`, limit).Scan(&pruned)
 	if err != nil {
 		return errors.New("expired enrollments could not be pruned")
+	}
+	return nil
+}
+
+func lockEnrollmentMutations(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, enrollmentMutationLockKey); err != nil {
+		return errors.New("enrollment mutation cannot be serialized")
 	}
 	return nil
 }

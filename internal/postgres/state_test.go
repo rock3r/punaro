@@ -66,10 +66,10 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 3 || manifest.MaxSupported != 3 || len(manifest.Migrations) != 3 {
-		t.Fatalf("manifest=%#v, want exact v3 compatibility window", manifest)
+	if manifest.MinSupported != 4 || manifest.MaxSupported != 4 || len(manifest.Migrations) != 4 {
+		t.Fatalf("manifest=%#v, want exact v4 compatibility window", manifest)
 	}
-	if manifest.Migrations[0].CompatibilityFloor != 1 || manifest.Migrations[1].CompatibilityFloor != 2 || manifest.Migrations[2].CompatibilityFloor != 3 {
-		t.Fatalf("migration floors=%d,%d,%d, want 1,2,3", manifest.Migrations[0].CompatibilityFloor, manifest.Migrations[1].CompatibilityFloor, manifest.Migrations[2].CompatibilityFloor)
+	if manifest.Migrations[0].CompatibilityFloor != 1 || manifest.Migrations[1].CompatibilityFloor != 2 || manifest.Migrations[2].CompatibilityFloor != 3 || manifest.Migrations[3].CompatibilityFloor != 4 {
+		t.Fatalf("migration floors=%d,%d,%d,%d, want 1,2,3,4", manifest.Migrations[0].CompatibilityFloor, manifest.Migrations[1].CompatibilityFloor, manifest.Migrations[2].CompatibilityFloor, manifest.Migrations[3].CompatibilityFloor)
 	}
 }

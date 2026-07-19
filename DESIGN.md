@@ -557,6 +557,28 @@ pending, migrated, or retired; the global legacy gate cannot close while any
 machine is pending. PostgreSQL remains dark for mail and SQLite routing is
 unchanged.
 
+The fourth dark foundation slice gives projects durable, credential-free
+identity claims. Conservative Git normalization strips credentials and only
+collapses well-known equivalent syntax; ambiguous locators fail closed.
+Unclaimed identities require both project write and explicit attach authority.
+A claimed identity can only be reconciled through an expiring, generation-bound
+preview followed by one bounded transaction that reauthorizes the same actor,
+locks both active project rows in deterministic order, and identifies every
+principal with any capability-level content-access expansion. Memberships are
+not unioned. Unredeemed enrollments targeting the retired project are included,
+with all of their collateral grants, in the preview impact and receive an
+explicit irreversible invalidation marker rather than silent retargeting.
+Nonterminal jobs are bounded merge records: queued jobs are rehomed, running
+leases are fenced and requeued, and the known typed payload is canonicalized in
+the same transaction. The retired project IDs and any older aliases are
+flattened directly to the active canonical project, but an alias supplies no
+authority by itself. Per-project
+identity, grant, alias-rewrite, preview, and pruning limits are hard bounds.
+Application-role mutation privileges are column-exact, and readiness verifies
+the new catalog objects, indexes, constraints, and grants. These primitives
+remain internal: no public identity or merge route is mounted, PostgreSQL mail
+authority remains dark, and SQLite routing is unchanged.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

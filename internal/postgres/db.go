@@ -186,6 +186,7 @@ FROM objects`, []string{"auth", "relay", "attachment", "brain", "jobs", "audit"}
 		return Snapshot{}, errors.New("PostgreSQL migration history cannot be inspected")
 	}
 	if len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 2 {
+		currentVersion := snapshot.Records[len(snapshot.Records)-1].Version
 		if err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT
@@ -254,8 +255,10 @@ SELECT
     AND NOT has_table_privilege('punaro_app', grants_oid, 'REFERENCES')
     AND NOT has_table_privilege('punaro_app', grants_oid, 'TRIGGER')
     AND has_table_privilege('punaro_app', projects_oid, 'SELECT')
-    AND has_table_privilege('punaro_app', projects_oid, 'INSERT')
-    AND has_table_privilege('punaro_app', projects_oid, 'UPDATE')
+    AND (($1 < 4 AND has_table_privilege('punaro_app', projects_oid, 'INSERT'))
+         OR ($1 >= 4 AND NOT has_table_privilege('punaro_app', projects_oid, 'INSERT')))
+    AND (($1 < 4 AND has_table_privilege('punaro_app', projects_oid, 'UPDATE'))
+         OR ($1 >= 4 AND NOT has_table_privilege('punaro_app', projects_oid, 'UPDATE')))
     AND NOT has_table_privilege('punaro_app', projects_oid, 'DELETE')
     AND NOT has_table_privilege('punaro_app', projects_oid, 'TRUNCATE')
     AND NOT has_table_privilege('punaro_app', projects_oid, 'REFERENCES')
@@ -296,11 +299,12 @@ SELECT
     AND NOT has_function_privilege('punaro_app', guard_oid, 'EXECUTE')
     AND has_function_privilege('punaro_app', audit_prune_oid, 'EXECUTE')
     AND has_function_privilege('punaro_app', jobs_prune_oid, 'EXECUTE')
-FROM objects, ownership, function_ownership`).Scan(&snapshot.CurrentObjectsPresent); err != nil {
+FROM objects, ownership, function_ownership`, currentVersion).Scan(&snapshot.CurrentObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL control-plane schema cannot be inspected")
 		}
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 3 {
+		currentVersion := snapshot.Records[len(snapshot.Records)-1].Version
 		var deviceObjectsPresent bool
 		if err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -359,7 +363,8 @@ SELECT
         SELECT 1 FROM pg_index
         WHERE indexrelid = enrollment_binding_oid AND indrelid = enrollments_oid
           AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '3'::int2vector
-          AND pg_get_expr(indpred, indrelid) = '(redeemed_at IS NULL)'
+          AND (($1 = 3 AND pg_get_expr(indpred, indrelid) = '(redeemed_at IS NULL)')
+               OR ($1 >= 4 AND pg_get_expr(indpred, indrelid) = '((redeemed_at IS NULL) AND (invalidated_at IS NULL))'))
     )
     AND EXISTS (
         SELECT 1 FROM pg_index
@@ -397,6 +402,17 @@ SELECT
         WHERE conrelid = enrollments_oid AND contype = 'c' AND conkey = ARRAY[10,11,12,13]::smallint[] AND convalidated
           AND pg_get_expr(conbin, conrelid) = '(((redeemed_at IS NULL) AND (redemption_key IS NULL) AND (redeemed_principal_id IS NULL) AND (credential_lookup_id IS NULL)) OR ((redeemed_at IS NOT NULL) AND (redemption_key IS NOT NULL) AND (redeemed_principal_id IS NOT NULL) AND (credential_lookup_id IS NOT NULL)))'
     )
+	AND (($1 = 3 AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = enrollments_oid AND attname = 'invalidated_at' AND NOT attisdropped))
+	     OR ($1 >= 4 AND EXISTS (
+	         SELECT 1 FROM pg_attribute WHERE attrelid = enrollments_oid AND attname = 'invalidated_at' AND NOT attisdropped
+	           AND NOT attnotnull AND atttypid = 'timestamptz'::regtype
+	     )))
+	AND (($1 = 3 AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND conname = 'pending_enrollments_invalidation_check'))
+	     OR ($1 >= 4 AND EXISTS (
+	         SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND conname = 'pending_enrollments_invalidation_check'
+	           AND contype = 'c' AND conkey = ARRAY[15,9]::smallint[] AND convalidated
+	           AND pg_get_expr(conbin, conrelid) = '((invalidated_at IS NULL) OR (invalidated_at >= created_at))'
+	     )))
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'p' AND conkey = ARRAY[1,2]::smallint[] AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = enrollments_oid AND confdeltype = 'c' AND convalidated)
     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'relay.projects'::regclass AND convalidated)
@@ -412,13 +428,15 @@ SELECT
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'audit.events'::regclass AND conname = 'events_action_check'
           AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated
-          AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text]))'
+          AND (($1 = 3 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text]))')
+            OR ($1 >= 4 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text, ''project.identity.attach''::text, ''project.merge.preview''::text, ''project.merge''::text]))'))
     )
     AND EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'audit.events'::regclass AND conname = 'events_target_kind_check'
           AND contype = 'c' AND conkey = ARRAY[7]::smallint[] AND convalidated
-          AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text]))'
+          AND (($1 = 3 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text]))')
+            OR ($1 >= 4 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text, ''project_identity''::text, ''project_merge''::text]))'))
     )
     AND has_table_privilege('punaro_app', owner_oid, 'SELECT')
     AND NOT has_table_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
@@ -430,6 +448,8 @@ SELECT
     AND has_column_privilege('punaro_app', enrollments_oid, 'redemption_key', 'UPDATE')
     AND has_column_privilege('punaro_app', enrollments_oid, 'redeemed_principal_id', 'UPDATE')
     AND has_column_privilege('punaro_app', enrollments_oid, 'credential_lookup_id', 'UPDATE')
+	AND (($1 = 3 AND NOT has_column_privilege('punaro_app', enrollments_oid, 'invalidated_at', 'UPDATE'))
+	     OR ($1 >= 4 AND has_column_privilege('punaro_app', enrollments_oid, 'invalidated_at', 'UPDATE')))
     AND NOT has_column_privilege('punaro_app', enrollments_oid, 'issuer_principal_id', 'UPDATE')
     AND NOT has_column_privilege('punaro_app', enrollments_oid, 'client_binding', 'UPDATE')
     AND NOT has_column_privilege('punaro_app', enrollments_oid, 'code_digest', 'UPDATE')
@@ -438,7 +458,7 @@ SELECT
     AND NOT EXISTS (
         SELECT 1 FROM pg_attribute
         WHERE attrelid = enrollments_oid AND attnum > 0 AND NOT attisdropped
-          AND attname <> ALL (ARRAY['redeemed_at', 'redemption_key', 'redeemed_principal_id', 'credential_lookup_id'])
+		  AND attname <> ALL (ARRAY['redeemed_at', 'redemption_key', 'redeemed_principal_id', 'credential_lookup_id', 'invalidated_at'])
           AND has_column_privilege('punaro_app', enrollments_oid, attname, 'UPDATE')
     )
     AND has_table_privilege('punaro_app', enrollment_grants_oid, 'SELECT')
@@ -476,10 +496,171 @@ SELECT
     AND has_table_privilege('punaro_app', legacy_machines_oid, 'SELECT')
     AND NOT has_table_privilege('punaro_app', legacy_machines_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
     AND NOT has_any_column_privilege('punaro_app', legacy_machines_oid, 'INSERT,UPDATE,REFERENCES')
-FROM objects, ownership`).Scan(&deviceObjectsPresent); err != nil {
+FROM objects, ownership`, currentVersion).Scan(&deviceObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL device-auth schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = deviceObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 4 {
+		var identityObjectsPresent bool
+		if err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT to_regclass('auth.project_acl_state') AS acl_state_oid,
+           to_regclass('relay.project_identities') AS identities_oid,
+           to_regclass('relay.project_lookup_aliases') AS aliases_oid,
+           to_regclass('relay.project_merge_previews') AS previews_oid,
+           to_regclass('relay.project_identities_project') AS identities_project_oid,
+           to_regclass('relay.project_lookup_aliases_canonical') AS aliases_canonical_oid,
+           to_regclass('relay.project_merge_previews_live_actor') AS previews_live_actor_oid,
+           to_regclass('relay.project_merge_previews_prune') AS previews_prune_oid,
+           to_regprocedure('auth.guard_pending_enrollment_invalidation()') AS enrollment_invalidation_guard_oid
+), ownership AS (
+    SELECT count(*) = 4 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
+    FROM pg_class, objects
+    WHERE oid = ANY(ARRAY[acl_state_oid, identities_oid, aliases_oid, previews_oid])
+)
+SELECT acl_state_oid IS NOT NULL AND identities_oid IS NOT NULL AND aliases_oid IS NOT NULL AND previews_oid IS NOT NULL
+    AND identities_project_oid IS NOT NULL AND aliases_canonical_oid IS NOT NULL
+	AND previews_live_actor_oid IS NOT NULL AND previews_prune_oid IS NOT NULL
+	AND enrollment_invalidation_guard_oid IS NOT NULL AND ownership.owned
+	AND COALESCE((
+	    SELECT pg_get_userbyid(proowner) = 'punaro_owner' AND NOT prosecdef
+	      AND prokind = 'f' AND provolatile = 'v' AND NOT proretset
+	      AND prorettype = 'trigger'::regtype AND pronargs = 0
+	      AND prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+	      AND COALESCE(proconfig = ARRAY['search_path=pg_catalog']::text[], false)
+	      AND md5(btrim(prosrc, E' \n\r\t')) = '56c6a353ea2c14eaaf72c9a6bada4a5d'
+	    FROM pg_proc WHERE oid = enrollment_invalidation_guard_oid
+	), false)
+	AND NOT has_function_privilege('punaro_app', enrollment_invalidation_guard_oid, 'EXECUTE')
+	AND NOT EXISTS (
+	    SELECT 1 FROM pg_proc AS routine
+	    CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl, acldefault('f', routine.proowner))) AS acl_entry
+	    WHERE routine.oid = enrollment_invalidation_guard_oid
+	      AND acl_entry.grantee <> routine.proowner
+	)
+	AND EXISTS (
+	    SELECT 1 FROM pg_trigger
+	    WHERE tgrelid = 'auth.pending_enrollments'::regclass
+	      AND tgname = 'pending_enrollment_invalidation_guard'
+	      AND tgfoid = enrollment_invalidation_guard_oid
+	      AND NOT tgisinternal AND tgenabled = 'O' AND tgtype = 19
+	      AND tgattr = '15'::int2vector AND tgqual IS NULL
+	)
+    AND (SELECT count(*) = 1 AND bool_and(singleton AND global_generation >= 0) FROM auth.project_acl_state)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = acl_state_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = acl_state_oid AND contype = 'c' AND conkey = ARRAY[1]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = 'singleton')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = acl_state_oid AND contype = 'c' AND conkey = ARRAY[2]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(global_generation >= 0)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND contype = 'u' AND conkey = ARRAY[3,4]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND contype = 'f' AND conkey = ARRAY[5]::smallint[] AND confrelid = 'auth.principals'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND contype = 'c' AND conkey = ARRAY[3]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(kind = ANY (ARRAY[''local_git''::text, ''git_remote''::text, ''operator_alias''::text, ''workspace''::text]))')
+    AND NOT EXISTS (
+        SELECT 1 FROM (VALUES
+            ('project_identities_locator_min_check', ARRAY[4]::smallint[], '(char_length(normalized_locator) >= 1)'),
+            ('project_identities_locator_max_check', ARRAY[4]::smallint[], '(char_length(normalized_locator) <= 2048)'),
+            ('project_identities_locator_bytes_check', ARRAY[4]::smallint[], '(octet_length(normalized_locator) <= 8192)'),
+            ('project_identities_locator_control_check', ARRAY[4]::smallint[], '(normalized_locator !~ ''[[:cntrl:]]''::text)')
+        ) AS expected(name, key, expression)
+        WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = identities_oid AND conname = expected.name AND contype = 'c' AND conkey = expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+    )
+    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = identities_project_oid AND indrelid = identities_oid AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 2 AND indkey = '2 1'::int2vector AND indexprs IS NULL AND indpred IS NULL)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = aliases_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = aliases_oid AND conname = 'project_lookup_aliases_alias_project_id_fkey' AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = aliases_oid AND conname = 'project_lookup_aliases_canonical_project_id_fkey' AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = aliases_oid AND contype = 'c' AND conkey = ARRAY[1,2]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(alias_project_id <> canonical_project_id)')
+    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = aliases_canonical_oid AND indrelid = aliases_oid AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 2 AND indkey = '2 1'::int2vector AND indexprs IS NULL AND indpred IS NULL)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND conname = 'project_merge_previews_actor_principal_id_fkey' AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND conname = 'project_merge_previews_source_project_id_fkey' AND contype = 'f' AND conkey = ARRAY[3]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND conname = 'project_merge_previews_canonical_project_id_fkey' AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND conname = 'project_merge_previews_identity_id_fkey' AND contype = 'f' AND conkey = ARRAY[5]::smallint[] AND confrelid = identities_oid AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND NOT EXISTS (
+        SELECT 1 FROM (VALUES
+            ('project_merge_previews_source_identity_generation_check', ARRAY[6]::smallint[], '(source_identity_generation >= 0)'),
+            ('project_merge_previews_source_acl_generation_check', ARRAY[7]::smallint[], '(source_acl_generation >= 0)'),
+            ('project_merge_previews_source_content_generation_check', ARRAY[8]::smallint[], '(source_content_generation >= 0)'),
+            ('project_merge_previews_canonical_identity_generation_check', ARRAY[9]::smallint[], '(canonical_identity_generation >= 0)'),
+            ('project_merge_previews_canonical_acl_generation_check', ARRAY[10]::smallint[], '(canonical_acl_generation >= 0)'),
+            ('project_merge_previews_canonical_content_generation_check', ARRAY[11]::smallint[], '(canonical_content_generation >= 0)'),
+            ('project_merge_previews_global_acl_generation_check', ARRAY[12]::smallint[], '(global_acl_generation >= 0)'),
+            ('project_merge_previews_identity_count_min_check', ARRAY[13]::smallint[], '(identity_count >= 1)'),
+            ('project_merge_previews_identity_count_max_check', ARRAY[13]::smallint[], '(identity_count <= 100)'),
+            ('project_merge_previews_grant_count_min_check', ARRAY[14]::smallint[], '(grant_count >= 0)'),
+            ('project_merge_previews_grant_count_max_check', ARRAY[14]::smallint[], '(grant_count <= 1000)'),
+            ('project_merge_previews_alias_count_min_check', ARRAY[15]::smallint[], '(alias_count >= 0)'),
+            ('project_merge_previews_alias_count_max_check', ARRAY[15]::smallint[], '(alias_count <= 1000)'),
+            ('project_merge_previews_new_principals_check', ARRAY[16]::smallint[], '(cardinality(newly_authorized_principal_ids) <= 256)'),
+            ('project_merge_previews_private_count_min_check', ARRAY[17]::smallint[], '(private_record_count >= 0)'),
+            ('project_merge_previews_private_count_max_check', ARRAY[17]::smallint[], '(private_record_count <= 1000)'),
+            ('project_merge_previews_conflict_count_min_check', ARRAY[18]::smallint[], '(conflict_count >= 0)'),
+            ('project_merge_previews_conflict_count_max_check', ARRAY[18]::smallint[], '(conflict_count <= 1000)'),
+            ('project_merge_previews_result_check', ARRAY[21]::smallint[], '((result IS NULL) OR (octet_length((result)::text) <= 4096))'),
+            ('project_merge_previews_distinct_projects_check', ARRAY[3,4]::smallint[], '(source_project_id <> canonical_project_id)'),
+            ('project_merge_previews_expiry_check', ARRAY[19,22]::smallint[], '(expires_at > created_at)'),
+            ('project_merge_previews_consumption_check', ARRAY[20,21]::smallint[], '(((consumed_at IS NULL) AND (result IS NULL)) OR ((consumed_at IS NOT NULL) AND (result IS NOT NULL)))'),
+			('project_merge_previews_pending_enrollment_count_min_check', ARRAY[23]::smallint[], '(pending_enrollment_count >= 0)'),
+			('project_merge_previews_pending_enrollment_count_max_check', ARRAY[23]::smallint[], '(pending_enrollment_count <= 1000)')
+        ) AS expected(name, key, expression)
+        WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = previews_oid AND conname = expected.name AND contype = 'c' AND conkey = expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+    )
+    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = previews_live_actor_oid AND indrelid = previews_oid AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 3 AND indkey = '2 19 1'::int2vector AND indexprs IS NULL AND pg_get_expr(indpred, indrelid) = '(consumed_at IS NULL)')
+    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = previews_prune_oid AND indrelid = previews_oid AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 2 AND indkey = '0 1'::int2vector AND pg_get_expr(indexprs, indrelid) = 'COALESCE(consumed_at, expires_at)' AND indpred IS NULL)
+    AND has_table_privilege('punaro_app', acl_state_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', acl_state_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND has_column_privilege('punaro_app', acl_state_oid, 'global_generation', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', acl_state_oid, 'singleton', 'UPDATE')
+    AND has_table_privilege('punaro_app', identities_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', identities_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', identities_oid, 'REFERENCES')
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = identities_oid AND attnum > 0 AND NOT attisdropped AND attname <> ALL (ARRAY['project_id','kind','normalized_locator','created_by']) AND has_column_privilege('punaro_app', identities_oid, attname, 'INSERT'))
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = identities_oid AND attnum > 0 AND NOT attisdropped AND attname <> 'project_id' AND has_column_privilege('punaro_app', identities_oid, attname, 'UPDATE'))
+    AND has_column_privilege('punaro_app', identities_oid, 'project_id', 'INSERT,UPDATE')
+    AND has_column_privilege('punaro_app', identities_oid, 'kind', 'INSERT')
+    AND has_column_privilege('punaro_app', identities_oid, 'normalized_locator', 'INSERT')
+    AND has_column_privilege('punaro_app', identities_oid, 'created_by', 'INSERT')
+    AND has_table_privilege('punaro_app', aliases_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', aliases_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND has_column_privilege('punaro_app', aliases_oid, 'alias_project_id', 'INSERT')
+    AND has_column_privilege('punaro_app', aliases_oid, 'canonical_project_id', 'INSERT,UPDATE')
+    AND NOT has_column_privilege('punaro_app', aliases_oid, 'alias_project_id', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', aliases_oid, 'created_at', 'INSERT,UPDATE')
+    AND has_table_privilege('punaro_app', previews_oid, 'SELECT,DELETE')
+    AND NOT has_table_privilege('punaro_app', previews_oid, 'INSERT,UPDATE,TRUNCATE,REFERENCES,TRIGGER')
+    AND has_column_privilege('punaro_app', previews_oid, 'consumed_at', 'UPDATE')
+    AND has_column_privilege('punaro_app', previews_oid, 'result', 'UPDATE')
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = previews_oid AND attnum > 0 AND NOT attisdropped AND attname <> ALL (ARRAY['consumed_at','result']) AND has_column_privilege('punaro_app', previews_oid, attname, 'UPDATE'))
+	AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = previews_oid AND attnum > 0 AND NOT attisdropped AND attname <> ALL (ARRAY['actor_principal_id','source_project_id','canonical_project_id','identity_id','source_identity_generation','source_acl_generation','source_content_generation','canonical_identity_generation','canonical_acl_generation','canonical_content_generation','global_acl_generation','identity_count','grant_count','alias_count','newly_authorized_principal_ids','expires_at','private_record_count','pending_enrollment_count']) AND has_column_privilege('punaro_app', previews_oid, attname, 'INSERT'))
+	AND (SELECT count(*) = 18 FROM pg_attribute WHERE attrelid = previews_oid AND attnum > 0 AND NOT attisdropped AND attname = ANY (ARRAY['actor_principal_id','source_project_id','canonical_project_id','identity_id','source_identity_generation','source_acl_generation','source_content_generation','canonical_identity_generation','canonical_acl_generation','canonical_content_generation','global_acl_generation','identity_count','grant_count','alias_count','newly_authorized_principal_ids','expires_at','private_record_count','pending_enrollment_count']) AND has_column_privilege('punaro_app', previews_oid, attname, 'INSERT'))
+    AND EXISTS (
+        SELECT 1 FROM pg_attribute AS attribute
+        JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+        WHERE attribute.attrelid = 'relay.projects'::regclass AND attribute.attname = 'identity_generation'
+          AND attribute.attnotnull AND attribute.atttypid = 'bigint'::regtype AND pg_get_expr(default_value.adbin, default_value.adrelid) = '0'
+    )
+    AND (SELECT count(*) = 3 FROM pg_attribute AS attribute JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum WHERE attribute.attrelid = 'relay.projects'::regclass AND attribute.attname = ANY (ARRAY['identity_generation','acl_generation','content_generation']) AND attribute.attnotnull AND attribute.atttypid = 'bigint'::regtype AND pg_get_expr(default_value.adbin, default_value.adrelid) = '0')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(identity_generation >= 0)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'c' AND conkey = ARRAY[6]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(acl_generation >= 0)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'c' AND conkey = ARRAY[7]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '(content_generation >= 0)')
+    AND NOT has_table_privilege('punaro_app', 'relay.projects', 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', 'relay.projects', 'INSERT')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'display_name', 'INSERT')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'created_by', 'INSERT')
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'relay.projects'::regclass AND attnum > 0 AND NOT attisdropped AND attname <> ALL (ARRAY['display_name','created_by']) AND has_column_privilege('punaro_app', 'relay.projects', attname, 'INSERT'))
+    AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'relay.projects'::regclass AND attnum > 0 AND NOT attisdropped AND attname <> ALL (ARRAY['identity_generation','acl_generation','content_generation','merged_into','merged_at']) AND has_column_privilege('punaro_app', 'relay.projects', attname, 'UPDATE'))
+    AND has_column_privilege('punaro_app', 'relay.projects', 'identity_generation', 'UPDATE')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'acl_generation', 'UPDATE')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'content_generation', 'UPDATE')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'merged_into', 'UPDATE')
+    AND has_column_privilege('punaro_app', 'relay.projects', 'merged_at', 'UPDATE')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'f' AND conkey = ARRAY[8]::smallint[] AND confrelid = 'relay.projects'::regclass AND confkey = ARRAY[1]::smallint[] AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's' AND NOT condeferrable AND NOT condeferred AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'c' AND conkey = ARRAY[8,9]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((merged_into IS NULL) = (merged_at IS NULL))')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'relay.projects'::regclass AND contype = 'c' AND conkey = ARRAY[8,1]::smallint[] AND convalidated AND pg_get_expr(conbin, conrelid) = '((merged_into IS NULL) OR (merged_into <> id))')
+FROM objects, ownership`).Scan(&identityObjectsPresent); err != nil {
+			return Snapshot{}, errors.New("PostgreSQL project-identity schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = identityObjectsPresent
 	}
 	return snapshot, nil
 }
