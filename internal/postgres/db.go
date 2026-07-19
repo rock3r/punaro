@@ -886,12 +886,12 @@ SELECT attachment_namespace_oid IS NOT NULL AND ready_oid IS NOT NULL AND fences
 	AND (SELECT count(*) = 4 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND convalidated)
 	AND NOT EXISTS (
 		SELECT 1 FROM (VALUES
-			(ARRAY[5,6]::smallint[], '(expires_at > acquired_at)'),
-			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR (((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200)) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
-			(ARRAY[7,8]::smallint[], '((released_at IS NULL) = (verified IS NULL))'),
-			(ARRAY[5,7]::smallint[], '((released_at IS NULL) OR (released_at >= acquired_at))')
-		) AS expected(key, expression)
-		WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND conkey @> expected.key AND conkey <@ expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+			(ARRAY[5,6]::smallint[], '(expires_at > acquired_at)', '(expires_at > acquired_at)'),
+			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR (((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200)) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))', '((snapshot_id IS NULL) OR ((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
+			(ARRAY[7,8]::smallint[], '((released_at IS NULL) = (verified IS NULL))', '((released_at IS NULL) = (verified IS NULL))'),
+			(ARRAY[5,7]::smallint[], '((released_at IS NULL) OR (released_at >= acquired_at))', '((released_at IS NULL) OR (released_at >= acquired_at))')
+		) AS expected(key, migration_expression, restored_expression)
+		WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND conkey @> expected.key AND conkey <@ expected.key AND convalidated AND pg_get_expr(conbin, conrelid) IN (expected.migration_expression, expected.restored_expression))
 	)
 	AND (SELECT count(*) = 2 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'c' AND convalidated)
 	AND NOT EXISTS (
