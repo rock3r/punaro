@@ -88,6 +88,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	close(errorsSeen)
 	for migrateErr := range errorsSeen {
 		if migrateErr != nil {
+			logControlPlaneCatalog(ctx, t, ownerDB)
 			t.Fatalf("concurrent migration failed: %v", migrateErr)
 		}
 	}
@@ -623,6 +624,45 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	pruned, err := app.PruneTerminalJobs(ctx, time.Now().Add(time.Hour), 1)
 	if err != nil || pruned != 1 {
 		t.Fatalf("pruned=%d err=%v", pruned, err)
+	}
+}
+
+func logControlPlaneCatalog(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `SELECT oid::regprocedure::text, pg_get_userbyid(proowner), prosecdef, proconfig::text, md5(btrim(prosrc))
+FROM pg_proc WHERE oid = ANY(ARRAY[
+    to_regprocedure('jobs.guard_outbox_capacity_and_state()'),
+    to_regprocedure('audit.prune_events(timestamp with time zone,integer)'),
+    to_regprocedure('jobs.prune_terminal(timestamp with time zone,integer)')
+]) ORDER BY oid::regprocedure::text`)
+	if err != nil {
+		t.Logf("control-plane function diagnostics unavailable: %v", err)
+	} else {
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var name, owner, config, hash string
+			var securityDefiner bool
+			if err := rows.Scan(&name, &owner, &securityDefiner, &config, &hash); err != nil {
+				t.Logf("control-plane function diagnostic malformed: %v", err)
+				break
+			}
+			t.Logf("control-plane function name=%s owner=%s security_definer=%t config=%v body_md5=%s", name, owner, securityDefiner, config, hash)
+		}
+	}
+	var indexKeys, indexExpression, indexPredicate string
+	var indexUnique, indexValid, indexReady bool
+	if err := db.QueryRowContext(ctx, `SELECT indkey::text, pg_get_expr(indexprs, indrelid), pg_get_expr(indpred, indrelid), indisunique, indisvalid, indisready
+FROM pg_index WHERE indexrelid = to_regclass('auth.capability_grants_active_unique')`).Scan(&indexKeys, &indexExpression, &indexPredicate, &indexUnique, &indexValid, &indexReady); err != nil {
+		t.Logf("control-plane index diagnostics unavailable: %v", err)
+	} else {
+		t.Logf("control-plane index keys=%s expression=%q predicate=%q unique=%t valid=%t ready=%t", indexKeys, indexExpression, indexPredicate, indexUnique, indexValid, indexReady)
+	}
+	var triggerType int
+	var triggerEnabled string
+	if err := db.QueryRowContext(ctx, `SELECT tgtype, tgenabled::text FROM pg_trigger WHERE tgrelid = to_regclass('jobs.outbox') AND tgname = 'outbox_capacity_and_state'`).Scan(&triggerType, &triggerEnabled); err != nil {
+		t.Logf("control-plane trigger diagnostics unavailable: %v", err)
+	} else {
+		t.Logf("control-plane trigger type=%d enabled=%s", triggerType, triggerEnabled)
 	}
 }
 
