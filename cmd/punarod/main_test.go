@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
 
@@ -58,3 +59,47 @@ func TestRunRejectsIncompatiblePostgresWithoutStartingServer(t *testing.T) {
 		t.Fatalf("ready=%t closed=%t stderr=%q", database.readyCalled, database.closed, stderr.String())
 	}
 }
+
+func TestRunDoesNotServePublicSocketWhenHealthBindFails(t *testing.T) {
+	originalListen := listenTCP
+	t.Cleanup(func() { listenTCP = originalListen })
+	tracked := &trackingListener{}
+	calls := 0
+	listenTCP = func(string, string) (net.Listener, error) {
+		calls++
+		if calls == 1 {
+			return tracked, nil
+		}
+		return nil, errors.New("health address occupied")
+	}
+	t.Setenv("PUNARO_LISTEN_ADDR", "127.0.0.1:18080")
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:18081")
+	var stderr bytes.Buffer
+	if code := run(nil, &stderr); code != 1 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if tracked.acceptCalled {
+		t.Fatal("public server began accepting before the health bind succeeded")
+	}
+	if !tracked.closed {
+		t.Fatal("public listener remained open after the health bind failed")
+	}
+}
+
+type trackingListener struct {
+	acceptCalled bool
+	closed       bool
+}
+
+func (l *trackingListener) Accept() (net.Conn, error) {
+	l.acceptCalled = true
+	return nil, errors.New("unexpected Accept call")
+}
+
+func (l *trackingListener) Close() error { l.closed = true; return nil }
+func (*trackingListener) Addr() net.Addr { return testAddr("127.0.0.1:18080") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "tcp" }
+func (a testAddr) String() string { return string(a) }

@@ -160,6 +160,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	publicURL := flags.String("public-url", "", "canonical HTTPS public URL")
 	trustedLAN := flags.String("trusted-lan-cidr", "", "private or link-local trusted LAN")
 	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials from the trusted LAN")
+	healthListen := flags.String("health-listen-addr", "127.0.0.1:8081", "distinct loopback-only health listener")
 	resume := flags.Bool("resume", false, "resume a durably staged initialization")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" {
 		return 2
@@ -192,7 +193,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		}
 		return createOwner(ctx, ownerFile, name)
 	}
-	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}}, bootstrap)
+	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}, HealthListenAddr: *healthListen}, bootstrap)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
 		return 1

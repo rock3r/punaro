@@ -17,13 +17,15 @@ Use Go for the current local smoke test:
 
 ```sh
 go run ./cmd/punarod
-curl --fail http://127.0.0.1:8080/healthz
+curl --fail http://127.0.0.1:8081/healthz
 ```
 
-The listener is deliberately restricted to a **literal** loopback IP.
+The legacy/application listener is deliberately restricted to a **literal**
+loopback IP unless the isolated M-5 device policy is enabled.
 `PUNARO_LISTEN_ADDR` must use `127.0.0.1:8080` or `[::1]:8080`; hostnames such
 as `localhost` are rejected until the daemon can verify their resolved address.
-A non-loopback address is a configuration error, even for health checks.
+Health and readiness use the distinct loopback-only
+`PUNARO_HEALTH_LISTEN_ADDR` (`127.0.0.1:8081` by default).
 
 Set `PUNARO_RELAY_ENABLED=true` plus a public
 `PUNARO_RELAY_MACHINES_JSON` enrollment set to enable the alpha relay; see the
@@ -556,7 +558,10 @@ punaro init ... --mode lan --listen-addr 192.168.50.4:8080 \
 A non-loopback trusted-LAN listener is valid only for the two bounded device
 routes added by M-5. Configuration fails closed if legacy relay, directory,
 permit, or attachment routes are enabled on that process. Those surfaces stay
-loopback-only until their separately reviewed public runtime milestone.
+loopback-only until their separately reviewed public runtime milestone. Health
+and readiness are mounted on the separate `127.0.0.1:8081` listener by default;
+override it only with `--health-listen-addr` naming another distinct concrete
+loopback address.
 
 Fresh initialization requires the application-role view to be pristine,
 migrates through the owner role, then reopens both roles and proves their
@@ -574,7 +579,8 @@ owner if it committed, or finishes bootstrap if it did not. Do not delete the
 staging directory or run a second bootstrap elsewhere while recovering.
 
 `punaro up --directory ...` rechecks the generated Compose file, protected
-paths, exact singleton-owner identity, and schema before invoking Compose. Status
+paths (including private installation-directory permissions), exact
+singleton-owner identity, and schema before invoking Compose. Status
 and doctor enforce the same owner binding. The generated file
 has no build context and accepts only the pinned image. It starts only a compatible schema;
 a pristine database after initialization is treated as data loss, an old schema

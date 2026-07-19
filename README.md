@@ -60,7 +60,7 @@ make operator-binary
 ```sh
 cp .env.example .env
 go run ./cmd/punarod --env-file .env
-curl http://127.0.0.1:8080/healthz
+curl http://127.0.0.1:8081/healthz
 ```
 
 The development container is a hardened build/run baseline:
@@ -97,6 +97,7 @@ precedence over dotenv values.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PUNARO_LISTEN_ADDR` | `127.0.0.1:8080` | Concrete HTTP listener. It remains loopback-only unless validated device ingress explicitly selects trusted-LAN mode. |
+| `PUNARO_HEALTH_LISTEN_ADDR` | `127.0.0.1:8081` | Distinct concrete loopback-only listener for `/healthz` and `/readyz`; health routes are never mounted on the device/legacy listener. |
 | `PUNARO_DATA_DIR` | `./data` | Relay SQLite state location when `PUNARO_RELAY_ENABLED=true`. |
 | `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |

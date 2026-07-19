@@ -18,6 +18,7 @@ import (
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
 	ListenAddr                  string
+	HealthListenAddr            string
 	DataDir                     string
 	LogLevel                    string
 	AttachmentsEnabled          bool
@@ -132,6 +133,10 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, fmt.Errorf("parse PUNARO_TRUSTED_LAN_HTTP: %w", err)
 	}
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
+	healthListenAddr := value("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:8081")
+	if !isLoopbackListener(healthListenAddr) || sameListener(listenAddr, healthListenAddr) {
+		return Config{}, fmt.Errorf("PUNARO_HEALTH_LISTEN_ADDR must be a distinct concrete loopback address")
+	}
 	// The legacy relay origin stays loopback-only. A non-loopback listener is
 	// admitted only when the complete device-ingress policy is validated below
 	// and no legacy route can share that listener.
@@ -238,7 +243,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {
@@ -263,12 +268,27 @@ func parsePositiveUint64(name, value string, maximum uint64) (uint64, error) {
 }
 
 func isLoopbackListener(address string) bool {
-	host, _, err := net.SplitHostPort(address)
+	ip, _, ok := listenerEndpoint(address)
+	return ok && ip.IsLoopback()
+}
+
+func sameListener(first, second string) bool {
+	firstIP, firstPort, firstOK := listenerEndpoint(first)
+	secondIP, secondPort, secondOK := listenerEndpoint(second)
+	return firstOK && secondOK && firstIP.Equal(secondIP) && firstPort == secondPort
+}
+
+func listenerEndpoint(address string) (net.IP, uint16, bool) {
+	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
-		return false
+		return nil, 0, false
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if ip == nil || err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
+		return nil, 0, false
+	}
+	return ip, uint16(port), true
 }
 
 func value(name, fallback string) string {

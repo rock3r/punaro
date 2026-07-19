@@ -603,6 +603,8 @@ here is limited to strict, bounded enrollment redemption and a
 bearer-authenticated session check. PostgreSQL remains dark for mail and
 project identity APIs. A non-loopback device listener cannot be combined with
 legacy relay, directory, permit, or attachment routes; those remain loopback-only.
+Health and readiness use a distinct concrete loopback-only listener and are
+never mounted on the device/legacy listener.
 
 ## Required adversarial acceptance tests
 

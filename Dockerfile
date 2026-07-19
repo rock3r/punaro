@@ -23,5 +23,5 @@ COPY --from=build /out/punaro-directory /usr/local/bin/punaro-directory
 COPY --from=build /out/punaro-telegram /usr/local/bin/punaro-telegram
 COPY --from=build /out/punaro-attachment /usr/local/bin/punaro-attachment
 USER nonroot:nonroot
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["/usr/local/bin/punarod"]

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,10 +22,11 @@ import (
 )
 
 const (
-	configName   = "installation.json"
-	pendingName  = ".installation.pending.json"
-	envName      = "punarod.env"
-	overrideName = "compose.operator.yaml"
+	configName              = "installation.json"
+	pendingName             = ".installation.pending.json"
+	envName                 = "punarod.env"
+	overrideName            = "compose.operator.yaml"
+	defaultHealthListenAddr = "127.0.0.1:8081"
 )
 
 // EnvFile returns the generated daemon dotenv path for one installation.
@@ -48,19 +50,21 @@ type Installation struct {
 	RuntimeUID       string         `json:"runtime_uid"`
 	RuntimeGID       string         `json:"runtime_gid"`
 	Ingress          ingress.Policy `json:"ingress"`
+	HealthListenAddr string         `json:"health_listen_addr"`
 	HealthURL        string         `json:"health_url"`
 }
 
 // InitOptions is the complete explicit input to a first installation.
 type InitOptions struct {
-	Directory    string
-	DataDir      string
-	BackupDir    string
-	Image        string
-	OwnerDSNFile string
-	AppDSNFile   string
-	OwnerName    string
-	Ingress      ingress.Policy
+	Directory        string
+	DataDir          string
+	BackupDir        string
+	Image            string
+	OwnerDSNFile     string
+	AppDSNFile       string
+	OwnerName        string
+	Ingress          ingress.Policy
+	HealthListenAddr string
 }
 
 // BootstrapOwner is the only database mutation performed by Init.
@@ -160,7 +164,7 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress}); err != nil {
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr}); err != nil {
 		return Installation{}, errors.New("initialization staging configuration is invalid")
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {
@@ -250,7 +254,14 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if err := policy.Validate(); err != nil {
 		return Installation{}, err
 	}
-	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthURL: localURL(policy.ListenAddr)}, nil
+	healthListenAddr := options.HealthListenAddr
+	if healthListenAddr == "" {
+		healthListenAddr = defaultHealthListenAddr
+	}
+	if !loopbackListener(healthListenAddr) || sameListener(policy.ListenAddr, healthListenAddr) {
+		return Installation{}, errors.New("health listener must be a distinct concrete loopback address")
+	}
+	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr)}, nil
 }
 
 // Load reads only a completely published installation marker.
@@ -258,8 +269,7 @@ func Load(directory string) (Installation, error) {
 	if !filepath.IsAbs(directory) {
 		return Installation{}, errors.New("installation directory must be absolute")
 	}
-	info, err := os.Lstat(directory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if err := requirePrivateDirectory(directory); err != nil {
 		return Installation{}, errors.New("installation directory is unavailable")
 	}
 	path := filepath.Join(directory, configName)
@@ -273,10 +283,11 @@ func Load(directory string) (Installation, error) {
 	if installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) {
 		return Installation{}, errors.New("published installation configuration is corrupt")
 	}
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress}); err != nil {
+	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
+	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
 	}
-	if installation.HealthURL != localURL(installation.Ingress.ListenAddr) {
+	if installation.HealthListenAddr != validated.HealthListenAddr || installation.HealthURL != validated.HealthURL {
 		return Installation{}, errors.New("published installation health URL is invalid")
 	}
 	installation.Directory = directory
@@ -356,6 +367,9 @@ func requireProtectedFile(path string, maximum int64) error {
 // CheckPaths returns actionable, content-free failures for installation paths.
 func CheckPaths(installation Installation) []string {
 	var failures []string
+	if err := requirePrivateDirectory(installation.Directory); err != nil {
+		failures = append(failures, "installation directory unavailable or unsafe")
+	}
 	if err := requirePrivateDirectory(installation.DataDir); err != nil {
 		failures = append(failures, "data directory unavailable or unsafe")
 	}
@@ -410,12 +424,37 @@ func localURL(listenAddr string) string {
 	return (&url.URL{Scheme: "http", Host: listenAddr}).String()
 }
 
+func loopbackListener(address string) bool {
+	ip, _, ok := listenerEndpoint(address)
+	return ok && ip.IsLoopback()
+}
+
+func sameListener(first, second string) bool {
+	firstIP, firstPort, firstOK := listenerEndpoint(first)
+	secondIP, secondPort, secondOK := listenerEndpoint(second)
+	return firstOK && secondOK && firstIP.Equal(secondIP) && firstPort == secondPort
+}
+
+func listenerEndpoint(address string) (net.IP, uint16, bool) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, 0, false
+	}
+	ip := net.ParseIP(host)
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if ip == nil || err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
+		return nil, 0, false
+	}
+	return ip, uint16(port), true
+}
+
 func daemonEnv(installation Installation) string {
 	return strings.Join([]string{
 		"PUNARO_IMAGE=" + installation.Image,
 		"PUNARO_HOST_DATA_DIR=" + installation.DataDir,
 		"PUNARO_DATA_DIR=/var/lib/punaro",
 		"PUNARO_LISTEN_ADDR=" + installation.Ingress.ListenAddr,
+		"PUNARO_HEALTH_LISTEN_ADDR=" + installation.HealthListenAddr,
 		"PUNARO_POSTGRES_ENABLED=true",
 		"PUNARO_POSTGRES_DSN_FILE=" + installation.AppDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
@@ -446,6 +485,7 @@ func composeOverride() string {
     environment:
       PUNARO_DATA_DIR: /var/lib/punaro
       PUNARO_LISTEN_ADDR: ${PUNARO_LISTEN_ADDR:?required}
+      PUNARO_HEALTH_LISTEN_ADDR: ${PUNARO_HEALTH_LISTEN_ADDR:?required}
       PUNARO_POSTGRES_ENABLED: ${PUNARO_POSTGRES_ENABLED:?required}
       PUNARO_POSTGRES_DSN_FILE: ${PUNARO_POSTGRES_DSN_FILE:?required}
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}

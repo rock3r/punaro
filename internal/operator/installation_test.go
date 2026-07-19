@@ -137,6 +137,57 @@ func TestLoadPreservesMissingPathDiagnosticsForDoctor(t *testing.T) {
 	}
 }
 
+func TestLoadAndCheckPathsRejectInstallationDirectoryPermissionDrift(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G302 -- the regression deliberately creates unsafe permission drift.
+	if err := os.Chmod(options.Directory, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(options.Directory); err == nil {
+		t.Fatal("Load accepted a group-writable installation directory")
+	}
+	if !containsFailure(CheckPaths(installation), "installation directory unavailable or unsafe") {
+		t.Fatalf("failures=%v", CheckPaths(installation))
+	}
+}
+
+func TestGeneratedConfigurationUsesDedicatedLoopbackHealthListener(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installation.HealthListenAddr != "127.0.0.1:8081" || installation.HealthURL != "http://127.0.0.1:8081" {
+		t.Fatalf("health listener=%q URL=%q", installation.HealthListenAddr, installation.HealthURL)
+	}
+	body, err := os.ReadFile(EnvFile(installation.Directory))
+	if err != nil || !strings.Contains(string(body), "PUNARO_HEALTH_LISTEN_ADDR=127.0.0.1:8081\n") {
+		t.Fatalf("env=%q err=%v", body, err)
+	}
+}
+
+func TestInitRejectsInvalidOrAliasingHealthListener(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:", "127.0.0.1:http", "127.0.0.1:65536", "127.0.0.1:08080"} {
+		t.Run(address, func(t *testing.T) {
+			options := validInitOptions(t)
+			options.HealthListenAddr = address
+			if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{}, nil
+			}); err == nil {
+				t.Fatalf("health listener accepted %q", address)
+			}
+		})
+	}
+}
+
 func TestInitRequiresDistinctRoleSecretFiles(t *testing.T) {
 	options := validInitOptions(t)
 	options.AppDSNFile = options.OwnerDSNFile

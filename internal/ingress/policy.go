@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -36,9 +37,13 @@ type Policy struct {
 
 // Validate rejects ambiguous, wildcard, and publicly routable boundaries.
 func (p *Policy) Validate() error {
-	host, _, err := net.SplitHostPort(p.ListenAddr)
+	host, portText, err := net.SplitHostPort(p.ListenAddr)
 	if err != nil {
 		return errors.New("ingress listen address must be a concrete IP and port")
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
+		return errors.New("ingress listen address must use a canonical nonzero numeric port")
 	}
 	bind := parseIP(host)
 	if bind == nil || bind.IsUnspecified() || bind.IsMulticast() {

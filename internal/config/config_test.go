@@ -111,6 +111,32 @@ func TestLoadAcceptsOnlyValidatedDeviceIngressProfiles(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresDistinctLoopbackHealthListener(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil || cfg.HealthListenAddr != "127.0.0.1:8081" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "192.168.50.4:8081")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted a non-loopback address")
+	}
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted the public listener address")
+	}
+	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:", "127.0.0.1:http", "127.0.0.1:65536"} {
+		t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", address)
+		if _, err := Load(""); err == nil {
+			t.Fatalf("health listener accepted invalid port in %q", address)
+		}
+	}
+	t.Setenv("PUNARO_LISTEN_ADDR", "127.0.0.1:8081")
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:08081")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted a zero-padded alias of the public listener")
+	}
+}
+
 func TestLoadRejectsLegacyRoutesOnNonLoopbackDeviceIngress(t *testing.T) {
 	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
 	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")

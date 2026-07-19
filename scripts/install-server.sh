@@ -285,4 +285,4 @@ fi
 printf '%s\n' 'Punaro relay files installed.' \
 	"Configuration: $config_file" \
 	'Use --machines-file /approved/public-machines.json --enable on a fresh host to configure and start in one command.' \
-	'Verify: curl --fail http://127.0.0.1:8080/readyz'
+	'Verify: curl --fail http://127.0.0.1:8081/readyz'
