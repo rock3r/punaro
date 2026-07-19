@@ -429,7 +429,7 @@ SELECT $1, 'operator_alias', 'identity-bound-' || value::text, $2 FROM generate_
 		t.Fatalf("combined identity bound error=%v", err)
 	}
 
-	aliasBoundSource := create("77777777-7777-4777-8777-777777777777", "alias bound source")
+	aliasBoundSource := create("77777777-7777-4777-8777-777777777779", "alias bound source")
 	aliasBoundCanonical := create("77777777-7777-4777-8777-777777777778", "alias bound canonical")
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_identities (project_id, kind, normalized_locator, created_by)
 VALUES ($1, 'local_git', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', $3),
