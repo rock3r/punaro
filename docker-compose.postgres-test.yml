@@ -23,7 +23,10 @@ services:
       context: .
       target: build
     command: ["go", "test", "-count=1", "-timeout", "4m", "./internal/postgres", "./cmd/punaro"]
+    user: "65532:65532"
     environment:
+      HOME: /tmp
+      GOCACHE: /tmp/punaro-go-build
       PUNARO_TEST_POSTGRES_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro?sslmode=disable
       PUNARO_TEST_POSTGRES_APP_DSN: postgres://punaro_app@postgres:5432/punaro?sslmode=disable
       PUNARO_TEST_POSTGRES_OTHER_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_other?sslmode=disable

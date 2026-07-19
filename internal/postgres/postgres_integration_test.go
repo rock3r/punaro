@@ -43,7 +43,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("pristine DSN pair proof failed: %v", err)
 	}
 	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
-		t.Fatalf("connection-bound pair migration state=%#v err=%v", state, err)
+		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN))
 	}
 	pairDB, err := open(ctx, pairOwnerDSN)
 	if err != nil {
@@ -442,6 +442,36 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
 	}
+}
+
+func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
+	db, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		return "open-failed"
+	}
+	defer func() { _ = db.Close() }()
+	queries := []string{
+		`SELECT format('constraint:%s:%s:%s', conrelid::regclass::text, conkey::text, pg_get_expr(conbin, conrelid)) FROM pg_constraint WHERE conrelid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) AND contype = 'c' ORDER BY conrelid::regclass::text, conkey::text`,
+		`SELECT format('column:%s:%s:%s:%s:%s', attrelid::regclass::text, attname, atttypid::regtype::text, atttypmod, COALESCE(pg_get_expr(adbin, adrelid),'')) FROM pg_attribute LEFT JOIN pg_attrdef ON adrelid=attrelid AND adnum=attnum WHERE attrelid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) AND attnum > 0 AND NOT attisdropped ORDER BY attrelid::regclass::text, attnum`,
+		`SELECT format('routine:%s:%s:%s:%s:%s:%s', oid::regprocedure::text, md5(btrim(prosrc)), provolatile, prosecdef, pg_get_function_result(oid), COALESCE(array_to_string(proconfig,','),'')) FROM pg_proc WHERE oid = ANY(ARRAY[to_regprocedure('jobs.acquire_backup_gc_fence(interval)'),to_regprocedure('jobs.bind_backup_snapshot(uuid,text)'),to_regprocedure('jobs.renew_backup_gc_fence(uuid,text,interval)'),to_regprocedure('jobs.cancel_unbound_backup_gc_fence(uuid)'),to_regprocedure('jobs.release_backup_gc_fence(uuid,text,boolean)'),to_regprocedure('jobs.physical_blob_gc_permitted()'),to_regprocedure('jobs.rotate_restored_timeline(uuid,uuid,uuid,bigint)')]) ORDER BY oid::regprocedure::text`,
+		`SELECT format('index:%s:%s:%s:%s:%s', indexrelid::regclass::text, indrelid::regclass::text, indkey::text, indisunique, pg_get_expr(indpred,indrelid)) FROM pg_index WHERE indexrelid=to_regclass('jobs.backup_gc_fences_active')`,
+	}
+	var diagnostic strings.Builder
+	for _, query := range queries {
+		rows, queryErr := db.QueryContext(ctx, query)
+		if queryErr != nil {
+			return "query-failed"
+		}
+		for rows.Next() {
+			var line string
+			if rows.Scan(&line) == nil && diagnostic.Len()+len(line) < 16<<10 {
+				diagnostic.WriteString(line)
+				diagnostic.WriteByte(';')
+			}
+		}
+		_ = rows.Close()
+	}
+	return diagnostic.String()
 }
 
 func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, ownerFile, appFile string) {
