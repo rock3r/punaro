@@ -178,9 +178,30 @@ func pgDumpSnapshot(ctx context.Context, dsnFile, snapshotID, destination string
 	if snapshotID == "" || !filepath.IsAbs(destination) {
 		return errors.New("database dump inputs are invalid")
 	}
-	return runPostgresTool(ctx, "pg_dump", dsnFile, func(connection string) []string {
-		return []string{"--no-password", "--dbname", connection, "--snapshot", snapshotID, "--format=custom", "--no-owner", "--exclude-table-data=jobs.backup_gc_fences", "--file", destination}
-	})
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- explicit private backup staging path.
+	if err != nil {
+		return errors.New("database dump destination cannot be reserved")
+	}
+	succeeded := false
+	defer func() {
+		_ = output.Close()
+		if !succeeded {
+			_ = os.Remove(destination)
+		}
+	}()
+	if err := runPostgresToolIO(ctx, "pg_dump", dsnFile, nil, output, func(connection string) []string {
+		return []string{"--no-password", "--dbname", connection, "--snapshot", snapshotID, "--format=custom", "--no-owner", "--exclude-table-data=jobs.backup_gc_fences"}
+	}); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return errors.New("database dump could not be made durable")
+	}
+	if err := output.Close(); err != nil {
+		return errors.New("database dump could not be closed")
+	}
+	succeeded = true
+	return nil
 }
 
 func pgRestoreDump(ctx context.Context, dsnFile string, dump io.Reader) error {
@@ -197,6 +218,10 @@ func runPostgresTool(ctx context.Context, executable, dsnFile string, arguments 
 }
 
 func runPostgresToolInput(ctx context.Context, executable, dsnFile string, input io.Reader, arguments func(string) []string) error {
+	return runPostgresToolIO(ctx, executable, dsnFile, input, nil, arguments)
+}
+
+func runPostgresToolIO(ctx context.Context, executable, dsnFile string, input io.Reader, output io.Writer, arguments func(string) []string) error {
 	dsn, err := punaropostgres.ReadDSNFile(dsnFile)
 	if err != nil {
 		return err
@@ -252,7 +277,10 @@ func runPostgresToolInput(ctx context.Context, executable, dsnFile string, input
 	command.Dir = filepath.Dir(dsnFile)
 	command.Env = postgresToolEnvironment(os.Environ(), passFile)
 	command.Stdin = input
-	command.Stdout = io.Discard
+	command.Stdout = output
+	if command.Stdout == nil {
+		command.Stdout = io.Discard
+	}
 	command.Stderr = io.Discard
 	err = command.Run()
 	if err != nil {

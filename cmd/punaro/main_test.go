@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -275,6 +276,37 @@ func TestPostgresToolNeverPlacesPasswordInArgumentsOrInheritedEnvironment(t *tes
 	}
 	if !strings.Contains(string(captured), "postgresql://punaro_owner@127.0.0.1:5432/punaro?sslmode=disable") {
 		t.Fatalf("sanitized connection was not passed: %q", captured)
+	}
+}
+
+func TestPostgresDumpUsesPrivatePreopenedOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	root := t.TempDir()
+	dsnFile := filepath.Join(root, "owner.dsn")
+	if err := os.WriteFile(dsnFile, []byte("postgresql://punaro_owner@127.0.0.1:5432/punaro?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "pg_dump")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'private-dump'\n"), 0o700); err != nil { // #nosec G306 -- executable test fixture.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root)
+	destination := filepath.Join(root, "database.dump")
+	if err := pgDumpSnapshot(context.Background(), dsnFile, "00000003-0000001B-999", destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("dump mode=%v", info.Mode().Perm())
+	}
+	body, err := os.ReadFile(destination) // #nosec G304 -- fixed test artifact path.
+	if err != nil || string(body) != "private-dump" {
+		t.Fatalf("dump=%q err=%v", body, err)
 	}
 }
 

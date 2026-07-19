@@ -550,7 +550,7 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.bind_backup_snapshot($1::uuid,$2)`, expiredToken, expiredSnapshot).Scan(&bound); err != nil || !bound {
 		t.Fatalf("bind expired-fence fixture=%t err=%v", bound, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.backup_gc_fences SET expires_at = statement_timestamp() - interval '1 second' WHERE fence_id = $1::uuid`, expiredToken); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.backup_gc_fences SET acquired_at = statement_timestamp() - interval '10 minutes', expires_at = statement_timestamp() - interval '1 second' WHERE fence_id = $1::uuid`, expiredToken); err != nil {
 		t.Fatal(err)
 	}
 	var released bool
