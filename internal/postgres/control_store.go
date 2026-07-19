@@ -144,6 +144,16 @@ func (d *Database) GrantCapability(ctx context.Context, actorPrincipalID string,
 	if err := lockGrantMutations(ctx, tx); err != nil {
 		return "", err
 	}
+	switch grant.Scope {
+	case ScopeProject:
+		if _, err := lockDirectActiveProject(ctx, tx, grant.ProjectID); err != nil {
+			return "", err
+		}
+	case ScopeAllProjects:
+		if err := lockGlobalProjectACL(ctx, tx); err != nil {
+			return "", err
+		}
+	}
 	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, grant.Scope, grant.ProjectID)
 	if err != nil {
 		return "", err
@@ -167,6 +177,9 @@ WHERE principal_id = $1 AND scope = $2 AND project_id IS NOT DISTINCT FROM $3::u
 		return "", errors.New("capability grant could not be created")
 	}
 	if inserted {
+		if err := advanceGrantGenerations(ctx, tx, grant.Scope, grant.ProjectID); err != nil {
+			return "", err
+		}
 		control := &ControlTx{tx: tx}
 		if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: grant.ProjectID, Action: AuditGrantCreate, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
 			return "", err
@@ -204,6 +217,16 @@ FROM auth.capability_grants WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan
 	if err != nil {
 		return errors.New("capability grant could not be locked")
 	}
+	switch scope {
+	case ScopeProject:
+		if _, err := lockDirectActiveProject(ctx, tx, projectID.String); err != nil {
+			return err
+		}
+	case ScopeAllProjects:
+		if err := lockGlobalProjectACL(ctx, tx); err != nil {
+			return err
+		}
+	}
 	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, scope, projectID.String)
 	if err != nil {
 		return err
@@ -217,6 +240,9 @@ FROM auth.capability_grants WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan
 	}
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return ErrNotFound
+	}
+	if err := advanceGrantGenerations(ctx, tx, scope, projectID.String); err != nil {
+		return err
 	}
 	control := &ControlTx{tx: tx}
 	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: projectID.String, Action: AuditGrantDelete, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
@@ -251,6 +277,40 @@ func lockGrantMutations(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+func lockGlobalProjectACL(ctx context.Context, tx *sql.Tx) error {
+	var singleton bool
+	if err := tx.QueryRowContext(ctx, `SELECT singleton FROM auth.project_acl_state WHERE singleton FOR UPDATE`).Scan(&singleton); err != nil || !singleton {
+		return errors.New("global project authorization could not be locked")
+	}
+	return nil
+}
+
+func advanceGrantGenerations(ctx context.Context, tx *sql.Tx, scope GrantScope, projectID string) error {
+	switch scope {
+	case ScopeProject:
+		result, err := tx.ExecContext(ctx, `UPDATE relay.projects SET acl_generation = acl_generation + 1, content_generation = content_generation + 1 WHERE id = $1 AND merged_into IS NULL`, projectID)
+		if err != nil {
+			return errors.New("project authorization generation could not advance")
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return ErrMergedProject
+		}
+	case ScopeAllProjects:
+		result, err := tx.ExecContext(ctx, `UPDATE auth.project_acl_state SET global_generation = global_generation + 1 WHERE singleton`)
+		if err != nil {
+			return errors.New("global project authorization generation could not advance")
+		}
+		if count, err := result.RowsAffected(); err != nil || count != 1 {
+			return errors.New("global project authorization generation is unavailable")
+		}
+	case ScopeInstallation:
+		return nil
+	default:
+		return errors.New("invalid grant generation scope")
+	}
+	return nil
+}
+
 func lockAllProjectsAdministration(ctx context.Context, tx *sql.Tx, actorPrincipalID string) (bool, error) {
 	var grantID string
 	err := tx.QueryRowContext(ctx, `SELECT capability_grant.id::text
@@ -278,12 +338,22 @@ func (d *Database) HasCapability(ctx context.Context, principalID, projectID str
 	if !known {
 		return false, errors.New("invalid authorization query")
 	}
-	if projectID == "" {
+	switch {
+	case projectID == "":
 		if allowedScopes&allowInstallation == 0 {
 			return false, errors.New("invalid authorization query")
 		}
-	} else if !validOpaqueID(projectID) || allowedScopes&(allowProject|allowAllProjects) == 0 {
+	case !validOpaqueID(projectID) || allowedScopes&(allowProject|allowAllProjects) == 0:
 		return false, errors.New("invalid authorization query")
+	default:
+		canonicalID, err := resolveCanonicalActiveProject(ctx, d.db, projectID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return false, nil
+			}
+			return false, err
+		}
+		projectID = canonicalID
 	}
 	return hasCapability(ctx, d.db, principalID, projectID, capability)
 }
@@ -297,7 +367,7 @@ WHERE principal.id = $1 AND principal.disabled_at IS NULL AND capability_grant.r
       ($2::uuid IS NULL AND capability_grant.scope = 'installation' AND capability_grant.project_id IS NULL)
       OR
       ($2::uuid IS NOT NULL
-       AND EXISTS (SELECT 1 FROM relay.projects WHERE id = $2)
+	       AND EXISTS (SELECT 1 FROM relay.projects WHERE id = $2 AND merged_into IS NULL)
        AND ((capability_grant.scope = 'project' AND capability_grant.project_id = $2) OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL)))
   )`
 
@@ -309,6 +379,24 @@ func hasCapability(ctx context.Context, q queryer, principalID, projectID string
 		return false, errors.New("authorization could not be evaluated")
 	}
 	return allowed, nil
+}
+
+func resolveCanonicalActiveProject(ctx context.Context, q queryer, projectID string) (string, error) {
+	var canonicalID string
+	err := q.QueryRowContext(ctx, `SELECT active.id::text
+FROM relay.projects AS requested
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id = requested.id
+JOIN relay.projects AS active ON active.id = COALESCE(alias.canonical_project_id, requested.id)
+WHERE requested.id = $1 AND active.merged_into IS NULL
+  AND ((requested.merged_into IS NULL AND alias.alias_project_id IS NULL)
+       OR (requested.merged_into = alias.canonical_project_id))`, projectID).Scan(&canonicalID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", errors.New("project lookup alias could not be resolved")
+	}
+	return canonicalID, nil
 }
 
 func lockCapability(ctx context.Context, tx *sql.Tx, principalID, projectID string, capability Capability) (bool, error) {

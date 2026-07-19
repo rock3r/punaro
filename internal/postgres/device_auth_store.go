@@ -163,6 +163,12 @@ func (a *Administration) BootstrapOwner(ctx context.Context, label string) (Prin
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, bootstrapLockKey); err != nil {
 		return Principal{}, errors.New("owner bootstrap cannot be serialized")
 	}
+	if err := lockGrantMutations(ctx, tx); err != nil {
+		return Principal{}, err
+	}
+	if err := lockGlobalProjectACL(ctx, tx); err != nil {
+		return Principal{}, err
+	}
 	var initialized bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.installation_owner)`).Scan(&initialized); err != nil {
 		return Principal{}, errors.New("owner state is unavailable")
@@ -180,6 +186,9 @@ func (a *Administration) BootstrapOwner(ctx context.Context, label string) (Prin
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, capability) VALUES
 ($1, 'installation', 'project.create'), ($1, 'all_projects', 'project.administer')`, owner.ID); err != nil {
 		return Principal{}, errors.New("owner authority could not be installed")
+	}
+	if err := advanceGrantGenerations(ctx, tx, ScopeAllProjects, ""); err != nil {
+		return Principal{}, err
 	}
 	control := &ControlTx{tx: tx}
 	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: owner.ID, Action: AuditOwnerBootstrap, Outcome: AuditSucceeded, TargetKind: AuditTargetPrincipal, TargetID: owner.ID}); err != nil {
@@ -237,7 +246,7 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	}
 	for _, projectID := range request.ProjectIDs {
 		var exists bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.projects WHERE id = $1)`, projectID).Scan(&exists); err != nil || !exists {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.projects WHERE id = $1 AND merged_into IS NULL)`, projectID).Scan(&exists); err != nil || !exists {
 			return PendingEnrollment{}, errors.New("enrollment project is unavailable")
 		}
 	}
@@ -358,6 +367,10 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		}
 		return DeviceCredential{PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
 	}
+	projectIDs, allProjects, err := lockPendingEnrollmentGrantTargets(ctx, tx, redeem.EnrollmentID)
+	if err != nil {
+		return DeviceCredential{}, err
+	}
 	if ok, err := lockInstallationOwner(ctx, tx, issuer); err != nil || !ok {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
@@ -380,6 +393,16 @@ RETURNING expires_at`, lookup, principalID.String, label, secretDigest[:], nulla
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, project_id, capability)
 SELECT $2, scope, project_id, capability FROM auth.pending_enrollment_grants WHERE enrollment_id = $1 ORDER BY ordinal`, redeem.EnrollmentID, principalID.String); err != nil {
 		return DeviceCredential{}, errors.New("device grants could not be installed")
+	}
+	for _, projectID := range projectIDs {
+		if err := advanceGrantGenerations(ctx, tx, ScopeProject, projectID); err != nil {
+			return DeviceCredential{}, err
+		}
+	}
+	if allProjects {
+		if err := advanceGrantGenerations(ctx, tx, ScopeAllProjects, ""); err != nil {
+			return DeviceCredential{}, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE auth.pending_enrollments SET redeemed_at = statement_timestamp(), redemption_key = $2, redeemed_principal_id = $3, credential_lookup_id = $4 WHERE id = $1 AND redeemed_at IS NULL`, redeem.EnrollmentID, redeem.IdempotencyKey, principalID.String, lookup)
 	if err != nil {
