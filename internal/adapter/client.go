@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -36,6 +38,17 @@ type HTTPRelayClient struct {
 	privateKey  ed25519.PrivateKey
 	httpClient  *http.Client
 	accessToken AccessServiceToken
+	access      *accessSession
+}
+
+// accessSession establishes and retains Cloudflare Access' short-lived
+// authorization cookie without ever replaying a signed relay request through
+// an Access redirect. It is used only for public, HTTPS relay origins.
+type accessSession struct {
+	baseURL *url.URL
+	client  *http.Client
+	token   AccessServiceToken
+	mu      sync.Mutex
 }
 
 type relayHTTPStatusError struct {
@@ -70,7 +83,91 @@ func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey,
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: client, accessToken: accessToken}, nil
+	clientCopy := *client
+	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, accessToken: accessToken}
+	if accessToken.ClientID != "" && !loopbackHost(baseURL.Hostname()) {
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return nil, fmt.Errorf("create Cloudflare Access cookie jar: %w", err)
+		}
+		result.httpClient.Jar = jar
+		result.access = &accessSession{baseURL: baseURL, client: result.httpClient, token: accessToken}
+	}
+	return result, nil
+}
+
+func (c *HTTPRelayClient) ensureAccessSession(ctx context.Context) error {
+	if c.access == nil {
+		return nil
+	}
+	return c.access.ensure(ctx)
+}
+
+func (a *accessSession) ensure(ctx context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if hasAccessAuthorizationCookie(a.client.Jar, a.baseURL) {
+		return nil
+	}
+
+	target := a.baseURL.ResolveReference(&url.URL{Path: "/.well-known/punaro-access-session"})
+	for hop := 0; hop < 3; hop++ {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+		if err != nil {
+			return fmt.Errorf("build Cloudflare Access session request: %w", err)
+		}
+		request.Header.Set("CF-Access-Client-Id", a.token.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", a.token.ClientSecret)
+		client := *a.client
+		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		response, err := client.Do(request)
+		if err != nil {
+			return fmt.Errorf("establish Cloudflare Access session: %w", err)
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+		_ = response.Body.Close()
+		if response.StatusCode < http.StatusMultipleChoices || response.StatusCode >= http.StatusBadRequest {
+			if hasAccessAuthorizationCookie(a.client.Jar, a.baseURL) {
+				return nil
+			}
+			return fmt.Errorf("cloudflare Access session response did not set an authorization cookie (HTTP %d)", response.StatusCode)
+		}
+		next, err := response.Location()
+		if err != nil {
+			return errors.New("cloudflare Access session redirect omitted a valid Location")
+		}
+		next = target.ResolveReference(next)
+		if next.Scheme != "https" || next.User != nil {
+			return errors.New("cloudflare Access session redirect is unsafe")
+		}
+		if hop == 0 {
+			if !cloudflareAccessHost(next.Hostname()) {
+				return errors.New("cloudflare Access session redirect leaves the trusted Access domain")
+			}
+		} else if !sameOrigin(next, a.baseURL) {
+			return errors.New("cloudflare Access session redirect does not return to the relay origin")
+		}
+		target = next
+	}
+	return errors.New("cloudflare Access session exceeded redirect limit")
+}
+
+func hasAccessAuthorizationCookie(jar http.CookieJar, relayURL *url.URL) bool {
+	for _, cookie := range jar.Cookies(relayURL) {
+		if strings.EqualFold(cookie.Name, "CF_Authorization") && cookie.Value != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func cloudflareAccessHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	return strings.HasSuffix(host, ".cloudflareaccess.com") && host != "cloudflareaccess.com"
+}
+
+func sameOrigin(left, right *url.URL) bool {
+	return left.Scheme == right.Scheme && strings.EqualFold(left.Host, right.Host)
 }
 
 // Advertise replaces the machine's current local endpoint attachment set.
@@ -179,6 +276,9 @@ func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachm
 	if err != nil {
 		return attachmentv2.Permit{}, fmt.Errorf("encode permit request: %w", err)
 	}
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return attachmentv2.Permit{}, err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return attachmentv2.Permit{}, err
@@ -262,6 +362,9 @@ func (c *HTTPRelayClient) DoV3Attachment(ctx context.Context, method, path strin
 	if err != nil || attachmentv3.VerifyAttachmentRoute(route, permit) != nil {
 		return nil, errors.New("invalid v3 attachment route")
 	}
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return nil, err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return nil, err
@@ -315,6 +418,9 @@ func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string,
 	if c == nil || maximum <= 0 || len(body) == 0 || path == "" || contentType != "application/cbor" {
 		return nil, errors.New("invalid signed CBOR request")
 	}
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return nil, err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return nil, err
@@ -359,6 +465,9 @@ func (c *HTTPRelayClient) doSignedCBOR(ctx context.Context, method, path string,
 // policy: directory membership and public-key metadata are not public relay
 // content. Callers must still root-verify the returned snapshot before use.
 func (c *HTTPRelayClient) FetchDirectorySnapshot(ctx context.Context) (attachmentv2.DirectorySnapshot, error) {
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return attachmentv2.DirectorySnapshot{}, err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return attachmentv2.DirectorySnapshot{}, err
@@ -405,6 +514,9 @@ func (c *HTTPRelayClient) FetchDirectorySnapshot(ctx context.Context) (attachmen
 // the connection ends. Durable polling remains authoritative.
 func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(relay.WakeEvent)) error {
 	path := "/v1/notifications"
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return err
@@ -428,6 +540,7 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
 	}
+	c.addAccessCookies(headers)
 	connection, response, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
 	if response != nil && response.Body != nil {
 		defer func() { _ = response.Body.Close() }()
@@ -452,11 +565,23 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 	}
 }
 
+func (c *HTTPRelayClient) addAccessCookies(headers http.Header) {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
+		return
+	}
+	for _, cookie := range c.httpClient.Jar.Cookies(c.baseURL) {
+		headers.Add("Cookie", cookie.Name+"="+cookie.Value)
+	}
+}
+
 func (c *HTTPRelayClient) doJSON(ctx context.Context, method, path string, requestValue, responseValue any) (int, error) {
 	return c.doJSONWithIdempotency(ctx, method, path, requestValue, "", responseValue)
 }
 
 func (c *HTTPRelayClient) doJSONWithIdempotency(ctx context.Context, method, path string, requestValue any, idempotencyKey string, responseValue any) (int, error) {
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return 0, err
+	}
 	body, err := json.Marshal(requestValue)
 	if err != nil {
 		return 0, fmt.Errorf("encode relay request: %w", err)
