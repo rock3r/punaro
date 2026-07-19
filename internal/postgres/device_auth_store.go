@@ -657,7 +657,7 @@ func lockInstallationOwner(ctx context.Context, tx *sql.Tx, principalID string) 
 	err := tx.QueryRowContext(ctx, `SELECT owner.principal_id::text FROM auth.installation_owner AS owner
 JOIN auth.principals AS principal ON principal.id = owner.principal_id
 WHERE owner.singleton AND owner.principal_id = $1 AND principal.disabled_at IS NULL
-FOR SHARE OF owner, principal`, principalID).Scan(&locked)
+FOR SHARE OF principal`, principalID).Scan(&locked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
