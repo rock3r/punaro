@@ -135,6 +135,9 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 
 	reciprocalA := create("77777777-7777-4777-8777-777777777769", "reciprocal merge A")
 	reciprocalB := create("77777777-7777-4777-8777-777777777770", "reciprocal merge B")
+	for _, projectID := range []string{reciprocalA.ProjectID, reciprocalB.ProjectID} {
+		grantFixture(actor.ID, projectID, CapabilityProjectAttachUnclaimed)
+	}
 	if _, err := app.AttachProjectIdentity(ctx, ProjectIdentityAttachRequest{ActorPrincipalID: actor.ID, ProjectID: reciprocalA.ProjectID, IdempotencyKey: "88888888-8888-4888-8888-888888888878", Kind: ProjectIdentityGitRemote, Locator: "https://reciprocal.example/Owner/A.git"}); err != nil {
 		t.Fatal(err)
 	}
@@ -330,6 +333,7 @@ WHERE id = $1`, preview.PreviewID, maxLiveProjectPreviewsActor-liveActorPreviews
 	}
 
 	destination := create("77777777-7777-4777-8777-777777777774", "second canonical")
+	grantFixture(actor.ID, destination.ProjectID, CapabilityProjectAttachUnclaimed)
 	destinationOnly, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "second canonical member")
 	if err != nil {
 		t.Fatal(err)
