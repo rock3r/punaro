@@ -126,7 +126,7 @@ type DeviceCredential struct {
 	LookupID    string    `json:"lookup_id"`
 	Encoded     string    `json:"credential"`
 	Generation  int64     `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
 }
 
 // AuthenticatedDevice is the generation fence carried by caches and sessions.
@@ -143,10 +143,10 @@ type DeviceCredentialMetadata struct {
 	Label       string    `json:"label"`
 	Generation  int64     `json:"generation"`
 	CreatedAt   time.Time `json:"created_at"`
-	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
-	RotatedAt   time.Time `json:"rotated_at,omitempty"`
-	RevokedAt   time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt  time.Time `json:"last_used_at,omitzero"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
+	RotatedAt   time.Time `json:"rotated_at,omitzero"`
+	RevokedAt   time.Time `json:"revoked_at,omitzero"`
 }
 
 // RedeemEnrollment binds a one-time code to the exact approved client.

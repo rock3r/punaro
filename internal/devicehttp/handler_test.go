@@ -15,9 +15,10 @@ import (
 )
 
 type fakeStore struct {
-	redeem punaropostgres.RedeemEnrollment
-	auth   punaropostgres.AuthenticatedDevice
-	err    error
+	redeem     punaropostgres.RedeemEnrollment
+	credential punaropostgres.DeviceCredential
+	auth       punaropostgres.AuthenticatedDevice
+	err        error
 }
 
 type blockingStore struct{ started chan struct{} }
@@ -38,6 +39,9 @@ func (f *fakeStore) RedeemEnrollment(_ context.Context, redeem punaropostgres.Re
 	f.redeem = redeem
 	if f.err != nil {
 		return punaropostgres.DeviceCredential{}, f.err
+	}
+	if f.credential.Encoded != "" {
+		return f.credential, nil
 	}
 	return punaropostgres.DeviceCredential{Encoded: "punaro_device_credential"}, nil
 }
@@ -67,8 +71,18 @@ func TestRedeemEnrollmentUsesStrictBoundedRequest(t *testing.T) {
 	req.RemoteAddr = "192.168.1.20:1234"
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)
-	if response.Code != http.StatusCreated || store.redeem.EnrollmentID == "" || !strings.Contains(response.Body.String(), "credential") {
+	if response.Code != http.StatusCreated || store.redeem.EnrollmentID == "" || !strings.Contains(response.Body.String(), "credential") || strings.Contains(response.Body.String(), "expires_at") || strings.Contains(response.Body.String(), "0001-01-01") {
 		t.Fatalf("status=%d body=%q redeem=%#v", response.Code, response.Body.String(), store.redeem)
+	}
+	expiresAt := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	store.credential = punaropostgres.DeviceCredential{Encoded: "expiring_credential", ExpiresAt: expiresAt}
+	expiring := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/enrollments/redeem", strings.NewReader(body))
+	expiring.Header.Set("Content-Type", "application/json")
+	expiring.RemoteAddr = "192.168.1.20:1234"
+	expiringResponse := httptest.NewRecorder()
+	handler.ServeHTTP(expiringResponse, expiring)
+	if expiringResponse.Code != http.StatusCreated || !strings.Contains(expiringResponse.Body.String(), `"expires_at":"2030-01-02T03:04:05Z"`) {
+		t.Fatalf("expiring status=%d body=%q", expiringResponse.Code, expiringResponse.Body.String())
 	}
 
 	badBodies := []struct {
