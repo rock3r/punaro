@@ -22,6 +22,8 @@ import (
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
+	"github.com/rock3r/punaro/internal/devicehttp"
+	"github.com/rock3r/punaro/internal/ingress"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -34,6 +36,11 @@ const (
 type platformDatabase interface {
 	Ready(context.Context) error
 	Close() error
+}
+
+type deviceDatabase interface {
+	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
+	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
 }
 
 var openPlatformDatabase = func(ctx context.Context, cfg punaropostgres.Config) (platformDatabase, error) {
@@ -128,6 +135,21 @@ func run(args []string, stderr io.Writer) int {
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}\n`))
 	})
+	if cfg.DeviceAuthEnabled {
+		database, ok := platformDB.(deviceDatabase)
+		if !ok {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL device store is unavailable")
+			return 2
+		}
+		policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
+		if err := policy.Validate(); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: invalid transport policy")
+			return 2
+		}
+		deviceHandler := devicehttp.New(database, policy)
+		mux.Handle("/v1/enrollments/redeem", deviceHandler)
+		mux.Handle("/v1/device/session", deviceHandler)
+	}
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
 	}

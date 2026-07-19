@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/rock3r/punaro/internal/ingress"
 )
 
 // Config is the explicit environment-derived daemon configuration.
@@ -44,6 +46,11 @@ type Config struct {
 	AccessJWKSFile              string
 	PostgresEnabled             bool
 	PostgresDSNFile             string
+	DeviceAuthEnabled           bool
+	IngressMode                 string
+	PublicURL                   string
+	TrustedLANCIDR              string
+	TrustedLANHTTP              bool
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -113,12 +120,33 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, fmt.Errorf("parse PUNARO_POSTGRES_ENABLED: %w", err)
 	}
 	postgresDSNFile := value("PUNARO_POSTGRES_DSN_FILE", "")
+	deviceAuthEnabled, err := strconv.ParseBool(value("PUNARO_DEVICE_AUTH_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_DEVICE_AUTH_ENABLED: %w", err)
+	}
+	ingressMode := value("PUNARO_INGRESS_MODE", "")
+	publicURL := value("PUNARO_PUBLIC_URL", "")
+	trustedLANCIDR := value("PUNARO_TRUSTED_LAN_CIDR", "")
+	trustedLANHTTP, err := strconv.ParseBool(value("PUNARO_TRUSTED_LAN_HTTP", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_TRUSTED_LAN_HTTP: %w", err)
+	}
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
-	// The relay origin stays loopback-only even when Cloudflare Access protects
-	// the public hostname. This prevents an operator from accidentally creating
-	// a direct-origin path that could bypass the Access and tunnel boundary.
-	if !isLoopbackListener(listenAddr) {
+	// The legacy relay origin stays loopback-only. A non-loopback listener is
+	// admitted only by the complete device-ingress policy validated below.
+	if !deviceAuthEnabled && !isLoopbackListener(listenAddr) {
 		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
+	}
+	if deviceAuthEnabled {
+		if !postgresEnabled {
+			return Config{}, fmt.Errorf("device authentication requires PUNARO_POSTGRES_ENABLED")
+		}
+		policy := ingress.Policy{Mode: ingress.Mode(ingressMode), ListenAddr: listenAddr, PublicURL: publicURL, TrustedLAN: trustedLANCIDR, AllowPlaintext: trustedLANHTTP}
+		if err := policy.Validate(); err != nil {
+			return Config{}, fmt.Errorf("device ingress policy: %w", err)
+		}
+	} else if ingressMode != "" || publicURL != "" || trustedLANCIDR != "" || trustedLANHTTP {
+		return Config{}, fmt.Errorf("ingress policy requires PUNARO_DEVICE_AUTH_ENABLED")
 	}
 	if attachmentsEnabled && (deviceKeys == "" || membership == "") {
 		return Config{}, fmt.Errorf("attachments require PUNARO_ATTACHMENT_DEVICE_KEYS_JSON and PUNARO_ATTACHMENT_MEMBERSHIP_JSON")
@@ -208,7 +236,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile}, nil
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

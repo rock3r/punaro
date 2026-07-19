@@ -37,9 +37,11 @@ optional worker load. PostgreSQL and blob services are private and never
 host-published by the reference deployment.
 
 Ordinary `punarod` startup and raw `docker compose up` never apply migrations.
-The supported `punaro up` wrapper may initialize a pristine schema or start an
-already compatible one. Every required upgrade migration goes through the
-operator update transaction with its declared backup and rollback boundary.
+The supported wrapper initializes a pristine schema only inside the durable
+`punaro init` ownership transaction. After publication, `punaro up` starts only
+an already-compatible schema; pristine state is a reset/data-loss fence. Every
+required upgrade migration goes through the operator update transaction with
+its declared backup and rollback boundary.
 
 ## Narrow store interfaces
 
@@ -128,6 +130,15 @@ can consume only the fixed redemption columns, insert a credential with its
 server-constrained defaults, and coalesce `last_used_at`; it cannot rotate or
 revoke credentials. Host-local administration uses a direct `punaro_owner`
 connection and is not exposed as an HTTP route.
+
+M-5 mounts only `POST /v1/enrollments/redeem` and authenticated
+`GET /v1/device/session`. Redemption requires exact `application/json`, a
+bounded object with four unique string fields, and the store's exact enrollment
+binding. Device bearer failures are uniform and content-free. A fixed
+concurrency ceiling and per-operation database deadline bound public work.
+Both routes admit credentials only over TLS, same-host loopback, or the
+explicitly configured trusted-LAN HTTP exception. `X-Forwarded-For` and
+`X-Forwarded-Proto` are never transport evidence.
 
 The `trusted-agent` template contains installation `project.create`; selected
 or explicit dynamic-all project discover/read/write and attach-unclaimed;

@@ -53,6 +53,18 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := admin.BootstrapOwner(ctx, "second owner"); !errors.Is(err, ErrAlreadyInitialized) {
 		t.Fatalf("second bootstrap error=%v", err)
 	}
+	recoveredOwner, err := admin.InstallationOwner(ctx)
+	if err != nil || recoveredOwner.ID != owner.ID || recoveredOwner.DisplayName != owner.DisplayName {
+		t.Fatalf("recovered owner=%#v err=%v", recoveredOwner, err)
+	}
+	appInstallation, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminInstallation, err := admin.InstallationState(ctx)
+	if err != nil || appInstallation.InstallationID != adminInstallation.InstallationID || appInstallation.TimelineID != adminInstallation.TimelineID {
+		t.Fatalf("app installation=%#v admin installation=%#v err=%v", appInstallation, adminInstallation, err)
+	}
 
 	project, err := app.CreateProject(ctx, ProjectCreate{PrincipalID: owner.ID, IdempotencyKey: uuid.NewString(), DisplayName: "enrollment project"})
 	if err != nil {

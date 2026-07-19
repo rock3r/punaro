@@ -1,4 +1,10 @@
-.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
+.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary
+
+PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
+
+operator-binary:
+	mkdir -p "$$(dirname "$(PUNARO_OPERATOR_OUTPUT)")"
+	go build -trimpath -o "$(PUNARO_OPERATOR_OUTPUT)" ./cmd/punaro
 
 test:
 	go test -covermode=atomic ./...

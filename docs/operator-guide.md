@@ -423,7 +423,7 @@ create or repair schema objects. A pristine, dirty, upgrade-required, newer, or
 incompatible schema makes startup fail with a content-free classification. Do
 not grant DDL to `punaro_app` to bypass that refusal.
 
-M-1 through M-3 expose the schema-owner action directly for controlled development and
+M-1 through M-5 expose the schema-owner action directly for controlled development and
 integration use:
 
 ```sh
@@ -457,8 +457,8 @@ update procedure. The digest-pinned `make test-postgres` stack is ephemeral
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 3. Versions 1 and 2 are reported as
-`upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
+The current binary requires schema version 4. Versions 1 through 3 are reported
+as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
 additive and creates the host-local ownership, pending enrollment, device
 credential, cache/session generation, and Ed25519 migration-inventory records.
 There is still no relay cutover, backup, or production update wrapper. Do not
@@ -488,10 +488,10 @@ punaro-admin client add -owner-dsn-file /absolute/private/owner.dsn \
   -project PROJECT_UUID
 ```
 
-The confirmed run returns one enrollment ID and code. M-3 deliberately mounts
-no public bootstrap, issuance, redemption, or device-auth route; the bounded
-store redemption primitive is staged and tested for the later ingress
-milestone. It binds the code to the opaque client value, generates the 256-bit
+The confirmed run returns one enrollment ID and code. M-5 mounts bounded
+redemption and device-session authentication under the transport policy below;
+ownership and issuance remain host-local. Redemption binds the code to the
+opaque client value, generates the 256-bit
 credential secret by domain-separated derivation from the internally generated
 256-bit code, and stores only an indexed SHA-256 digest. An exact retry with the
 same code, client binding, and idempotency UUID returns the same result without
@@ -513,6 +513,94 @@ and other processes/sessions force reauthentication within the documented
 two-second bound. Existing Ed25519 relay authentication remains active in this
 slice; its PostgreSQL inventory and disable gate stage the later explicit
 cutover and do not silently change current SQLite routing.
+
+Migration 4 adds project identities, aliases, generation-bound merge previews,
+and bounded reconciliation records. M-5 adds no schema migration and does not
+rewrite or remove any M-1 through M-4 record during rollback.
+
+### Operator wrapper and device ingress
+
+`punaro init` is the supported first-install path for the staged PostgreSQL
+platform. Create separate private data and backup directories and separate
+`0600` DSN files for `punaro_owner` and `punaro_app`. Build the host wrapper
+with `make operator-binary`; do not run it inside the daemon container. Supply
+only the reviewed release image by immutable registry digest. Run init as the
+non-root Unix account that owns the private paths; root is rejected and the
+same numeric identity runs the container. Data and backup must resolve to
+non-overlapping locations. Neither DSN nor the installation directory may
+resolve beneath the daemon-writable data directory, including through a
+symlinked ancestor:
+
+```sh
+punaro init \
+  --directory /absolute/private/punaro-installation \
+  --data-dir /absolute/private/punaro-data \
+  --backup-dir /absolute/private/punaro-backups \
+  --image registry.example/punaro@sha256:REVIEWED_DIGEST \
+  --owner-dsn-file /absolute/private/owner.dsn \
+  --app-dsn-file /absolute/private/app.dsn \
+  --owner-name "local owner" \
+  --mode internet \
+  --public-url https://punaro.example
+```
+
+Proxy mode has the same HTTPS and loopback-origin requirements. Trusted-LAN
+plaintext is deliberately noisy and must name both a concrete private or
+link-local bind and the containing CIDR:
+
+```sh
+punaro init ... --mode lan --listen-addr 192.168.50.4:8080 \
+  --trusted-lan-cidr 192.168.50.0/24 --allow-lan-http
+```
+
+Fresh initialization requires the application-role view to be pristine,
+migrates through the owner role, then reopens both roles and proves their
+installation and timeline IDs match before creating the owner. It publishes
+the generated configuration last. If the process reports
+an uncertain owner outcome or publication failure, preserve the staging
+directory and run only:
+
+```sh
+punaro init --resume --directory /absolute/private/punaro-installation
+```
+
+Resume verifies the staged files and exact owner label, adopts the singleton
+owner if it committed, or finishes bootstrap if it did not. Do not delete the
+staging directory or run a second bootstrap elsewhere while recovering.
+
+`punaro up --directory ...` rechecks the generated Compose file, protected
+paths, exact singleton-owner identity, and schema before invoking Compose. Status
+and doctor enforce the same owner binding. The generated file
+has no build context and accepts only the pinned image. It starts only a compatible schema;
+a pristine database after initialization is treated as data loss, an old schema
+directs the operator to `punaro update`, and dirty/newer/incompatible state
+requires recovery. It waits up to 30 seconds for readiness and then runs the
+same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
+
+Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
+--directory ...` for a failing health gate. Reports contain only capability and
+content-free path/schema/health states. The generated M-5 server Compose file
+still uses an externally provisioned PostgreSQL service; the bundled production
+PostgreSQL/profile shape arrives in M-23.
+
+Create a client in two exact steps. The first prints the effective grants and
+preview hash without touching the database. The confirmed invocation must
+repeat the same grant flags and bind the prior hash:
+
+```sh
+punaro client add --directory /absolute/private/punaro-installation \
+  --name laptop --project PROJECT_UUID
+punaro client add --directory /absolute/private/punaro-installation \
+  --name laptop --project PROJECT_UUID --yes \
+  --confirm-preview-hash HASH_FROM_THE_PRIOR_OUTPUT
+```
+
+The second response contains the generated client binding, enrollment ID, and
+single-use code. Send the exact four-field JSON object to
+`POST /v1/enrollments/redeem`; retain the returned bearer credential only in
+protected client storage. `GET /v1/device/session` is the bounded authentication
+check. Forwarded headers never qualify a direct request for TLS or trusted-LAN
+admission.
 
 ## Operations and incident response
 
