@@ -2,11 +2,15 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
@@ -38,6 +42,37 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("application migrator attempt mutated state=%#v err=%v", state, err)
 	}
 	_ = app.Close()
+	ownerDB, err := open(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerDB.Close() }()
+	current := CurrentManifest()
+	v1Manifest := Manifest{MinSupported: 1, MaxSupported: 1, Migrations: append([]Migration(nil), current.Migrations[:1]...)}
+	if state, err := migrate(ctx, ownerDB, v1Manifest); err != nil || state.Classification != Compatible || state.Version != 1 {
+		t.Fatalf("v1 bootstrap state=%#v err=%v", state, err)
+	}
+	app, err = OpenApplication(ctx, Config{DSNFile: appFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = app.SchemaState(ctx)
+	if err != nil || state.Classification != UpgradeRequired || state.Version != 1 {
+		t.Fatalf("intact v1 state=%#v err=%v, want upgrade_required", state, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE jobs.server_state RENAME TO server_state_missing`); err != nil {
+		t.Fatal(err)
+	}
+	state, err = app.SchemaState(ctx)
+	if err != nil || state.Classification != Incompatible {
+		t.Fatalf("damaged v1 state=%#v err=%v, want incompatible", state, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE jobs.server_state_missing RENAME TO server_state`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	var wg sync.WaitGroup
 	errorsSeen := make(chan error, 2)
@@ -93,11 +128,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("metadata changed across application restart: after=%#v err=%v", afterRestart, err)
 	}
 
-	ownerDB, err := open(ctx, ownerDSN)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ownerDB.Close() }()
+	testControlPlaneIntegration(ctx, t, app, ownerDB)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -115,13 +146,13 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = app.Close() }()
-	if _, err := ownerDB.ExecContext(ctx, `DROP SCHEMA audit`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `ALTER SCHEMA audit RENAME TO audit_missing`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Ready(ctx); err == nil || !strings.Contains(err.Error(), string(Incompatible)) {
 		t.Fatalf("readiness accepted missing required schema: %v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `CREATE SCHEMA audit`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `ALTER SCHEMA audit_missing RENAME TO audit`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE jobs.server_state RENAME TO server_state_missing`); err != nil {
@@ -135,6 +166,63 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("readiness did not recover after required objects were restored: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE auth.principals RENAME TO principals_missing`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil || !strings.Contains(err.Error(), string(Incompatible)) {
+		t.Fatalf("readiness accepted missing control-plane object: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE auth.principals_missing RENAME TO principals`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after control-plane object restoration: %v", err)
+	}
+	var guardDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('jobs.guard_outbox_capacity_and_state()'::regprocedure)`).Scan(&guardDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION jobs.guard_outbox_capacity_and_state()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted replacement capacity-trigger function body")
+	}
+	if _, err := ownerDB.ExecContext(ctx, guardDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after capacity-trigger function restoration: %v", err)
+	}
+	for _, drift := range []struct {
+		name    string
+		apply   string
+		restore string
+	}{
+		{name: "project truncate", apply: `GRANT TRUNCATE ON relay.projects TO punaro_app`, restore: `REVOKE TRUNCATE ON relay.projects FROM punaro_app`},
+		{name: "audit update column", apply: `GRANT UPDATE (outcome) ON audit.events TO punaro_app`, restore: `REVOKE UPDATE (outcome) ON audit.events FROM punaro_app`},
+		{name: "audit sequence update", apply: `GRANT UPDATE ON SEQUENCE audit.events_event_id_seq TO punaro_app`, restore: `REVOKE UPDATE ON SEQUENCE audit.events_event_id_seq FROM punaro_app`},
+		{name: "active grant index expression", apply: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`, restore: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(project_id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`},
+		{name: "function search path", apply: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) RESET ALL`, restore: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) SET search_path = pg_catalog`},
+		{name: "trigger events", apply: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`, restore: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE INSERT OR UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`},
+	} {
+		t.Run("readiness rejects "+drift.name, func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err == nil {
+				t.Fatalf("readiness accepted %s drift", drift.name)
+			}
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover after %s drift: %v", drift.name, err)
+			}
+		})
 	}
 	if _, err := ownerDB.ExecContext(ctx, `CREATE SCHEMA unsafe_extra; GRANT CREATE ON SCHEMA unsafe_extra TO punaro_app`); err != nil {
 		t.Fatal(err)
@@ -211,8 +299,8 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("application did not recover after unsafe role membership was revoked: %v", err)
 	}
 	var count int
-	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM jobs.schema_migrations`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("migration rows=%d err=%v, want exactly one", count, err)
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM jobs.schema_migrations`).Scan(&count); err != nil || count != len(CurrentManifest().Migrations) {
+		t.Fatalf("migration rows=%d err=%v, want exactly %d", count, err, len(CurrentManifest().Migrations))
 	}
 	if _, err := ownerDB.ExecContext(ctx, `CREATE EXTENSION IF NOT EXISTS vector`); err != nil {
 		t.Fatalf("pinned pgvector image cannot create vector extension: %v", err)
@@ -269,6 +357,272 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	principalA, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "device A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	principalB, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "device B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	creatorGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalA.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamicGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantState, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grantAuditBefore int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events WHERE target_id = $1 AND action = 'grant.create'`, dynamicGrantID).Scan(&grantAuditBefore); err != nil {
+		t.Fatal(err)
+	}
+	type grantResult struct {
+		id  string
+		err error
+	}
+	grantResults := make(chan grantResult, 2)
+	grantStart := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-grantStart
+			id, grantErr := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
+			grantResults <- grantResult{id: id, err: grantErr}
+		}()
+	}
+	close(grantStart)
+	grantRetryA, grantRetryB := <-grantResults, <-grantResults
+	grantStateAfter, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grantAuditAfter int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events WHERE target_id = $1 AND action = 'grant.create'`, dynamicGrantID).Scan(&grantAuditAfter); err != nil {
+		t.Fatal(err)
+	}
+	if grantRetryA.err != nil || grantRetryB.err != nil || grantRetryA.id != dynamicGrantID || grantRetryB.id != dynamicGrantID || grantStateAfter.ChangeSequence != grantState.ChangeSequence || grantAuditAfter != grantAuditBefore {
+		t.Fatalf("no-op grant retries changed state: a=%#v b=%#v sequence=%d/%d audit=%d/%d", grantRetryA, grantRetryB, grantState.ChangeSequence, grantStateAfter.ChangeSequence, grantAuditBefore, grantAuditAfter)
+	}
+
+	before, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := ProjectCreate{PrincipalID: principalA.ID, IdempotencyKey: "33333333-3333-4333-8333-333333333333", DisplayName: "friendly alpha"}
+	type createResult struct {
+		result ProjectResult
+		err    error
+	}
+	concurrent := make(chan createResult, 2)
+	start := make(chan struct{})
+	for range 2 {
+		go func() {
+			<-start
+			result, createErr := app.CreateProject(ctx, create)
+			concurrent <- createResult{result: result, err: createErr}
+		}()
+	}
+	close(start)
+	firstCall, secondCall := <-concurrent, <-concurrent
+	if firstCall.err != nil || secondCall.err != nil || firstCall.result != secondCall.result {
+		t.Fatalf("concurrent project results=%#v/%#v", firstCall, secondCall)
+	}
+	first := firstCall.result
+	retry, err := app.CreateProject(ctx, create)
+	if err != nil || retry != first {
+		t.Fatalf("exact project retry=%#v err=%v, want %#v", retry, err, first)
+	}
+	after, err := app.InstallationState(ctx)
+	if err != nil || after.ChangeSequence != before.ChangeSequence+1 || first.ChangeSequence != after.ChangeSequence {
+		t.Fatalf("project sequence before=%#v result=%#v after=%#v err=%v", before, first, after, err)
+	}
+	if err := app.RevokeGrant(ctx, creatorGrantID); err != nil {
+		t.Fatal(err)
+	}
+	retryAfterRevoke, err := app.CreateProject(ctx, create)
+	if err != nil || retryAfterRevoke != first {
+		t.Fatalf("exact project retry after authority revocation=%#v err=%v, want %#v", retryAfterRevoke, err, first)
+	}
+	if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalA.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
+		t.Fatal(err)
+	}
+	for _, check := range []struct {
+		principal  string
+		project    string
+		capability Capability
+		want       bool
+	}{
+		{principalA.ID, first.ProjectID, CapabilityProjectRead, true},
+		{principalA.ID, first.ProjectID, CapabilityProjectWrite, true},
+		{principalB.ID, first.ProjectID, CapabilityMemoryRead, true},
+		{principalB.ID, first.ProjectID, CapabilityProjectWrite, false},
+	} {
+		got, checkErr := app.HasCapability(ctx, check.principal, check.project, check.capability)
+		if checkErr != nil || got != check.want {
+			t.Fatalf("HasCapability(%s)=%t err=%v, want %t", check.capability, got, checkErr, check.want)
+		}
+	}
+	if _, err := app.HasCapability(ctx, principalA.ID, "friendly alpha", CapabilityProjectRead); err == nil {
+		t.Fatal("friendly project label accepted as authority")
+	}
+
+	changed := create
+	changed.DisplayName = "changed body"
+	if _, err := app.CreateProject(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed idempotent body error=%v", err)
+	}
+	if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
+		t.Fatal(err)
+	}
+	changed = create
+	changed.PrincipalID = principalB.ID
+	if _, err := app.CreateProject(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed idempotent principal error=%v", err)
+	}
+	if _, err := app.executeIdempotent(ctx, IdempotencyRequest{PrincipalID: principalA.ID, Operation: "project.rename", Key: create.IdempotencyKey, Body: []byte(`{}`)}, func(*ControlTx) (IdempotencyOutcome, error) {
+		return IdempotencyOutcome{Status: OutcomeSucceeded, Result: json.RawMessage(`{}`)}, nil
+	}); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed idempotent operation error=%v", err)
+	}
+
+	principalC, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "device C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorized := ProjectCreate{PrincipalID: principalC.ID, IdempotencyKey: "44444444-4444-4444-8444-444444444444", DisplayName: "forbidden"}
+	if _, err := app.CreateProject(ctx, unauthorized); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unauthorized project error=%v", err)
+	}
+	var unauthorizedRecords int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM relay.projects WHERE display_name = 'forbidden')
+      + (SELECT count(*) FROM relay.idempotency_records WHERE key = '44444444-4444-4444-8444-444444444444')
+      + (SELECT count(*) FROM audit.events WHERE principal_id = $1 AND action = 'project.create')`, principalC.ID).Scan(&unauthorizedRecords); err != nil || unauthorizedRecords != 0 {
+		t.Fatalf("unauthorized mutation left %d rows err=%v", unauthorizedRecords, err)
+	}
+
+	secondCreate := ProjectCreate{PrincipalID: principalA.ID, IdempotencyKey: "55555555-5555-4555-8555-555555555555", DisplayName: "future beta"}
+	second, err := app.CreateProject(ctx, secondCreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || !allowed {
+		t.Fatalf("dynamic all-projects grant did not cover future project: allowed=%t err=%v", allowed, err)
+	}
+	if err := app.RevokeGrant(ctx, dynamicGrantID); err != nil {
+		t.Fatal(err)
+	}
+	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || allowed {
+		t.Fatalf("revoked dynamic grant remained effective: allowed=%t err=%v", allowed, err)
+	}
+
+	type claimResult struct {
+		jobs []LeasedJob
+		err  error
+	}
+	claimResults := make(chan claimResult, 2)
+	claimStart := make(chan struct{})
+	for _, holder := range []string{principalA.ID, principalB.ID} {
+		go func() {
+			<-claimStart
+			claimed, claimErr := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: holder, Limit: 1, LeaseDuration: time.Minute})
+			claimResults <- claimResult{jobs: claimed, err: claimErr}
+		}()
+	}
+	close(claimStart)
+	firstClaim, secondClaim := <-claimResults, <-claimResults
+	if firstClaim.err != nil || secondClaim.err != nil || len(firstClaim.jobs) != 1 || len(secondClaim.jobs) != 1 || firstClaim.jobs[0].ID == secondClaim.jobs[0].ID {
+		t.Fatalf("concurrent disjoint claims=%#v/%#v", firstClaim, secondClaim)
+	}
+	jobs, otherJobs := firstClaim.jobs, secondClaim.jobs
+	if err := app.CompleteJob(ctx, jobs[0].Lease()); err != nil {
+		t.Fatal(err)
+	}
+	stale := otherJobs[0].Lease()
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET lease_until = statement_timestamp() - interval '1 second' WHERE id = $1`, otherJobs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalA.ID, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].ID != otherJobs[0].ID || reclaimed[0].Generation <= stale.Generation || reclaimed[0].Token == stale.Token {
+		t.Fatalf("reclaimed=%#v err=%v, stale=%#v", reclaimed, err, stale)
+	}
+	if err := app.CompleteJob(ctx, stale); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("stale completion error=%v", err)
+	}
+	if err := app.RetryJob(ctx, JobRetry{Lease: reclaimed[0].Lease(), ErrorCode: "transient", Delay: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if premature, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalB.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(premature) != 0 {
+		t.Fatalf("backoff job claimed before availability: jobs=%#v err=%v", premature, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET available_at = statement_timestamp() - interval '1 second' WHERE id = $1`, reclaimed[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	var activeBefore, projectsBefore, auditBefore, idempotencyBefore int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT active_count FROM jobs.queue_capacity WHERE singleton`).Scan(&activeBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.queue_capacity SET max_depth = active_count WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM relay.projects),
+        (SELECT count(*) FROM audit.events),
+        (SELECT count(*) FROM relay.idempotency_records)`).Scan(&projectsBefore, &auditBefore, &idempotencyBefore); err != nil {
+		t.Fatal(err)
+	}
+	full := ProjectCreate{PrincipalID: principalA.ID, IdempotencyKey: "66666666-6666-4666-8666-666666666666", DisplayName: "queue full rollback"}
+	if _, err := app.CreateProject(ctx, full); !errors.Is(err, ErrQueueFull) {
+		t.Fatalf("queue-full project error=%v", err)
+	}
+	var projectsAfter, auditAfter, idempotencyAfter, activeAfter int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM relay.projects),
+        (SELECT count(*) FROM audit.events),
+        (SELECT count(*) FROM relay.idempotency_records),
+        (SELECT active_count FROM jobs.queue_capacity WHERE singleton)`).Scan(&projectsAfter, &auditAfter, &idempotencyAfter, &activeAfter); err != nil {
+		t.Fatal(err)
+	}
+	if projectsAfter != projectsBefore || auditAfter != auditBefore || idempotencyAfter != idempotencyBefore || activeAfter != activeBefore {
+		t.Fatalf("queue-full rollback changed projects %d/%d audit %d/%d idempotency %d/%d active %d/%d", projectsBefore, projectsAfter, auditBefore, auditAfter, idempotencyBefore, idempotencyAfter, activeBefore, activeAfter)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.queue_capacity SET max_depth = 10000 WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.CompleteJob(ctx, reclaimed[0].Lease()); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("retried lease remained publishable: %v", err)
+	}
+	claimedAgain, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalB.ID, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || len(claimedAgain) != 1 {
+		t.Fatalf("retry claim=%#v err=%v", claimedAgain, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts, lease_until = statement_timestamp() - interval '1 second' WHERE id = $1`, claimedAgain[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if jobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalA.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(jobs) != 0 {
+		t.Fatalf("exhausted job was reclaimed: jobs=%#v err=%v", jobs, err)
+	}
+	var terminalState string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM jobs.outbox WHERE id = $1`, claimedAgain[0].ID).Scan(&terminalState); err != nil || terminalState != "failed" {
+		t.Fatalf("exhausted state=%q err=%v", terminalState, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET completed_at = statement_timestamp() - interval '2 hours' WHERE id = $1`, claimedAgain[0].ID); err == nil {
+		t.Fatal("terminal job was mutable")
+	}
+	pruned, err := app.PruneTerminalJobs(ctx, time.Now().Add(time.Hour), 1)
+	if err != nil || pruned != 1 {
+		t.Fatalf("pruned=%d err=%v", pruned, err)
 	}
 }
 

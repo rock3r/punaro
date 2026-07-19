@@ -63,11 +63,14 @@ type AppliedMigration struct {
 
 // Snapshot is the read-only evidence used to classify a database schema.
 type Snapshot struct {
-	OwnedSchemaCount       int
-	TrackingExists         bool
-	RequiredObjectsPresent bool
-	Records                []AppliedMigration
+	OwnedSchemaCount      int
+	TrackingExists        bool
+	BaseObjectsPresent    bool
+	CurrentObjectsPresent bool
+	Records               []AppliedMigration
 }
+
+const controlPlaneSchemaVersion int64 = 2
 
 // SchemaState contains a content-free classification and highest version.
 type SchemaState struct {
@@ -117,7 +120,7 @@ func Classify(snapshot Snapshot, manifest Manifest) SchemaState {
 			}
 		}
 	}
-	if snapshot.OwnedSchemaCount != 6 || !snapshot.RequiredObjectsPresent {
+	if snapshot.OwnedSchemaCount != 6 || !snapshot.BaseObjectsPresent {
 		return SchemaState{Classification: Incompatible}
 	}
 	version := records[len(records)-1].Version
@@ -126,6 +129,8 @@ func Classify(snapshot Snapshot, manifest Manifest) SchemaState {
 		return SchemaState{Classification: Newer, Version: version}
 	case version < manifest.MinSupported:
 		return SchemaState{Classification: UpgradeRequired, Version: version}
+	case version >= controlPlaneSchemaVersion && !snapshot.CurrentObjectsPresent:
+		return SchemaState{Classification: Incompatible, Version: version}
 	default:
 		return SchemaState{Classification: Compatible, Version: version}
 	}

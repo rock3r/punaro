@@ -423,7 +423,7 @@ create or repair schema objects. A pristine, dirty, upgrade-required, newer, or
 incompatible schema makes startup fail with a content-free classification. Do
 not grant DDL to `punaro_app` to bypass that refusal.
 
-M-1 exposes the schema-owner action directly for controlled development and
+M-1/M-2 expose the schema-owner action directly for controlled development and
 integration use:
 
 ```sh
@@ -441,7 +441,7 @@ docker run --rm --entrypoint /usr/local/bin/punaro-migrate \
   PUNARO_IMAGE_BY_DIGEST -owner-dsn-file /run/secrets/owner.dsn
 ```
 
-The initial M-1 role contract uses the exact roles `punaro_owner` and
+The role contract uses the exact roles `punaro_owner` and
 `punaro_app`. Provision `punaro_app` first as a login with no superuser,
 database-create, role-create, public-schema-create, or `punaro_owner` membership;
 the migrator refuses to bootstrap otherwise. The owner DSN must authenticate
@@ -456,6 +456,15 @@ recovery arrive in later milestones, so this command is not yet a production
 update procedure. The digest-pinned `make test-postgres` stack is ephemeral
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
+
+The current binary requires schema version 2. Version 1 is reported as
+`upgrade_required`; damaged version-1 objects remain `incompatible`. Migration
+2 is additive and creates only dark control-plane rows and bounded queue/audit
+primitives. There is still no supported public project/grant/job API, device
+enrollment, relay cutover, backup, or production update wrapper. Do not hand
+edit idempotency, capacity, lease, migration, or audit rows to bypass a failure.
+Before any later authority cutover, rollback remains disabling the PostgreSQL
+opt-in and retaining SQLite as the unchanged active relay.
 
 ## Operations and incident response
 

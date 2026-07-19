@@ -72,8 +72,11 @@ make test-postgres
 ```
 
 That target starts a fresh private, digest-pinned pgvector service, runs the
-PostgreSQL substrate contract tests inside the isolated network, and removes
-the database volume afterward. It requires Docker Compose v2.
+PostgreSQL substrate and dark control-plane contract tests inside the isolated
+network, and removes the database volume afterward. The tests cover migration
+compatibility, explicit project scopes, operation-bound idempotency, closed
+audit records, queue ceilings, and fenced job leases. It requires Docker
+Compose v2 and does not switch the active SQLite relay.
 
 ## Configuration and secrets
 

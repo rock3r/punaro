@@ -68,6 +68,33 @@ implementation it replaces where parity is required. Transactions stay inside
 one store when possible; cross-domain atomic operations are explicit service
 methods whose interface documents the shared transaction boundary.
 
+### Implemented dark control-plane primitives
+
+Schema version 2 is the minimum for the current PostgreSQL opt-in. It adds
+opaque principals and projects, active capability grants with exactly one of
+installation, selected-project, or dynamic all-project scope, generic
+idempotency, closed audit events, and one transactional work/outbox table.
+`project.discover` is never installation-wide: it is selected-project or
+dynamic-all scoped, while only `project.create` is currently installation
+scoped. A dynamic grant applies to current and future projects but still
+requires the queried opaque project to exist.
+
+Idempotency keys are globally unique UUIDs bound to principal, operation, and a
+SHA-256 request hash. Only the hash and a bounded immutable JSON outcome are
+stored; the request body is not. Exact concurrent and lost-response retries
+return the first outcome. Reusing a key with another body, operation, or
+principal returns one content-free conflict.
+
+The work table is both transactional outbox and worker queue until a real
+delivery destination requires separate fan-out. Database constraints and a
+locked capacity counter bound payload size, depth, attempts, and state. Claims
+use `FOR UPDATE SKIP LOCKED`, database-time expiry, a fresh token, and an
+increasing generation. Completion or retry requires the exact unexpired fence;
+expired final attempts become terminal failures. Terminal and audit pruning is
+limited to bounded security-definer functions. Audit rows contain only closed
+action/outcome/target classes, opaque IDs, sequence, and time—never arbitrary
+details.
+
 ## Server invariants
 
 - At-least-once mail delivery, immutable message IDs, operation-bound

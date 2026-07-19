@@ -523,6 +523,16 @@ dirty, old, newer, or incompatible schemas without performing DDL. The normal
 application role is distinct from the schema owner. SQLite remains the active
 and default relay authority until the later fenced mail cutover.
 
+The second dark foundation slice adds opaque principals/projects, explicit
+selected-project and dynamic all-project capability grants, globally unique
+operation-bound idempotency keys, closed content-free audit events, and a
+capacity-bounded transactional work queue. Project creation proves that
+authorization, immutable retry outcome, ordinary creator grants, audit, queued
+work, and one change-sequence advance commit atomically. Worker publication is
+accepted only for the exact unexpired lease token and generation. None of these
+primitives is exposed through the alpha HTTP relay yet, and they do not change
+SQLite routing or establish a production authority barrier.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:
