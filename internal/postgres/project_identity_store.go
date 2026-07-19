@@ -467,9 +467,9 @@ SET invalidated_at = statement_timestamp()
 		return ProjectMergeResult{}, ErrStaleProjectMerge
 	}
 	rehomedJobs, err := tx.ExecContext(ctx, `UPDATE jobs.outbox AS job
-SET project_id = $1,
+SET project_id = $1::uuid,
     payload = CASE job.kind
-        WHEN 'project.created' THEN jsonb_set(job.payload, '{project_id}', to_jsonb($1::text), true)
+		WHEN 'project.created' THEN jsonb_set(job.payload, '{project_id}', to_jsonb(($1::uuid)::text), true)
         ELSE job.payload
     END,
     state = CASE WHEN job.state = 'running' THEN 'queued' ELSE job.state END,
