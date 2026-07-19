@@ -22,6 +22,7 @@ import (
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
+	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -29,6 +30,15 @@ const (
 	attachmentV3ReapInterval = time.Minute
 	attachmentV3ReapBatch    = 64
 )
+
+type platformDatabase interface {
+	Ready(context.Context) error
+	Close() error
+}
+
+var openPlatformDatabase = func(ctx context.Context, cfg punaropostgres.Config) (platformDatabase, error) {
+	return punaropostgres.OpenApplication(ctx, cfg)
+}
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
@@ -50,6 +60,21 @@ func run(args []string, stderr io.Writer) int {
 	if cfg.AttachmentsEnabled {
 		_, _ = fmt.Fprintln(stderr, "punarod attachment v2 runtime is withheld: the required recipient-envelope, fresh-directory, revocation, and permit state machine is not implemented")
 		return 2
+	}
+	postgresReadiness := func() error { return nil }
+	var platformDB platformDatabase
+	if cfg.PostgresEnabled {
+		platformDB, err = openPlatformDatabase(context.Background(), punaropostgres.Config{DSNFile: cfg.PostgresDSNFile})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "punarod PostgreSQL configuration error: %v\n", err)
+			return 2
+		}
+		defer func() { _ = platformDB.Close() }()
+		postgresReadiness = func() error { return platformDB.Ready(context.Background()) }
+		if err := postgresReadiness(); err != nil {
+			_, _ = fmt.Fprintf(stderr, "punarod PostgreSQL readiness error: %v\n", err)
+			return 2
+		}
 	}
 	accessReadiness := func() error { return nil }
 	if cfg.AccessIssuer != "" {
@@ -97,7 +122,7 @@ func run(args []string, stderr io.Writer) int {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) || (v3Readiness != nil && v3Readiness() != nil) {
+		if postgresReadiness() != nil || accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) || (v3Readiness != nil && v3Readiness() != nil) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}

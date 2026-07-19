@@ -64,6 +64,17 @@ docker compose up --build
 It deliberately publishes no port and does not load `.env`.  It is not a
 public deployment. See the operator guide before using containers or systemd.
 
+The separate PostgreSQL Compose file is integration-test infrastructure only;
+it does not change the SQLite relay or the alpha deployment:
+
+```sh
+make test-postgres
+```
+
+That target starts a fresh private, digest-pinned pgvector service, runs the
+PostgreSQL substrate contract tests inside the isolated network, and removes
+the database volume afterward. It requires Docker Compose v2.
+
 ## Configuration and secrets
 
 Punaro reads ordinary environment variables. For local development, pass an
@@ -78,6 +89,8 @@ precedence over dotenv values.
 | `PUNARO_DATA_DIR` | `./data` | Relay SQLite state location when `PUNARO_RELAY_ENABLED=true`. |
 | `PUNARO_LOG_LEVEL` | `info` | Validated reserved setting; current standard logging does not filter by it. |
 | `PUNARO_ENV_FILE` | unset | Optional dotenv file when no CLI flag is used. |
+| `PUNARO_POSTGRES_ENABLED` | `false` | Opts into the dark PostgreSQL platform substrate. It does not select PostgreSQL as the relay store. Ordinary startup only checks compatibility and never migrates. |
+| `PUNARO_POSTGRES_DSN_FILE` | unset | Required with PostgreSQL enabled: absolute path to a private application-role DSN file. The application role has no DDL authority. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
 | `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
@@ -132,7 +145,7 @@ rules.
 make ci
 ```
 
-The Makefile also exposes individual `test`, `test-race`, `staticcheck`,
+The Makefile also exposes individual `test`, `test-race`, `test-postgres`, `staticcheck`,
 `security`, `dockerfile-lint`, and `workflow-lint` targets.
 
 ## License

@@ -42,6 +42,8 @@ type Config struct {
 	AccessAudience              string
 	AccessJWKSURL               string
 	AccessJWKSFile              string
+	PostgresEnabled             bool
+	PostgresDSNFile             string
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -106,6 +108,11 @@ func Load(explicitEnvFile string) (Config, error) {
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
 	accessJWKSURL := value("PUNARO_ACCESS_JWKS_URL", "")
 	accessJWKSFile := value("PUNARO_ACCESS_JWKS_FILE", "")
+	postgresEnabled, err := strconv.ParseBool(value("PUNARO_POSTGRES_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_POSTGRES_ENABLED: %w", err)
+	}
+	postgresDSNFile := value("PUNARO_POSTGRES_DSN_FILE", "")
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	// The relay origin stays loopback-only even when Cloudflare Access protects
 	// the public hostname. This prevents an operator from accidentally creating
@@ -195,7 +202,13 @@ func Load(explicitEnvFile string) (Config, error) {
 	if accessJWKSFile != "" && !filepath.IsAbs(accessJWKSFile) {
 		return Config{}, fmt.Errorf("PUNARO_ACCESS_JWKS_FILE must be absolute")
 	}
-	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile}, nil
+	if postgresEnabled && (postgresDSNFile == "" || !filepath.IsAbs(postgresDSNFile)) {
+		return Config{}, fmt.Errorf("enabled PostgreSQL requires an absolute PUNARO_POSTGRES_DSN_FILE")
+	}
+	if !postgresEnabled && postgresDSNFile != "" {
+		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
+	}
+	return Config{ListenAddr: listenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

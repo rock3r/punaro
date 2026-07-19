@@ -515,6 +515,14 @@ Pi integration remains a future plan phase but is excluded from the currently
 authorized Punaro delivery scope. Every slice retains a safe rollback boundary,
 passes the full quality gate, and ships through a separately reviewed PR.
 
+The first PostgreSQL foundation slice is additive and dark. It embeds an
+advisory-locked, checksum-validated schema migrator behind the explicit
+`punaro-migrate` command, records installation/timeline identity and a monotonic
+change sequence, and makes opt-in `punarod` startup/readiness reject pristine,
+dirty, old, newer, or incompatible schemas without performing DDL. The normal
+application role is distinct from the schema owner. SQLite remains the active
+and default relay authority until the later fenced mail cutover.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:
