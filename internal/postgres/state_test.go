@@ -16,7 +16,7 @@ func TestClassifySchemaState(t *testing.T) {
 		return AppliedMigration{Version: version, Name: name, Checksum: checksum, CompatibilityFloor: floor, Status: "applied"}
 	}
 	tracked := func(records ...AppliedMigration) Snapshot {
-		return Snapshot{OwnedSchemaCount: 6, TrackingExists: true, RequiredObjectsPresent: true, Records: records}
+		return Snapshot{OwnedSchemaCount: 6, TrackingExists: true, BaseObjectsPresent: true, CurrentObjectsPresent: true, Records: records}
 	}
 	tests := []struct {
 		name     string
@@ -25,11 +25,12 @@ func TestClassifySchemaState(t *testing.T) {
 	}{
 		{name: "pristine", snapshot: Snapshot{}, want: Pristine},
 		{name: "partial bootstrap", snapshot: Snapshot{OwnedSchemaCount: 1}, want: Incompatible},
-		{name: "empty tracker", snapshot: Snapshot{OwnedSchemaCount: 6, TrackingExists: true, RequiredObjectsPresent: true}, want: Incompatible},
-		{name: "missing required schema", snapshot: Snapshot{OwnedSchemaCount: 5, TrackingExists: true, RequiredObjectsPresent: true, Records: []AppliedMigration{applied(1, "bootstrap", "one", 1)}}, want: Incompatible},
+		{name: "empty tracker", snapshot: Snapshot{OwnedSchemaCount: 6, TrackingExists: true, BaseObjectsPresent: true, CurrentObjectsPresent: true}, want: Incompatible},
+		{name: "missing required schema", snapshot: Snapshot{OwnedSchemaCount: 5, TrackingExists: true, BaseObjectsPresent: true, CurrentObjectsPresent: true, Records: []AppliedMigration{applied(1, "bootstrap", "one", 1)}}, want: Incompatible},
 		{name: "missing required object", snapshot: Snapshot{OwnedSchemaCount: 6, TrackingExists: true, Records: []AppliedMigration{applied(1, "bootstrap", "one", 1)}}, want: Incompatible},
-		{name: "upgrade required", snapshot: tracked(applied(1, "bootstrap", "one", 1)), want: UpgradeRequired},
+		{name: "upgrade required without future objects", snapshot: Snapshot{OwnedSchemaCount: 6, TrackingExists: true, BaseObjectsPresent: true, Records: []AppliedMigration{applied(1, "bootstrap", "one", 1)}}, want: UpgradeRequired},
 		{name: "compatible", snapshot: tracked(applied(1, "bootstrap", "one", 1), applied(2, "second", "two", 2)), want: Compatible},
+		{name: "compatible history missing current object", snapshot: Snapshot{OwnedSchemaCount: 6, TrackingExists: true, BaseObjectsPresent: true, Records: []AppliedMigration{applied(1, "bootstrap", "one", 1), applied(2, "second", "two", 2)}}, want: Incompatible},
 		{name: "compatible latest", snapshot: tracked(applied(1, "bootstrap", "one", 1), applied(2, "second", "two", 2), applied(3, "third", "three", 2)), want: Compatible},
 		{name: "newer", snapshot: tracked(applied(1, "bootstrap", "one", 1), applied(2, "second", "two", 2), applied(3, "third", "three", 2), applied(4, "future", "unknown", 3)), want: Newer},
 		{name: "dirty", snapshot: tracked(AppliedMigration{Version: 1, Name: "bootstrap", Checksum: "one", CompatibilityFloor: 1, Status: "applying"}), want: Dirty},
@@ -60,5 +61,15 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 		if err := manifest.Validate(); err == nil {
 			t.Errorf("case %d: Validate() succeeded, want error", i)
 		}
+	}
+}
+
+func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
+	manifest := CurrentManifest()
+	if manifest.MinSupported != 2 || manifest.MaxSupported != 2 || len(manifest.Migrations) != 2 {
+		t.Fatalf("manifest=%#v, want exact v2 compatibility window", manifest)
+	}
+	if manifest.Migrations[0].CompatibilityFloor != 1 || manifest.Migrations[1].CompatibilityFloor != 2 {
+		t.Fatalf("migration floors=%d,%d, want 1,2", manifest.Migrations[0].CompatibilityFloor, manifest.Migrations[1].CompatibilityFloor)
 	}
 }

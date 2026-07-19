@@ -68,6 +68,57 @@ implementation it replaces where parity is required. Transactions stay inside
 one store when possible; cross-domain atomic operations are explicit service
 methods whose interface documents the shared transaction boundary.
 
+### Implemented dark control-plane primitives
+
+Schema version 2 is the minimum for the current PostgreSQL opt-in. It adds
+opaque principals and projects, active capability grants with exactly one of
+installation, selected-project, or dynamic all-project scope, generic
+idempotency, closed audit events, and one transactional work/outbox table.
+`project.discover` is never installation-wide: it is selected-project or
+dynamic-all scoped, while only `project.create` is currently installation
+scoped. A dynamic grant applies to current and future projects but still
+requires the queried opaque project to exist.
+
+Grant and revoke mutations carry an explicit acting principal and lock its
+active administration grant in the same transaction. Exact-project
+`project.administer` can mutate grants only for that project; dynamic
+all-project `project.administer` can mutate selected-project, installation, and
+all-project grants. `project.create`, subject identifiers, and requested scopes
+never authorize grant administration.
+
+Idempotency keys are globally unique UUIDs bound to principal, operation, and a
+SHA-256 request hash. Only the hash and a bounded immutable JSON outcome are
+stored; the request body is not. Exact concurrent and lost-response retries
+return the first outcome. Reusing a key with another body, operation, or
+principal returns one content-free conflict.
+
+The work table is both transactional outbox and worker queue until a real
+delivery destination requires separate fan-out. Database constraints and a
+locked capacity counter bound payload size, depth, attempts, and state. Claims
+use `FOR UPDATE SKIP LOCKED`, database-time expiry, a fresh token, and an
+increasing generation. Completion or retry requires the exact unexpired fence;
+the holder must also remain active and authorized for the job project. Expired
+final attempts become terminal failures independently of caller authorization,
+so dead rows cannot pin queue capacity. Terminal and audit pruning is limited
+to bounded security-definer functions. Audit rows contain only closed
+action/outcome/target classes, opaque IDs, sequence, and time—never arbitrary
+details.
+
+Queue scheduling is a bounded delay from PostgreSQL time, never an
+application-clock timestamp. Each claimable job kind maps to a server-selected
+capability and target shape; enqueue rejects unknown kinds and missing required
+project IDs. Only an active principal holding that capability for the opaque job
+project can receive its payload and lease fence. Unknown kinds, disabled
+principals, and unauthorized holders receive no lease.
+
+Enqueue, completion, retry/failure, and exhausted-lease terminalization append
+closed, content-free job audit events in the same transaction as the queue
+state change. Claim locks the exact active principal/grant evidence used to
+authorize the lease, so concurrent disablement or revocation cannot commit
+between authorization and lease publication. A bounded `SKIP LOCKED`
+pre-candidate batch first reserves disjoint job rows, then locks authorization
+evidence only for those projects instead of unrelated grants held by the worker.
+
 ## Server invariants
 
 - At-least-once mail delivery, immutable message IDs, operation-bound

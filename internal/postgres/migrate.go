@@ -18,6 +18,11 @@ var migrationFiles embed.FS
 
 const advisoryLockKey int64 = 0x50554e41524f4d31 // "PUNAROM1"
 
+var migrationCompatibilityFloors = map[int64]int64{
+	1: 1,
+	2: 2,
+}
+
 // CurrentManifest returns the immutable migrations embedded in this binary.
 func CurrentManifest() Manifest {
 	entries, err := fs.Glob(migrationFiles, "migrations/*.sql")
@@ -40,9 +45,13 @@ func CurrentManifest() Manifest {
 		if err != nil || version != int64(i+1) {
 			panic("non-contiguous embedded PostgreSQL migrations")
 		}
-		migrations = append(migrations, Migration{Version: version, Name: name, Checksum: hex.EncodeToString(sum[:]), CompatibilityFloor: 1, SQL: string(body)})
+		floor, ok := migrationCompatibilityFloors[version]
+		if !ok {
+			panic("missing PostgreSQL migration compatibility floor")
+		}
+		migrations = append(migrations, Migration{Version: version, Name: name, Checksum: hex.EncodeToString(sum[:]), CompatibilityFloor: floor, SQL: string(body)})
 	}
-	manifest := Manifest{MinSupported: 1, MaxSupported: int64(len(migrations)), Migrations: migrations}
+	manifest := Manifest{MinSupported: migrations[len(migrations)-1].CompatibilityFloor, MaxSupported: int64(len(migrations)), Migrations: migrations}
 	if err := manifest.Validate(); err != nil {
 		panic(err)
 	}

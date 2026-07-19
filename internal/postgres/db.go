@@ -162,11 +162,11 @@ SELECT state_oid IS NOT NULL
    AND NOT COALESCE(has_table_privilege('punaro_app', state_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'), false)
    AND NOT COALESCE(has_any_column_privilege('punaro_app', state_oid, 'INSERT,UPDATE,REFERENCES'), false)
    AND COALESCE(has_function_privilege('punaro_app', advance_oid, 'EXECUTE'), false)
-FROM objects`, []string{"auth", "relay", "attachment", "brain", "jobs", "audit"}).Scan(&snapshot.RequiredObjectsPresent); err != nil {
+FROM objects`, []string{"auth", "relay", "attachment", "brain", "jobs", "audit"}).Scan(&snapshot.BaseObjectsPresent); err != nil {
 		return Snapshot{}, errors.New("PostgreSQL schema state cannot be inspected")
 	}
-	if snapshot.RequiredObjectsPresent {
-		if err := q.QueryRowContext(ctx, `SELECT COALESCE(count(*) = 1 AND bool_and(singleton AND installation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND timeline_id <> '00000000-0000-0000-0000-000000000000'::uuid AND change_sequence >= 0), false) FROM jobs.server_state`).Scan(&snapshot.RequiredObjectsPresent); err != nil {
+	if snapshot.BaseObjectsPresent {
+		if err := q.QueryRowContext(ctx, `SELECT COALESCE(count(*) = 1 AND bool_and(singleton AND installation_id <> '00000000-0000-0000-0000-000000000000'::uuid AND timeline_id <> '00000000-0000-0000-0000-000000000000'::uuid AND change_sequence >= 0), false) FROM jobs.server_state`).Scan(&snapshot.BaseObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL installation metadata cannot be inspected")
 		}
 	}
@@ -184,6 +184,121 @@ FROM objects`, []string{"auth", "relay", "attachment", "brain", "jobs", "audit"}
 	}
 	if err := rows.Err(); err != nil {
 		return Snapshot{}, errors.New("PostgreSQL migration history cannot be inspected")
+	}
+	if len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 2 {
+		if err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT
+        to_regclass('auth.principals') AS principals_oid,
+        to_regclass('auth.capability_grants') AS grants_oid,
+        to_regclass('relay.projects') AS projects_oid,
+        to_regclass('relay.idempotency_records') AS idempotency_oid,
+        to_regclass('audit.events') AS audit_oid,
+        to_regclass('audit.events_event_id_seq') AS audit_sequence_oid,
+        to_regclass('jobs.queue_capacity') AS capacity_oid,
+        to_regclass('jobs.outbox') AS outbox_oid,
+        to_regclass('auth.capability_grants_active_unique') AS grants_active_oid,
+        to_regprocedure('jobs.guard_outbox_capacity_and_state()') AS guard_oid,
+        to_regprocedure('audit.prune_events(timestamp with time zone,integer)') AS audit_prune_oid,
+        to_regprocedure('jobs.prune_terminal(timestamp with time zone,integer)') AS jobs_prune_oid
+), ownership AS (
+    SELECT count(*) = 9 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
+    FROM pg_class, objects
+    WHERE oid = ANY(ARRAY[principals_oid, grants_oid, projects_oid, idempotency_oid, audit_oid, audit_sequence_oid, capacity_oid, outbox_oid, grants_active_oid])
+), function_ownership AS (
+    SELECT count(*) = 3
+       AND bool_and(pg_get_userbyid(proowner) = 'punaro_owner')
+       AND bool_and(prosecdef)
+	   AND bool_and(COALESCE(proconfig = ARRAY['search_path=pg_catalog']::text[], false))
+       -- PostgreSQL prosrc retains the dollar-quoted boundary newlines; btrim
+       -- removes only ordinary spaces, so these are catalog-exact fingerprints.
+       AND bool_and(
+		   (oid = guard_oid AND md5(btrim(prosrc)) = '56cb3ea6402ffbf41f360cf4c8ba392f')
+		   OR (oid = audit_prune_oid AND md5(btrim(prosrc)) = 'd477a1e8ffc27e7a7c652975bdd06057')
+		   OR (oid = jobs_prune_oid AND md5(btrim(prosrc)) = 'ea4a8de811f6f8f9d5804f30fcd03869')
+       ) AS owned
+    FROM pg_proc, objects
+    WHERE oid = ANY(ARRAY[guard_oid, audit_prune_oid, jobs_prune_oid])
+)
+SELECT
+    principals_oid IS NOT NULL AND grants_oid IS NOT NULL AND projects_oid IS NOT NULL
+    AND idempotency_oid IS NOT NULL AND audit_oid IS NOT NULL AND audit_sequence_oid IS NOT NULL
+    AND capacity_oid IS NOT NULL AND outbox_oid IS NOT NULL AND grants_active_oid IS NOT NULL
+    AND guard_oid IS NOT NULL AND audit_prune_oid IS NOT NULL AND jobs_prune_oid IS NOT NULL
+    AND ownership.owned AND function_ownership.owned
+    AND EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = outbox_oid AND tgfoid = guard_oid AND tgname = 'outbox_capacity_and_state'
+          AND tgenabled = 'O' AND NOT tgisinternal AND tgtype = 23
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = grants_active_oid AND indrelid = grants_oid
+          AND indisunique AND indisvalid AND indisready AND indnkeyatts = 4
+          AND indkey = '2 3 0 5'::int2vector
+          AND pg_get_expr(indexprs, indrelid) = 'COALESCE(project_id, ''00000000-0000-0000-0000-000000000000''::uuid)'
+          AND pg_get_expr(indpred, indrelid) = '(revoked_at IS NULL)'
+    )
+    AND has_table_privilege('punaro_app', principals_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', principals_oid, 'INSERT')
+    AND has_table_privilege('punaro_app', principals_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', principals_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', principals_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', principals_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', principals_oid, 'TRIGGER')
+    AND has_table_privilege('punaro_app', grants_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', grants_oid, 'INSERT')
+    AND has_table_privilege('punaro_app', grants_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', grants_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', grants_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', grants_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', grants_oid, 'TRIGGER')
+    AND has_table_privilege('punaro_app', projects_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', projects_oid, 'INSERT')
+    AND has_table_privilege('punaro_app', projects_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', projects_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', projects_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', projects_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', projects_oid, 'TRIGGER')
+    AND has_table_privilege('punaro_app', idempotency_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', idempotency_oid, 'INSERT')
+    AND has_table_privilege('punaro_app', idempotency_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', idempotency_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', idempotency_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', idempotency_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', idempotency_oid, 'TRIGGER')
+    AND has_table_privilege('punaro_app', audit_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', audit_oid, 'INSERT')
+    AND NOT has_table_privilege('punaro_app', audit_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', audit_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', audit_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', audit_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', audit_oid, 'TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', audit_oid, 'UPDATE,REFERENCES')
+    AND has_sequence_privilege('punaro_app', audit_sequence_oid, 'USAGE')
+    AND has_sequence_privilege('punaro_app', audit_sequence_oid, 'SELECT')
+    AND NOT has_sequence_privilege('punaro_app', audit_sequence_oid, 'UPDATE')
+    AND has_table_privilege('punaro_app', capacity_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'INSERT')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', capacity_oid, 'TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', capacity_oid, 'INSERT,UPDATE,REFERENCES')
+    AND has_table_privilege('punaro_app', outbox_oid, 'SELECT')
+    AND has_table_privilege('punaro_app', outbox_oid, 'INSERT')
+    AND has_table_privilege('punaro_app', outbox_oid, 'UPDATE')
+    AND NOT has_table_privilege('punaro_app', outbox_oid, 'DELETE')
+    AND NOT has_table_privilege('punaro_app', outbox_oid, 'TRUNCATE')
+    AND NOT has_table_privilege('punaro_app', outbox_oid, 'REFERENCES')
+    AND NOT has_table_privilege('punaro_app', outbox_oid, 'TRIGGER')
+    AND NOT has_function_privilege('punaro_app', guard_oid, 'EXECUTE')
+    AND has_function_privilege('punaro_app', audit_prune_oid, 'EXECUTE')
+    AND has_function_privilege('punaro_app', jobs_prune_oid, 'EXECUTE')
+FROM objects, ownership, function_ownership`).Scan(&snapshot.CurrentObjectsPresent); err != nil {
+			return Snapshot{}, errors.New("PostgreSQL control-plane schema cannot be inspected")
+		}
 	}
 	return snapshot, nil
 }
