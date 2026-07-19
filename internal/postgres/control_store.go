@@ -21,7 +21,14 @@ var (
 	ErrNotFound            = errors.New("control-plane record was not found")
 )
 
-const maxJobRetryDelay = 24 * time.Hour
+const maxJobDelay = 24 * time.Hour
+
+func jobClaimCapability(kind string) (Capability, bool) {
+	if kind == "project.created" {
+		return CapabilityProjectAdminister, true
+	}
+	return "", false
+}
 
 // PrincipalKind is a closed principal classification. M-3 adds enrollment behavior.
 type PrincipalKind string
@@ -403,13 +410,9 @@ func (t *ControlTx) EnqueueJob(ctx context.Context, job EnqueueJob) (string, err
 	if t == nil || t.tx == nil || job.Validate() != nil {
 		return "", errors.New("invalid job")
 	}
-	available := job.AvailableAt
-	if available.IsZero() {
-		available = time.Now().UTC()
-	}
 	var id string
 	err := t.tx.QueryRowContext(ctx, `INSERT INTO jobs.outbox (project_id, kind, payload, max_attempts, available_at)
-VALUES ($1, $2, $3, $4, $5) RETURNING id::text`, nullableID(job.ProjectID), job.Kind, []byte(job.Payload), job.MaxAttempts, available).Scan(&id)
+VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond')) RETURNING id::text`, nullableID(job.ProjectID), job.Kind, []byte(job.Payload), job.MaxAttempts, job.Delay.Microseconds()).Scan(&id)
 	if isSQLState(err, "54000") {
 		return "", ErrQueueFull
 	}
@@ -437,39 +440,59 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 	if err := claim.Validate(); err != nil {
 		return nil, err
 	}
+	capability, knownKind := jobClaimCapability(claim.Kind)
+	if !knownKind {
+		return nil, errors.New("invalid job claim")
+	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, errors.New("job claim transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `WITH exhausted AS (
-    SELECT id FROM jobs.outbox
-    WHERE kind = $1 AND state = 'running' AND lease_until <= statement_timestamp() AND attempts >= max_attempts
-    ORDER BY lease_until, created_at, id
+    SELECT job.id FROM jobs.outbox AS job
+    WHERE job.kind = $1 AND job.state = 'running' AND job.lease_until <= statement_timestamp() AND job.attempts >= job.max_attempts
+      AND EXISTS (
+          SELECT 1 FROM auth.principals AS principal
+          JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+          WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+            AND capability_grant.capability = $4 AND job.project_id IS NOT NULL
+            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
+                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+      )
+    ORDER BY job.lease_until, job.created_at, job.id
     FOR UPDATE SKIP LOCKED
     LIMIT $2
 )
 UPDATE jobs.outbox AS job
 SET state = 'failed', last_error_code = 'attempts_exhausted', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
-FROM exhausted WHERE job.id = exhausted.id`, claim.Kind, claim.Limit); err != nil {
+FROM exhausted WHERE job.id = exhausted.id`, claim.Kind, claim.Limit, claim.Holder, capability); err != nil {
 		return nil, errors.New("expired jobs could not be fenced")
 	}
 	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
-    SELECT id FROM jobs.outbox
-    WHERE kind = $1 AND attempts < max_attempts
-      AND ((state = 'queued' AND available_at <= statement_timestamp()) OR (state = 'running' AND lease_until <= statement_timestamp()))
-    ORDER BY COALESCE(lease_until, available_at), created_at, id
+    SELECT job.id FROM jobs.outbox AS job
+    WHERE job.kind = $1 AND job.attempts < job.max_attempts
+      AND ((job.state = 'queued' AND job.available_at <= statement_timestamp()) OR (job.state = 'running' AND job.lease_until <= statement_timestamp()))
+      AND EXISTS (
+          SELECT 1 FROM auth.principals AS principal
+          JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+          WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+            AND capability_grant.capability = $4 AND job.project_id IS NOT NULL
+            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
+                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+      )
+    ORDER BY COALESCE(job.lease_until, job.available_at), job.created_at, job.id
     FOR UPDATE SKIP LOCKED
     LIMIT $2
 )
 UPDATE jobs.outbox AS job
 SET state = 'running', attempts = job.attempts + 1, lease_holder = $3,
     lease_token = gen_random_uuid(), lease_generation = job.lease_generation + 1,
-    lease_until = statement_timestamp() + ($4 * interval '1 microsecond')
+    lease_until = statement_timestamp() + ($5 * interval '1 microsecond')
 FROM candidates WHERE job.id = candidates.id
 RETURNING job.id::text, COALESCE(job.project_id::text, ''), job.kind, job.payload,
           job.attempts, job.max_attempts, job.lease_holder::text, job.lease_token::text,
-          job.lease_generation, job.lease_until`, claim.Kind, claim.Limit, claim.Holder, claim.LeaseDuration.Microseconds())
+          job.lease_generation, job.lease_until`, claim.Kind, claim.Limit, claim.Holder, capability, claim.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, errors.New("jobs could not be claimed")
 	}
@@ -511,7 +534,7 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 
 // RetryJob conditionally requeues or terminally fails one exact unexpired lease.
 func (d *Database) RetryJob(ctx context.Context, retry JobRetry) error {
-	if !validJobLease(retry.Lease) || !boundedTokenPattern.MatchString(retry.ErrorCode) || retry.Delay < 0 || retry.Delay > maxJobRetryDelay {
+	if !validJobLease(retry.Lease) || !boundedTokenPattern.MatchString(retry.ErrorCode) || retry.Delay < 0 || retry.Delay > maxJobDelay {
 		return errors.New("invalid job retry")
 	}
 	result, err := d.db.ExecContext(ctx, `UPDATE jobs.outbox

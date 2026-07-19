@@ -525,6 +525,23 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || allowed {
 		t.Fatalf("revoked dynamic grant remained effective: allowed=%t err=%v", allowed, err)
 	}
+	for _, principalID := range []string{principalA.ID, principalB.ID} {
+		if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalID, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if unauthorizedJobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalC.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(unauthorizedJobs) != 0 {
+		t.Fatalf("unauthorized worker received jobs=%#v err=%v", unauthorizedJobs, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.principals SET disabled_at = statement_timestamp() WHERE id = $1`, principalA.ID); err != nil {
+		t.Fatal(err)
+	}
+	if disabledJobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalA.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(disabledJobs) != 0 {
+		t.Fatalf("disabled worker received jobs=%#v err=%v", disabledJobs, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.principals SET disabled_at = NULL WHERE id = $1`, principalA.ID); err != nil {
+		t.Fatal(err)
+	}
 
 	type claimResult struct {
 		jobs []LeasedJob

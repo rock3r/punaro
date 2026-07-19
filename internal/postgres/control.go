@@ -248,12 +248,12 @@ type EnqueueJob struct {
 	ProjectID   string
 	Payload     json.RawMessage
 	MaxAttempts int
-	AvailableAt time.Time
+	Delay       time.Duration
 }
 
 // Validate enforces queue storage and retry ceilings before a transaction starts.
 func (j EnqueueJob) Validate() error {
-	if !boundedTokenPattern.MatchString(j.Kind) || (j.ProjectID != "" && !validOpaqueID(j.ProjectID)) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts {
+	if !boundedTokenPattern.MatchString(j.Kind) || (j.ProjectID != "" && !validOpaqueID(j.ProjectID)) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts || j.Delay < 0 || j.Delay > maxJobDelay {
 		return errors.New("invalid job")
 	}
 	return nil
@@ -277,5 +277,5 @@ func (c ClaimJobs) Validate() error {
 
 func validOpaqueID(value string) bool {
 	id, err := uuid.Parse(value)
-	return err == nil && id != uuid.Nil
+	return err == nil && id != uuid.Nil && id.String() == value
 }

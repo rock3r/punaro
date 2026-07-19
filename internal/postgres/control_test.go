@@ -3,6 +3,7 @@ package postgres
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,7 +94,7 @@ func TestOutcomeAuditAndJobBounds(t *testing.T) {
 		t.Fatal("free-form audit content accepted")
 	}
 
-	job := EnqueueJob{Kind: "project.reconcile", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, AvailableAt: time.Now().UTC()}
+	job := EnqueueJob{Kind: "project.reconcile", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, Delay: time.Minute}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -101,9 +102,26 @@ func TestOutcomeAuditAndJobBounds(t *testing.T) {
 	if err := job.Validate(); err == nil {
 		t.Fatal("oversized job payload accepted")
 	}
+	job.Payload = json.RawMessage(`{}`)
+	job.Delay = maxJobDelay + time.Second
+	if err := job.Validate(); err == nil {
+		t.Fatal("oversized job delay accepted")
+	}
+}
+
+func TestOpaqueIDsRequireCanonicalUUIDEncoding(t *testing.T) {
+	if validOpaqueID(strings.ToUpper(testProjectA)) {
+		t.Fatal("uppercase UUID accepted as an opaque identifier")
+	}
 }
 
 func TestClaimOptionsAreHardBounded(t *testing.T) {
+	if capability, ok := jobClaimCapability("project.created"); !ok || capability != CapabilityProjectAdminister {
+		t.Fatalf("project.created claim capability=%q known=%t", capability, ok)
+	}
+	if _, ok := jobClaimCapability("project.reconcile"); ok {
+		t.Fatal("unknown job kind received a claim capability")
+	}
 	valid := ClaimJobs{Kind: "project.reconcile", Holder: testPrincipalB, Limit: 10, LeaseDuration: time.Minute}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)

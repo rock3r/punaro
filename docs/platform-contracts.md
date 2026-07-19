@@ -95,6 +95,12 @@ limited to bounded security-definer functions. Audit rows contain only closed
 action/outcome/target classes, opaque IDs, sequence, and time—never arbitrary
 details.
 
+Queue scheduling is a bounded delay from PostgreSQL time, never an
+application-clock timestamp. Each claimable job kind maps to a server-selected
+capability; only an active principal holding that capability for the opaque job
+project can receive its payload and lease fence. Unknown kinds, disabled
+principals, and unauthorized holders receive no lease.
+
 ## Server invariants
 
 - At-least-once mail delivery, immutable message IDs, operation-bound
