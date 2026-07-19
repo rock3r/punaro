@@ -110,7 +110,11 @@ var (
 		return admin.CreateEnrollment(ctx, installation.OwnerPrincipalID, request, previewHash)
 	}
 	startServices = func(ctx context.Context, installation operator.Installation) error {
-		command := exec.CommandContext(ctx, "docker", "compose", "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "up", "-d") // #nosec G204 -- fixed executable and generated private file arguments.
+		arguments, err := composeUpArgs(installation)
+		if err != nil {
+			return err
+		}
+		command := exec.CommandContext(ctx, "docker", arguments...) // #nosec G204 -- fixed executable and generated private file arguments.
 		command.Dir = installation.Directory
 		output, err := command.CombinedOutput()
 		if err != nil {
@@ -120,6 +124,14 @@ var (
 	}
 	probe = probeHTTP
 )
+
+func composeUpArgs(installation operator.Installation) ([]string, error) {
+	projectName, err := operator.ComposeProjectName(installation)
+	if err != nil {
+		return nil, err
+	}
+	return []string{"compose", "--project-name", projectName, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "up", "-d"}, nil
+}
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 

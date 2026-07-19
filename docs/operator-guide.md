@@ -531,7 +531,10 @@ non-root Unix account that owns the private paths; root is rejected and the
 same numeric identity runs the container. Data and backup must resolve to
 non-overlapping locations. Neither DSN nor the installation directory may
 resolve beneath the daemon-writable data directory, including through a
-symlinked ancestor:
+symlinked ancestor. Each private directory and DSN file must be owned by that
+account. Every path ancestor must be owned by root or that account and may not
+be group/world writable unless sticky; only root-owned system symlinks with a
+separately trusted resolved chain are accepted:
 
 ```sh
 punaro init \
@@ -579,10 +582,12 @@ owner if it committed, or finishes bootstrap if it did not. Do not delete the
 staging directory or run a second bootstrap elsewhere while recovering.
 
 `punaro up --directory ...` rechecks the generated Compose file, protected
-paths (including private installation-directory permissions), exact
+paths (including ownership and ancestor permissions), exact
 singleton-owner identity, and schema before invoking Compose. Status
 and doctor enforce the same owner binding. The generated file
-has no build context and accepts only the pinned image. It starts only a compatible schema;
+has no build context and accepts only the pinned image. The wrapper supplies a
+stable Compose project name from the verified owner UUID, so equal installation
+directory basenames cannot share containers. It starts only a compatible schema;
 a pristine database after initialization is treated as data loss, an old schema
 directs the operator to `punaro update`, and dirty/newer/incompatible state
 requires recovery. It waits up to 30 seconds for readiness and then runs the

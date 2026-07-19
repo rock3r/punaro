@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -157,6 +159,263 @@ func TestLoadAndCheckPathsRejectInstallationDirectoryPermissionDrift(t *testing.
 	}
 }
 
+func TestLoadAndCheckPathsRejectWritableInstallationAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ancestor := filepath.Dir(options.Directory)
+	// #nosec G302 -- the regression deliberately creates an unsafe ancestor.
+	if err := os.Chmod(ancestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// #nosec G302 -- restore the required private directory mode.
+		_ = os.Chmod(ancestor, 0o700)
+	})
+	if _, err := Load(options.Directory); err == nil {
+		t.Fatal("Load accepted an installation below a writable non-sticky ancestor")
+	}
+	if !containsFailure(CheckPaths(installation), "installation directory unavailable or unsafe") {
+		t.Fatalf("failures=%v", CheckPaths(installation))
+	}
+}
+
+func TestInitRejectsWritableInstallationAncestorBeforeBootstrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	options := validInitOptions(t)
+	ancestor := filepath.Dir(options.Directory)
+	// #nosec G302 -- the regression deliberately creates an unsafe ancestor.
+	if err := os.Chmod(ancestor, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// #nosec G302 -- restore the required private directory mode.
+		_ = os.Chmod(ancestor, 0o700)
+	})
+	called := false
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || called {
+		t.Fatalf("unsafe ancestor err=%v bootstrapCalled=%t", err, called)
+	}
+}
+
+func TestLoadAcceptsStickyWritableInstallationAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ancestor := filepath.Dir(options.Directory)
+	if err := os.Chmod(ancestor, os.ModeSticky|0o777); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		// #nosec G302 -- restore the required private directory mode.
+		_ = os.Chmod(ancestor, 0o700)
+	})
+	if _, err := Load(options.Directory); err != nil {
+		t.Fatalf("Load rejected sticky writable ancestor: %v", err)
+	}
+	if failures := CheckPaths(installation); len(failures) != 0 {
+		t.Fatalf("failures=%v", failures)
+	}
+}
+
+func TestInitRejectsSymlinkedInstallationAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	options := validInitOptions(t)
+	target := filepath.Join(filepath.Dir(options.Directory), "trusted-parent")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(filepath.Dir(options.Directory), "parent-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	options.Directory = filepath.Join(link, "installation")
+	called := false
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || called {
+		t.Fatalf("symlinked ancestor err=%v bootstrapCalled=%t", err, called)
+	}
+}
+
+func TestInitRejectsUnsafeSensitivePathAncestorsBeforeBootstrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	for _, kind := range []string{"data", "backup", "owner DSN", "application DSN"} {
+		t.Run(kind, func(t *testing.T) {
+			options := validInitOptions(t)
+			parent := filepath.Join(filepath.Dir(options.Directory), strings.ReplaceAll(kind, " ", "-")+"-parent")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			switch kind {
+			case "data", "backup":
+				leaf := filepath.Join(parent, "private")
+				if err := os.Mkdir(leaf, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "data" {
+					options.DataDir = leaf
+				} else {
+					options.BackupDir = leaf
+				}
+			case "owner DSN", "application DSN":
+				leaf := filepath.Join(parent, "database.dsn")
+				protectedFile(t, leaf)
+				if kind == "owner DSN" {
+					options.OwnerDSNFile = leaf
+				} else {
+					options.AppDSNFile = leaf
+				}
+			}
+			// #nosec G302 -- the regression deliberately creates an unsafe ancestor.
+			if err := os.Chmod(parent, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				// #nosec G302 -- restore the required private directory mode.
+				_ = os.Chmod(parent, 0o700)
+			})
+			called := false
+			if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				called = true
+				return punaropostgres.Principal{}, nil
+			}); err == nil || called {
+				t.Fatalf("unsafe %s ancestor err=%v bootstrapCalled=%t", kind, err, called)
+			}
+		})
+	}
+}
+
+func TestCheckPathsRejectsSensitivePathAncestorPermissionDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix directory trust semantics")
+	}
+	for _, test := range []struct {
+		kind    string
+		failure string
+	}{
+		{kind: "data", failure: "data directory unavailable or unsafe"},
+		{kind: "backup", failure: "backup directory unavailable or unsafe"},
+		{kind: "owner DSN", failure: "owner DSN file unavailable or unsafe"},
+		{kind: "application DSN", failure: "application DSN file unavailable or unsafe"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			options := validInitOptions(t)
+			parent := filepath.Join(filepath.Dir(options.Directory), strings.ReplaceAll(test.kind, " ", "-")+"-parent")
+			if err := os.Mkdir(parent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			switch test.kind {
+			case "data", "backup":
+				leaf := filepath.Join(parent, "private")
+				if err := os.Mkdir(leaf, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if test.kind == "data" {
+					options.DataDir = leaf
+				} else {
+					options.BackupDir = leaf
+				}
+			case "owner DSN", "application DSN":
+				leaf := filepath.Join(parent, "database.dsn")
+				protectedFile(t, leaf)
+				if test.kind == "owner DSN" {
+					options.OwnerDSNFile = leaf
+				} else {
+					options.AppDSNFile = leaf
+				}
+			}
+			installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G302 -- the regression deliberately creates unsafe permission drift.
+			if err := os.Chmod(parent, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				// #nosec G302 -- restore the required private directory mode.
+				_ = os.Chmod(parent, 0o700)
+			})
+			if _, err := Load(options.Directory); err != nil {
+				t.Fatalf("unrelated published installation became unreadable: %v", err)
+			}
+			if failures := CheckPaths(installation); !containsFailure(failures, test.failure) {
+				t.Fatalf("failures=%v", failures)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsPersistedRuntimeIdentityMismatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix runtime identity semantics")
+	}
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(options.Directory, configName)
+	body, err := os.ReadFile(path) // #nosec G304 -- fixed generated marker in the test installation.
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), `"runtime_uid": "`+installation.RuntimeUID+`"`, `"runtime_uid": "4294967294"`, 1))
+	if err := os.WriteFile(path, body, 0o600); err != nil { // #nosec G703 -- fixed generated marker in the test installation.
+		t.Fatal(err)
+	}
+	if _, err := Load(options.Directory); err == nil {
+		t.Fatal("Load accepted a persisted runtime identity mismatch")
+	}
+}
+
+func TestComposeProjectNameUsesStableOwnerIdentity(t *testing.T) {
+	first := Installation{Directory: "/srv/a/punaro", OwnerPrincipalID: "11111111-1111-4111-8111-111111111111"}
+	moved := Installation{Directory: "/srv/b/punaro", OwnerPrincipalID: first.OwnerPrincipalID}
+	second := Installation{Directory: "/srv/c/punaro", OwnerPrincipalID: "22222222-2222-4222-8222-222222222222"}
+	firstName, firstErr := ComposeProjectName(first)
+	movedName, movedErr := ComposeProjectName(moved)
+	secondName, secondErr := ComposeProjectName(second)
+	if firstErr != nil || movedErr != nil || secondErr != nil || firstName != movedName || firstName == secondName {
+		t.Fatalf("first=%q/%v moved=%q/%v second=%q/%v", firstName, firstErr, movedName, movedErr, secondName, secondErr)
+	}
+	if !regexp.MustCompile(`^punaro-[0-9a-f]{32}$`).MatchString(firstName) {
+		t.Fatalf("invalid Compose project name %q", firstName)
+	}
+	if _, err := ComposeProjectName(Installation{OwnerPrincipalID: "invalid"}); err == nil {
+		t.Fatal("invalid owner identity produced a Compose project name")
+	}
+}
+
 func TestGeneratedConfigurationUsesDedicatedLoopbackHealthListener(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
@@ -295,19 +554,15 @@ func TestInitRejectsCredentialsAndOperatorStateBelowData(t *testing.T) {
 func TestCheckPathsDetectsBackupAncestorRetargetedBelowData(t *testing.T) {
 	options := validInitOptions(t)
 	root := filepath.Dir(options.DataDir)
-	realBackupParent := filepath.Join(root, "real-backup-parent")
-	if err := os.Mkdir(realBackupParent, 0o700); err != nil {
+	backupParent := filepath.Join(root, "backup-parent")
+	if err := os.Mkdir(backupParent, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	realBackup := filepath.Join(realBackupParent, "backup")
+	realBackup := filepath.Join(backupParent, "backup")
 	if err := os.Mkdir(realBackup, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	alias := filepath.Join(root, "backup-alias")
-	if err := os.Symlink(realBackupParent, alias); err != nil {
-		t.Fatal(err)
-	}
-	options.BackupDir = filepath.Join(alias, "backup")
+	options.BackupDir = realBackup
 	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
 	})
@@ -317,10 +572,10 @@ func TestCheckPathsDetectsBackupAncestorRetargetedBelowData(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(options.DataDir, "backup"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(alias); err != nil {
+	if err := os.Rename(backupParent, backupParent+".original"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(options.DataDir, alias); err != nil {
+	if err := os.Symlink(options.DataDir, backupParent); err != nil {
 		t.Fatal(err)
 	}
 	failures := CheckPaths(installation)

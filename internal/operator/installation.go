@@ -35,6 +35,16 @@ func EnvFile(directory string) string { return filepath.Join(directory, envName)
 // OverrideFile returns the generated immutable-image Compose file.
 func OverrideFile(directory string) string { return filepath.Join(directory, overrideName) }
 
+// ComposeProjectName returns the stable, installation-specific Docker Compose
+// project name derived from the persisted and database-verified owner identity.
+func ComposeProjectName(installation Installation) (string, error) {
+	ownerID, err := uuid.Parse(installation.OwnerPrincipalID)
+	if err != nil {
+		return "", errors.New("installation owner identity is invalid")
+	}
+	return "punaro-" + strings.ReplaceAll(ownerID.String(), "-", ""), nil
+}
+
 // Installation is the content-free operator configuration. DSN values remain
 // in separately protected files and are never copied here.
 type Installation struct {
@@ -89,6 +99,10 @@ func Init(ctx context.Context, options InitOptions, bootstrap BootstrapOwner) (I
 	}
 	if err := os.Mkdir(options.Directory, 0o700); err != nil {
 		return Installation{}, errors.New("installation directory must be new")
+	}
+	if err := requireTrustedPrivateDirectory(options.Directory); err != nil {
+		_ = os.Remove(options.Directory)
+		return Installation{}, errors.New("installation directory must have trusted ancestors")
 	}
 	preserveStage := false
 	defer func() {
@@ -155,12 +169,12 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		}
 		return installation, nil
 	}
-	if err := requirePrivateDirectory(directory); err != nil {
+	if err := requireTrustedPrivateDirectory(directory); err != nil {
 		return Installation{}, errors.New("initialization staging directory is unavailable or unsafe")
 	}
 	pendingPath := filepath.Join(directory, pendingName)
 	installation, err := readInstallation(pendingPath)
-	if err != nil || installation.Version != 1 || installation.OwnerPrincipalID != "" || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) {
+	if err != nil || installation.Version != 1 || installation.OwnerPrincipalID != "" || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) || !runtimeIdentityMatches(installation) {
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
@@ -197,10 +211,13 @@ func validateInit(options InitOptions) (Installation, error) {
 	if err != nil {
 		return Installation{}, err
 	}
-	if err := requirePrivateDirectory(options.DataDir); err != nil {
+	if err := requireTrustedDirectoryAncestors(filepath.Dir(options.Directory)); err != nil {
+		return Installation{}, errors.New("installation parent path is unavailable or unsafe")
+	}
+	if err := requireTrustedPrivateDirectory(options.DataDir); err != nil {
 		return Installation{}, fmt.Errorf("data directory: %w", err)
 	}
-	if err := requirePrivateDirectory(options.BackupDir); err != nil {
+	if err := requireTrustedPrivateDirectory(options.BackupDir); err != nil {
 		return Installation{}, fmt.Errorf("backup directory: %w", err)
 	}
 	dataInfo, dataErr := os.Stat(options.DataDir)
@@ -209,8 +226,14 @@ func validateInit(options InitOptions) (Installation, error) {
 	if dataErr != nil || backupErr != nil || overlapErr != nil || os.SameFile(dataInfo, backupInfo) || overlaps {
 		return Installation{}, errors.New("data and backup directories must be separate non-overlapping locations")
 	}
+	if err := requireTrustedProtectedFile(options.OwnerDSNFile, 64<<10); err != nil {
+		return Installation{}, fmt.Errorf("owner DSN file: %w", err)
+	}
 	if _, err := punaropostgres.ReadDSNFile(options.OwnerDSNFile); err != nil {
 		return Installation{}, fmt.Errorf("owner DSN file: %w", err)
+	}
+	if err := requireTrustedProtectedFile(options.AppDSNFile, 64<<10); err != nil {
+		return Installation{}, fmt.Errorf("application DSN file: %w", err)
 	}
 	if _, err := punaropostgres.ReadDSNFile(options.AppDSNFile); err != nil {
 		return Installation{}, fmt.Errorf("application DSN file: %w", err)
@@ -269,18 +292,18 @@ func Load(directory string) (Installation, error) {
 	if !filepath.IsAbs(directory) {
 		return Installation{}, errors.New("installation directory must be absolute")
 	}
-	if err := requirePrivateDirectory(directory); err != nil {
+	if err := requireTrustedPrivateDirectory(directory); err != nil {
 		return Installation{}, errors.New("installation directory is unavailable")
 	}
 	path := filepath.Join(directory, configName)
-	if err := requireProtectedFile(path, 64<<10); err != nil {
+	if err := requireTrustedProtectedFile(path, 64<<10); err != nil {
 		return Installation{}, errors.New("published installation configuration is unavailable or unsafe")
 	}
 	installation, err := readInstallation(path)
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is corrupt")
 	}
-	if installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) {
+	if installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) || !runtimeIdentityMatches(installation) {
 		return Installation{}, errors.New("published installation configuration is corrupt")
 	}
 	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
@@ -295,7 +318,7 @@ func Load(directory string) (Installation, error) {
 }
 
 func readInstallation(path string) (Installation, error) {
-	if err := requireProtectedFile(path, 64<<10); err != nil {
+	if err := requireTrustedProtectedFile(path, 64<<10); err != nil {
 		return Installation{}, err
 	}
 	file, err := os.Open(path) // #nosec G304 -- fixed file below an explicit private installation directory.
@@ -367,29 +390,33 @@ func requireProtectedFile(path string, maximum int64) error {
 // CheckPaths returns actionable, content-free failures for installation paths.
 func CheckPaths(installation Installation) []string {
 	var failures []string
-	if err := requirePrivateDirectory(installation.Directory); err != nil {
+	if err := requireTrustedPrivateDirectory(installation.Directory); err != nil {
 		failures = append(failures, "installation directory unavailable or unsafe")
 	}
-	if err := requirePrivateDirectory(installation.DataDir); err != nil {
+	if err := requireTrustedPrivateDirectory(installation.DataDir); err != nil {
 		failures = append(failures, "data directory unavailable or unsafe")
 	}
-	if err := requirePrivateDirectory(installation.BackupDir); err != nil {
+	if err := requireTrustedPrivateDirectory(installation.BackupDir); err != nil {
 		failures = append(failures, "backup directory unavailable or unsafe")
 	}
 	if overlaps, err := canonicalDirectoriesOverlap(installation.DataDir, installation.BackupDir); err == nil && overlaps {
 		failures = append(failures, "data and backup directories overlap")
 	}
-	if _, err := punaropostgres.ReadDSNFile(installation.OwnerDSNFile); err != nil {
+	if err := requireTrustedProtectedFile(installation.OwnerDSNFile, 64<<10); err != nil {
+		failures = append(failures, "owner DSN file unavailable or unsafe")
+	} else if _, err := punaropostgres.ReadDSNFile(installation.OwnerDSNFile); err != nil {
 		failures = append(failures, "owner DSN file unavailable or unsafe")
 	}
-	if _, err := punaropostgres.ReadDSNFile(installation.AppDSNFile); err != nil {
+	if err := requireTrustedProtectedFile(installation.AppDSNFile, 64<<10); err != nil {
+		failures = append(failures, "application DSN file unavailable or unsafe")
+	} else if _, err := punaropostgres.ReadDSNFile(installation.AppDSNFile); err != nil {
 		failures = append(failures, "application DSN file unavailable or unsafe")
 	}
 	if overlaps, err := daemonWritableOverlap(installation.DataDir, installation.Directory, installation.OwnerDSNFile, installation.AppDSNFile, true); err == nil && overlaps {
 		failures = append(failures, "daemon-writable data directory overlaps database credentials or operator state")
 	}
 	envPath := EnvFile(installation.Directory)
-	if err := requireProtectedFile(envPath, 64<<10); err != nil {
+	if err := requireTrustedProtectedFile(envPath, 64<<10); err != nil {
 		failures = append(failures, "generated daemon environment unavailable or unsafe")
 	} else {
 		// #nosec G304 -- fixed generated file below the explicit validated installation directory.
@@ -399,7 +426,7 @@ func CheckPaths(installation Installation) []string {
 		}
 	}
 	overridePath := OverrideFile(installation.Directory)
-	if err := requireProtectedFile(overridePath, 64<<10); err != nil {
+	if err := requireTrustedProtectedFile(overridePath, 64<<10); err != nil {
 		failures = append(failures, "generated Compose override unavailable or unsafe")
 	} else {
 		// #nosec G304 -- fixed generated file below the explicit validated installation directory.

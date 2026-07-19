@@ -64,6 +64,23 @@ func preserveDependencies(t *testing.T) {
 	}
 }
 
+func TestComposeUpArgsUseInstallationSpecificProjectName(t *testing.T) {
+	first := operator.Installation{Directory: filepath.Join(string(filepath.Separator), "srv", "a", "punaro"), OwnerPrincipalID: "11111111-1111-4111-8111-111111111111"}
+	second := operator.Installation{Directory: filepath.Join(string(filepath.Separator), "srv", "b", "punaro"), OwnerPrincipalID: "22222222-2222-4222-8222-222222222222"}
+	firstArgs, firstErr := composeUpArgs(first)
+	secondArgs, secondErr := composeUpArgs(second)
+	firstProject, _ := operator.ComposeProjectName(first)
+	if firstErr != nil || secondErr != nil || len(firstArgs) < 3 || firstArgs[1] != "--project-name" || firstArgs[2] != firstProject {
+		t.Fatalf("first args=%v", firstArgs)
+	}
+	if firstArgs[2] == secondArgs[2] {
+		t.Fatalf("same-basename installations share project name: %q", firstArgs[2])
+	}
+	if _, err := composeUpArgs(operator.Installation{OwnerPrincipalID: "invalid"}); err == nil {
+		t.Fatal("invalid owner identity reached Docker arguments")
+	}
+}
+
 func TestUpRefusesExistingUpgradeBeforeMigrationOrStart(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
