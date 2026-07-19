@@ -23,6 +23,11 @@ var (
 
 const maxJobDelay = 24 * time.Hour
 
+// Grant mutations are rare administrative operations. One transaction-scoped
+// lock gives every actor/target pair the same lock order and prevents reciprocal
+// revoke or delegate operations from deadlocking.
+const grantMutationLockKey int64 = 0x50756e61726f4752
+
 func jobClaimCapability(kind string) (Capability, bool) {
 	if kind == "project.created" {
 		return CapabilityProjectAdminister, true
@@ -125,16 +130,27 @@ func (d *Database) CreatePrincipal(ctx context.Context, kind PrincipalKind, disp
 	return principal, nil
 }
 
-// GrantCapability adds or returns one active explicit capability grant.
-func (d *Database) GrantCapability(ctx context.Context, grant Grant) (string, error) {
-	if err := grant.Validate(); err != nil {
-		return "", err
+// GrantCapability adds or returns one active explicit capability grant after
+// locking the actor's authority for the target scope.
+func (d *Database) GrantCapability(ctx context.Context, actorPrincipalID string, grant Grant) (string, error) {
+	if !validOpaqueID(actorPrincipalID) || grant.Validate() != nil {
+		return "", errors.New("invalid grant")
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return "", errors.New("grant transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockGrantMutations(ctx, tx); err != nil {
+		return "", err
+	}
+	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, grant.Scope, grant.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", ErrForbidden
+	}
 	project := nullableID(grant.ProjectID)
 	var grantID string
 	inserted := true
@@ -152,7 +168,7 @@ WHERE principal_id = $1 AND scope = $2 AND project_id IS NOT DISTINCT FROM $3::u
 	}
 	if inserted {
 		control := &ControlTx{tx: tx}
-		if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: grant.PrincipalID, ProjectID: grant.ProjectID, Action: AuditGrantCreate, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
+		if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: grant.ProjectID, Action: AuditGrantCreate, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
 			return "", err
 		}
 		if _, err := control.AdvanceChange(ctx); err != nil {
@@ -165,9 +181,9 @@ WHERE principal_id = $1 AND scope = $2 AND project_id IS NOT DISTINCT FROM $3::u
 	return grantID, nil
 }
 
-// RevokeGrant revokes one active grant without deleting its audit-relevant identity.
-func (d *Database) RevokeGrant(ctx context.Context, grantID string) error {
-	if !validOpaqueID(grantID) {
+// RevokeGrant revokes one active grant after locking the actor's authority.
+func (d *Database) RevokeGrant(ctx context.Context, actorPrincipalID, grantID string) error {
+	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(grantID) {
 		return errors.New("invalid grant")
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
@@ -175,18 +191,35 @@ func (d *Database) RevokeGrant(ctx context.Context, grantID string) error {
 		return errors.New("grant transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	var principalID string
+	if err := lockGrantMutations(ctx, tx); err != nil {
+		return err
+	}
 	var projectID sql.NullString
-	err = tx.QueryRowContext(ctx, `UPDATE auth.capability_grants SET revoked_at = statement_timestamp()
-WHERE id = $1 AND revoked_at IS NULL RETURNING principal_id::text, project_id::text`, grantID).Scan(&principalID, &projectID)
+	var scope GrantScope
+	err = tx.QueryRowContext(ctx, `SELECT scope, project_id::text
+FROM auth.capability_grants WHERE id = $1 AND revoked_at IS NULL`, grantID).Scan(&scope, &projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
+		return errors.New("capability grant could not be locked")
+	}
+	allowed, err := lockGrantAdministration(ctx, tx, actorPrincipalID, scope, projectID.String)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrForbidden
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at = statement_timestamp() WHERE id = $1 AND revoked_at IS NULL`, grantID)
+	if err != nil {
 		return errors.New("capability grant could not be revoked")
 	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return ErrNotFound
+	}
 	control := &ControlTx{tx: tx}
-	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: principalID, ProjectID: projectID.String, Action: AuditGrantDelete, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
+	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, ProjectID: projectID.String, Action: AuditGrantDelete, Outcome: AuditSucceeded, TargetKind: AuditTargetGrant, TargetID: grantID}); err != nil {
 		return err
 	}
 	if _, err := control.AdvanceChange(ctx); err != nil {
@@ -196,6 +229,44 @@ WHERE id = $1 AND revoked_at IS NULL RETURNING principal_id::text, project_id::t
 		return errors.New("grant transaction could not commit")
 	}
 	return nil
+}
+
+func lockGrantAdministration(ctx context.Context, tx *sql.Tx, actorPrincipalID string, scope GrantScope, projectID string) (bool, error) {
+	switch scope {
+	case ScopeInstallation:
+		return lockAllProjectsAdministration(ctx, tx, actorPrincipalID)
+	case ScopeProject:
+		return lockCapability(ctx, tx, actorPrincipalID, projectID, CapabilityProjectAdminister)
+	case ScopeAllProjects:
+		return lockAllProjectsAdministration(ctx, tx, actorPrincipalID)
+	default:
+		return false, errors.New("invalid grant administration scope")
+	}
+}
+
+func lockGrantMutations(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, grantMutationLockKey); err != nil {
+		return errors.New("grant mutation could not be serialized")
+	}
+	return nil
+}
+
+func lockAllProjectsAdministration(ctx context.Context, tx *sql.Tx, actorPrincipalID string) (bool, error) {
+	var grantID string
+	err := tx.QueryRowContext(ctx, `SELECT capability_grant.id::text
+FROM auth.principals AS principal
+JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+WHERE principal.id = $1 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+  AND capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL
+  AND capability_grant.capability = 'project.administer'
+ORDER BY capability_grant.id LIMIT 1 FOR SHARE OF principal, capability_grant`, actorPrincipalID).Scan(&grantID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.New("grant administration could not be locked")
+	}
+	return true, nil
 }
 
 // HasCapability checks one explicit installation/project/all-project grant.
@@ -293,7 +364,7 @@ func (d *Database) CreateProject(ctx context.Context, create ProjectCreate) (Pro
 		payload, _ := json.Marshal(struct {
 			ProjectID string `json:"project_id"`
 		}{ProjectID: projectID})
-		if _, err := control.EnqueueJob(ctx, EnqueueJob{Kind: "project.created", ProjectID: projectID, Payload: payload, MaxAttempts: 4}); err != nil {
+		if _, err := control.EnqueueJob(ctx, EnqueueJob{ActorPrincipalID: create.PrincipalID, Kind: "project.created", ProjectID: projectID, Payload: payload, MaxAttempts: 4}); err != nil {
 			return IdempotencyOutcome{}, err
 		}
 		state, err := control.AdvanceChange(ctx)
@@ -419,6 +490,9 @@ VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond'))
 	if err != nil {
 		return "", errors.New("job could not be enqueued")
 	}
+	if err := t.AppendAudit(ctx, AuditEvent{PrincipalID: job.ActorPrincipalID, ProjectID: job.ProjectID, Action: AuditJobEnqueue, Outcome: AuditSucceeded, TargetKind: AuditTargetJob, TargetID: id}); err != nil {
+		return "", err
+	}
 	return id, nil
 }
 
@@ -450,31 +524,59 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `WITH exhausted AS (
-    SELECT job.id FROM jobs.outbox AS job
+	SELECT job.id, job.project_id, job.lease_holder FROM jobs.outbox AS job
     WHERE job.kind = $1 AND job.state = 'running' AND job.lease_until <= statement_timestamp() AND job.attempts >= job.max_attempts
     ORDER BY job.lease_until, job.created_at, job.id
     FOR UPDATE SKIP LOCKED
     LIMIT $2
+), failed AS (
+    UPDATE jobs.outbox AS job
+    SET state = 'failed', last_error_code = 'attempts_exhausted', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
+    FROM exhausted WHERE job.id = exhausted.id
+	RETURNING job.id, exhausted.project_id, exhausted.lease_holder
 )
-UPDATE jobs.outbox AS job
-SET state = 'failed', last_error_code = 'attempts_exhausted', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
-FROM exhausted WHERE job.id = exhausted.id`, claim.Kind, claim.Limit); err != nil {
+INSERT INTO audit.events (principal_id, project_id, action, outcome, target_kind, target_id)
+SELECT lease_holder, project_id, 'job.fail', 'succeeded', 'job', id FROM failed`, claim.Kind, claim.Limit); err != nil {
 		return nil, errors.New("expired jobs could not be fenced")
 	}
-	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
-    SELECT job.id FROM jobs.outbox AS job
+	rows, err := tx.QueryContext(ctx, `WITH pre_candidates AS MATERIALIZED (
+	SELECT job.id, job.project_id, job.available_at, job.lease_until, job.created_at
+	FROM jobs.outbox AS job
+	WHERE job.kind = $1 AND job.attempts < job.max_attempts AND job.project_id IS NOT NULL
+	  AND ((job.state = 'queued' AND job.available_at <= statement_timestamp()) OR (job.state = 'running' AND job.lease_until <= statement_timestamp()))
+	  AND EXISTS (
+		  SELECT 1 FROM auth.principals AS principal
+		  JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+		  WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+		    AND capability_grant.capability = $4
+		    AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
+		         OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+	  )
+	ORDER BY COALESCE(job.lease_until, job.available_at), job.created_at, job.id
+	FOR UPDATE OF job SKIP LOCKED
+	LIMIT $2
+), authorized_grants AS MATERIALIZED (
+    SELECT capability_grant.scope, capability_grant.project_id
+    FROM auth.principals AS principal
+    JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+    WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
+      AND capability_grant.capability = $4
+      AND capability_grant.scope IN ('project', 'all_projects')
+	  AND (capability_grant.scope = 'all_projects'
+	       OR capability_grant.project_id IN (SELECT project_id FROM pre_candidates))
+    FOR SHARE OF principal, capability_grant
+), candidates AS (
+	SELECT job.id FROM jobs.outbox AS job
+	JOIN pre_candidates AS candidate ON candidate.id = job.id
     WHERE job.kind = $1 AND job.attempts < job.max_attempts
       AND ((job.state = 'queued' AND job.available_at <= statement_timestamp()) OR (job.state = 'running' AND job.lease_until <= statement_timestamp()))
       AND EXISTS (
-          SELECT 1 FROM auth.principals AS principal
-          JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
-          WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
-            AND capability_grant.capability = $4 AND job.project_id IS NOT NULL
+          SELECT 1 FROM authorized_grants AS capability_grant
+          WHERE job.project_id IS NOT NULL
             AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
                  OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
       )
-    ORDER BY COALESCE(job.lease_until, job.available_at), job.created_at, job.id
-    FOR UPDATE SKIP LOCKED
+	ORDER BY COALESCE(candidate.lease_until, candidate.available_at), candidate.created_at, candidate.id
     LIMIT $2
 )
 UPDATE jobs.outbox AS job
@@ -512,10 +614,11 @@ func (d *Database) CompleteJob(ctx context.Context, lease JobLease) error {
 	if !validJobLease(lease) {
 		return errors.New("invalid job lease")
 	}
-	tx, err := d.authorizedJobLeaseTx(ctx, lease)
+	locked, err := d.authorizedJobLeaseTx(ctx, lease)
 	if err != nil {
 		return err
 	}
+	tx := locked.tx
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `UPDATE jobs.outbox
 SET state = 'succeeded', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
@@ -525,6 +628,9 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 	}
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return ErrStaleLease
+	}
+	if err := (&ControlTx{tx: tx}).AppendAudit(ctx, AuditEvent{PrincipalID: locked.Holder, ProjectID: locked.ProjectID, Action: AuditJobComplete, Outcome: AuditSucceeded, TargetKind: AuditTargetJob, TargetID: lease.ID}); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("job completion could not commit")
@@ -537,22 +643,32 @@ func (d *Database) RetryJob(ctx context.Context, retry JobRetry) error {
 	if !validJobLease(retry.Lease) || !boundedTokenPattern.MatchString(retry.ErrorCode) || retry.Delay < 0 || retry.Delay > maxJobDelay {
 		return errors.New("invalid job retry")
 	}
-	tx, err := d.authorizedJobLeaseTx(ctx, retry.Lease)
+	locked, err := d.authorizedJobLeaseTx(ctx, retry.Lease)
 	if err != nil {
 		return err
 	}
+	tx := locked.tx
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE jobs.outbox
+	var state string
+	err = tx.QueryRowContext(ctx, `UPDATE jobs.outbox
 SET state = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
     available_at = CASE WHEN attempts >= max_attempts THEN available_at ELSE statement_timestamp() + ($4 * interval '1 microsecond') END,
     last_error_code = $5, lease_holder = NULL, lease_token = NULL, lease_until = NULL,
-    completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
-WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = $3 AND lease_until > statement_timestamp()`, retry.Lease.ID, retry.Lease.Token, retry.Lease.Generation, retry.Delay.Microseconds(), retry.ErrorCode)
+	completed_at = CASE WHEN attempts >= max_attempts THEN statement_timestamp() ELSE NULL END
+WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = $3 AND lease_until > statement_timestamp()
+RETURNING state`, retry.Lease.ID, retry.Lease.Token, retry.Lease.Generation, retry.Delay.Microseconds(), retry.ErrorCode).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrStaleLease
+	}
 	if err != nil {
 		return errors.New("job could not be retried")
 	}
-	if count, err := result.RowsAffected(); err != nil || count != 1 {
-		return ErrStaleLease
+	action := AuditJobRetry
+	if state == "failed" {
+		action = AuditJobFail
+	}
+	if err := (&ControlTx{tx: tx}).AppendAudit(ctx, AuditEvent{PrincipalID: locked.Holder, ProjectID: locked.ProjectID, Action: action, Outcome: AuditSucceeded, TargetKind: AuditTargetJob, TargetID: retry.Lease.ID}); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("job retry could not commit")
@@ -560,13 +676,20 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 	return nil
 }
 
-// authorizedJobLeaseTx locks the lease, its active holder, and the exact grant
-// that authorizes the holder for the job project. Revocation or disablement
-// therefore fences already-issued leases before they can publish or requeue.
-func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (*sql.Tx, error) {
+// authorizedJobLeaseTx locks and revalidates the opaque lease, then locks its
+// active holder and exact grant. Claim, completion, and retry therefore use the
+// same job-before-authorization lock order, while revocation or disablement
+// fences already-issued leases before publication.
+type authorizedJobLease struct {
+	tx        *sql.Tx
+	Holder    string
+	ProjectID string
+}
+
+func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (authorizedJobLease, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, errors.New("job lease transaction cannot start")
+		return authorizedJobLease{}, errors.New("job lease transaction cannot start")
 	}
 	var kind, holder, projectID string
 	err = tx.QueryRowContext(ctx, `SELECT kind, lease_holder::text, COALESCE(project_id::text, '')
@@ -575,27 +698,27 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 FOR UPDATE`, lease.ID, lease.Token, lease.Generation).Scan(&kind, &holder, &projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = tx.Rollback()
-		return nil, ErrStaleLease
+		return authorizedJobLease{}, ErrStaleLease
 	}
 	if err != nil {
 		_ = tx.Rollback()
-		return nil, errors.New("job lease could not be locked")
+		return authorizedJobLease{}, errors.New("job lease could not be locked")
 	}
 	capability, knownKind := jobClaimCapability(kind)
 	if !knownKind || projectID == "" {
 		_ = tx.Rollback()
-		return nil, ErrStaleLease
+		return authorizedJobLease{}, ErrStaleLease
 	}
 	allowed, err := lockCapability(ctx, tx, holder, projectID, capability)
 	if err != nil {
 		_ = tx.Rollback()
-		return nil, err
+		return authorizedJobLease{}, err
 	}
 	if !allowed {
 		_ = tx.Rollback()
-		return nil, ErrStaleLease
+		return authorizedJobLease{}, ErrStaleLease
 	}
-	return tx, nil
+	return authorizedJobLease{tx: tx, Holder: holder, ProjectID: projectID}, nil
 }
 
 // PruneTerminalJobs removes only a bounded batch of old terminal rows.

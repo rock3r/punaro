@@ -184,6 +184,7 @@ const (
 	AuditGrantDelete     AuditAction = "grant.delete"
 	AuditJobEnqueue      AuditAction = "job.enqueue"
 	AuditJobComplete     AuditAction = "job.complete"
+	AuditJobRetry        AuditAction = "job.retry"
 	AuditJobFail         AuditAction = "job.fail"
 )
 
@@ -208,7 +209,7 @@ const (
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobFail: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.
@@ -244,17 +245,18 @@ func (e AuditEvent) Validate() error {
 
 // EnqueueJob is one bounded transactional outbox entry.
 type EnqueueJob struct {
-	Kind        string
-	ProjectID   string
-	Payload     json.RawMessage
-	MaxAttempts int
-	Delay       time.Duration
+	ActorPrincipalID string
+	Kind             string
+	ProjectID        string
+	Payload          json.RawMessage
+	MaxAttempts      int
+	Delay            time.Duration
 }
 
 // Validate enforces queue storage and retry ceilings before a transaction starts.
 func (j EnqueueJob) Validate() error {
 	_, knownKind := jobClaimCapability(j.Kind)
-	if !knownKind || !validOpaqueID(j.ProjectID) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts || j.Delay < 0 || j.Delay > maxJobDelay {
+	if !validOpaqueID(j.ActorPrincipalID) || !knownKind || !validOpaqueID(j.ProjectID) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts || j.Delay < 0 || j.Delay > maxJobDelay {
 		return errors.New("invalid job")
 	}
 	return nil

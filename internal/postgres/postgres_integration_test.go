@@ -371,13 +371,40 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if err != nil {
 		t.Fatal(err)
 	}
-	creatorGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalA.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate})
+	// M-3 replaces this fixture with the host-local first-owner bootstrap. M-2
+	// seeds the minimum root authority out of band so every public grant mutation
+	// can prove actor authorization without adding an unauthenticated back door.
+	var creatorGrantID, bootstrapAdminGrantID string
+	err = ownerDB.QueryRowContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, capability)
+VALUES ($1, 'installation', 'project.create') RETURNING id::text`, principalA.ID).Scan(&creatorGrantID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dynamicGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
+	err = ownerDB.QueryRowContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, capability)
+VALUES ($1, 'all_projects', 'project.administer') RETURNING id::text`, principalA.ID).Scan(&bootstrapAdminGrantID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := app.GrantCapability(ctx, principalB.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unauthorized self-grant error=%v", err)
+	}
+	var unauthorizedGrantRows int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM auth.capability_grants
+WHERE principal_id = $1 AND scope = 'all_projects' AND capability = 'memory.read'`, principalB.ID).Scan(&unauthorizedGrantRows); err != nil || unauthorizedGrantRows != 0 {
+		t.Fatalf("unauthorized grant left rows=%d err=%v", unauthorizedGrantRows, err)
+	}
+	if _, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GrantCapability(ctx, principalB.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ordinary project creator administered grants: %v", err)
+	}
+	dynamicGrantID, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RevokeGrant(ctx, principalB.ID, dynamicGrantID); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("ordinary project creator revoked grant: %v", err)
 	}
 	grantState, err := app.InstallationState(ctx)
 	if err != nil {
@@ -386,6 +413,10 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	var grantAuditBefore int
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events WHERE target_id = $1 AND action = 'grant.create'`, dynamicGrantID).Scan(&grantAuditBefore); err != nil {
 		t.Fatal(err)
+	}
+	var grantAuditActor string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT principal_id::text FROM audit.events WHERE target_id = $1 AND action = 'grant.create'`, dynamicGrantID).Scan(&grantAuditActor); err != nil || grantAuditActor != principalA.ID {
+		t.Fatalf("grant audit actor=%q err=%v", grantAuditActor, err)
 	}
 	type grantResult struct {
 		id  string
@@ -396,7 +427,7 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	for range 2 {
 		go func() {
 			<-grantStart
-			id, grantErr := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
+			id, grantErr := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryRead})
 			grantResults <- grantResult{id: id, err: grantErr}
 		}()
 	}
@@ -446,14 +477,14 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if err != nil || after.ChangeSequence != before.ChangeSequence+1 || first.ChangeSequence != after.ChangeSequence {
 		t.Fatalf("project sequence before=%#v result=%#v after=%#v err=%v", before, first, after, err)
 	}
-	if err := app.RevokeGrant(ctx, creatorGrantID); err != nil {
+	if err := app.RevokeGrant(ctx, principalA.ID, creatorGrantID); err != nil {
 		t.Fatal(err)
 	}
 	retryAfterRevoke, err := app.CreateProject(ctx, create)
 	if err != nil || retryAfterRevoke != first {
 		t.Fatalf("exact project retry after authority revocation=%#v err=%v, want %#v", retryAfterRevoke, err, first)
 	}
-	if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalA.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
+	if _, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalA.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
 		t.Fatal(err)
 	}
 	for _, check := range []struct {
@@ -480,8 +511,8 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 		t.Fatal(err)
 	}
 	for name, invalidJob := range map[string]EnqueueJob{
-		"unknown kind":    {Kind: "project.reconcile", ProjectID: first.ProjectID, Payload: json.RawMessage(`{}`), MaxAttempts: 1},
-		"missing project": {Kind: "project.created", Payload: json.RawMessage(`{}`), MaxAttempts: 1},
+		"unknown kind":    {ActorPrincipalID: principalA.ID, Kind: "project.reconcile", ProjectID: first.ProjectID, Payload: json.RawMessage(`{}`), MaxAttempts: 1},
+		"missing project": {ActorPrincipalID: principalA.ID, Kind: "project.created", Payload: json.RawMessage(`{}`), MaxAttempts: 1},
 	} {
 		t.Run("invalid enqueue "+name, func(t *testing.T) {
 			tx, txErr := app.db.BeginTx(ctx, nil)
@@ -509,7 +540,7 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if _, err := app.CreateProject(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("changed idempotent body error=%v", err)
 	}
-	if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalB.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
+	if _, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate}); err != nil {
 		t.Fatal(err)
 	}
 	changed = create
@@ -547,7 +578,26 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || !allowed {
 		t.Fatalf("dynamic all-projects grant did not cover future project: allowed=%t err=%v", allowed, err)
 	}
-	if err := app.RevokeGrant(ctx, dynamicGrantID); err != nil {
+	if _, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeProject, ProjectID: first.ProjectID, Capability: CapabilityProjectAdminister}); err != nil {
+		t.Fatal(err)
+	}
+	exactProjectGrantID, err := app.GrantCapability(ctx, principalB.ID, Grant{PrincipalID: principalB.ID, Scope: ScopeProject, ProjectID: first.ProjectID, Capability: CapabilityMemoryWrite})
+	if err != nil {
+		t.Fatalf("exact-project administrator could not grant in its project: %v", err)
+	}
+	for name, forbiddenGrant := range map[string]Grant{
+		"other project": {PrincipalID: principalB.ID, Scope: ScopeProject, ProjectID: second.ProjectID, Capability: CapabilityMemoryWrite},
+		"installation":  {PrincipalID: principalB.ID, Scope: ScopeInstallation, Capability: CapabilityProjectCreate},
+		"all projects":  {PrincipalID: principalB.ID, Scope: ScopeAllProjects, Capability: CapabilityMemoryWrite},
+	} {
+		if _, err := app.GrantCapability(ctx, principalB.ID, forbiddenGrant); !errors.Is(err, ErrForbidden) {
+			t.Fatalf("exact-project administrator mutated %s scope: %v", name, err)
+		}
+	}
+	if err := app.RevokeGrant(ctx, principalB.ID, exactProjectGrantID); err != nil {
+		t.Fatalf("exact-project administrator could not revoke in its project: %v", err)
+	}
+	if err := app.RevokeGrant(ctx, principalA.ID, dynamicGrantID); err != nil {
 		t.Fatal(err)
 	}
 	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || allowed {
@@ -555,7 +605,7 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	}
 	adminGrantIDs := make(map[string]string, 2)
 	for _, principalID := range []string{principalA.ID, principalB.ID} {
-		grantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalID, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
+		grantID, err := app.GrantCapability(ctx, principalA.ID, Grant{PrincipalID: principalID, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -616,13 +666,17 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if err := app.CompleteJob(ctx, stale); !errors.Is(err, ErrStaleLease) {
 		t.Fatalf("stale completion error=%v", err)
 	}
-	if err := app.RevokeGrant(ctx, adminGrantIDs[reclaimed[0].Holder]); err != nil {
+	revocationActor := principalB.ID
+	if reclaimed[0].Holder == principalB.ID {
+		revocationActor = principalA.ID
+	}
+	if err := app.RevokeGrant(ctx, revocationActor, adminGrantIDs[reclaimed[0].Holder]); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.RetryJob(ctx, JobRetry{Lease: reclaimed[0].Lease(), ErrorCode: "transient", Delay: time.Minute}); !errors.Is(err, ErrStaleLease) {
 		t.Fatalf("revoked holder retried leased job: %v", err)
 	}
-	replacementGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: reclaimed[0].Holder, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
+	replacementGrantID, err := app.GrantCapability(ctx, revocationActor, Grant{PrincipalID: reclaimed[0].Holder, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,15 +730,49 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if err != nil || len(claimedAgain) != 1 {
 		t.Fatalf("retry claim=%#v err=%v", claimedAgain, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts, lease_until = statement_timestamp() - interval '1 second' WHERE id = $1`, claimedAgain[0].ID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts WHERE id = $1`, claimedAgain[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RetryJob(ctx, JobRetry{Lease: claimedAgain[0].Lease(), ErrorCode: "terminal", Delay: 0}); err != nil {
+		t.Fatalf("terminal retry failed: %v", err)
+	}
+	var terminalState string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM jobs.outbox WHERE id = $1`, claimedAgain[0].ID).Scan(&terminalState); err != nil || terminalState != "failed" {
+		t.Fatalf("terminal retry state=%q err=%v", terminalState, err)
+	}
+	exhaustionProject, err := app.CreateProject(ctx, ProjectCreate{PrincipalID: principalA.ID, IdempotencyKey: "77777777-7777-4777-8777-777777777777", DisplayName: "exhaustion audit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exhaustionJobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalB.ID, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || len(exhaustionJobs) != 1 || exhaustionJobs[0].ProjectID != exhaustionProject.ProjectID {
+		t.Fatalf("exhaustion setup jobs=%#v err=%v", exhaustionJobs, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts, lease_until = statement_timestamp() - interval '1 second' WHERE id = $1`, exhaustionJobs[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	if jobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalC.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(jobs) != 0 {
 		t.Fatalf("exhausted job was reclaimed: jobs=%#v err=%v", jobs, err)
 	}
-	var terminalState string
-	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM jobs.outbox WHERE id = $1`, claimedAgain[0].ID).Scan(&terminalState); err != nil || terminalState != "failed" {
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM jobs.outbox WHERE id = $1`, exhaustionJobs[0].ID).Scan(&terminalState); err != nil || terminalState != "failed" {
 		t.Fatalf("exhausted state=%q err=%v", terminalState, err)
+	}
+	var enqueueAudits, completionAudits, retryAudits, failureAudits int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+		count(*) FILTER (WHERE action = 'job.enqueue'),
+		count(*) FILTER (WHERE action = 'job.complete'),
+		count(*) FILTER (WHERE action = 'job.retry'),
+		count(*) FILTER (WHERE action = 'job.fail')
+		FROM audit.events WHERE target_kind = 'job'`).Scan(&enqueueAudits, &completionAudits, &retryAudits, &failureAudits); err != nil {
+		t.Fatal(err)
+	}
+	if enqueueAudits != 3 || completionAudits != 1 || retryAudits != 1 || failureAudits != 2 {
+		t.Fatalf("job audit counts enqueue=%d complete=%d retry=%d fail=%d", enqueueAudits, completionAudits, retryAudits, failureAudits)
+	}
+	var exhaustedAuditActor string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT principal_id::text FROM audit.events
+		WHERE target_id = $1 AND action = 'job.fail'`, exhaustionJobs[0].ID).Scan(&exhaustedAuditActor); err != nil || exhaustedAuditActor != exhaustionJobs[0].Holder {
+		t.Fatalf("exhausted audit actor=%q err=%v", exhaustedAuditActor, err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET completed_at = statement_timestamp() - interval '2 hours' WHERE id = $1`, claimedAgain[0].ID); err == nil {
 		t.Fatal("terminal job was mutable")

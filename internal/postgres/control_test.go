@@ -95,7 +95,7 @@ func TestOutcomeAuditAndJobBounds(t *testing.T) {
 		t.Fatal("free-form audit content accepted")
 	}
 
-	job := EnqueueJob{Kind: "project.created", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, Delay: time.Minute}
+	job := EnqueueJob{ActorPrincipalID: testPrincipalA, Kind: "project.created", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, Delay: time.Minute}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -108,6 +108,11 @@ func TestOutcomeAuditAndJobBounds(t *testing.T) {
 	installationScoped.ProjectID = ""
 	if err := installationScoped.Validate(); err == nil {
 		t.Fatal("project job without a project accepted for enqueue")
+	}
+	actorless := job
+	actorless.ActorPrincipalID = ""
+	if err := actorless.Validate(); err == nil {
+		t.Fatal("actorless job accepted for enqueue")
 	}
 	job.Payload = bytes.Repeat([]byte("x"), maxJobPayloadBytes+1)
 	if err := job.Validate(); err == nil {

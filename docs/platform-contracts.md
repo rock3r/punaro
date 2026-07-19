@@ -79,6 +79,13 @@ dynamic-all scoped, while only `project.create` is currently installation
 scoped. A dynamic grant applies to current and future projects but still
 requires the queried opaque project to exist.
 
+Grant and revoke mutations carry an explicit acting principal and lock its
+active administration grant in the same transaction. Exact-project
+`project.administer` can mutate grants only for that project; dynamic
+all-project `project.administer` can mutate selected-project, installation, and
+all-project grants. `project.create`, subject identifiers, and requested scopes
+never authorize grant administration.
+
 Idempotency keys are globally unique UUIDs bound to principal, operation, and a
 SHA-256 request hash. Only the hash and a bounded immutable JSON outcome are
 stored; the request body is not. Exact concurrent and lost-response retries
@@ -103,6 +110,14 @@ capability and target shape; enqueue rejects unknown kinds and missing required
 project IDs. Only an active principal holding that capability for the opaque job
 project can receive its payload and lease fence. Unknown kinds, disabled
 principals, and unauthorized holders receive no lease.
+
+Enqueue, completion, retry/failure, and exhausted-lease terminalization append
+closed, content-free job audit events in the same transaction as the queue
+state change. Claim locks the exact active principal/grant evidence used to
+authorize the lease, so concurrent disablement or revocation cannot commit
+between authorization and lease publication. A bounded `SKIP LOCKED`
+pre-candidate batch first reserves disjoint job rows, then locks authorization
+evidence only for those projects instead of unrelated grants held by the worker.
 
 ## Server invariants
 

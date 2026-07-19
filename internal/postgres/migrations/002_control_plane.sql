@@ -95,7 +95,7 @@ CREATE TABLE audit.events (
     project_id uuid,
     action text NOT NULL CHECK (action IN (
         'principal.create', 'project.create', 'grant.create', 'grant.delete',
-        'job.enqueue', 'job.complete', 'job.fail'
+		'job.enqueue', 'job.complete', 'job.retry', 'job.fail'
     )),
     outcome text NOT NULL CHECK (outcome IN ('succeeded', 'rejected')),
     target_kind text NOT NULL CHECK (target_kind IN ('principal', 'project', 'grant', 'job')),
