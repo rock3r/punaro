@@ -219,6 +219,8 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		{name: "owner insert privilege", apply: `GRANT INSERT ON auth.installation_owner TO punaro_app`, restore: `REVOKE INSERT ON auth.installation_owner FROM punaro_app`},
 		{name: "owner principal column update", apply: `GRANT UPDATE (principal_id) ON auth.installation_owner TO punaro_app`, restore: `REVOKE UPDATE (principal_id) ON auth.installation_owner FROM punaro_app`},
 		{name: "enrollment issuer column insert", apply: `GRANT INSERT (issuer_principal_id) ON auth.pending_enrollments TO punaro_app`, restore: `REVOKE INSERT (issuer_principal_id) ON auth.pending_enrollments FROM punaro_app`},
+		{name: "enrollment invalidation update", apply: `REVOKE UPDATE (invalidated_at) ON auth.pending_enrollments FROM punaro_app`, restore: `GRANT UPDATE (invalidated_at) ON auth.pending_enrollments TO punaro_app`},
+		{name: "enrollment invalidation trigger", apply: `ALTER TABLE auth.pending_enrollments DISABLE TRIGGER pending_enrollment_invalidation_guard`, restore: `ALTER TABLE auth.pending_enrollments ENABLE TRIGGER pending_enrollment_invalidation_guard`},
 		{name: "credential secret update privilege", apply: `GRANT UPDATE (secret_digest) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (secret_digest) ON auth.device_credentials FROM punaro_app`},
 		{name: "credential expiry update privilege", apply: `GRANT UPDATE (expires_at) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (expires_at) ON auth.device_credentials FROM punaro_app`},
 		{name: "credential principal column references", apply: `GRANT REFERENCES (principal_id) ON auth.device_credentials TO punaro_app`, restore: `REVOKE REFERENCES (principal_id) ON auth.device_credentials FROM punaro_app`},

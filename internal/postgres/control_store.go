@@ -21,7 +21,10 @@ var (
 	ErrNotFound            = errors.New("control-plane record was not found")
 )
 
-const maxJobDelay = 24 * time.Hour
+const (
+	maxJobDelay               = 24 * time.Hour
+	projectJobMutationLockKey = int64(0x50756e61726f4a4f)
+)
 
 // Grant mutations are rare administrative operations. One transaction-scoped
 // lock gives every actor/target pair the same lock order and prevents reciprocal
@@ -569,6 +572,12 @@ func (t *ControlTx) EnqueueJob(ctx context.Context, job EnqueueJob) (string, err
 	if t == nil || t.tx == nil || job.Validate() != nil {
 		return "", errors.New("invalid job")
 	}
+	if err := lockProjectJobMutations(ctx, t.tx, false); err != nil {
+		return "", err
+	}
+	if _, err := lockDirectActiveProject(ctx, t.tx, job.ProjectID); err != nil {
+		return "", err
+	}
 	var id string
 	err := t.tx.QueryRowContext(ctx, `INSERT INTO jobs.outbox (project_id, kind, payload, max_attempts, available_at)
 VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond')) RETURNING id::text`, nullableID(job.ProjectID), job.Kind, []byte(job.Payload), job.MaxAttempts, job.Delay.Microseconds()).Scan(&id)
@@ -580,6 +589,13 @@ VALUES ($1, $2, $3, $4, statement_timestamp() + ($5 * interval '1 microsecond'))
 	}
 	if err := t.AppendAudit(ctx, AuditEvent{PrincipalID: job.ActorPrincipalID, ProjectID: job.ProjectID, Action: AuditJobEnqueue, Outcome: AuditSucceeded, TargetKind: AuditTargetJob, TargetID: id}); err != nil {
 		return "", err
+	}
+	advanced, err := t.tx.ExecContext(ctx, `UPDATE relay.projects SET content_generation = content_generation + 1 WHERE id = $1 AND merged_into IS NULL`, job.ProjectID)
+	if err != nil {
+		return "", errors.New("project content generation could not advance")
+	}
+	if count, err := advanced.RowsAffected(); err != nil || count != 1 {
+		return "", ErrMergedProject
 	}
 	return id, nil
 }
@@ -611,6 +627,9 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 		return nil, errors.New("job claim transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
+		return nil, err
+	}
 	if _, err := tx.ExecContext(ctx, `WITH exhausted AS (
 	SELECT job.id, job.project_id, job.lease_holder FROM jobs.outbox AS job
     WHERE job.kind = $1 AND job.state = 'running' AND job.lease_until <= statement_timestamp() AND job.attempts >= job.max_attempts
@@ -661,8 +680,8 @@ SELECT lease_holder, project_id, 'job.fail', 'succeeded', 'job', id FROM failed`
       AND EXISTS (
           SELECT 1 FROM authorized_grants AS capability_grant
           WHERE job.project_id IS NOT NULL
-            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
-                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+	            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
+	                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
       )
 	ORDER BY COALESCE(candidate.lease_until, candidate.available_at), candidate.created_at, candidate.id
     LIMIT $2
@@ -779,6 +798,10 @@ func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (au
 	if err != nil {
 		return authorizedJobLease{}, errors.New("job lease transaction cannot start")
 	}
+	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
+		_ = tx.Rollback()
+		return authorizedJobLease{}, err
+	}
 	var kind, holder, projectID string
 	err = tx.QueryRowContext(ctx, `SELECT kind, lease_holder::text, COALESCE(project_id::text, '')
 FROM jobs.outbox
@@ -807,6 +830,17 @@ FOR UPDATE`, lease.ID, lease.Token, lease.Generation).Scan(&kind, &holder, &proj
 		return authorizedJobLease{}, ErrStaleLease
 	}
 	return authorizedJobLease{tx: tx, Holder: holder, ProjectID: projectID}, nil
+}
+
+func lockProjectJobMutations(ctx context.Context, tx *sql.Tx, exclusive bool) error {
+	routine := "pg_advisory_xact_lock_shared"
+	if exclusive {
+		routine = "pg_advisory_xact_lock"
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_catalog.`+routine+`($1)`, projectJobMutationLockKey); err != nil {
+		return errors.New("project job mutation cannot be serialized")
+	}
+	return nil
 }
 
 // PruneTerminalJobs removes only a bounded batch of old terminal rows.

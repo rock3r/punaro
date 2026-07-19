@@ -2,10 +2,14 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -200,7 +204,7 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.SourceProjectID != source.ProjectID || preview.CanonicalProjectID != canonical.ProjectID || preview.IdentityCount < 1 || preview.PrivateRecordCount != 0 || preview.ConflictCount != 0 || len(preview.NewlyAuthorizedPrincipalIDs) != 1 || preview.NewlyAuthorizedPrincipalIDs[0] != canonicalOnly.ID {
+	if preview.SourceProjectID != source.ProjectID || preview.CanonicalProjectID != canonical.ProjectID || preview.IdentityCount < 1 || preview.PrivateRecordCount != 1 || preview.PendingEnrollmentCount != 0 || preview.ConflictCount != 0 || len(preview.NewlyAuthorizedPrincipalIDs) != 1 || preview.NewlyAuthorizedPrincipalIDs[0] != canonicalOnly.ID {
 		t.Fatalf("unexpected preview: %#v", preview)
 	}
 	previewRetry, err := app.PreviewProjectIdentityMerge(ctx, previewRequest)
@@ -297,11 +301,80 @@ WHERE id = $1`, preview.PreviewID, maxLiveProjectPreviewsActor-liveActorPreviews
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.project_merge_previews WHERE actor_principal_id = $1 AND consumed_at IS NULL`, actor.ID); err != nil {
 		t.Fatal(err)
 	}
+	canonicalWorker, err := app.CreatePrincipal(ctx, PrincipalKindService, "canonical project worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantFixture(canonicalWorker.ID, source.ProjectID, CapabilityProjectAdminister)
+	grantFixture(canonicalWorker.ID, canonical.ProjectID, CapabilityProjectAdminister)
+	preMergeLeases, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: canonicalWorker.ID, Limit: 10, LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leasedSourceJob bool
+	for _, lease := range preMergeLeases {
+		leasedSourceJob = leasedSourceJob || lease.ProjectID == source.ProjectID
+		if lease.ProjectID == source.ProjectID {
+			if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts WHERE id = $1`, lease.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !leasedSourceJob {
+		t.Fatal("source project job was not leased before merge")
+	}
+	var queuedSourceJobID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO jobs.outbox (project_id, kind, payload, max_attempts)
+VALUES ($1, 'project.created', jsonb_build_object('project_id', $1::text), 4) RETURNING id::text`, source.ProjectID).Scan(&queuedSourceJobID); err != nil {
+		t.Fatal(err)
+	}
+	var pendingSourceEnrollmentID string
+	pendingClientBinding := "66666666-6666-4666-8666-666666666666"
+	pendingCodeBytes := []byte("merge-invalidated-enrollment-code")
+	pendingCode := base64.RawURLEncoding.EncodeToString(pendingCodeBytes)
+	pendingCodeDigest := sha256.Sum256(pendingCodeBytes)
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.pending_enrollments
+    (issuer_principal_id, client_binding, label, code_digest, preview_hash, expires_at)
+VALUES ($1, $2, 'source enrollment', $3, decode(repeat('22', 32), 'hex'), statement_timestamp() + interval '10 minutes')
+RETURNING id::text`, actor.ID, pendingClientBinding, pendingCodeDigest[:]).Scan(&pendingSourceEnrollmentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollment_grants
+    (enrollment_id, ordinal, scope, project_id, capability)
+VALUES ($1, 0, 'project', $2, 'memory.read'),
+	   ($1, 1, 'project', $3, 'attachment.download')`, pendingSourceEnrollmentID, source.ProjectID, canonical.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	var disclosedGrantCount, disclosedPendingEnrollmentCount int
+	if err := ownerDB.QueryRowContext(ctx, `WITH affected_enrollments AS MATERIALIZED (
+    SELECT enrollment.id FROM auth.pending_enrollments AS enrollment
+    WHERE enrollment.redeemed_at IS NULL AND enrollment.invalidated_at IS NULL
+      AND enrollment.expires_at > statement_timestamp()
+      AND EXISTS (
+          SELECT 1 FROM auth.pending_enrollment_grants AS source_grant
+          WHERE source_grant.enrollment_id = enrollment.id
+            AND source_grant.scope = 'project' AND source_grant.project_id = $1
+      )
+)
+SELECT
+    (SELECT count(*) FROM auth.capability_grants WHERE project_id = $1 AND revoked_at IS NULL)
+	+ (SELECT count(*) FROM auth.pending_enrollment_grants
+	   WHERE enrollment_id IN (SELECT id FROM affected_enrollments)),
+	(SELECT count(*) FROM affected_enrollments)`, source.ProjectID).Scan(&disclosedGrantCount, &disclosedPendingEnrollmentCount); err != nil {
+		t.Fatal(err)
+	}
+	var disclosedPrivateRecordCount int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM jobs.outbox WHERE project_id = $1 AND state IN ('queued', 'running')`, source.ProjectID).Scan(&disclosedPrivateRecordCount); err != nil {
+		t.Fatal(err)
+	}
 
 	previewRequest.IdempotencyKey = "99999999-9999-4999-8999-999999999995"
 	preview, err = app.PreviewProjectIdentityMerge(ctx, previewRequest)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if preview.GrantCount != disclosedGrantCount || preview.PendingEnrollmentCount != disclosedPendingEnrollmentCount || preview.PrivateRecordCount != disclosedPrivateRecordCount {
+		t.Fatalf("preview impact=%#v, want grants=%d pending enrollments=%d private records=%d", preview, disclosedGrantCount, disclosedPendingEnrollmentCount, disclosedPrivateRecordCount)
 	}
 	merged, err := app.ApproveProjectIdentityMerge(ctx, ProjectMergeApproval{ActorPrincipalID: actor.ID, PreviewID: preview.PreviewID})
 	if err != nil || merged.AliasProjectID != source.ProjectID || merged.CanonicalProjectID != canonical.ProjectID {
@@ -313,6 +386,82 @@ WHERE id = $1`, preview.PreviewID, maxLiveProjectPreviewsActor-liveActorPreviews
 	}
 	if _, err := app.ApproveProjectIdentityMerge(ctx, ProjectMergeApproval{ActorPrincipalID: outsider.ID, PreviewID: preview.PreviewID}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("cross-actor preview replay error=%v", err)
+	}
+	for _, lease := range preMergeLeases {
+		err := app.CompleteJob(ctx, JobLease{ID: lease.ID, Token: lease.Token, Generation: lease.Generation})
+		if lease.ProjectID == source.ProjectID && !errors.Is(err, ErrStaleLease) {
+			t.Fatalf("source lease completion error=%v, want stale fence", err)
+		}
+		if lease.ProjectID == canonical.ProjectID && err != nil {
+			t.Fatalf("unrelated canonical lease completion error=%v", err)
+		}
+	}
+	postMergeLeases, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: canonicalWorker.ID, Limit: 10, LeaseDuration: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimedQueuedSourceJob, reclaimedSourceLease bool
+	for _, lease := range postMergeLeases {
+		claimedQueuedSourceJob = claimedQueuedSourceJob || lease.ID == queuedSourceJobID
+		for _, oldLease := range preMergeLeases {
+			reclaimedSourceLease = reclaimedSourceLease || (oldLease.ProjectID == source.ProjectID && oldLease.ID == lease.ID)
+		}
+		var payload struct {
+			ProjectID string `json:"project_id"`
+		}
+		if lease.ProjectID != canonical.ProjectID || json.Unmarshal(lease.Payload, &payload) != nil || payload.ProjectID != canonical.ProjectID {
+			t.Fatalf("reclaimed job envelope=%#v payload=%s", lease, lease.Payload)
+		}
+		if err := app.CompleteJob(ctx, JobLease{ID: lease.ID, Token: lease.Token, Generation: lease.Generation}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !claimedQueuedSourceJob || !reclaimedSourceLease {
+		t.Fatalf("queued source claimed=%t running source reclaimed=%t", claimedQueuedSourceJob, reclaimedSourceLease)
+	}
+	var pendingEnrollmentInvalidated bool
+	var pendingGrantProjects []byte
+	if err := ownerDB.QueryRowContext(ctx, `SELECT enrollment.invalidated_at IS NOT NULL,
+	jsonb_agg(pending_grant.project_id::text ORDER BY pending_grant.ordinal)
+FROM auth.pending_enrollments AS enrollment
+JOIN auth.pending_enrollment_grants AS pending_grant ON pending_grant.enrollment_id = enrollment.id
+WHERE enrollment.id = $1 GROUP BY enrollment.invalidated_at`, pendingSourceEnrollmentID).Scan(&pendingEnrollmentInvalidated, &pendingGrantProjects); err != nil {
+		t.Fatal(err)
+	}
+	var retainedGrantProjects []string
+	if json.Unmarshal(pendingGrantProjects, &retainedGrantProjects) != nil || len(retainedGrantProjects) != 2 || retainedGrantProjects[0] != source.ProjectID || retainedGrantProjects[1] != canonical.ProjectID {
+		t.Fatalf("retained pending grant projects=%s", pendingGrantProjects)
+	}
+	if !pendingEnrollmentInvalidated {
+		t.Fatalf("source enrollment invalidated=%t grant projects=%s, want invalidated without retargeting", pendingEnrollmentInvalidated, pendingGrantProjects)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET invalidated_at = NULL WHERE id = $1`, pendingSourceEnrollmentID); err == nil {
+		t.Fatal("enrollment invalidation marker was reversible")
+	}
+	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pendingSourceEnrollmentID, ClientBinding: pendingClientBinding, Code: pendingCode, IdempotencyKey: "66666666-6666-4666-8666-666666666667"}); !errors.Is(err, ErrInvalidEnrollment) {
+		t.Fatalf("invalidated enrollment redemption error=%v", err)
+	}
+	reenrollmentBinding := "66666666-6666-4666-8666-666666666668"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+	(issuer_principal_id, client_binding, label, code_digest, preview_hash, expires_at, invalidated_at)
+SELECT $1,
+	CASE WHEN value = 101 THEN $2::uuid ELSE gen_random_uuid() END,
+	'invalidated enrollment ' || value::text,
+	decode(repeat('33', 32), 'hex'), decode(repeat('44', 32), 'hex'),
+	statement_timestamp() + interval '1 hour' + value * interval '1 second', statement_timestamp()
+FROM generate_series(1, 101) AS value`, actor.ID, reenrollmentBinding); err != nil {
+		t.Fatal(err)
+	}
+	var ownerPrincipalID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT principal_id::text FROM auth.installation_owner WHERE singleton`).Scan(&ownerPrincipalID); err != nil {
+		t.Fatal(err)
+	}
+	_, reenrollmentHash, err := PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&Administration{db: ownerDB}).CreateEnrollment(ctx, ownerPrincipalID, EnrollmentRequest{ClientBinding: reenrollmentBinding, Label: "replacement enrollment", AllProjects: true, TTL: time.Minute}, reenrollmentHash); err != nil {
+		t.Fatalf("invalidated binding blocked replacement after bounded prune: %v", err)
 	}
 	if _, err := app.AttachProjectIdentity(ctx, ProjectIdentityAttachRequest{ActorPrincipalID: actor.ID, ProjectID: source.ProjectID, IdempotencyKey: "88888888-8888-4888-8888-888888888888", Kind: ProjectIdentityOperatorAlias, Locator: "stale source"}); !errors.Is(err, ErrMergedProject) {
 		t.Fatalf("source mutation error=%v", err)

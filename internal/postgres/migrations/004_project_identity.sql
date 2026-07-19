@@ -14,6 +14,31 @@ CREATE TABLE auth.project_acl_state (
 
 INSERT INTO auth.project_acl_state (singleton) VALUES (true);
 
+ALTER TABLE auth.pending_enrollments
+ADD COLUMN invalidated_at timestamptz,
+ADD CONSTRAINT pending_enrollments_invalidation_check
+CHECK (invalidated_at IS NULL OR invalidated_at >= created_at);
+
+CREATE FUNCTION auth.guard_pending_enrollment_invalidation()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF OLD.invalidated_at IS NOT NULL
+       AND NEW.invalidated_at IS DISTINCT FROM OLD.invalidated_at THEN
+        RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'enrollment invalidation is immutable';
+    END IF;
+    RETURN NEW;
+END
+$function$;
+
+CREATE TRIGGER pending_enrollment_invalidation_guard
+BEFORE UPDATE OF invalidated_at ON auth.pending_enrollments
+FOR EACH ROW EXECUTE FUNCTION auth.guard_pending_enrollment_invalidation();
+
+REVOKE ALL ON FUNCTION auth.guard_pending_enrollment_invalidation() FROM PUBLIC, punaro_app;
+
 CREATE TABLE relay.project_identities (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     project_id uuid NOT NULL REFERENCES relay.projects(id),
@@ -75,6 +100,9 @@ CREATE TABLE relay.project_merge_previews (
     consumed_at timestamptz,
     result jsonb CONSTRAINT project_merge_previews_result_check CHECK (result IS NULL OR octet_length(result::text) <= 4096),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+    pending_enrollment_count integer NOT NULL DEFAULT 0
+        CONSTRAINT project_merge_previews_pending_enrollment_count_min_check CHECK (pending_enrollment_count >= 0)
+        CONSTRAINT project_merge_previews_pending_enrollment_count_max_check CHECK (pending_enrollment_count <= 1000),
     CONSTRAINT project_merge_previews_distinct_projects_check CHECK (source_project_id <> canonical_project_id),
     CONSTRAINT project_merge_previews_expiry_check CHECK (expires_at > created_at),
     CONSTRAINT project_merge_previews_consumption_check CHECK ((consumed_at IS NULL AND result IS NULL) OR (consumed_at IS NOT NULL AND result IS NOT NULL))
@@ -110,6 +138,8 @@ GRANT UPDATE (identity_generation, acl_generation, content_generation, merged_in
 GRANT SELECT ON auth.project_acl_state TO punaro_app;
 GRANT UPDATE (global_generation) ON auth.project_acl_state TO punaro_app;
 
+GRANT UPDATE (invalidated_at) ON auth.pending_enrollments TO punaro_app;
+
 GRANT SELECT ON relay.project_identities TO punaro_app;
 GRANT INSERT (project_id, kind, normalized_locator, created_by) ON relay.project_identities TO punaro_app;
 GRANT UPDATE (project_id) ON relay.project_identities TO punaro_app;
@@ -124,6 +154,6 @@ GRANT INSERT (
     source_identity_generation, source_acl_generation, source_content_generation,
     canonical_identity_generation, canonical_acl_generation, canonical_content_generation,
     global_acl_generation, identity_count, grant_count, alias_count,
-    newly_authorized_principal_ids, expires_at
+    newly_authorized_principal_ids, private_record_count, expires_at, pending_enrollment_count
 ) ON relay.project_merge_previews TO punaro_app;
 GRANT UPDATE (consumed_at, result) ON relay.project_merge_previews TO punaro_app;

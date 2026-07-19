@@ -23,16 +23,17 @@ var (
 )
 
 const (
-	maxProjectIdentities         = 100
-	maxProjectMergeGrants        = 1000
-	maxProjectMergeAliases       = 1000
-	maxNewlyAuthorizedPrincipals = 256
-	maxLiveProjectPreviewsActor  = 16
-	maxLiveProjectPreviews       = 1024
-	projectPreviewPruneBatch     = 100
-	projectPreviewTTL            = 10 * time.Minute
-	projectPreviewRetention      = 24 * time.Hour
-	projectMergePreviewLockKey   = int64(0x50756e61726f4d50) // "PunaroMP"
+	maxProjectIdentities          = 100
+	maxProjectMergeGrants         = 1000
+	maxProjectMergeAliases        = 1000
+	maxProjectMergePrivateRecords = 1000
+	maxNewlyAuthorizedPrincipals  = 256
+	maxLiveProjectPreviewsActor   = 16
+	maxLiveProjectPreviews        = 1024
+	projectPreviewPruneBatch      = 100
+	projectPreviewTTL             = 10 * time.Minute
+	projectPreviewRetention       = 24 * time.Hour
+	projectMergePreviewLockKey    = int64(0x50756e61726f4d50) // "PunaroMP"
 )
 
 // ProjectIdentityAttachRequest names one unique identity claim.
@@ -77,6 +78,7 @@ type ProjectMergePreview struct {
 	IdentityCount               int       `json:"identity_count"`
 	GrantCount                  int       `json:"grant_count"`
 	AliasCount                  int       `json:"alias_count"`
+	PendingEnrollmentCount      int       `json:"pending_enrollment_count"`
 	NewlyAuthorizedPrincipalIDs []string  `json:"newly_authorized_principal_ids"`
 	PrivateRecordCount          int       `json:"private_record_count"`
 	ConflictCount               int       `json:"conflict_count"`
@@ -259,6 +261,9 @@ func (d *Database) PreviewProjectIdentityMerge(ctx context.Context, request Proj
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, IdempotencyRequest{PrincipalID: request.ActorPrincipalID, Operation: "project.merge.preview", Key: request.IdempotencyKey, Body: body}, func(control *ControlTx) (IdempotencyOutcome, error) {
+		if err := lockProjectJobMutations(ctx, tx, true); err != nil {
+			return IdempotencyOutcome{}, err
+		}
 		if err := lockGrantMutations(ctx, tx); err != nil {
 			return IdempotencyOutcome{}, err
 		}
@@ -302,7 +307,7 @@ func (d *Database) PreviewProjectIdentityMerge(ctx context.Context, request Proj
 		if err := checkProjectPreviewCapacity(ctx, tx, request.ActorPrincipalID); err != nil {
 			return IdempotencyOutcome{}, err
 		}
-		identityCount, grantCount, aliasCount, newlyAuthorized, err := projectMergeCounts(ctx, tx, source.ID, canonical.ID)
+		identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, newlyAuthorized, err := projectMergeCounts(ctx, tx, source.ID, canonical.ID)
 		if err != nil {
 			return IdempotencyOutcome{}, err
 		}
@@ -316,16 +321,17 @@ func (d *Database) PreviewProjectIdentityMerge(ctx context.Context, request Proj
     actor_principal_id, source_project_id, canonical_project_id, identity_id,
     source_identity_generation, source_acl_generation, source_content_generation,
     canonical_identity_generation, canonical_acl_generation, canonical_content_generation,
-    global_acl_generation, identity_count, grant_count, alias_count, newly_authorized_principal_ids, expires_at
-) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid[],statement_timestamp() + ($16 * interval '1 microsecond'))
+    global_acl_generation, identity_count, grant_count, alias_count, newly_authorized_principal_ids,
+    private_record_count, expires_at, pending_enrollment_count
+) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::uuid[],$16,statement_timestamp() + ($17 * interval '1 microsecond'),$18)
 RETURNING id::text, expires_at`, request.ActorPrincipalID, source.ID, canonical.ID, identityID,
 			source.IdentityGeneration, source.ACLGeneration, source.ContentGeneration,
 			canonical.IdentityGeneration, canonical.ACLGeneration, canonical.ContentGeneration,
-			globalGeneration, identityCount, grantCount, aliasCount, newlyAuthorized, projectPreviewTTL.Microseconds()).Scan(&previewID, &expiresAt)
+			globalGeneration, identityCount, grantCount, aliasCount, newlyAuthorized, privateRecordCount, projectPreviewTTL.Microseconds(), pendingEnrollmentCount).Scan(&previewID, &expiresAt)
 		if err != nil {
 			return IdempotencyOutcome{}, errors.New("project merge preview could not be recorded")
 		}
-		preview := ProjectMergePreview{PreviewID: previewID, SourceProjectID: source.ID, CanonicalProjectID: canonical.ID, IdentityCount: identityCount, GrantCount: grantCount, AliasCount: aliasCount, NewlyAuthorizedPrincipalIDs: newlyAuthorized, PrivateRecordCount: 0, ConflictCount: 0, ExpiresAt: expiresAt}
+		preview := ProjectMergePreview{PreviewID: previewID, SourceProjectID: source.ID, CanonicalProjectID: canonical.ID, IdentityCount: identityCount, GrantCount: grantCount, AliasCount: aliasCount, PendingEnrollmentCount: pendingEnrollmentCount, NewlyAuthorizedPrincipalIDs: newlyAuthorized, PrivateRecordCount: privateRecordCount, ConflictCount: 0, ExpiresAt: expiresAt}
 		if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: request.ActorPrincipalID, ProjectID: canonical.ID, Action: AuditProjectMergePreview, Outcome: AuditSucceeded, TargetKind: AuditTargetProjectMerge, TargetID: previewID}); err != nil {
 			return IdempotencyOutcome{}, err
 		}
@@ -359,6 +365,9 @@ func (d *Database) ApproveProjectIdentityMerge(ctx context.Context, approval Pro
 		return ProjectMergeResult{}, errors.New("project merge transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := lockProjectJobMutations(ctx, tx, true); err != nil {
+		return ProjectMergeResult{}, err
+	}
 	if err := lockGrantMutations(ctx, tx); err != nil {
 		return ProjectMergeResult{}, err
 	}
@@ -367,6 +376,7 @@ func (d *Database) ApproveProjectIdentityMerge(ctx context.Context, approval Pro
 	}
 	var actorID, sourceID, canonicalID, identityID string
 	var sourceIdentity, sourceACL, sourceContent, canonicalIdentity, canonicalACL, canonicalContent, globalACL int64
+	var storedIdentityCount, storedGrantCount, storedAliasCount, storedPendingEnrollmentCount, storedPrivateRecordCount int
 	var expiresAt time.Time
 	var unexpired bool
 	var consumedAt sql.NullTime
@@ -374,11 +384,13 @@ func (d *Database) ApproveProjectIdentityMerge(ctx context.Context, approval Pro
 	err = tx.QueryRowContext(ctx, `SELECT actor_principal_id::text, source_project_id::text, canonical_project_id::text, identity_id::text,
     source_identity_generation, source_acl_generation, source_content_generation,
     canonical_identity_generation, canonical_acl_generation, canonical_content_generation,
-    global_acl_generation, expires_at, expires_at > statement_timestamp(), consumed_at, result
+    global_acl_generation, identity_count, grant_count, alias_count, pending_enrollment_count, private_record_count,
+    expires_at, expires_at > statement_timestamp(), consumed_at, result
 FROM relay.project_merge_previews WHERE id = $1 FOR UPDATE`, approval.PreviewID).Scan(
 		&actorID, &sourceID, &canonicalID, &identityID,
 		&sourceIdentity, &sourceACL, &sourceContent, &canonicalIdentity, &canonicalACL, &canonicalContent,
-		&globalACL, &expiresAt, &unexpired, &consumedAt, &storedResult)
+		&globalACL, &storedIdentityCount, &storedGrantCount, &storedAliasCount, &storedPendingEnrollmentCount, &storedPrivateRecordCount,
+		&expiresAt, &unexpired, &consumedAt, &storedResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProjectMergeResult{}, ErrNotFound
 	}
@@ -426,18 +438,53 @@ FROM relay.project_merge_previews WHERE id = $1 FOR UPDATE`, approval.PreviewID)
 			return ProjectMergeResult{}, ErrForbidden
 		}
 	}
-	identityCount, grantCount, aliasCount, _, err := projectMergeCounts(ctx, tx, sourceID, canonicalID)
+	identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, _, err := projectMergeCounts(ctx, tx, sourceID, canonicalID)
 	if err != nil {
 		return ProjectMergeResult{}, err
 	}
-	if identityCount < 1 || identityCount > maxProjectIdentities || grantCount > maxProjectMergeGrants || aliasCount >= maxProjectMergeAliases {
-		return ProjectMergeResult{}, ErrProjectMergeTooLarge
+	if identityCount != storedIdentityCount || grantCount != storedGrantCount || aliasCount != storedAliasCount ||
+		pendingEnrollmentCount != storedPendingEnrollmentCount || privateRecordCount != storedPrivateRecordCount {
+		return ProjectMergeResult{}, ErrStaleProjectMerge
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE relay.project_identities SET project_id = $1 WHERE project_id = $2`, canonicalID, sourceID); err != nil {
 		return ProjectMergeResult{}, errors.New("project identities could not be merged")
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at = statement_timestamp() WHERE project_id = $1 AND revoked_at IS NULL`, sourceID); err != nil {
 		return ProjectMergeResult{}, errors.New("source project membership could not be retired")
+	}
+	invalidatedEnrollments, err := tx.ExecContext(ctx, `UPDATE auth.pending_enrollments AS enrollment
+SET invalidated_at = statement_timestamp()
+	WHERE enrollment.redeemed_at IS NULL AND enrollment.invalidated_at IS NULL AND enrollment.expires_at > statement_timestamp()
+  AND EXISTS (
+      SELECT 1 FROM auth.pending_enrollment_grants AS pending_grant
+      WHERE pending_grant.enrollment_id = enrollment.id
+        AND pending_grant.scope = 'project' AND pending_grant.project_id = $1
+	  )`, sourceID)
+	if err != nil {
+		return ProjectMergeResult{}, errors.New("source project enrollments could not be fenced")
+	}
+	if count, err := invalidatedEnrollments.RowsAffected(); err != nil || count != int64(pendingEnrollmentCount) {
+		return ProjectMergeResult{}, ErrStaleProjectMerge
+	}
+	rehomedJobs, err := tx.ExecContext(ctx, `UPDATE jobs.outbox AS job
+SET project_id = $1,
+    payload = CASE job.kind
+        WHEN 'project.created' THEN jsonb_set(job.payload, '{project_id}', to_jsonb($1::text), true)
+        ELSE job.payload
+    END,
+    state = CASE WHEN job.state = 'running' THEN 'queued' ELSE job.state END,
+	attempts = job.attempts - CASE WHEN job.state = 'running' THEN 1 ELSE 0 END,
+    lease_holder = NULL, lease_token = NULL, lease_until = NULL,
+    lease_generation = job.lease_generation + CASE WHEN job.state = 'running' THEN 1 ELSE 0 END,
+    available_at = CASE WHEN job.state = 'running' THEN statement_timestamp() ELSE job.available_at END,
+    last_error_code = CASE WHEN job.state = 'running' THEN 'project_merged' ELSE job.last_error_code END,
+    updated_at = statement_timestamp()
+WHERE job.project_id = $2 AND job.state IN ('queued', 'running')`, canonicalID, sourceID)
+	if err != nil {
+		return ProjectMergeResult{}, errors.New("source project jobs could not be rehomed")
+	}
+	if count, err := rehomedJobs.RowsAffected(); err != nil || count != int64(privateRecordCount) {
+		return ProjectMergeResult{}, ErrStaleProjectMerge
 	}
 	if _, err := tx.ExecContext(ctx, `WITH rewritten AS (
     UPDATE relay.project_lookup_aliases SET canonical_project_id = $1 WHERE canonical_project_id = $2
@@ -551,21 +598,43 @@ WHERE consumed_at IS NULL AND expires_at > statement_timestamp()`, actorPrincipa
 	return nil
 }
 
-func projectMergeCounts(ctx context.Context, tx *sql.Tx, sourceID, canonicalID string) (int, int, int, []string, error) {
-	var identityCount, canonicalIdentityCount, grantCount, aliasCount int
+func projectMergeCounts(ctx context.Context, tx *sql.Tx, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
+	var identityCount, canonicalIdentityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount int
 	if err := tx.QueryRowContext(ctx, `SELECT
     count(*) FILTER (WHERE project_id = $1), count(*) FILTER (WHERE project_id = $2)
 FROM relay.project_identities WHERE project_id IN ($1, $2)`, sourceID, canonicalID).Scan(&identityCount, &canonicalIdentityCount); err != nil {
-		return 0, 0, 0, nil, errors.New("project identity count is unavailable")
+		return 0, 0, 0, 0, 0, nil, errors.New("project identity count is unavailable")
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM auth.capability_grants WHERE project_id = $1 AND revoked_at IS NULL`, sourceID).Scan(&grantCount); err != nil {
-		return 0, 0, 0, nil, errors.New("project grant count is unavailable")
+	if err := tx.QueryRowContext(ctx, `WITH affected_enrollments AS MATERIALIZED (
+    SELECT enrollment.id FROM auth.pending_enrollments AS enrollment
+    WHERE enrollment.redeemed_at IS NULL AND enrollment.invalidated_at IS NULL
+      AND enrollment.expires_at > statement_timestamp()
+      AND EXISTS (
+          SELECT 1 FROM auth.pending_enrollment_grants AS source_grant
+          WHERE source_grant.enrollment_id = enrollment.id
+            AND source_grant.scope = 'project' AND source_grant.project_id = $1
+      )
+)
+SELECT
+    (SELECT count(*) FROM auth.capability_grants WHERE project_id = $1 AND revoked_at IS NULL)
+  + (SELECT count(*) FROM auth.pending_enrollment_grants
+     WHERE enrollment_id IN (SELECT id FROM affected_enrollments)),
+    (SELECT count(*) FROM affected_enrollments)`, sourceID).Scan(&grantCount, &pendingEnrollmentCount); err != nil {
+		return 0, 0, 0, 0, 0, nil, errors.New("project grant count is unavailable")
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM relay.project_lookup_aliases WHERE canonical_project_id = $1`, sourceID).Scan(&aliasCount); err != nil {
-		return 0, 0, 0, nil, errors.New("project alias count is unavailable")
+		return 0, 0, 0, 0, 0, nil, errors.New("project alias count is unavailable")
 	}
-	if identityCount < 1 || identityCount+canonicalIdentityCount > maxProjectIdentities || grantCount > maxProjectMergeGrants || aliasCount >= maxProjectMergeAliases {
-		return 0, 0, 0, nil, ErrProjectMergeTooLarge
+	var unsupportedJobCount int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*), count(*) FILTER (WHERE kind <> 'project.created')
+FROM jobs.outbox WHERE project_id = $1 AND state IN ('queued', 'running')`, sourceID).Scan(&privateRecordCount, &unsupportedJobCount); err != nil {
+		return 0, 0, 0, 0, 0, nil, errors.New("project job count is unavailable")
+	}
+	if unsupportedJobCount > 0 {
+		return 0, 0, 0, 0, 0, nil, errors.New("project job kind has no merge behavior")
+	}
+	if identityCount < 1 || identityCount+canonicalIdentityCount > maxProjectIdentities || grantCount > maxProjectMergeGrants || aliasCount >= maxProjectMergeAliases || pendingEnrollmentCount > maxPendingEnrollments || privateRecordCount > maxProjectMergePrivateRecords {
+		return 0, 0, 0, 0, 0, nil, ErrProjectMergeTooLarge
 	}
 	rows, err := tx.QueryContext(ctx, `WITH canonical_capabilities AS (
     SELECT DISTINCT principal_id, capability FROM auth.capability_grants
@@ -585,24 +654,24 @@ FROM relay.project_identities WHERE project_id IN ($1, $2)`, sourceID, canonical
 SELECT DISTINCT principal_id::text FROM expanded
 ORDER BY principal_id::text LIMIT $3`, sourceID, canonicalID, maxNewlyAuthorizedPrincipals+1)
 	if err != nil {
-		return 0, 0, 0, nil, errors.New("project authorization preview is unavailable")
+		return 0, 0, 0, 0, 0, nil, errors.New("project authorization preview is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
 	principals := make([]string, 0)
 	for rows.Next() {
 		var principalID string
 		if err := rows.Scan(&principalID); err != nil {
-			return 0, 0, 0, nil, errors.New("project authorization preview is malformed")
+			return 0, 0, 0, 0, 0, nil, errors.New("project authorization preview is malformed")
 		}
 		principals = append(principals, principalID)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, 0, 0, nil, errors.New("project authorization preview is unavailable")
+		return 0, 0, 0, 0, 0, nil, errors.New("project authorization preview is unavailable")
 	}
 	if len(principals) > maxNewlyAuthorizedPrincipals {
-		return 0, 0, 0, nil, ErrProjectMergeTooLarge
+		return 0, 0, 0, 0, 0, nil, ErrProjectMergeTooLarge
 	}
-	return identityCount, grantCount, aliasCount, principals, nil
+	return identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, principals, nil
 }
 
 func currentInstallationState(ctx context.Context, tx *sql.Tx) (InstallationState, error) {
