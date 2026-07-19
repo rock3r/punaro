@@ -833,11 +833,11 @@ FOR UPDATE`, lease.ID, lease.Token, lease.Generation).Scan(&kind, &holder, &proj
 }
 
 func lockProjectJobMutations(ctx context.Context, tx *sql.Tx, exclusive bool) error {
-	routine := "pg_advisory_xact_lock_shared"
+	statement := `SELECT pg_catalog.pg_advisory_xact_lock_shared($1)`
 	if exclusive {
-		routine = "pg_advisory_xact_lock"
+		statement = `SELECT pg_catalog.pg_advisory_xact_lock($1)`
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_catalog.`+routine+`($1)`, projectJobMutationLockKey); err != nil {
+	if _, err := tx.ExecContext(ctx, statement, projectJobMutationLockKey); err != nil {
 		return errors.New("project job mutation cannot be serialized")
 	}
 	return nil
