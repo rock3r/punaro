@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -285,7 +286,7 @@ func TestHTTPRelayClientDoesNotFollowRedirectForOfferNotice(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer relayServer.Close()
-	client, err := NewHTTPRelayClient(relayServer.URL, "machine-a", machinePrivate, relayServer.Client(), AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	client, err := NewHTTPRelayClient(relayServer.URL, "machine-a", machinePrivate, relayServer.Client(), AccessServiceToken{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +296,140 @@ func TestHTTPRelayClientDoesNotFollowRedirectForOfferNotice(t *testing.T) {
 	if redirectTargetHit {
 		t.Fatal("offer notice followed redirect")
 	}
+}
+
+func TestHTTPRelayClientEstablishesAccessSessionWithoutReplayingSignedRequest(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := 0
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		step++
+		if request.Header.Get("CF-Access-Client-Id") != "access-id" || request.Header.Get("CF-Access-Client-Secret") != "access-secret" {
+			t.Fatalf("request %d omitted Access headers", step)
+		}
+		switch step {
+		case 1:
+			if request.URL.Host != "relay.example" || request.URL.Path != "/.well-known/punaro-access-session" || request.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatalf("unsafe initial preflight: %s %s", request.URL, request.Header.Get("X-Punaro-Signature"))
+			}
+			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://team.cloudflareaccess.com/session"}}), nil
+		case 2:
+			if request.URL.Host != "team.cloudflareaccess.com" || request.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatalf("signed relay request reached Access: %s", request.URL)
+			}
+			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://relay.example/.well-known/punaro-access-session"}}), nil
+		case 3:
+			if request.URL.Host != "relay.example" || request.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatalf("unsafe returning preflight: %s", request.URL)
+			}
+			return testHTTPResponse(request, http.StatusNotFound, http.Header{"Set-Cookie": []string{"CF_Authorization=session; Path=/; Secure"}}), nil
+		case 4:
+			if request.URL.Host != "relay.example" || request.Method != http.MethodPut || request.URL.Path != "/v1/machines/me/endpoints" {
+				t.Fatalf("unexpected signed request: %s %s", request.Method, request.URL)
+			}
+			if request.Header.Get("X-Punaro-Signature") == "" || !strings.Contains(request.Header.Get("Cookie"), "CF_Authorization=session") {
+				t.Fatal("signed request did not carry the origin-scoped Access session")
+			}
+			return testHTTPResponse(request, http.StatusNoContent, nil), nil
+		default:
+			t.Fatalf("unexpected request %d: %s", step, request.URL)
+			return nil, nil
+		}
+	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Advertise(context.Background(), []string{"agent/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if step != 4 {
+		t.Fatalf("request count=%d want 4", step)
+	}
+}
+
+func TestHTTPRelayClientAcceptsAccessCookieFromUnauthorizedPreflight(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		switch requests {
+		case 1:
+			if request.URL.Path != "/.well-known/punaro-access-session" || request.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatalf("unexpected preflight request: %s %s", request.URL, request.Header.Get("X-Punaro-Signature"))
+			}
+			return testHTTPResponse(request, http.StatusUnauthorized, http.Header{"Set-Cookie": []string{"CF_Authorization=session; Path=/; Secure"}}), nil
+		case 2:
+			if request.Header.Get("X-Punaro-Signature") == "" || !strings.Contains(request.Header.Get("Cookie"), "CF_Authorization=session") {
+				t.Fatal("signed request did not use the Access cookie returned with HTTP 401")
+			}
+			return testHTTPResponse(request, http.StatusNoContent, nil), nil
+		default:
+			t.Fatalf("unexpected request %d", requests)
+			return nil, nil
+		}
+	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Advertise(context.Background(), []string{"agent/a"}); err != nil {
+		t.Fatal(err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d want 2", requests)
+	}
+}
+
+func TestHTTPRelayClientRejectsUntrustedAccessSessionRedirect(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		requests++
+		if request.Header.Get("X-Punaro-Signature") != "" {
+			t.Fatal("signed relay request was sent before a trusted Access session")
+		}
+		return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://attacker.example/session"}}), nil
+	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Advertise(context.Background(), []string{"agent/a"}); err == nil {
+		t.Fatal("untrusted Access redirect was accepted")
+	}
+	if requests != 1 {
+		t.Fatalf("requests=%d want 1", requests)
+	}
+}
+
+func TestCloudflareAccessHost(t *testing.T) {
+	for host, want := range map[string]bool{
+		"team.cloudflareaccess.com":             true,
+		"TEAM.CLOUDFLAREACCESS.COM.":            true,
+		"cloudflareaccess.com":                  false,
+		"cloudflareaccess.com.attacker.example": false,
+	} {
+		if got := cloudflareAccessHost(host); got != want {
+			t.Fatalf("cloudflareAccessHost(%q)=%t want %t", host, got, want)
+		}
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
+
+func testHTTPResponse(request *http.Request, status int, header http.Header) *http.Response {
+	if header == nil {
+		header = make(http.Header)
+	}
+	return &http.Response{StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader("")), Request: request}
 }
 
 func mustDecodeSignature(t testing.TB, raw string) []byte {

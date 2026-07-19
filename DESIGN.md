@@ -131,6 +131,15 @@ Cloudflare; revoking the machine credential stops it at Punaro. Store both in
 the OS keychain or a root-readable service secret file, never in an agent
 prompt, repository, or mailbox body.
 
+Some Cloudflare Access deployments establish a service-token session through
+an initial redirect. Before a signed adapter operation, the client may perform
+a payload-free session preflight that carries only the two Access headers. It
+may follow at most one HTTPS hop to a `*.cloudflareaccess.com` host and then
+only back to the exact relay origin; it requires an origin-scoped
+`CF_Authorization` cookie before proceeding. Signed request bodies, machine
+signatures, nonces, and idempotency keys are never replayed through this flow.
+All signed relay operations still reject redirects.
+
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
 only through the tunnel. Both the issuer and JWKS endpoint must be
