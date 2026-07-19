@@ -253,7 +253,8 @@ type EnqueueJob struct {
 
 // Validate enforces queue storage and retry ceilings before a transaction starts.
 func (j EnqueueJob) Validate() error {
-	if !boundedTokenPattern.MatchString(j.Kind) || (j.ProjectID != "" && !validOpaqueID(j.ProjectID)) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts || j.Delay < 0 || j.Delay > maxJobDelay {
+	_, knownKind := jobClaimCapability(j.Kind)
+	if !knownKind || !validOpaqueID(j.ProjectID) || len(j.Payload) == 0 || len(j.Payload) > maxJobPayloadBytes || !json.Valid(j.Payload) || j.MaxAttempts < 1 || j.MaxAttempts > maxJobAttempts || j.Delay < 0 || j.Delay > maxJobDelay {
 		return errors.New("invalid job")
 	}
 	return nil

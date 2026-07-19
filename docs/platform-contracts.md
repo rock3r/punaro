@@ -90,14 +90,17 @@ delivery destination requires separate fan-out. Database constraints and a
 locked capacity counter bound payload size, depth, attempts, and state. Claims
 use `FOR UPDATE SKIP LOCKED`, database-time expiry, a fresh token, and an
 increasing generation. Completion or retry requires the exact unexpired fence;
-expired final attempts become terminal failures. Terminal and audit pruning is
-limited to bounded security-definer functions. Audit rows contain only closed
+the holder must also remain active and authorized for the job project. Expired
+final attempts become terminal failures independently of caller authorization,
+so dead rows cannot pin queue capacity. Terminal and audit pruning is limited
+to bounded security-definer functions. Audit rows contain only closed
 action/outcome/target classes, opaque IDs, sequence, and time—never arbitrary
 details.
 
 Queue scheduling is a bounded delay from PostgreSQL time, never an
 application-clock timestamp. Each claimable job kind maps to a server-selected
-capability; only an active principal holding that capability for the opaque job
+capability and target shape; enqueue rejects unknown kinds and missing required
+project IDs. Only an active principal holding that capability for the opaque job
 project can receive its payload and lease fence. Unknown kinds, disabled
 principals, and unauthorized holders receive no lease.
 

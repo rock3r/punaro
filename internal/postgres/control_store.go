@@ -442,7 +442,7 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 	}
 	capability, knownKind := jobClaimCapability(claim.Kind)
 	if !knownKind {
-		return nil, errors.New("invalid job claim")
+		return []LeasedJob{}, nil
 	}
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -452,21 +452,13 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 	if _, err := tx.ExecContext(ctx, `WITH exhausted AS (
     SELECT job.id FROM jobs.outbox AS job
     WHERE job.kind = $1 AND job.state = 'running' AND job.lease_until <= statement_timestamp() AND job.attempts >= job.max_attempts
-      AND EXISTS (
-          SELECT 1 FROM auth.principals AS principal
-          JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
-          WHERE principal.id = $3 AND principal.disabled_at IS NULL AND capability_grant.revoked_at IS NULL
-            AND capability_grant.capability = $4 AND job.project_id IS NOT NULL
-            AND ((capability_grant.scope = 'project' AND capability_grant.project_id = job.project_id)
-                 OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
-      )
     ORDER BY job.lease_until, job.created_at, job.id
     FOR UPDATE SKIP LOCKED
     LIMIT $2
 )
 UPDATE jobs.outbox AS job
 SET state = 'failed', last_error_code = 'attempts_exhausted', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
-FROM exhausted WHERE job.id = exhausted.id`, claim.Kind, claim.Limit, claim.Holder, capability); err != nil {
+FROM exhausted WHERE job.id = exhausted.id`, claim.Kind, claim.Limit); err != nil {
 		return nil, errors.New("expired jobs could not be fenced")
 	}
 	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
@@ -520,7 +512,12 @@ func (d *Database) CompleteJob(ctx context.Context, lease JobLease) error {
 	if !validJobLease(lease) {
 		return errors.New("invalid job lease")
 	}
-	result, err := d.db.ExecContext(ctx, `UPDATE jobs.outbox
+	tx, err := d.authorizedJobLeaseTx(ctx, lease)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE jobs.outbox
 SET state = 'succeeded', lease_holder = NULL, lease_token = NULL, lease_until = NULL, completed_at = statement_timestamp()
 WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = $3 AND lease_until > statement_timestamp()`, lease.ID, lease.Token, lease.Generation)
 	if err != nil {
@@ -528,6 +525,9 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 	}
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return ErrStaleLease
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("job completion could not commit")
 	}
 	return nil
 }
@@ -537,7 +537,12 @@ func (d *Database) RetryJob(ctx context.Context, retry JobRetry) error {
 	if !validJobLease(retry.Lease) || !boundedTokenPattern.MatchString(retry.ErrorCode) || retry.Delay < 0 || retry.Delay > maxJobDelay {
 		return errors.New("invalid job retry")
 	}
-	result, err := d.db.ExecContext(ctx, `UPDATE jobs.outbox
+	tx, err := d.authorizedJobLeaseTx(ctx, retry.Lease)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE jobs.outbox
 SET state = CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'queued' END,
     available_at = CASE WHEN attempts >= max_attempts THEN available_at ELSE statement_timestamp() + ($4 * interval '1 microsecond') END,
     last_error_code = $5, lease_holder = NULL, lease_token = NULL, lease_until = NULL,
@@ -549,7 +554,48 @@ WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = 
 	if count, err := result.RowsAffected(); err != nil || count != 1 {
 		return ErrStaleLease
 	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("job retry could not commit")
+	}
 	return nil
+}
+
+// authorizedJobLeaseTx locks the lease, its active holder, and the exact grant
+// that authorizes the holder for the job project. Revocation or disablement
+// therefore fences already-issued leases before they can publish or requeue.
+func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (*sql.Tx, error) {
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, errors.New("job lease transaction cannot start")
+	}
+	var kind, holder, projectID string
+	err = tx.QueryRowContext(ctx, `SELECT kind, lease_holder::text, COALESCE(project_id::text, '')
+FROM jobs.outbox
+WHERE id = $1 AND state = 'running' AND lease_token = $2 AND lease_generation = $3 AND lease_until > statement_timestamp()
+FOR UPDATE`, lease.ID, lease.Token, lease.Generation).Scan(&kind, &holder, &projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = tx.Rollback()
+		return nil, ErrStaleLease
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, errors.New("job lease could not be locked")
+	}
+	capability, knownKind := jobClaimCapability(kind)
+	if !knownKind || projectID == "" {
+		_ = tx.Rollback()
+		return nil, ErrStaleLease
+	}
+	allowed, err := lockCapability(ctx, tx, holder, projectID, capability)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	if !allowed {
+		_ = tx.Rollback()
+		return nil, ErrStaleLease
+	}
+	return tx, nil
 }
 
 // PruneTerminalJobs removes only a bounded batch of old terminal rows.

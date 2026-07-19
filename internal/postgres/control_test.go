@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -94,9 +95,19 @@ func TestOutcomeAuditAndJobBounds(t *testing.T) {
 		t.Fatal("free-form audit content accepted")
 	}
 
-	job := EnqueueJob{Kind: "project.reconcile", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, Delay: time.Minute}
+	job := EnqueueJob{Kind: "project.created", ProjectID: testProjectA, Payload: json.RawMessage(`{"project_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}`), MaxAttempts: 4, Delay: time.Minute}
 	if err := job.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	unknown := job
+	unknown.Kind = "project.reconcile"
+	if err := unknown.Validate(); err == nil {
+		t.Fatal("unknown job kind accepted for enqueue")
+	}
+	installationScoped := job
+	installationScoped.ProjectID = ""
+	if err := installationScoped.Validate(); err == nil {
+		t.Fatal("project job without a project accepted for enqueue")
 	}
 	job.Payload = bytes.Repeat([]byte("x"), maxJobPayloadBytes+1)
 	if err := job.Validate(); err == nil {
@@ -137,5 +148,13 @@ func TestClaimOptionsAreHardBounded(t *testing.T) {
 				t.Fatal("invalid claim accepted")
 			}
 		})
+	}
+}
+
+func TestUnknownJobKindReceivesNoLease(t *testing.T) {
+	// The store returns before touching the nil test database.
+	jobs, err := (&Database{}).ClaimJobs(context.Background(), ClaimJobs{Kind: "project.reconcile", Holder: testPrincipalB, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("unknown kind jobs=%#v err=%v", jobs, err)
 	}
 }

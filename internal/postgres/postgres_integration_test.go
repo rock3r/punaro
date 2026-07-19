@@ -475,6 +475,34 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if _, err := app.HasCapability(ctx, principalA.ID, "friendly alpha", CapabilityProjectRead); err == nil {
 		t.Fatal("friendly project label accepted as authority")
 	}
+	var capacityBeforeInvalidJobs int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT active_count FROM jobs.queue_capacity WHERE singleton`).Scan(&capacityBeforeInvalidJobs); err != nil {
+		t.Fatal(err)
+	}
+	for name, invalidJob := range map[string]EnqueueJob{
+		"unknown kind":    {Kind: "project.reconcile", ProjectID: first.ProjectID, Payload: json.RawMessage(`{}`), MaxAttempts: 1},
+		"missing project": {Kind: "project.created", Payload: json.RawMessage(`{}`), MaxAttempts: 1},
+	} {
+		t.Run("invalid enqueue "+name, func(t *testing.T) {
+			tx, txErr := app.db.BeginTx(ctx, nil)
+			if txErr != nil {
+				t.Fatal(txErr)
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, enqueueErr := (&ControlTx{tx: tx}).EnqueueJob(ctx, invalidJob); enqueueErr == nil {
+				t.Fatal("invalid job was enqueued")
+			}
+		})
+	}
+	var capacityAfterInvalidJobs, invalidJobRows int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+		(SELECT active_count FROM jobs.queue_capacity WHERE singleton),
+		(SELECT count(*) FROM jobs.outbox WHERE kind = 'project.reconcile' OR project_id IS NULL)`).Scan(&capacityAfterInvalidJobs, &invalidJobRows); err != nil {
+		t.Fatal(err)
+	}
+	if capacityAfterInvalidJobs != capacityBeforeInvalidJobs || invalidJobRows != 0 {
+		t.Fatalf("invalid enqueue changed capacity %d/%d or left %d rows", capacityBeforeInvalidJobs, capacityAfterInvalidJobs, invalidJobRows)
+	}
 
 	changed := create
 	changed.DisplayName = "changed body"
@@ -525,10 +553,13 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if allowed, err := app.HasCapability(ctx, principalB.ID, second.ProjectID, CapabilityMemoryRead); err != nil || allowed {
 		t.Fatalf("revoked dynamic grant remained effective: allowed=%t err=%v", allowed, err)
 	}
+	adminGrantIDs := make(map[string]string, 2)
 	for _, principalID := range []string{principalA.ID, principalB.ID} {
-		if _, err := app.GrantCapability(ctx, Grant{PrincipalID: principalID, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister}); err != nil {
+		grantID, err := app.GrantCapability(ctx, Grant{PrincipalID: principalID, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
+		if err != nil {
 			t.Fatal(err)
 		}
+		adminGrantIDs[principalID] = grantID
 	}
 	if unauthorizedJobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalC.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(unauthorizedJobs) != 0 {
 		t.Fatalf("unauthorized worker received jobs=%#v err=%v", unauthorizedJobs, err)
@@ -562,6 +593,15 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 		t.Fatalf("concurrent disjoint claims=%#v/%#v", firstClaim, secondClaim)
 	}
 	jobs, otherJobs := firstClaim.jobs, secondClaim.jobs
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.principals SET disabled_at = statement_timestamp() WHERE id = $1`, jobs[0].Holder); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.CompleteJob(ctx, jobs[0].Lease()); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("disabled holder completed leased job: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.principals SET disabled_at = NULL WHERE id = $1`, jobs[0].Holder); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.CompleteJob(ctx, jobs[0].Lease()); err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +616,17 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if err := app.CompleteJob(ctx, stale); !errors.Is(err, ErrStaleLease) {
 		t.Fatalf("stale completion error=%v", err)
 	}
+	if err := app.RevokeGrant(ctx, adminGrantIDs[reclaimed[0].Holder]); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RetryJob(ctx, JobRetry{Lease: reclaimed[0].Lease(), ErrorCode: "transient", Delay: time.Minute}); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("revoked holder retried leased job: %v", err)
+	}
+	replacementGrantID, err := app.GrantCapability(ctx, Grant{PrincipalID: reclaimed[0].Holder, Scope: ScopeAllProjects, Capability: CapabilityProjectAdminister})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminGrantIDs[reclaimed[0].Holder] = replacementGrantID
 	if err := app.RetryJob(ctx, JobRetry{Lease: reclaimed[0].Lease(), ErrorCode: "transient", Delay: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +679,7 @@ func testControlPlaneIntegration(ctx context.Context, t *testing.T, app *Databas
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.outbox SET attempts = max_attempts, lease_until = statement_timestamp() - interval '1 second' WHERE id = $1`, claimedAgain[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if jobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalA.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(jobs) != 0 {
+	if jobs, err := app.ClaimJobs(ctx, ClaimJobs{Kind: "project.created", Holder: principalC.ID, Limit: 1, LeaseDuration: time.Minute}); err != nil || len(jobs) != 0 {
 		t.Fatalf("exhausted job was reclaimed: jobs=%#v err=%v", jobs, err)
 	}
 	var terminalState string
