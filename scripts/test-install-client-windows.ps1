@@ -17,7 +17,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', 'PUNARO_ATTACHMENT_HOST_DPAPI_FILE', 'punaro-dpapi.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'PUNARO_ATTACHMENT_HOST_DPAPI_FILE', 'punaro-dpapi.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
@@ -38,6 +38,7 @@ try {
 
     $global:punaroRegisteredTask = $null
     $global:punaroRegisteredSettings = $null
+    $global:punaroRegisteredAction = $null
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
     function New-ScheduledTaskTrigger { param([switch]$AtLogOn, [string]$User) return [pscustomobject]@{ User = $User } }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
@@ -46,6 +47,7 @@ try {
         param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [string]$Description, [switch]$Force)
         $global:punaroRegisteredTask = $TaskName
         $global:punaroRegisteredSettings = $Settings
+        $global:punaroRegisteredAction = $Action
         return [pscustomobject]@{}
     }
 
@@ -57,6 +59,22 @@ try {
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
     if ($global:punaroRegisteredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
+    if (-not ([string]$global:punaroRegisteredAction.Argument -match '(^|\s)-ExecutionPolicy\s+Bypass(\s|$)')) { throw 'Windows client adapter task must use only process-scoped ExecutionPolicy Bypass' }
+    $existingGroupMailbox = @'
+@echo off
+echo %* | findstr /C:"group create" >nul
+if not errorlevel 1 (
+  echo group already exists 1>&2
+  exit /b 1
+)
+echo %* | findstr /C:"group list --json" >nul
+if not errorlevel 1 (
+  echo [{"group_id":"grp_test","address":"group/punaro-attached","created_at":"2026-01-01T00:00:00Z"}]
+  exit /b 0
+)
+exit /b 0
+'@
+    [System.IO.File]::WriteAllText($mailbox, $existingGroupMailbox, [System.Text.Encoding]::ASCII)
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
 } finally {
