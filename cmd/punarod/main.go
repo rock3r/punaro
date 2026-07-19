@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,8 @@ import (
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
+	"github.com/rock3r/punaro/internal/devicehttp"
+	"github.com/rock3r/punaro/internal/ingress"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -36,9 +39,16 @@ type platformDatabase interface {
 	Close() error
 }
 
+type deviceDatabase interface {
+	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
+	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
+}
+
 var openPlatformDatabase = func(ctx context.Context, cfg punaropostgres.Config) (platformDatabase, error) {
 	return punaropostgres.OpenApplication(ctx, cfg)
 }
+
+var listenTCP = net.Listen
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
@@ -119,15 +129,31 @@ func run(args []string, stderr io.Writer) int {
 		defer closeV3()
 	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+	healthMux := http.NewServeMux()
+	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
+	healthMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		if postgresReadiness() != nil || accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) || (v3Readiness != nil && v3Readiness() != nil) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}\n`))
 	})
+	mux := http.NewServeMux()
+	if cfg.DeviceAuthEnabled {
+		database, ok := platformDB.(deviceDatabase)
+		if !ok {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL device store is unavailable")
+			return 2
+		}
+		policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
+		if err := policy.Validate(); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: invalid transport policy")
+			return 2
+		}
+		deviceHandler := devicehttp.New(database, policy)
+		mux.Handle("/v1/enrollments/redeem", deviceHandler)
+		mux.Handle("/v1/device/session", deviceHandler)
+	}
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
 	}
@@ -143,29 +169,80 @@ func run(args []string, stderr io.Writer) int {
 	if v3AttachmentHandler != nil {
 		mux.Handle("/v3/attachments/", v3AttachmentHandler)
 	}
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
-	serverErrors := make(chan error, 1)
-	go func() { serverErrors <- server.ListenAndServe() }()
+	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
+	healthServer := configuredServer(cfg.HealthListenAddr, securityHeaders(healthMux))
+	publicListener, err := listenTCP("tcp", cfg.ListenAddr)
+	if err != nil {
+		logger.Printf("public listener bind failed error=%v", err)
+		return 1
+	}
+	healthListener, err := listenTCP("tcp", cfg.HealthListenAddr)
+	if err != nil {
+		_ = publicListener.Close()
+		logger.Printf("health listener bind failed error=%v", err)
+		return 1
+	}
+	type serverResult struct {
+		name string
+		err  error
+	}
+	serverErrors := make(chan serverResult, 2)
+	go func() { serverErrors <- serverResult{name: "public", err: server.Serve(publicListener)} }()
+	go func() { serverErrors <- serverResult{name: "health", err: healthServer.Serve(healthListener)} }()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	logger.Printf("listening address=%s data_dir=%s log_level=%s", cfg.ListenAddr, cfg.DataDir, cfg.LogLevel)
+	logger.Printf("listening address=%s health_address=%s data_dir=%s log_level=%s", cfg.ListenAddr, cfg.HealthListenAddr, cfg.DataDir, cfg.LogLevel)
 	select {
-	case err := <-serverErrors:
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Printf("server stopped error=%v", err)
+	case result := <-serverErrors:
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = shutdownHTTPServers(shutdown, server, healthServer)
+		if result.err != nil && !errors.Is(result.err, http.ErrServerClosed) {
+			logger.Printf("%s server stopped error=%v", result.name, result.err)
 			return 1
 		}
 		return 0
 	case <-signals:
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
+		if err := shutdownHTTPServers(shutdown, server, healthServer); err != nil {
 			logger.Printf("graceful shutdown failed error=%v", err)
 			return 1
 		}
 		return 0
 	}
+}
+
+func configuredServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
+}
+
+type httpShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownHTTPServers(ctx context.Context, servers ...httpShutdowner) error {
+	failures := make(chan error, len(servers))
+	var wait sync.WaitGroup
+	for _, server := range servers {
+		if server != nil {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				if err := server.Shutdown(ctx); err != nil {
+					failures <- err
+				}
+			}()
+		}
+	}
+	wait.Wait()
+	close(failures)
+	var joined []error
+	for err := range failures {
+		joined = append(joined, err)
+	}
+	return errors.Join(joined...)
 }
 
 type permitRouteAuthorizer struct{ authenticator *relay.Authenticator }

@@ -4,7 +4,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/punarod \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro ./cmd/punaro \
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/punarod \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-migrate ./cmd/punaro-migrate \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-admin ./cmd/punaro-admin \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-adapter ./cmd/punaro-adapter \
@@ -13,6 +14,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/puna
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-attachment ./cmd/punaro-attachment
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7bb25d9f7c31d2bdd1982feb4dafcaf137703c7075dbe2febb41c24212b946f
+COPY --from=build /out/punaro /usr/local/bin/punaro
 COPY --from=build /out/punarod /usr/local/bin/punarod
 COPY --from=build /out/punaro-migrate /usr/local/bin/punaro-migrate
 COPY --from=build /out/punaro-admin /usr/local/bin/punaro-admin
@@ -21,5 +23,5 @@ COPY --from=build /out/punaro-directory /usr/local/bin/punaro-directory
 COPY --from=build /out/punaro-telegram /usr/local/bin/punaro-telegram
 COPY --from=build /out/punaro-attachment /usr/local/bin/punaro-attachment
 USER nonroot:nonroot
-EXPOSE 8080
+EXPOSE 8080 8081
 ENTRYPOINT ["/usr/local/bin/punarod"]

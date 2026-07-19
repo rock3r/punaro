@@ -80,6 +80,34 @@ func OpenAdministration(ctx context.Context, cfg Config) (*Administration, error
 // Close releases the host-local owner connection pool.
 func (a *Administration) Close() error { return a.db.Close() }
 
+// InstallationOwner returns the existing singleton owner for host-local
+// initialization recovery. It exposes no network route and no secret material.
+func (a *Administration) InstallationOwner(ctx context.Context) (Principal, error) {
+	var owner Principal
+	err := a.db.QueryRowContext(ctx, `SELECT principal.id::text, principal.kind, principal.display_name
+FROM auth.installation_owner AS installation
+JOIN auth.principals AS principal ON principal.id = installation.principal_id
+WHERE installation.singleton`).Scan(&owner.ID, &owner.Kind, &owner.DisplayName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Principal{}, ErrNotFound
+	}
+	if err != nil {
+		return Principal{}, errors.New("installation owner is unavailable")
+	}
+	return owner, nil
+}
+
+// InstallationState returns the owner-role view used to prove that host-local
+// administration and the public application role target the same installation.
+func (a *Administration) InstallationState(ctx context.Context) (InstallationState, error) {
+	var state InstallationState
+	err := a.db.QueryRowContext(ctx, `SELECT installation_id::text, timeline_id::text, change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence)
+	if err != nil {
+		return InstallationState{}, errors.New("PostgreSQL installation metadata is unavailable")
+	}
+	return state, nil
+}
+
 // PendingEnrollment contains the one-time secret and exact confirmed grants.
 // Callers must display/store Code once and must never log this value.
 type PendingEnrollment struct {
@@ -98,7 +126,7 @@ type DeviceCredential struct {
 	LookupID    string    `json:"lookup_id"`
 	Encoded     string    `json:"credential"`
 	Generation  int64     `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
 }
 
 // AuthenticatedDevice is the generation fence carried by caches and sessions.
@@ -115,10 +143,10 @@ type DeviceCredentialMetadata struct {
 	Label       string    `json:"label"`
 	Generation  int64     `json:"generation"`
 	CreatedAt   time.Time `json:"created_at"`
-	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at,omitempty"`
-	RotatedAt   time.Time `json:"rotated_at,omitempty"`
-	RevokedAt   time.Time `json:"revoked_at,omitempty"`
+	LastUsedAt  time.Time `json:"last_used_at,omitzero"`
+	ExpiresAt   time.Time `json:"expires_at,omitzero"`
+	RotatedAt   time.Time `json:"rotated_at,omitzero"`
+	RevokedAt   time.Time `json:"revoked_at,omitzero"`
 }
 
 // RedeemEnrollment binds a one-time code to the exact approved client.

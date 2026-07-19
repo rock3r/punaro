@@ -26,6 +26,9 @@ services:
     environment:
       PUNARO_TEST_POSTGRES_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro?sslmode=disable
       PUNARO_TEST_POSTGRES_APP_DSN: postgres://punaro_app@postgres:5432/punaro?sslmode=disable
+      PUNARO_TEST_POSTGRES_OTHER_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_other?sslmode=disable
+      PUNARO_TEST_POSTGRES_PAIR_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_pair?sslmode=disable
+      PUNARO_TEST_POSTGRES_PAIR_APP_DSN: postgres://punaro_app@postgres:5432/punaro_pair?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

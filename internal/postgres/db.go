@@ -111,6 +111,23 @@ func (d *Database) InstallationState(ctx context.Context) (InstallationState, er
 	return state, nil
 }
 
+// InstallationOwner returns the singleton owner identity visible to the
+// application role so runtime configuration can be bound to one installation.
+func (d *Database) InstallationOwner(ctx context.Context) (Principal, error) {
+	var owner Principal
+	err := d.db.QueryRowContext(ctx, `SELECT principal.id::text, principal.kind, principal.display_name
+FROM auth.installation_owner AS installation
+JOIN auth.principals AS principal ON principal.id = installation.principal_id
+WHERE installation.singleton`).Scan(&owner.ID, &owner.Kind, &owner.DisplayName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Principal{}, ErrNotFound
+	}
+	if err != nil {
+		return Principal{}, errors.New("installation owner is unavailable")
+	}
+	return owner, nil
+}
+
 // AdvanceChange atomically increments and returns the global change sequence.
 func (d *Database) AdvanceChange(ctx context.Context) (InstallationState, error) {
 	var state InstallationState

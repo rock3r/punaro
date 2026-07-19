@@ -84,6 +84,83 @@ func TestLoadRejectsNonLoopbackListenerWhilePublicRuntimeIsUnavailable(t *testin
 	}
 }
 
+func TestLoadAcceptsOnlyValidatedDeviceIngressProfiles(t *testing.T) {
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	cfg, err := Load("")
+	if err != nil || !cfg.DeviceAuthEnabled || cfg.IngressMode != "internet" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+
+	t.Setenv("PUNARO_INGRESS_MODE", "lan")
+	t.Setenv("PUNARO_PUBLIC_URL", "")
+	t.Setenv("PUNARO_LISTEN_ADDR", "192.168.50.4:8080")
+	t.Setenv("PUNARO_TRUSTED_LAN_CIDR", "192.168.50.0/24")
+	t.Setenv("PUNARO_TRUSTED_LAN_HTTP", "true")
+	cfg, err = Load("")
+	if err != nil || cfg.IngressMode != "lan" || !cfg.TrustedLANHTTP {
+		t.Fatalf("LAN config=%#v err=%v", cfg, err)
+	}
+
+	t.Setenv("PUNARO_LISTEN_ADDR", "0.0.0.0:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("device ingress accepted a wildcard LAN bind")
+	}
+}
+
+func TestLoadRequiresDistinctLoopbackHealthListener(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil || cfg.HealthListenAddr != "127.0.0.1:8081" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "192.168.50.4:8081")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted a non-loopback address")
+	}
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:8080")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted the public listener address")
+	}
+	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:", "127.0.0.1:http", "127.0.0.1:65536"} {
+		t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", address)
+		if _, err := Load(""); err == nil {
+			t.Fatalf("health listener accepted invalid port in %q", address)
+		}
+	}
+	t.Setenv("PUNARO_LISTEN_ADDR", "127.0.0.1:8081")
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:08081")
+	if _, err := Load(""); err == nil {
+		t.Fatal("health listener accepted a zero-padded alias of the public listener")
+	}
+}
+
+func TestLoadRejectsLegacyRoutesOnNonLoopbackDeviceIngress(t *testing.T) {
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "lan")
+	t.Setenv("PUNARO_LISTEN_ADDR", "192.168.50.4:8080")
+	t.Setenv("PUNARO_TRUSTED_LAN_CIDR", "192.168.50.0/24")
+	t.Setenv("PUNARO_TRUSTED_LAN_HTTP", "true")
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-loopback device ingress exposed legacy relay routes")
+	}
+}
+
+func TestLoadRejectsDeviceIngressWithoutPostgres(t *testing.T) {
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	if _, err := Load(""); err == nil {
+		t.Fatal("device ingress accepted no PostgreSQL application store")
+	}
+}
+
 func TestLoadRejectsLocalhostNameUntilResolvedBindingIsImplemented(t *testing.T) {
 	t.Setenv("PUNARO_LISTEN_ADDR", "localhost:8080")
 	if _, err := Load(""); err == nil {

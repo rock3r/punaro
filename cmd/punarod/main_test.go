@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
@@ -56,5 +58,88 @@ func TestRunRejectsIncompatiblePostgresWithoutStartingServer(t *testing.T) {
 	}
 	if !database.readyCalled || !database.closed || !strings.Contains(stderr.String(), "readiness error") {
 		t.Fatalf("ready=%t closed=%t stderr=%q", database.readyCalled, database.closed, stderr.String())
+	}
+}
+
+func TestRunDoesNotServePublicSocketWhenHealthBindFails(t *testing.T) {
+	originalListen := listenTCP
+	t.Cleanup(func() { listenTCP = originalListen })
+	tracked := &trackingListener{}
+	calls := 0
+	listenTCP = func(string, string) (net.Listener, error) {
+		calls++
+		if calls == 1 {
+			return tracked, nil
+		}
+		return nil, errors.New("health address occupied")
+	}
+	t.Setenv("PUNARO_LISTEN_ADDR", "127.0.0.1:18080")
+	t.Setenv("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:18081")
+	var stderr bytes.Buffer
+	if code := run(nil, &stderr); code != 1 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if tracked.acceptCalled {
+		t.Fatal("public server began accepting before the health bind succeeded")
+	}
+	if !tracked.closed {
+		t.Fatal("public listener remained open after the health bind failed")
+	}
+}
+
+type trackingListener struct {
+	acceptCalled bool
+	closed       bool
+}
+
+func (l *trackingListener) Accept() (net.Conn, error) {
+	l.acceptCalled = true
+	return nil, errors.New("unexpected Accept call")
+}
+
+func (l *trackingListener) Close() error { l.closed = true; return nil }
+func (*trackingListener) Addr() net.Addr { return testAddr("127.0.0.1:18080") }
+
+type testAddr string
+
+func (testAddr) Network() string  { return "tcp" }
+func (a testAddr) String() string { return string(a) }
+
+func TestShutdownHTTPServersStartsAllDrainsConcurrently(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	servers := []httpShutdowner{
+		blockingShutdowner{started: started, release: release},
+		blockingShutdowner{started: started, release: release},
+	}
+	result := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	go func() { result <- shutdownHTTPServers(ctx, servers...) }()
+	for range 2 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("both server drains did not start under the shared deadline")
+		}
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockingShutdowner struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s blockingShutdowner) Shutdown(ctx context.Context) error {
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }

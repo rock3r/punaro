@@ -57,7 +57,7 @@ for the tunnel service and maintenance checks.
 Verify the finished server:
 
 ```sh
-curl --fail http://127.0.0.1:8080/readyz
+curl --fail http://127.0.0.1:8081/readyz
 systemctl status punarod.service punaro-jwks-refresh.timer
 ```
 

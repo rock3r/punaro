@@ -548,9 +548,10 @@ prints the exact `trusted-agent` grant expansion before issuing a short-lived,
 single-use enrollment. Redemption is bound to an opaque client value; the dark
 store generates a fresh 256-bit secret
 internally, stores only its indexed SHA-256 digest, and composes the device
-principal, credential, grants, audit, and change sequence atomically. No public
-bootstrap, issuance, redemption, or device-auth route is mounted in this slice;
-ingress arrives with the later operator/ingress milestone. Credential caches
+principal, credential, grants, audit, and change sequence atomically. At the
+M-3 boundary no public bootstrap, issuance, redemption, or device-auth route was
+mounted; M-5 adds only bounded redemption and device session authentication
+behind its explicit ingress transport policy. Credential caches
 and long-lived sessions revalidate within two seconds. The existing Ed25519
 relay remains active while its intended machines are durably inventoried as
 pending, migrated, or retired; the global legacy gate cannot close while any
@@ -578,6 +579,32 @@ Application-role mutation privileges are column-exact, and readiness verifies
 the new catalog objects, indexes, constraints, and grants. These primitives
 remain internal: no public identity or merge route is mounted, PostgreSQL mail
 authority remains dark, and SQLite routing is unchanged.
+
+The fifth foundation slice adds the host-local `punaro` operator wrapper and
+the first device-credential ingress. `init` validates private data and backup
+directories, distinct owner/application DSN files, and a digest-pinned release
+image. Canonical-path checks keep both credentials and operator state outside
+the daemon-writable data tree, including across symlinked ancestors. It durably
+stages a private daemon environment and immutable-image-only Compose file,
+creates the first owner, then publishes one `installation.json` marker by
+rename. An uncertain owner outcome is recoverable with `punaro init --resume`;
+the staging directory is synchronized before the database mutation. `up`
+starts only an already-compatible owned database, refuses pristine/reset,
+upgrade-required, newer, dirty, and incompatible states before service start,
+waits boundedly for readiness, then runs doctor. Initial pristine migration is
+part of `init`; raw daemon and Compose startup remain non-migrating.
+
+Internet and existing-proxy profiles require a canonical HTTPS public URL and
+a loopback origin. Trusted-LAN plaintext is an explicit exception requiring a
+concrete private or link-local bind, a containing private/link-local CIDR, and
+an observed peer in that CIDR. Wildcard/public binds and peers fail closed;
+forwarded headers never establish TLS or source trust. The public surface added
+here is limited to strict, bounded enrollment redemption and a
+bearer-authenticated session check. PostgreSQL remains dark for mail and
+project identity APIs. A non-loopback device listener cannot be combined with
+legacy relay, directory, permit, or attachment routes; those remain loopback-only.
+Health and readiness use a distinct concrete loopback-only listener and are
+never mounted on the device/legacy listener.
 
 ## Required adversarial acceptance tests
 

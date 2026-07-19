@@ -12,3 +12,6 @@ fi
 grep -Eq 'condition:[[:space:]]*service_healthy' "$compose_file"
 grep -Eq 'PUNARO_TEST_POSTGRES_OWNER_DSN:' "$compose_file"
 grep -Eq 'PUNARO_TEST_POSTGRES_APP_DSN:' "$compose_file"
+grep -Eq 'PUNARO_TEST_POSTGRES_OTHER_OWNER_DSN:' "$compose_file"
+grep -Eq 'PUNARO_TEST_POSTGRES_PAIR_OWNER_DSN:' "$compose_file"
+grep -Eq 'PUNARO_TEST_POSTGRES_PAIR_APP_DSN:' "$compose_file"

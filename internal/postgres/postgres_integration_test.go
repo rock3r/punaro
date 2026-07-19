@@ -19,9 +19,43 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if ownerDSN == "" || appDSN == "" {
 		t.Skip("set PUNARO_TEST_POSTGRES_OWNER_DSN and PUNARO_TEST_POSTGRES_APP_DSN to run PostgreSQL integration tests")
 	}
+	otherOwnerDSN := os.Getenv("PUNARO_TEST_POSTGRES_OTHER_OWNER_DSN")
+	pairOwnerDSN := os.Getenv("PUNARO_TEST_POSTGRES_PAIR_OWNER_DSN")
+	pairAppDSN := os.Getenv("PUNARO_TEST_POSTGRES_PAIR_APP_DSN")
+	if otherOwnerDSN == "" || pairOwnerDSN == "" || pairAppDSN == "" {
+		t.Fatal("PostgreSQL integration requires the distinct-target and pair-migration DSNs")
+	}
 	ctx := context.Background()
 	ownerFile := writeTestDSN(t, "owner.dsn", ownerDSN)
 	appFile := writeTestDSN(t, "app.dsn", appDSN)
+	otherOwnerFile := writeTestDSN(t, "other-owner.dsn", otherOwnerDSN)
+	pairOwnerFile := writeTestDSN(t, "pair-owner.dsn", pairOwnerDSN)
+	pairAppFile := writeTestDSN(t, "pair-app.dsn", pairAppDSN)
+	if _, err := withPristinePair(ctx, Config{DSNFile: appFile}, Config{DSNFile: otherOwnerFile}, func(*sql.Conn) (SchemaState, error) {
+		t.Fatal("distinct database pair reached the migration action")
+		return SchemaState{}, nil
+	}); !errors.Is(err, ErrMigrationNotAttempted) {
+		t.Fatalf("distinct database pair error=%v, want pre-migration refusal", err)
+	}
+	if _, err := withPristinePair(ctx, Config{DSNFile: appFile}, Config{DSNFile: ownerFile}, func(*sql.Conn) (SchemaState, error) {
+		return SchemaState{Classification: Pristine}, nil
+	}); err != nil {
+		t.Fatalf("pristine DSN pair proof failed: %v", err)
+	}
+	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
+		t.Fatalf("connection-bound pair migration state=%#v err=%v", state, err)
+	}
+	pairDB, err := open(ctx, pairOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+		_ = pairDB.Close()
+		t.Fatalf("auxiliary pair cleanup failed: %v", err)
+	}
+	if err := pairDB.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
