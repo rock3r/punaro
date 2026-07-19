@@ -21,6 +21,7 @@ const advisoryLockKey int64 = 0x50554e41524f4d31 // "PUNAROM1"
 var migrationCompatibilityFloors = map[int64]int64{
 	1: 1,
 	2: 2,
+	3: 3,
 }
 
 // CurrentManifest returns the immutable migrations embedded in this binary.

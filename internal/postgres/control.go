@@ -178,14 +178,23 @@ type AuditAction string
 
 // Supported content-free audit actions.
 const (
-	AuditPrincipalCreate AuditAction = "principal.create"
-	AuditProjectCreate   AuditAction = "project.create"
-	AuditGrantCreate     AuditAction = "grant.create"
-	AuditGrantDelete     AuditAction = "grant.delete"
-	AuditJobEnqueue      AuditAction = "job.enqueue"
-	AuditJobComplete     AuditAction = "job.complete"
-	AuditJobRetry        AuditAction = "job.retry"
-	AuditJobFail         AuditAction = "job.fail"
+	AuditPrincipalCreate  AuditAction = "principal.create"
+	AuditProjectCreate    AuditAction = "project.create"
+	AuditGrantCreate      AuditAction = "grant.create"
+	AuditGrantDelete      AuditAction = "grant.delete"
+	AuditJobEnqueue       AuditAction = "job.enqueue"
+	AuditJobComplete      AuditAction = "job.complete"
+	AuditJobRetry         AuditAction = "job.retry"
+	AuditJobFail          AuditAction = "job.fail"
+	AuditOwnerBootstrap   AuditAction = "owner.bootstrap"
+	AuditEnrollmentCreate AuditAction = "enrollment.create"
+	AuditEnrollmentRedeem AuditAction = "enrollment.redeem"
+	AuditCredentialRotate AuditAction = "credential.rotate" // #nosec G101 -- content-free audit action, not a credential.
+	AuditCredentialRevoke AuditAction = "credential.revoke" // #nosec G101 -- content-free audit action, not a credential.
+	AuditLegacyRegister   AuditAction = "legacy.register"
+	AuditLegacyExchange   AuditAction = "legacy.exchange"
+	AuditLegacyRetire     AuditAction = "legacy.retire"
+	AuditLegacyDisable    AuditAction = "legacy.disable"
 )
 
 // AuditOutcome is a closed content-free result class.
@@ -202,14 +211,17 @@ type AuditTargetKind string
 
 // Supported content-free audit target kinds.
 const (
-	AuditTargetPrincipal AuditTargetKind = "principal"
-	AuditTargetProject   AuditTargetKind = "project"
-	AuditTargetGrant     AuditTargetKind = "grant"
-	AuditTargetJob       AuditTargetKind = "job"
+	AuditTargetPrincipal     AuditTargetKind = "principal"
+	AuditTargetProject       AuditTargetKind = "project"
+	AuditTargetGrant         AuditTargetKind = "grant"
+	AuditTargetJob           AuditTargetKind = "job"
+	AuditTargetEnrollment    AuditTargetKind = "enrollment"
+	AuditTargetCredential    AuditTargetKind = "credential"
+	AuditTargetLegacyMachine AuditTargetKind = "legacy_machine"
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.
@@ -237,7 +249,7 @@ func (e AuditEvent) Validate() error {
 	if _, ok := validAuditActions[e.Action]; !ok {
 		return errors.New("invalid audit classification")
 	}
-	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob) {
+	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob && e.TargetKind != AuditTargetEnrollment && e.TargetKind != AuditTargetCredential && e.TargetKind != AuditTargetLegacyMachine) {
 		return errors.New("invalid audit classification")
 	}
 	return nil

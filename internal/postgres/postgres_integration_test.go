@@ -130,6 +130,11 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	}
 
 	testControlPlaneIntegration(ctx, t, app, ownerDB)
+	if administration, err := OpenAdministration(ctx, Config{DSNFile: appFile}); err == nil {
+		_ = administration.Close()
+		t.Fatal("application role opened host-local administration")
+	}
+	testDeviceAuthIntegration(ctx, t, app, ownerDB)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +214,17 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		{name: "active grant index expression", apply: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`, restore: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(project_id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`},
 		{name: "function search path", apply: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) RESET ALL`, restore: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) SET search_path = pg_catalog`},
 		{name: "trigger events", apply: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`, restore: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE INSERT OR UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`},
+		{name: "owner insert privilege", apply: `GRANT INSERT ON auth.installation_owner TO punaro_app`, restore: `REVOKE INSERT ON auth.installation_owner FROM punaro_app`},
+		{name: "owner principal column update", apply: `GRANT UPDATE (principal_id) ON auth.installation_owner TO punaro_app`, restore: `REVOKE UPDATE (principal_id) ON auth.installation_owner FROM punaro_app`},
+		{name: "enrollment issuer column insert", apply: `GRANT INSERT (issuer_principal_id) ON auth.pending_enrollments TO punaro_app`, restore: `REVOKE INSERT (issuer_principal_id) ON auth.pending_enrollments FROM punaro_app`},
+		{name: "credential secret update privilege", apply: `GRANT UPDATE (secret_digest) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (secret_digest) ON auth.device_credentials FROM punaro_app`},
+		{name: "credential expiry update privilege", apply: `GRANT UPDATE (expires_at) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (expires_at) ON auth.device_credentials FROM punaro_app`},
+		{name: "credential principal column references", apply: `GRANT REFERENCES (principal_id) ON auth.device_credentials TO punaro_app`, restore: `REVOKE REFERENCES (principal_id) ON auth.device_credentials FROM punaro_app`},
+		{name: "legacy enabled column update", apply: `GRANT UPDATE (enabled) ON auth.legacy_auth_state TO punaro_app`, restore: `REVOKE UPDATE (enabled) ON auth.legacy_auth_state FROM punaro_app`},
+		{name: "legacy key column update", apply: `GRANT UPDATE (public_key) ON auth.legacy_machines TO punaro_app`, restore: `REVOKE UPDATE (public_key) ON auth.legacy_machines FROM punaro_app`},
+		{name: "pending binding index uniqueness", apply: `DROP INDEX auth.pending_enrollments_active_binding; CREATE UNIQUE INDEX pending_enrollments_active_binding ON auth.pending_enrollments (client_binding) WHERE redeemed_at IS NULL`, restore: `DROP INDEX auth.pending_enrollments_active_binding; CREATE INDEX pending_enrollments_active_binding ON auth.pending_enrollments (client_binding) WHERE redeemed_at IS NULL`},
+		{name: "credential digest index", apply: `DROP INDEX auth.device_credentials_secret_digest`, restore: `CREATE UNIQUE INDEX device_credentials_secret_digest ON auth.device_credentials (secret_digest)`},
+		{name: "credential generation constraint", apply: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_generation_check`, restore: `ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_generation_check CHECK (generation >= 1)`},
 	} {
 		t.Run("readiness rejects "+drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {

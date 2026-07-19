@@ -70,7 +70,7 @@ methods whose interface documents the shared transaction boundary.
 
 ### Implemented dark control-plane primitives
 
-Schema version 2 is the minimum for the current PostgreSQL opt-in. It adds
+Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds
 opaque principals and projects, active capability grants with exactly one of
 installation, selected-project, or dynamic all-project scope, generic
 idempotency, closed audit events, and one transactional work/outbox table.
@@ -118,6 +118,22 @@ authorize the lease, so concurrent disablement or revocation cannot commit
 between authorization and lease publication. A bounded `SKIP LOCKED`
 pre-candidate batch first reserves disjoint job rows, then locks authorization
 evidence only for those projects instead of unrelated grants held by the worker.
+
+Version 3 adds one schema-owner-only installation-owner row; bounded pending
+enrollments with digest-only codes and immutable grant expansions; digest-only
+device credentials with expiry, last-use, short-lived retry-recoverable rotation codes, revocation, and
+generation fences; and a content-free intended-Ed25519-machine inventory. The
+application role can read but cannot create ownership or enrollment plans. It
+can consume only the fixed redemption columns, insert a credential with its
+server-constrained defaults, and coalesce `last_used_at`; it cannot rotate or
+revoke credentials. Host-local administration uses a direct `punaro_owner`
+connection and is not exposed as an HTTP route.
+
+The `trusted-agent` template contains installation `project.create`; selected
+or explicit dynamic-all project discover/read/write and attach-unclaimed;
+conversation send/receive; memory search/read/propose/write; and attachment
+upload/download. It excludes attachment delete, every administer/purge
+capability, merge/membership administration, backup, and restore.
 
 ## Server invariants
 

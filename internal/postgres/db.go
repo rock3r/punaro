@@ -300,6 +300,139 @@ FROM objects, ownership, function_ownership`).Scan(&snapshot.CurrentObjectsPrese
 			return Snapshot{}, errors.New("PostgreSQL control-plane schema cannot be inspected")
 		}
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 3 {
+		var deviceObjectsPresent bool
+		if err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT
+        to_regclass('auth.installation_owner') AS owner_oid,
+        to_regclass('auth.pending_enrollments') AS enrollments_oid,
+        to_regclass('auth.pending_enrollment_grants') AS enrollment_grants_oid,
+        to_regclass('auth.device_credentials') AS credentials_oid,
+        to_regclass('auth.pending_enrollments_active_binding') AS enrollment_binding_oid,
+        to_regclass('auth.device_credentials_principal_active') AS credential_principal_oid,
+        to_regclass('auth.device_credentials_secret_digest') AS credential_digest_oid,
+        to_regclass('auth.legacy_auth_state') AS legacy_state_oid,
+        to_regclass('auth.legacy_machines') AS legacy_machines_oid
+), ownership AS (
+    SELECT count(*) = 9 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
+    FROM pg_class, objects
+    WHERE oid = ANY(ARRAY[owner_oid, enrollments_oid, enrollment_grants_oid, credentials_oid, enrollment_binding_oid, credential_principal_oid, credential_digest_oid, legacy_state_oid, legacy_machines_oid])
+)
+SELECT
+    owner_oid IS NOT NULL AND enrollments_oid IS NOT NULL AND enrollment_grants_oid IS NOT NULL
+    AND credentials_oid IS NOT NULL AND enrollment_binding_oid IS NOT NULL AND credential_principal_oid IS NOT NULL AND credential_digest_oid IS NOT NULL
+    AND legacy_state_oid IS NOT NULL AND legacy_machines_oid IS NOT NULL AND ownership.owned
+    AND EXISTS (
+        SELECT 1 FROM pg_attribute AS attribute
+        JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+        WHERE attribute.attrelid = 'auth.principals'::regclass AND attribute.attname = 'auth_generation' AND NOT attribute.attisdropped
+          AND attribute.attnotnull AND attribute.atttypid = 'bigint'::regtype
+          AND pg_get_expr(default_value.adbin, default_value.adrelid) = '0'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = enrollment_binding_oid AND indrelid = enrollments_oid
+          AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '3'::int2vector
+          AND pg_get_expr(indpred, indrelid) = '(redeemed_at IS NULL)'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = credential_principal_oid AND indrelid = credentials_oid
+          AND NOT indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '2'::int2vector
+          AND pg_get_expr(indpred, indrelid) = '(revoked_at IS NULL)'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = credential_digest_oid AND indrelid = credentials_oid
+          AND indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indkey = '4'::int2vector
+          AND indexprs IS NULL AND indpred IS NULL
+    )
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = owner_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%CHECK (singleton)%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(secret_digest) = 32%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%generation >= 1%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%expires_at IS NULL%expires_at > created_at%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = credentials_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%rotation_code_digest IS NULL%rotation_expected_generation IS NULL%rotation_expires_at IS NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[2]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[13]::smallint[] AND confrelid = credentials_oid AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'f' AND conkey = ARRAY[14]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(code_digest) = 32%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%credential_ttl_seconds%31536000%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollments_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%redeemed_at IS NULL%redemption_key IS NULL%redeemed_principal_id IS NULL%credential_lookup_id IS NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'p' AND conkey = ARRAY[1,2]::smallint[] AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = enrollments_oid AND confdeltype = 'c' AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'relay.projects'::regclass AND convalidated)
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = enrollment_grants_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%scope = ''installation''%scope = ANY%project_id IS NOT NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%octet_length(public_key) = 32%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = legacy_machines_oid AND contype = 'c' AND convalidated AND pg_get_constraintdef(oid) LIKE '%state = ''migrated''%migrated_credential_lookup_id IS NOT NULL%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'audit.events'::regclass AND conname = 'events_action_check' AND convalidated AND pg_get_constraintdef(oid) LIKE '%owner.bootstrap%' AND pg_get_constraintdef(oid) LIKE '%legacy.disable%')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'audit.events'::regclass AND conname = 'events_target_kind_check' AND convalidated AND pg_get_constraintdef(oid) LIKE '%enrollment%' AND pg_get_constraintdef(oid) LIKE '%credential%' AND pg_get_constraintdef(oid) LIKE '%legacy_machine%')
+    AND has_table_privilege('punaro_app', owner_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,REFERENCES')
+    AND has_table_privilege('punaro_app', enrollments_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', enrollments_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', enrollments_oid, 'INSERT,REFERENCES')
+    AND has_column_privilege('punaro_app', enrollments_oid, 'redeemed_at', 'UPDATE')
+    AND has_column_privilege('punaro_app', enrollments_oid, 'redemption_key', 'UPDATE')
+    AND has_column_privilege('punaro_app', enrollments_oid, 'redeemed_principal_id', 'UPDATE')
+    AND has_column_privilege('punaro_app', enrollments_oid, 'credential_lookup_id', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', enrollments_oid, 'issuer_principal_id', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', enrollments_oid, 'client_binding', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', enrollments_oid, 'code_digest', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', enrollments_oid, 'preview_hash', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', enrollments_oid, 'legacy_principal_id', 'UPDATE')
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = enrollments_oid AND attnum > 0 AND NOT attisdropped
+          AND attname <> ALL (ARRAY['redeemed_at', 'redemption_key', 'redeemed_principal_id', 'credential_lookup_id'])
+          AND has_column_privilege('punaro_app', enrollments_oid, attname, 'UPDATE')
+    )
+    AND has_table_privilege('punaro_app', enrollment_grants_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', enrollment_grants_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', enrollment_grants_oid, 'INSERT,UPDATE,REFERENCES')
+    AND has_table_privilege('punaro_app', credentials_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', credentials_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND has_column_privilege('punaro_app', credentials_oid, 'lookup_id', 'INSERT')
+    AND has_column_privilege('punaro_app', credentials_oid, 'principal_id', 'INSERT')
+    AND has_column_privilege('punaro_app', credentials_oid, 'label', 'INSERT')
+    AND has_column_privilege('punaro_app', credentials_oid, 'secret_digest', 'INSERT')
+    AND has_column_privilege('punaro_app', credentials_oid, 'expires_at', 'INSERT')
+    AND NOT has_column_privilege('punaro_app', credentials_oid, 'generation', 'INSERT')
+    AND NOT has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'INSERT')
+    AND has_column_privilege('punaro_app', credentials_oid, 'last_used_at', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', credentials_oid, 'secret_digest', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', credentials_oid, 'generation', 'UPDATE')
+    AND NOT has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'UPDATE')
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = credentials_oid AND attnum > 0 AND NOT attisdropped
+          AND attname <> ALL (ARRAY['lookup_id', 'principal_id', 'label', 'secret_digest', 'expires_at'])
+          AND has_column_privilege('punaro_app', credentials_oid, attname, 'INSERT')
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = credentials_oid AND attnum > 0 AND NOT attisdropped
+          AND attname <> 'last_used_at'
+          AND has_column_privilege('punaro_app', credentials_oid, attname, 'UPDATE')
+    )
+    AND NOT has_any_column_privilege('punaro_app', credentials_oid, 'REFERENCES')
+    AND has_table_privilege('punaro_app', legacy_state_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', legacy_state_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', legacy_state_oid, 'INSERT,UPDATE,REFERENCES')
+    AND has_table_privilege('punaro_app', legacy_machines_oid, 'SELECT')
+    AND NOT has_table_privilege('punaro_app', legacy_machines_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+    AND NOT has_any_column_privilege('punaro_app', legacy_machines_oid, 'INSERT,UPDATE,REFERENCES')
+FROM objects, ownership`).Scan(&deviceObjectsPresent); err != nil {
+			return Snapshot{}, errors.New("PostgreSQL device-auth schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = deviceObjectsPresent
+	}
 	return snapshot, nil
 }
 
