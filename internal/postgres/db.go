@@ -897,6 +897,8 @@ SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT 
    AND NOT has_any_column_privilege('punaro_app', fences_oid, 'INSERT,UPDATE,REFERENCES')
    AND NOT has_table_privilege('punaro_app', restores_oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_any_column_privilege('punaro_app', restores_oid, 'INSERT,UPDATE,REFERENCES')
+	AND has_schema_privilege('punaro_app', 'attachment', 'USAGE')
+	AND NOT has_schema_privilege('punaro_app', 'attachment', 'CREATE')
 	AND NOT has_function_privilege('punaro_app', acquire_oid, 'EXECUTE')
 	AND NOT has_function_privilege('punaro_app', bind_oid, 'EXECUTE')
 	AND NOT has_function_privilege('punaro_app', renew_oid, 'EXECUTE')
