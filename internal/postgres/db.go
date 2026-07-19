@@ -810,7 +810,7 @@ WITH objects AS (
 	CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl, acldefault('f', proc.proowner))) AS acl
 	LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
 ), table_acl AS (
-	SELECT count(*) = 22
+	SELECT count(*) = 25
 	   AND bool_and(NOT acl.is_grantable)
 	   AND bool_and(grantee.rolname = 'punaro_owner' OR (grantee.rolname = 'punaro_app' AND relation.oid = objects.ready_oid AND acl.privilege_type = 'SELECT')) AS exact
 	FROM objects
