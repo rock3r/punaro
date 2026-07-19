@@ -6,8 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
+
+	"github.com/rock3r/punaro/internal/listener"
 )
 
 // Mode is one explicit operator-selected ingress profile.
@@ -37,18 +38,11 @@ type Policy struct {
 
 // Validate rejects ambiguous, wildcard, and publicly routable boundaries.
 func (p *Policy) Validate() error {
-	host, portText, err := net.SplitHostPort(p.ListenAddr)
-	if err != nil {
+	endpoint, err := listener.Parse(p.ListenAddr)
+	if err != nil || endpoint.Address.IsUnspecified() || endpoint.Address.IsMulticast() {
 		return errors.New("ingress listen address must be a concrete IP and port")
 	}
-	port, err := strconv.ParseUint(portText, 10, 16)
-	if err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
-		return errors.New("ingress listen address must use a canonical nonzero numeric port")
-	}
-	bind := parseIP(host)
-	if bind == nil || bind.IsUnspecified() || bind.IsMulticast() {
-		return errors.New("ingress listen address must be a concrete IP and port")
-	}
+	bind := net.IP(endpoint.Address.AsSlice())
 	switch p.Mode {
 	case Internet, Proxy:
 		if !bind.IsLoopback() {

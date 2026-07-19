@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
@@ -103,3 +104,42 @@ type testAddr string
 
 func (testAddr) Network() string  { return "tcp" }
 func (a testAddr) String() string { return string(a) }
+
+func TestShutdownHTTPServersStartsAllDrainsConcurrently(t *testing.T) {
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	servers := []httpShutdowner{
+		blockingShutdowner{started: started, release: release},
+		blockingShutdowner{started: started, release: release},
+	}
+	result := make(chan error, 1)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	go func() { result <- shutdownHTTPServers(ctx, servers...) }()
+	for range 2 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("both server drains did not start under the shared deadline")
+		}
+	}
+	close(release)
+	if err := <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+type blockingShutdowner struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s blockingShutdowner) Shutdown(ctx context.Context) error {
+	s.started <- struct{}{}
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

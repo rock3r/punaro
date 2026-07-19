@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/ingress"
+	"github.com/rock3r/punaro/internal/listener"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
@@ -258,7 +258,7 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if healthListenAddr == "" {
 		healthListenAddr = defaultHealthListenAddr
 	}
-	if !loopbackListener(healthListenAddr) || sameListener(policy.ListenAddr, healthListenAddr) {
+	if !listener.IsLoopback(healthListenAddr) || listener.Same(policy.ListenAddr, healthListenAddr) {
 		return Installation{}, errors.New("health listener must be a distinct concrete loopback address")
 	}
 	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr)}, nil
@@ -422,30 +422,6 @@ func syncDirectory(path string) error {
 
 func localURL(listenAddr string) string {
 	return (&url.URL{Scheme: "http", Host: listenAddr}).String()
-}
-
-func loopbackListener(address string) bool {
-	ip, _, ok := listenerEndpoint(address)
-	return ok && ip.IsLoopback()
-}
-
-func sameListener(first, second string) bool {
-	firstIP, firstPort, firstOK := listenerEndpoint(first)
-	secondIP, secondPort, secondOK := listenerEndpoint(second)
-	return firstOK && secondOK && firstIP.Equal(secondIP) && firstPort == secondPort
-}
-
-func listenerEndpoint(address string) (net.IP, uint16, bool) {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, 0, false
-	}
-	ip := net.ParseIP(host)
-	port, err := strconv.ParseUint(portText, 10, 16)
-	if ip == nil || err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
-		return nil, 0, false
-	}
-	return ip, uint16(port), true
 }
 
 func daemonEnv(installation Installation) string {

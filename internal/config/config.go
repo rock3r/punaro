@@ -6,11 +6,12 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/rock3r/punaro/internal/listener"
 
 	"github.com/rock3r/punaro/internal/ingress"
 )
@@ -134,14 +135,14 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	healthListenAddr := value("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:8081")
-	if !isLoopbackListener(healthListenAddr) || sameListener(listenAddr, healthListenAddr) {
+	if !listener.IsLoopback(healthListenAddr) || listener.Same(listenAddr, healthListenAddr) {
 		return Config{}, fmt.Errorf("PUNARO_HEALTH_LISTEN_ADDR must be a distinct concrete loopback address")
 	}
 	// The legacy relay origin stays loopback-only. A non-loopback listener is
 	// admitted only when the complete device-ingress policy is validated below
 	// and no legacy route can share that listener.
 	legacyRoutesEnabled := relayEnabled || directoryEnabled || permitIssuanceEnabled || attachmentsEnabled || attachmentV3Enabled
-	if !isLoopbackListener(listenAddr) && (!deviceAuthEnabled || legacyRoutesEnabled) {
+	if !listener.IsLoopback(listenAddr) && (!deviceAuthEnabled || legacyRoutesEnabled) {
 		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
 	}
 	if deviceAuthEnabled {
@@ -265,30 +266,6 @@ func parsePositiveUint64(name, value string, maximum uint64) (uint64, error) {
 		return 0, fmt.Errorf("%s must be an integer from 1 to %d", name, maximum)
 	}
 	return parsed, nil
-}
-
-func isLoopbackListener(address string) bool {
-	ip, _, ok := listenerEndpoint(address)
-	return ok && ip.IsLoopback()
-}
-
-func sameListener(first, second string) bool {
-	firstIP, firstPort, firstOK := listenerEndpoint(first)
-	secondIP, secondPort, secondOK := listenerEndpoint(second)
-	return firstOK && secondOK && firstIP.Equal(secondIP) && firstPort == secondPort
-}
-
-func listenerEndpoint(address string) (net.IP, uint16, bool) {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, 0, false
-	}
-	ip := net.ParseIP(host)
-	port, err := strconv.ParseUint(portText, 10, 16)
-	if ip == nil || err != nil || port == 0 || portText != strconv.FormatUint(port, 10) {
-		return nil, 0, false
-	}
-	return ip, uint16(port), true
 }
 
 func value(name, fallback string) string {

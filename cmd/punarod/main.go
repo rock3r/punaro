@@ -218,16 +218,31 @@ func configuredServer(address string, handler http.Handler) *http.Server {
 	return &http.Server{Addr: address, Handler: handler, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 }
 
-func shutdownHTTPServers(ctx context.Context, servers ...*http.Server) error {
-	var failures []error
+type httpShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownHTTPServers(ctx context.Context, servers ...httpShutdowner) error {
+	failures := make(chan error, len(servers))
+	var wait sync.WaitGroup
 	for _, server := range servers {
 		if server != nil {
-			if err := server.Shutdown(ctx); err != nil {
-				failures = append(failures, err)
-			}
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				if err := server.Shutdown(ctx); err != nil {
+					failures <- err
+				}
+			}()
 		}
 	}
-	return errors.Join(failures...)
+	wait.Wait()
+	close(failures)
+	var joined []error
+	for err := range failures {
+		joined = append(joined, err)
+	}
+	return errors.Join(joined...)
 }
 
 type permitRouteAuthorizer struct{ authenticator *relay.Authenticator }
