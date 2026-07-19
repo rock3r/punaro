@@ -75,14 +75,18 @@ func Migrate(ctx context.Context, cfg Config) (SchemaState, error) {
 }
 
 func migrate(ctx context.Context, db *sql.DB, manifest Manifest) (SchemaState, error) {
-	if err := manifest.Validate(); err != nil {
-		return SchemaState{}, err
-	}
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return SchemaState{}, errors.New("PostgreSQL migration connection is unavailable")
 	}
 	defer func() { _ = conn.Close() }()
+	return migrateConn(ctx, conn, manifest)
+}
+
+func migrateConn(ctx context.Context, conn *sql.Conn, manifest Manifest) (SchemaState, error) {
+	if err := manifest.Validate(); err != nil {
+		return SchemaState{}, err
+	}
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
 		return SchemaState{}, errors.New("PostgreSQL migration lock is unavailable")
 	}

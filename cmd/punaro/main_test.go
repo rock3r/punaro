@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,12 +44,12 @@ func testInstallation(t *testing.T) string {
 
 func preserveDependencies(t *testing.T) {
 	t.Helper()
-	originalInspect, originalOwner, originalMigrate := inspectSchema, inspectOwner, migrateSchema
+	originalInspect, originalOwner, originalMigrate := inspectSchema, inspectOwner, migratePristinePair
 	originalCreate, originalRecover := createOwner, recoverInstallationOwner
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue := startServices, probe, issueEnrollment
 	t.Cleanup(func() {
-		inspectSchema, inspectOwner, migrateSchema = originalInspect, originalOwner, originalMigrate
+		inspectSchema, inspectOwner, migratePristinePair = originalInspect, originalOwner, originalMigrate
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
 		verifyInstallationPair = originalVerify
 		startServices, probe = originalStart, originalProbe
@@ -58,6 +59,9 @@ func preserveDependencies(t *testing.T) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
 	}
 	verifyInstallationPair = func(context.Context, string, string) error { return nil }
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+	}
 }
 
 func TestUpRefusesExistingUpgradeBeforeMigrationOrStart(t *testing.T) {
@@ -67,7 +71,7 @@ func TestUpRefusesExistingUpgradeBeforeMigrationOrStart(t *testing.T) {
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.UpgradeRequired, Version: 3}, nil
 	}
-	migrateSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		migrated = true
 		return punaropostgres.SchemaState{}, nil
 	}
@@ -101,7 +105,7 @@ func TestUpRefusesResetPristineDatabase(t *testing.T) {
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Pristine}, nil
 	}
-	migrateSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		migrateCalls++
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
 	}
@@ -196,7 +200,7 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		}
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
 	}
-	migrateSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		sequence = append(sequence, "migrate")
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
 	}
@@ -208,6 +212,35 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run(args, &stdout, &stderr); code != 0 || strings.Join(sequence, ",") != "inspect,migrate,inspect,owner" {
 		t.Fatalf("code=%d sequence=%v stdout=%q stderr=%q", code, sequence, stdout.String(), stderr.String())
+	}
+}
+
+func TestInitProvesPristineDSNPairBeforeMigration(t *testing.T) {
+	preserveDependencies(t)
+	root := t.TempDir()
+	for _, name := range []string{"data", "backup"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"owner.dsn", "app.dsn"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("postgres://invalid\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Pristine}, nil
+	}
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{}, fmt.Errorf("%w: different pristine databases", punaropostgres.ErrMigrationNotAttempted)
+	}
+	args := []string{"init", "--directory", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "backup"), "--image", cliTestImage, "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator", "--mode", "internet", "--public-url", "https://punaro.example"}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "requires a pristine") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "install")); !os.IsNotExist(err) {
+		t.Fatalf("pre-migration refusal left a resumable stage: %v", err)
 	}
 }
 

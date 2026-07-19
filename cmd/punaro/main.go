@@ -38,8 +38,8 @@ var (
 		defer func() { _ = database.Close() }()
 		return database.InstallationOwner(ctx)
 	}
-	migrateSchema = func(ctx context.Context, dsnFile string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.Migrate(ctx, punaropostgres.Config{DSNFile: dsnFile})
+	migratePristinePair = func(ctx context.Context, appDSNFile, ownerDSNFile string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.MigratePristinePair(ctx, punaropostgres.Config{DSNFile: appDSNFile}, punaropostgres.Config{DSNFile: ownerDSNFile})
 	}
 	createOwner = func(ctx context.Context, dsnFile, name string) (punaropostgres.Principal, error) {
 		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: dsnFile})
@@ -79,7 +79,8 @@ var (
 			return punaropostgres.Principal{}, err
 		}
 		if state.Classification == punaropostgres.Pristine {
-			if _, err = migrateSchema(ctx, installation.OwnerDSNFile); err == nil {
+			_, err = migratePristinePair(ctx, installation.AppDSNFile, installation.OwnerDSNFile)
+			if err == nil {
 				state, err = inspectSchema(ctx, installation.AppDSNFile)
 			}
 		}
@@ -181,7 +182,10 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		if err != nil || state.Classification != punaropostgres.Pristine {
 			return punaropostgres.Principal{}, operator.ErrBootstrapNotAttempted
 		}
-		if _, err = migrateSchema(ctx, ownerFile); err != nil {
+		if _, err = migratePristinePair(ctx, *appDSN, ownerFile); err != nil {
+			if errors.Is(err, punaropostgres.ErrMigrationNotAttempted) {
+				return punaropostgres.Principal{}, operator.ErrBootstrapNotAttempted
+			}
 			return punaropostgres.Principal{}, err
 		}
 		state, err = inspectSchema(ctx, *appDSN)
