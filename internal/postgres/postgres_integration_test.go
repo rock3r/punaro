@@ -45,6 +45,17 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
 		t.Fatalf("connection-bound pair migration state=%#v err=%v", state, err)
 	}
+	pairDB, err := open(ctx, pairOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+		_ = pairDB.Close()
+		t.Fatalf("auxiliary pair cleanup failed: %v", err)
+	}
+	if err := pairDB.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
