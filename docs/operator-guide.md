@@ -423,7 +423,7 @@ create or repair schema objects. A pristine, dirty, upgrade-required, newer, or
 incompatible schema makes startup fail with a content-free classification. Do
 not grant DDL to `punaro_app` to bypass that refusal.
 
-M-1/M-2 expose the schema-owner action directly for controlled development and
+M-1 through M-3 expose the schema-owner action directly for controlled development and
 integration use:
 
 ```sh
@@ -457,14 +457,62 @@ update procedure. The digest-pinned `make test-postgres` stack is ephemeral
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 2. Version 1 is reported as
-`upgrade_required`; damaged version-1 objects remain `incompatible`. Migration
-2 is additive and creates only dark control-plane rows and bounded queue/audit
-primitives. There is still no supported public project/grant/job API, device
-enrollment, relay cutover, backup, or production update wrapper. Do not hand
-edit idempotency, capacity, lease, migration, or audit rows to bypass a failure.
+The current binary requires schema version 3. Versions 1 and 2 are reported as
+`upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
+additive and creates the host-local ownership, pending enrollment, device
+credential, cache/session generation, and Ed25519 migration-inventory records.
+There is still no relay cutover, backup, or production update wrapper. Do not
+hand edit ownership, enrollment, credential, idempotency, capacity, lease,
+migration, or audit rows to bypass a failure.
 Before any later authority cutover, rollback remains disabling the PostgreSQL
 opt-in and retaining SQLite as the unchanged active relay.
+
+### Host-local device enrollment
+
+`punaro-admin` is a one-shot image role and never opens a listener. Its owner
+DSN must be protected exactly like the migrator DSN and must never be mounted
+into `punarod`. Bootstrap is single-winner:
+
+```sh
+punaro-admin init -owner-dsn-file /absolute/private/owner.dsn -name "local owner"
+```
+
+Preview a bounded `trusted-agent` grant expansion before creating state. Use
+repeatable `--project UUID` or the explicit dynamic `--all-projects`, never
+both. The command exits with status 3 after printing the preview until `--yes`
+is supplied:
+
+```sh
+punaro-admin client add -owner-dsn-file /absolute/private/owner.dsn \
+  -actor-principal-id OWNER_UUID -name laptop -client-binding CLIENT_UUID \
+  -project PROJECT_UUID
+```
+
+The confirmed run returns one enrollment ID and code. M-3 deliberately mounts
+no public bootstrap, issuance, redemption, or device-auth route; the bounded
+store redemption primitive is staged and tested for the later ingress
+milestone. It binds the code to the opaque client value, generates the 256-bit
+credential secret by domain-separated derivation from the internally generated
+256-bit code, and stores only an indexed SHA-256 digest. An exact retry with the
+same code, client binding, and idempotency UUID returns the same result without
+retaining plaintext while the original short enrollment lifetime remains
+unexpired; any changed, expired, or ordinary replay fails. Never put an
+enrollment code or device secret in
+logs, shell history, audit fields, or an environment variable.
+
+List credential metadata with `credential list`. Rotation requires the current
+generation and two host-local steps. First run `credential rotate` with an
+absolute new `--code-output` path; the command stages a short-lived random code
+without invalidating the current credential and creates that file exclusively
+as `0600`. Then rerun with the same generation and `--code-file`; exact retries
+within that code's short lifetime derive and return the same internally
+generated credential without storing it in plaintext. Symlinks, non-regular
+files, permissive modes, and malformed
+codes are rejected. `credential revoke` is immediate locally,
+and other processes/sessions force reauthentication within the documented
+two-second bound. Existing Ed25519 relay authentication remains active in this
+slice; its PostgreSQL inventory and disable gate stage the later explicit
+cutover and do not silently change current SQLite routing.
 
 ## Operations and incident response
 

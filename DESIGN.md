@@ -542,6 +542,21 @@ accepted only for the exact unexpired lease token and generation. None of these
 primitives is exposed through the alpha HTTP relay yet, and they do not change
 SQLite routing or establish a production authority barrier.
 
+The third foundation slice adds the host-local-only ownership and device
+credential path. The schema owner creates exactly one installation owner and
+prints the exact `trusted-agent` grant expansion before issuing a short-lived,
+single-use enrollment. Redemption is bound to an opaque client value; the dark
+store generates a fresh 256-bit secret
+internally, stores only its indexed SHA-256 digest, and composes the device
+principal, credential, grants, audit, and change sequence atomically. No public
+bootstrap, issuance, redemption, or device-auth route is mounted in this slice;
+ingress arrives with the later operator/ingress milestone. Credential caches
+and long-lived sessions revalidate within two seconds. The existing Ed25519
+relay remains active while its intended machines are durably inventoried as
+pending, migrated, or retired; the global legacy gate cannot close while any
+machine is pending. PostgreSQL remains dark for mail and SQLite routing is
+unchanged.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

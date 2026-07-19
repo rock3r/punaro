@@ -89,6 +89,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	for migrateErr := range errorsSeen {
 		if migrateErr != nil {
 			logControlPlaneCatalog(ctx, t, ownerDB)
+			logDeviceAuthCatalog(ctx, t, ownerDB)
 			t.Fatalf("concurrent migration failed: %v", migrateErr)
 		}
 	}
@@ -130,6 +131,11 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	}
 
 	testControlPlaneIntegration(ctx, t, app, ownerDB)
+	if administration, err := OpenAdministration(ctx, Config{DSNFile: appFile}); err == nil {
+		_ = administration.Close()
+		t.Fatal("application role opened host-local administration")
+	}
+	testDeviceAuthIntegration(ctx, t, app, ownerDB)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -209,6 +215,30 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		{name: "active grant index expression", apply: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`, restore: `DROP INDEX auth.capability_grants_active_unique; CREATE UNIQUE INDEX capability_grants_active_unique ON auth.capability_grants (principal_id, scope, COALESCE(project_id, '00000000-0000-0000-0000-000000000000'::uuid), capability) WHERE revoked_at IS NULL`},
 		{name: "function search path", apply: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) RESET ALL`, restore: `ALTER FUNCTION jobs.prune_terminal(timestamptz, integer) SET search_path = pg_catalog`},
 		{name: "trigger events", apply: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`, restore: `DROP TRIGGER outbox_capacity_and_state ON jobs.outbox; CREATE TRIGGER outbox_capacity_and_state BEFORE INSERT OR UPDATE ON jobs.outbox FOR EACH ROW EXECUTE FUNCTION jobs.guard_outbox_capacity_and_state()`},
+		{name: "owner insert privilege", apply: `GRANT INSERT ON auth.installation_owner TO punaro_app`, restore: `REVOKE INSERT ON auth.installation_owner FROM punaro_app`},
+		{name: "owner principal column update", apply: `GRANT UPDATE (principal_id) ON auth.installation_owner TO punaro_app`, restore: `REVOKE UPDATE (principal_id) ON auth.installation_owner FROM punaro_app`},
+		{name: "enrollment issuer column insert", apply: `GRANT INSERT (issuer_principal_id) ON auth.pending_enrollments TO punaro_app`, restore: `REVOKE INSERT (issuer_principal_id) ON auth.pending_enrollments FROM punaro_app`},
+		{name: "credential secret update privilege", apply: `GRANT UPDATE (secret_digest) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (secret_digest) ON auth.device_credentials FROM punaro_app`},
+		{name: "credential expiry update privilege", apply: `GRANT UPDATE (expires_at) ON auth.device_credentials TO punaro_app`, restore: `REVOKE UPDATE (expires_at) ON auth.device_credentials FROM punaro_app`},
+		{name: "credential principal column references", apply: `GRANT REFERENCES (principal_id) ON auth.device_credentials TO punaro_app`, restore: `REVOKE REFERENCES (principal_id) ON auth.device_credentials FROM punaro_app`},
+		{name: "legacy enabled column update", apply: `GRANT UPDATE (enabled) ON auth.legacy_auth_state TO punaro_app`, restore: `REVOKE UPDATE (enabled) ON auth.legacy_auth_state FROM punaro_app`},
+		{name: "legacy key column update", apply: `GRANT UPDATE (public_key) ON auth.legacy_machines TO punaro_app`, restore: `REVOKE UPDATE (public_key) ON auth.legacy_machines FROM punaro_app`},
+		{name: "legacy exchange public execute", apply: `GRANT EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) TO PUBLIC`, restore: `REVOKE EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) FROM PUBLIC`},
+		{name: "legacy exchange extra grantee", apply: `GRANT EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) TO pg_monitor`, restore: `REVOKE EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) FROM pg_monitor`},
+		{name: "legacy exchange delegated grant", apply: `GRANT EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) TO punaro_app WITH GRANT OPTION`, restore: `REVOKE GRANT OPTION FOR EXECUTE ON FUNCTION auth.complete_legacy_exchange(uuid, uuid) FROM punaro_app`},
+		{name: "legacy exchange search path", apply: `ALTER FUNCTION auth.complete_legacy_exchange(uuid, uuid) RESET ALL`, restore: `ALTER FUNCTION auth.complete_legacy_exchange(uuid, uuid) SET search_path = pg_catalog`},
+		{name: "pending binding index uniqueness", apply: `DROP INDEX auth.pending_enrollments_active_binding; CREATE UNIQUE INDEX pending_enrollments_active_binding ON auth.pending_enrollments (client_binding) WHERE redeemed_at IS NULL`, restore: `DROP INDEX auth.pending_enrollments_active_binding; CREATE INDEX pending_enrollments_active_binding ON auth.pending_enrollments (client_binding) WHERE redeemed_at IS NULL`},
+		{name: "credential digest index", apply: `DROP INDEX auth.device_credentials_secret_digest`, restore: `CREATE UNIQUE INDEX device_credentials_secret_digest ON auth.device_credentials (secret_digest)`},
+		{name: "credential generation constraint", apply: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_generation_check`, restore: `ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_generation_check CHECK (generation >= 1)`},
+		{name: "permissive credential generation constraint", apply: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_generation_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_generation_check CHECK (generation >= 1 OR true)`, restore: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_generation_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_generation_check CHECK (generation >= 1)`},
+		{name: "permissive credential expiry constraint", apply: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_check CHECK (expires_at IS NULL OR expires_at > created_at OR true)`, restore: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_check CHECK (expires_at IS NULL OR expires_at > created_at)`},
+		{name: "principal auth generation constraint", apply: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check`, restore: `ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0)`},
+		{name: "permissive principal auth generation constraint", apply: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check; ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0 OR true)`, restore: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check; ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0)`},
+		{name: "audit action value set", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'unexpected'))`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable'))`},
+		{name: "permissive audit action constraint", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable') OR true)`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable'))`},
+		{name: "audit target value set", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine', 'unexpected'))`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine'))`},
+		{name: "permissive audit target constraint", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine') OR true)`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine'))`},
+		{name: "legacy machine state value set", apply: `ALTER TABLE auth.legacy_machines DROP CONSTRAINT legacy_machines_state_check; ALTER TABLE auth.legacy_machines ADD CONSTRAINT legacy_machines_state_check CHECK (state IN ('pending', 'migrated', 'retired', 'unexpected'))`, restore: `ALTER TABLE auth.legacy_machines DROP CONSTRAINT legacy_machines_state_check; ALTER TABLE auth.legacy_machines ADD CONSTRAINT legacy_machines_state_check CHECK (state IN ('pending', 'migrated', 'retired'))`},
 	} {
 		t.Run("readiness rejects "+drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
@@ -819,6 +849,34 @@ FROM pg_index WHERE indexrelid = to_regclass('auth.capability_grants_active_uniq
 		t.Logf("control-plane trigger diagnostics unavailable: %v", err)
 	} else {
 		t.Logf("control-plane trigger type=%d enabled=%s", triggerType, triggerEnabled)
+	}
+}
+
+func logDeviceAuthCatalog(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `SELECT conrelid::regclass::text, conname, conkey::text, pg_get_expr(conbin, conrelid)
+FROM pg_constraint
+WHERE contype = 'c' AND conrelid = ANY(ARRAY[
+    to_regclass('auth.principals'),
+    to_regclass('auth.installation_owner'),
+    to_regclass('auth.pending_enrollments'),
+    to_regclass('auth.pending_enrollment_grants'),
+    to_regclass('auth.device_credentials'),
+    to_regclass('auth.legacy_machines'),
+    to_regclass('audit.events')
+]) ORDER BY conrelid::regclass::text, conname`)
+	if err != nil {
+		t.Logf("device-auth constraint diagnostics unavailable: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var relation, name, keys, expression string
+		if err := rows.Scan(&relation, &name, &keys, &expression); err != nil {
+			t.Logf("device-auth constraint diagnostic malformed: %v", err)
+			return
+		}
+		t.Logf("device-auth constraint relation=%s name=%s keys=%s expression=%q", relation, name, keys, expression)
 	}
 }
 
