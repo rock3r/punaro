@@ -459,11 +459,11 @@ update procedure. The digest-pinned `make test-postgres` stack is ephemeral
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 4. Versions 1 through 3 are reported
+The current binary requires schema version 5. Versions 1 through 4 are reported
 as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
 additive and creates the host-local ownership, pending enrollment, device
 credential, cache/session generation, and Ed25519 migration-inventory records.
-There is still no relay cutover, backup, or production update wrapper. Do not
+There is still no relay cutover or production update wrapper. Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
 migration, or audit rows to bypass a failure.
 Before any later authority cutover, rollback remains disabling the PostgreSQL
@@ -517,8 +517,9 @@ slice; its PostgreSQL inventory and disable gate stage the later explicit
 cutover and do not silently change current SQLite routing.
 
 Migration 4 adds project identities, aliases, generation-bound merge previews,
-and bounded reconciliation records. M-5 adds no schema migration and does not
-rewrite or remove any M-1 through M-4 record during rollback.
+and bounded reconciliation records. Migration 5 adds the backup GC-fence,
+READY-blob manifest, restore-history, and timeline-rotation substrate. It does
+not change relay authority.
 
 ### Operator wrapper and device ingress
 
@@ -629,12 +630,72 @@ protected client storage. `GET /v1/device/session` is the bounded authentication
 check. Forwarded headers never qualify a direct request for TLS or trusted-LAN
 admission.
 
-## Operations and incident response
+### Consistent backup and clean-stack restore
 
-There is no supported production backup or restore procedure yet.  Do not
-claim one.  Before any durable production data is admitted, the release must
-provide encrypted backups, integrity verification, a measured restore drill,
-disk-pressure limits, credentials rotation, and revocation exercise.
+M-6 supports local, verified recovery points for the staged PostgreSQL
+platform. `pg_dump` and `pg_restore` must be installed on the operator host.
+Database DSN files must use canonical single-host TCP `postgresql://` or
+`postgres://` URI form. Unix sockets, multi-host URIs, URI fragments, service
+files, host overrides, and encrypted client-key password parameters are not
+supported;
+the wrapper removes the password from process arguments, rejects inherited
+`PG*` overrides, and supplies it through a temporary owner-only pgpass file.
+
+Create and immediately verify a backup:
+
+```sh
+punaro backup --directory /absolute/private/punaro-installation
+punaro backup list --directory /absolute/private/punaro-installation
+punaro backup verify --backup /absolute/private/punaro-backups/BACKUP_DIRECTORY
+```
+
+The command commits a database GC fence before exporting one repeatable-read
+snapshot. The schema-owner `pg_dump` and application-role READY-blob query use
+that same snapshot. The exporter and renewable GC fence remain live until every
+selected immutable blob has been copied, length/digest checked, synchronized,
+and the complete hidden stage verifies. Only then is the backup renamed into
+view. Failures before rename leave no published backup; a parent-directory sync
+failure reports the published path as durability-uncertain so the operator can
+verify it explicitly. A backup contains the custom
+database dump, generated Punaro configuration, both Punaro database credential
+files, and verified READY blobs. Its manifest lists host TLS, proxy/tunnel,
+Telegram, and OAuth state as external dependencies rather than copying them.
+Keep the backup directory private; optional storage encryption and an off-host
+copy are recommended operational controls.
+
+Restore only into a stopped, separately provisioned pristine database and new
+filesystem paths. The target must already have the safe `punaro_owner` and
+`punaro_app` roles plus distinct protected target DSN files; both DSNs are
+proved to reach the same pristine database before `pg_restore` starts:
+
+```sh
+punaro restore \
+  --backup /absolute/private/punaro-backups/BACKUP_DIRECTORY \
+  --into-new-stack /absolute/private/restored-installation \
+  --data-dir /absolute/private/restored-data \
+  --backup-dir /absolute/private/restored-backups \
+  --owner-dsn-file /absolute/private/restored-owner.dsn \
+  --app-dsn-file /absolute/private/restored-app.dsn
+```
+
+Restore re-verifies the complete backup before mutation, stages and verifies
+all blobs, restores the database in one `pg_restore` transaction, preserves the
+installation ID, rotates the timeline, and publishes the new data and generated
+configuration only at the end. Each boundary is recorded in a private durable
+journal beside the new data path. If any post-mutation step fails, stop the old
+stack and retry the exact same command: it resumes the bound journal without
+repeating completed database or timeline mutation. Do not delete or edit the
+journal or target paths. Existing targets on a new request, overlaps,
+symlinks, permissive paths, non-pristine databases, identity drift, and an
+unrotated timeline fail closed. Clients observing the new timeline must discard later
+cursors/caches and re-enumerate authoritative state. Optional gateways remain
+not ready until their external dependencies are supplied or re-enrolled.
+
+M-6 is not the M-7 production update transaction and does not make raw Compose
+or daemon startup migrate. Run restore drills and retain a verified off-host
+copy before admitting irreplaceable data.
+
+## Operations and incident response
 
 If a credential or machine is suspected compromised, stop the local service,
 preserve relevant logs without copying secrets or message bodies, then follow

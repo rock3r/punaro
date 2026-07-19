@@ -57,6 +57,10 @@ make operator-binary
 ./bin/punaro
 ```
 
+The host wrapper also provides exported-snapshot `backup`, strict `backup
+verify`, and clean-stack `restore --into-new-stack`; see the operator guide for
+the private-path, PostgreSQL-role, external-dependency, and restore-drill rules.
+
 ```sh
 cp .env.example .env
 go run ./cmd/punarod --env-file .env

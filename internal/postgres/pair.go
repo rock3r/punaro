@@ -24,6 +24,15 @@ func MigratePristinePair(ctx context.Context, appConfig, ownerConfig Config) (Sc
 	})
 }
 
+// VerifyPristinePair proves both roles target the same pristine database and
+// performs no schema mutation. Clean-stack restore runs only after this gate.
+func VerifyPristinePair(ctx context.Context, appConfig, ownerConfig Config) error {
+	_, err := withPristinePair(ctx, appConfig, ownerConfig, func(*sql.Conn) (SchemaState, error) {
+		return SchemaState{Classification: Pristine}, nil
+	})
+	return err
+}
+
 func withPristinePair(ctx context.Context, appConfig, ownerConfig Config, action func(*sql.Conn) (SchemaState, error)) (SchemaState, error) {
 	appDSN, err := ReadDSNFile(appConfig.DSNFile)
 	if err != nil {

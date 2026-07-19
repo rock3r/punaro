@@ -32,6 +32,9 @@ const (
 // EnvFile returns the generated daemon dotenv path for one installation.
 func EnvFile(directory string) string { return filepath.Join(directory, envName) }
 
+// ConfigFile returns the final published installation marker path.
+func ConfigFile(directory string) string { return filepath.Join(directory, configName) }
+
 // OverrideFile returns the generated immutable-image Compose file.
 func OverrideFile(directory string) string { return filepath.Join(directory, overrideName) }
 

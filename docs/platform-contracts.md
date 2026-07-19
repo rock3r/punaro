@@ -155,12 +155,26 @@ capability, merge/membership administration, backup, and restore.
   paths, opaque IDs, prompt content, and caller-supplied scopes are not proof of
   authority.
 - Installation ID, timeline ID, and monotonic change sequence accompany server
-  state. Restore rotates the timeline so future cached cursors are rejected.
+  state. Restore preserves the installation ID, rotates the timeline, rejects
+  abandoned-timeline and future cursors, and requires authoritative
+  re-enumeration before cached work is reconsidered by stable client IDs.
 - Canonical memory revisions and provenance are source data. Lexical vectors,
   embeddings, summaries, and inferred relationships are derived and
   rebuildable.
 - Attachment metadata never claims filesystem/database atomicity. Only READY
   metadata backed by a verified immutable blob is downloadable.
+- Backup uses one exported repeatable-read snapshot for the schema-owner dump
+  and application-role READY-blob manifest. A committed, renewable GC fence
+  spans snapshot export through verified blob copy. Hidden stages are private,
+  synchronized, fully verified, and rename-published; an incomplete stage is
+  never a backup.
+- Restore accepts only the versioned strict manifest into a separately proved
+  pristine database and new filesystem paths. Its request-bound durable journal
+  resumes database, timeline, data-publication, and finalization phases after a
+  crash without repeating completed mutation. Generated Punaro configuration
+  and database credentials are bundled; host ingress, tunnel, and third-party
+  gateway dependencies are declared but never copied. Existing stacks are never
+  overwritten in place.
 - Hard ceilings bound requests, pages, queues, jobs, attachments, search, and
   retention. Optional work sheds load before mail is starved.
 - Logs, errors, metrics, and audit events contain no credentials, auth headers,

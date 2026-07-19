@@ -171,6 +171,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	}
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
+	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -440,6 +441,127 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, ownerFile, appFile string) {
+	t.Helper()
+	identity, err := app.Identity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRestoreLock, err := AcquireRestoreLock(ctx, Config{DSNFile: appFile}, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AcquireRestoreLock(ctx, Config{DSNFile: appFile}, identity); err == nil {
+		releaseRestoreLock()
+		t.Fatal("concurrent target-database restore lock unexpectedly succeeded")
+	}
+	releaseRestoreLock()
+	releaseRestoreLock, err = AcquireRestoreLock(ctx, Config{DSNFile: appFile}, identity)
+	if err != nil {
+		t.Fatalf("released target-database restore lock was not reusable: %v", err)
+	}
+	releaseRestoreLock()
+	if _, err := app.db.ExecContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')`); err == nil {
+		t.Fatal("application role can acquire privileged backup GC fences")
+	}
+	if _, err := app.db.ExecContext(ctx, `INSERT INTO attachment.ready_blob_manifest (storage_path, size_bytes, sha256) VALUES ('ready/test', 4, repeat('a', 64))`); err == nil {
+		t.Fatal("application role can directly publish READY blob backup metadata")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.ready_blob_manifest (storage_path, size_bytes, sha256) VALUES ('ready/test', 4, repeat('a', 64))`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_, _ = ownerDB.ExecContext(context.Background(), `DELETE FROM attachment.ready_blob_manifest WHERE storage_path = 'ready/test'`)
+	}()
+	dumpCalled := false
+	source, err := NewBackupSource(app, ownerFile, func(_ context.Context, dsnFile, snapshotID, destination string) error {
+		dumpCalled = true
+		if dsnFile != ownerFile || snapshotID == "" || !filepath.IsAbs(destination) {
+			t.Fatalf("dump inputs dsn=%q snapshot=%q destination=%q", dsnFile, snapshotID, destination)
+		}
+		return os.WriteFile(destination, []byte("dump"), 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := source.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.ReadyBlobs) != 1 || snapshot.ReadyBlobs[0].StoragePath != "ready/test" || snapshot.ReadyBlobs[0].Size != 4 || snapshot.ReadyBlobs[0].SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("unexpected READY snapshot: %#v", snapshot.ReadyBlobs)
+	}
+	var gcPermitted bool
+	if err := app.db.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&gcPermitted); err != nil || gcPermitted {
+		t.Fatalf("physical GC was not fenced: permitted=%t err=%v", gcPermitted, err)
+	}
+	dumpPath := filepath.Join(t.TempDir(), "database.dump")
+	if err := snapshot.Dump(ctx, dumpPath); err != nil || !dumpCalled {
+		t.Fatalf("snapshot dump called=%t err=%v", dumpCalled, err)
+	}
+	if err := snapshot.Finish(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&gcPermitted); err != nil || !gcPermitted {
+		t.Fatalf("physical GC fence did not release: permitted=%t err=%v", gcPermitted, err)
+	}
+	var expiredToken string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&expiredToken); err != nil {
+		t.Fatal(err)
+	}
+	const expiredSnapshot = "00000003-0000001B-999"
+	var bound bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.bind_backup_snapshot($1::uuid,$2)`, expiredToken, expiredSnapshot).Scan(&bound); err != nil || !bound {
+		t.Fatalf("bind expired-fence fixture=%t err=%v", bound, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE jobs.backup_gc_fences SET expires_at = statement_timestamp() - interval '1 second' WHERE fence_id = $1::uuid`, expiredToken); err != nil {
+		t.Fatal(err)
+	}
+	var released bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.release_backup_gc_fence($1::uuid,$2,true)`, expiredToken, expiredSnapshot).Scan(&released); !errors.Is(err, sql.ErrNoRows) || released {
+		t.Fatalf("expired fence verified release=%t err=%v", released, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.release_backup_gc_fence($1::uuid,$2,false)`, expiredToken, expiredSnapshot).Scan(&released); err != nil || !released {
+		t.Fatalf("expired fence unverified release=%t err=%v", released, err)
+	}
+	var verified bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT verified FROM jobs.backup_gc_fences WHERE snapshot_id = $1`, snapshot.ID).Scan(&verified); err != nil || !verified {
+		t.Fatalf("backup fence verification state=%t err=%v", verified, err)
+	}
+	before, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, err := OpenAdministration(ctx, Config{DSNFile: ownerFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := admin.RotateRestoredTimeline(ctx, "018f47f4-7b18-7cc2-98d6-31d4fb5ab742", before)
+	if closeErr := admin.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil || rotated.InstallationID != before.InstallationID || rotated.TimelineID == before.TimelineID || rotated.ChangeSequence != before.ChangeSequence {
+		t.Fatalf("timeline rotation before=%#v after=%#v err=%v", before, rotated, err)
+	}
+	admin, err = OpenAdministration(ctx, Config{DSNFile: ownerFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := admin.RotateRestoredTimeline(ctx, "018f47f4-7b18-7cc2-98d6-31d4fb5ab742", before)
+	if closeErr := admin.Close(); err == nil && closeErr != nil {
+		err = closeErr
+	}
+	if err != nil || retried != rotated {
+		t.Fatalf("timeline rotation retry=%#v want=%#v err=%v", retried, rotated, err)
+	}
+	if err := ValidateCursor(rotated, before); !errors.Is(err, ErrCursorTimelineChanged) {
+		t.Fatalf("pre-restore cursor error=%v, want timeline change", err)
+	}
+	if err := ValidateCursor(rotated, InstallationState{InstallationID: rotated.InstallationID, TimelineID: rotated.TimelineID, ChangeSequence: rotated.ChangeSequence + 1}); !errors.Is(err, ErrCursorFromFuture) {
+		t.Fatalf("future cursor error=%v, want future rejection", err)
 	}
 }
 

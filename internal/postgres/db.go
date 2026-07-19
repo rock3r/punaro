@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the audited pgx database/sql driver.
@@ -109,6 +112,85 @@ func (d *Database) InstallationState(ctx context.Context) (InstallationState, er
 		return InstallationState{}, errors.New("PostgreSQL installation metadata is unavailable")
 	}
 	return state, nil
+}
+
+// Identity returns a content-free fingerprint of the exact target database
+// within its PostgreSQL server. It is stable across schema restore operations.
+func (d *Database) Identity(ctx context.Context) (string, error) {
+	return databaseIdentity(ctx, d.db)
+}
+
+// Identity returns the same stable target fingerprint through owner authority.
+func (a *Administration) Identity(ctx context.Context) (string, error) {
+	return databaseIdentity(ctx, a.db)
+}
+
+// OwnerDatabaseIdentity fingerprints a pristine or migrated target while
+// proving the protected credential authenticates as the schema owner.
+func OwnerDatabaseIdentity(ctx context.Context, cfg Config) (string, error) {
+	dsn, err := ReadDSNFile(cfg.DSNFile)
+	if err != nil {
+		return "", err
+	}
+	db, err := open(ctx, dsn)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+	var owner bool
+	if err := db.QueryRowContext(ctx, `SELECT session_user = current_user AND current_user = 'punaro_owner'`).Scan(&owner); err != nil || !owner {
+		return "", errors.New("PostgreSQL database identity requires the schema-owner role")
+	}
+	return databaseIdentity(ctx, db)
+}
+
+func databaseIdentity(ctx context.Context, q queryer) (string, error) {
+	var database, oid, address, port string
+	if err := q.QueryRowContext(ctx, `SELECT current_database(), oid::text, COALESCE(inet_server_addr()::text, 'local'), COALESCE(inet_server_port()::text, 'local') FROM pg_database WHERE datname = current_database()`).Scan(&database, &oid, &address, &port); err != nil {
+		return "", errors.New("PostgreSQL database identity is unavailable")
+	}
+	digest := sha256.Sum256([]byte(database + "\x00" + oid + "\x00" + address + "\x00" + port))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// AcquireRestoreLock holds a cooperative database-wide advisory lock on one
+// dedicated application-role session for the full restore operation.
+func AcquireRestoreLock(ctx context.Context, cfg Config, identity string) (func(), error) {
+	decoded, err := hex.DecodeString(identity)
+	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != identity {
+		return nil, errors.New("PostgreSQL restore lock identity is invalid")
+	}
+	database, err := OpenApplication(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := database.db.Conn(ctx)
+	if err != nil {
+		_ = database.Close()
+		return nil, errors.New("PostgreSQL restore lock session is unavailable")
+	}
+	keyDigest := sha256.Sum256(append([]byte("punaro-restore-lock\x00"), decoded...))
+	var key int64
+	for _, value := range keyDigest[:7] {
+		key = (key << 8) | int64(value)
+	}
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&acquired); err != nil || !acquired {
+		_ = conn.Close()
+		_ = database.Close()
+		return nil, errors.New("PostgreSQL target is already participating in a restore")
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
+			defer cancel()
+			var released bool
+			_ = conn.QueryRowContext(releaseCtx, `SELECT pg_advisory_unlock($1)`, key).Scan(&released)
+			_ = conn.Close()
+			_ = database.Close()
+		})
+	}, nil
 }
 
 // InstallationOwner returns the singleton owner identity visible to the
@@ -678,6 +760,154 @@ FROM objects, ownership`).Scan(&identityObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL project-identity schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = identityObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 5 {
+		var backupObjectsPresent bool
+		if err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT to_regclass('attachment.ready_blob_manifest') AS ready_oid,
+           to_regclass('jobs.backup_gc_fences') AS fences_oid,
+           to_regclass('jobs.restore_events') AS restores_oid,
+           to_regclass('jobs.backup_gc_fences_active') AS active_index_oid,
+           to_regprocedure('jobs.acquire_backup_gc_fence(interval)') AS acquire_oid,
+           to_regprocedure('jobs.bind_backup_snapshot(uuid,text)') AS bind_oid,
+		   to_regprocedure('jobs.renew_backup_gc_fence(uuid,text,interval)') AS renew_oid,
+		   to_regprocedure('jobs.cancel_unbound_backup_gc_fence(uuid)') AS cancel_oid,
+           to_regprocedure('jobs.release_backup_gc_fence(uuid,text,boolean)') AS release_oid,
+           to_regprocedure('jobs.physical_blob_gc_permitted()') AS gc_oid,
+           to_regprocedure('jobs.rotate_restored_timeline(uuid,uuid,uuid,bigint)') AS rotate_oid
+), table_ownership AS (
+    SELECT count(*) = 3 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
+    FROM pg_class, objects WHERE oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
+), routine_expected(oid, body_hash, language_name, volatility, security_definer, result_type) AS (
+	SELECT expected.* FROM objects, LATERAL (VALUES
+		(acquire_oid, 'c463308f31c66843c472609c2300ea5d', 'plpgsql', 'v'::"char", true, 'uuid'),
+		(bind_oid, 'cbab918206a45ac87eb0e3f4acf8d318', 'sql', 'v'::"char", true, 'boolean'),
+		(renew_oid, '317cbaa017b68c051fc268e3a73cdd0f', 'plpgsql', 'v'::"char", true, 'boolean'),
+		(cancel_oid, 'b525b20fda387502c5d661074082751c', 'sql', 'v'::"char", true, 'boolean'),
+		(release_oid, 'a4657bd92b6384ea383970690a9c1142', 'sql', 'v'::"char", true, 'boolean'),
+		(gc_oid, 'ed08dbb0bb0cbd127fc7f7ce6c59caa3', 'sql', 's'::"char", true, 'boolean'),
+		(rotate_oid, 'c485843fcadebadb42f6dba134c396a6', 'plpgsql', 'v'::"char", false, 'TABLE(installation_id uuid, timeline_id uuid, change_sequence bigint)')
+	) AS expected(oid, body_hash, language_name, volatility, security_definer, result_type)
+), routine_safety AS (
+	SELECT count(*) = 7
+	   AND bool_and(pg_get_userbyid(proc.proowner) = 'punaro_owner')
+	   AND bool_and(COALESCE(proc.proconfig = ARRAY['search_path=pg_catalog']::text[], false))
+	   AND bool_and(md5(btrim(proc.prosrc)) = expected.body_hash)
+	   AND bool_and(language.lanname = expected.language_name)
+	   AND bool_and(proc.provolatile = expected.volatility)
+	   AND bool_and(proc.prosecdef = expected.security_definer)
+	   AND bool_and(proc.prokind = 'f' AND pg_get_function_result(proc.oid) = expected.result_type) AS safe
+	FROM routine_expected AS expected
+	JOIN pg_proc AS proc ON proc.oid = expected.oid
+	JOIN pg_language AS language ON language.oid = proc.prolang
+), routine_acl AS (
+	SELECT count(*) = 8
+	   AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+	   AND bool_and(grantee.rolname = 'punaro_owner' OR (grantee.rolname = 'punaro_app' AND proc.oid = objects.gc_oid)) AS exact
+	FROM objects
+	JOIN pg_proc AS proc ON proc.oid = ANY(ARRAY[acquire_oid, bind_oid, renew_oid, cancel_oid, release_oid, gc_oid, rotate_oid])
+	CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl, acldefault('f', proc.proowner))) AS acl
+	LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+), table_acl AS (
+	SELECT count(*) = 22
+	   AND bool_and(NOT acl.is_grantable)
+	   AND bool_and(grantee.rolname = 'punaro_owner' OR (grantee.rolname = 'punaro_app' AND relation.oid = objects.ready_oid AND acl.privilege_type = 'SELECT')) AS exact
+	FROM objects
+	JOIN pg_class AS relation ON relation.oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
+	CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) AS acl
+	LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+), column_expected(relation_oid, column_name, type_oid, type_modifier, required, default_expression) AS (
+	SELECT expected.* FROM objects, LATERAL (VALUES
+		(ready_oid, 'storage_path', 'text'::regtype, -1, true, ''),
+		(ready_oid, 'size_bytes', 'bigint'::regtype, -1, true, ''),
+		(ready_oid, 'sha256', 'character'::regtype, 68, true, ''),
+		(ready_oid, 'ready_at', 'timestamptz'::regtype, -1, true, 'statement_timestamp()'),
+		(fences_oid, 'fence_id', 'uuid'::regtype, -1, true, ''),
+		(fences_oid, 'installation_id', 'uuid'::regtype, -1, true, ''),
+		(fences_oid, 'timeline_id', 'uuid'::regtype, -1, true, ''),
+		(fences_oid, 'snapshot_id', 'text'::regtype, -1, false, ''),
+		(fences_oid, 'acquired_at', 'timestamptz'::regtype, -1, true, 'statement_timestamp()'),
+		(fences_oid, 'expires_at', 'timestamptz'::regtype, -1, true, ''),
+		(fences_oid, 'released_at', 'timestamptz'::regtype, -1, false, ''),
+		(fences_oid, 'verified', 'boolean'::regtype, -1, false, ''),
+		(restores_oid, 'restore_id', 'uuid'::regtype, -1, true, ''),
+		(restores_oid, 'backup_id', 'uuid'::regtype, -1, true, ''),
+		(restores_oid, 'installation_id', 'uuid'::regtype, -1, true, ''),
+		(restores_oid, 'previous_timeline_id', 'uuid'::regtype, -1, true, ''),
+		(restores_oid, 'restored_timeline_id', 'uuid'::regtype, -1, true, ''),
+		(restores_oid, 'restored_change_sequence', 'bigint'::regtype, -1, true, ''),
+		(restores_oid, 'restored_at', 'timestamptz'::regtype, -1, true, 'statement_timestamp()')
+	) AS expected(relation_oid, column_name, type_oid, type_modifier, required, default_expression)
+), column_safety AS (
+	SELECT count(*) = 19
+	   AND bool_and(attribute.atttypid = expected.type_oid AND attribute.atttypmod = expected.type_modifier
+	       AND attribute.attnotnull = expected.required
+	       AND COALESCE(pg_get_expr(default_value.adbin, default_value.adrelid), '') = expected.default_expression)
+	   AND (SELECT count(*) = 19 FROM pg_attribute, objects
+	        WHERE attrelid = ANY(ARRAY[ready_oid, fences_oid, restores_oid]) AND attnum > 0 AND NOT attisdropped) AS exact
+	FROM column_expected AS expected
+	JOIN pg_attribute AS attribute ON attribute.attrelid = expected.relation_oid AND attribute.attname = expected.column_name AND attribute.attnum > 0 AND NOT attribute.attisdropped
+	LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
+)
+SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT NULL
+	   AND active_index_oid IS NOT NULL AND acquire_oid IS NOT NULL AND bind_oid IS NOT NULL
+	   AND renew_oid IS NOT NULL AND cancel_oid IS NOT NULL AND release_oid IS NOT NULL AND gc_oid IS NOT NULL AND rotate_oid IS NOT NULL
+   AND table_ownership.owned AND routine_safety.safe AND routine_acl.exact AND table_acl.exact AND column_safety.exact
+	AND (SELECT index.indisunique AND index.indisvalid AND index.indisready AND index.indnkeyatts = 1 AND index.indnatts = 1
+		AND index.indrelid = fences_oid AND index.indkey::text = '2' AND index.indexprs IS NULL AND pg_get_expr(index.indpred, index.indrelid) = '(released_at IS NULL)'
+		FROM pg_index AS index WHERE index.indexrelid = active_index_oid)
+   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'u' AND conkey = ARRAY[3]::smallint[] AND convalidated)
+   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+	AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'u' AND conkey = ARRAY[5]::smallint[] AND convalidated)
+	AND (SELECT count(*) = 3 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'c' AND convalidated)
+	AND NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			(ARRAY[2]::smallint[], '((size_bytes >= 0) AND (size_bytes <= 17179869184))'),
+			(ARRAY[3]::smallint[], '(sha256 ~ ''^[0-9a-f]{64}$''::text)'),
+			(ARRAY[1]::smallint[], '((storage_path <> ''''::text) AND (char_length(storage_path) <= 1024) AND (octet_length(storage_path) <= 4096) AND (storage_path !~ ''[[:cntrl:]]''::text) AND (storage_path !~ ''(^|/)\.\.?(/|$)''::text) AND (storage_path !~ ''^/''::text) AND (storage_path !~ ''\\''::text))')
+		) AS expected(key, expression)
+		WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'c' AND conkey = expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+	)
+	AND (SELECT count(*) = 4 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND convalidated)
+	AND NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			(ARRAY[5,6]::smallint[], '(expires_at > acquired_at)'),
+			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR ((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
+			(ARRAY[7,8]::smallint[], '((released_at IS NULL) = (verified IS NULL))'),
+			(ARRAY[5,7]::smallint[], '((released_at IS NULL) OR (released_at >= acquired_at))')
+		) AS expected(key, expression)
+		WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND conkey @> expected.key AND conkey <@ expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+	)
+	AND (SELECT count(*) = 2 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'c' AND convalidated)
+	AND NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			(ARRAY[6]::smallint[], '(restored_change_sequence >= 0)'),
+			(ARRAY[4,5]::smallint[], '(previous_timeline_id <> restored_timeline_id)')
+		) AS expected(key, expression)
+		WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'c' AND conkey @> expected.key AND conkey <@ expected.key AND convalidated AND pg_get_expr(conbin, conrelid) = expected.expression)
+	)
+   AND has_table_privilege('punaro_app', ready_oid, 'SELECT')
+   AND NOT has_table_privilege('punaro_app', ready_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND NOT has_any_column_privilege('punaro_app', ready_oid, 'INSERT,UPDATE,REFERENCES')
+   AND NOT has_table_privilege('punaro_app', fences_oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND NOT has_any_column_privilege('punaro_app', fences_oid, 'INSERT,UPDATE,REFERENCES')
+   AND NOT has_table_privilege('punaro_app', restores_oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND NOT has_any_column_privilege('punaro_app', restores_oid, 'INSERT,UPDATE,REFERENCES')
+	AND NOT has_function_privilege('punaro_app', acquire_oid, 'EXECUTE')
+	AND NOT has_function_privilege('punaro_app', bind_oid, 'EXECUTE')
+	AND NOT has_function_privilege('punaro_app', renew_oid, 'EXECUTE')
+	AND NOT has_function_privilege('punaro_app', cancel_oid, 'EXECUTE')
+	AND NOT has_function_privilege('punaro_app', release_oid, 'EXECUTE')
+   AND has_function_privilege('punaro_app', gc_oid, 'EXECUTE')
+   AND NOT has_function_privilege('punaro_app', rotate_oid, 'EXECUTE')
+FROM objects, table_ownership, routine_safety, routine_acl, table_acl, column_safety`).Scan(&backupObjectsPresent); err != nil {
+			return Snapshot{}, errors.New("PostgreSQL backup schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = backupObjectsPresent
 	}
 	return snapshot, nil
 }

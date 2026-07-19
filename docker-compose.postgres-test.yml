@@ -22,13 +22,17 @@ services:
     build:
       context: .
       target: build
-    command: ["go", "test", "-count=1", "-timeout", "2m", "./internal/postgres"]
+    command: ["go", "test", "-count=1", "-timeout", "4m", "./internal/postgres", "./cmd/punaro"]
     environment:
       PUNARO_TEST_POSTGRES_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro?sslmode=disable
       PUNARO_TEST_POSTGRES_APP_DSN: postgres://punaro_app@postgres:5432/punaro?sslmode=disable
       PUNARO_TEST_POSTGRES_OTHER_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_other?sslmode=disable
       PUNARO_TEST_POSTGRES_PAIR_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_pair?sslmode=disable
       PUNARO_TEST_POSTGRES_PAIR_APP_DSN: postgres://punaro_app@postgres:5432/punaro_pair?sslmode=disable
+      PUNARO_TEST_RESTORE_SOURCE_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_restore_source?sslmode=disable
+      PUNARO_TEST_RESTORE_SOURCE_APP_DSN: postgres://punaro_app@postgres:5432/punaro_restore_source?sslmode=disable
+      PUNARO_TEST_RESTORE_TARGET_OWNER_DSN: postgres://punaro_owner@postgres:5432/punaro_restore_target?sslmode=disable
+      PUNARO_TEST_RESTORE_TARGET_APP_DSN: postgres://punaro_app@postgres:5432/punaro_restore_target?sslmode=disable
     depends_on:
       postgres:
         condition: service_healthy

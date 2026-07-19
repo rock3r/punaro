@@ -9,13 +9,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	punarobackup "github.com/rock3r/punaro/internal/backup"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -73,6 +76,9 @@ var (
 		}
 		return nil
 	}
+	verifyPristinePair = func(ctx context.Context, appDSNFile, ownerDSNFile string) error {
+		return punaropostgres.VerifyPristinePair(ctx, punaropostgres.Config{DSNFile: appDSNFile}, punaropostgres.Config{DSNFile: ownerDSNFile})
+	}
 	recoverInstallationOwner = func(ctx context.Context, installation operator.Installation) (punaropostgres.Principal, error) {
 		state, err := inspectSchema(ctx, installation.AppDSNFile)
 		if err != nil {
@@ -120,8 +126,21 @@ var (
 		}
 		return nil
 	}
-	probe = probeHTTP
+	probe                 = probeHTTP
+	createOperatorBackup  = createBackup
+	listOperatorBackups   = punarobackup.List
+	verifyOperatorBackup  = punarobackup.Verify
+	restoreOperatorBackup = restoreBackup
 )
+
+type restoreRequest struct {
+	BackupDirectory string
+	Directory       string
+	DataDir         string
+	BackupDir       string
+	OwnerDSNFile    string
+	AppDSNFile      string
+}
 
 func composeUpCommand(ctx context.Context, installation operator.Installation) (*exec.Cmd, error) {
 	arguments, err := composeUpArgs(installation)
@@ -155,11 +174,115 @@ func composeEnvironment(environment []string, directory string) []string {
 	return append(sanitized, "PWD="+directory)
 }
 
+func pgDumpSnapshot(ctx context.Context, dsnFile, snapshotID, destination string) error {
+	if snapshotID == "" || !filepath.IsAbs(destination) {
+		return errors.New("database dump inputs are invalid")
+	}
+	return runPostgresTool(ctx, "pg_dump", dsnFile, func(connection string) []string {
+		return []string{"--no-password", "--dbname", connection, "--snapshot", snapshotID, "--format=custom", "--no-owner", "--exclude-table-data=jobs.backup_gc_fences", "--file", destination}
+	})
+}
+
+func pgRestoreDump(ctx context.Context, dsnFile string, dump io.Reader) error {
+	if dump == nil {
+		return errors.New("database restore input is invalid")
+	}
+	return runPostgresToolInput(ctx, "pg_restore", dsnFile, dump, func(connection string) []string {
+		return []string{"--no-password", "--dbname", connection, "--exit-on-error", "--single-transaction", "--no-owner"}
+	})
+}
+
+func runPostgresTool(ctx context.Context, executable, dsnFile string, arguments func(string) []string) error {
+	return runPostgresToolInput(ctx, executable, dsnFile, nil, arguments)
+}
+
+func runPostgresToolInput(ctx context.Context, executable, dsnFile string, input io.Reader, arguments func(string) []string) error {
+	dsn, err := punaropostgres.ReadDSNFile(dsnFile)
+	if err != nil {
+		return err
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") || parsed.User == nil || parsed.User.Username() == "" || parsed.Host == "" || parsed.Path == "" || parsed.Fragment != "" || strings.Contains(parsed.Host, ",") || strings.Contains(parsed.Hostname(), "/") {
+		return errors.New("PostgreSQL tool requires a canonical single-host TCP URI DSN")
+	}
+	password, _ := parsed.User.Password()
+	username := parsed.User.Username()
+	for _, field := range []string{parsed.Hostname(), username, strings.TrimPrefix(parsed.EscapedPath(), "/"), password} {
+		if strings.ContainsAny(field, "\r\n") {
+			return errors.New("PostgreSQL tool credential is invalid")
+		}
+	}
+	port := parsed.Port()
+	if port == "" {
+		port = "5432"
+	}
+	if parsedPort, parseErr := strconv.ParseUint(port, 10, 16); parseErr != nil || parsedPort == 0 {
+		return errors.New("PostgreSQL tool port is invalid")
+	}
+	database, err := url.PathUnescape(strings.TrimPrefix(parsed.EscapedPath(), "/"))
+	if err != nil || database == "" || strings.ContainsAny(database, "\r\n") {
+		return errors.New("PostgreSQL tool database is invalid")
+	}
+	sanitized := *parsed
+	sanitized.User = url.User(username)
+	sanitizedQuery := sanitized.Query()
+	for key := range sanitizedQuery {
+		if strings.EqualFold(key, "password") || strings.EqualFold(key, "sslpassword") {
+			return errors.New("PostgreSQL tool URI must not contain password query parameters")
+		}
+		if strings.EqualFold(key, "host") || strings.EqualFold(key, "hostaddr") {
+			return errors.New("PostgreSQL tool URI host overrides are unsupported")
+		}
+		if strings.EqualFold(key, "passfile") || strings.EqualFold(key, "service") || strings.EqualFold(key, "servicefile") {
+			sanitizedQuery.Del(key)
+		}
+	}
+	sanitized.RawQuery = sanitizedQuery.Encode()
+	temporary, err := os.MkdirTemp("", "punaro-postgres-tool-")
+	if err != nil {
+		return errors.New("PostgreSQL tool credential staging failed")
+	}
+	defer func() { _ = os.RemoveAll(temporary) }()
+	passFile := filepath.Join(temporary, "pgpass")
+	passEntry := strings.Join([]string{escapePGPass(parsed.Hostname()), port, escapePGPass(database), escapePGPass(username), escapePGPass(password)}, ":") + "\n"
+	if err := os.WriteFile(passFile, []byte(passEntry), 0o600); err != nil { // #nosec G306 -- pgpass requires exactly owner-only access.
+		return errors.New("PostgreSQL tool credential staging failed")
+	}
+	command := exec.CommandContext(ctx, executable, arguments(sanitized.String())...) // #nosec G204 -- fixed audited executable and structured arguments.
+	command.Dir = filepath.Dir(dsnFile)
+	command.Env = postgresToolEnvironment(os.Environ(), passFile)
+	command.Stdin = input
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	err = command.Run()
+	if err != nil {
+		return errors.New("PostgreSQL tool failed; verify the client version and database connectivity")
+	}
+	return nil
+}
+
+func postgresToolEnvironment(environment []string, passFile string) []string {
+	sanitized := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if !found || strings.HasPrefix(strings.ToUpper(name), "PG") {
+			continue
+		}
+		sanitized = append(sanitized, entry)
+	}
+	return append(sanitized, "PGPASSFILE="+passFile)
+}
+
+func escapePGPass(value string) string {
+	value = strings.ReplaceAll(value, "\\", "\\\\")
+	return strings.ReplaceAll(value, ":", "\\:")
+}
+
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|backup|restore")
 		return 2
 	}
 	switch args[0] {
@@ -175,6 +298,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if len(args) > 1 && args[1] == "add" {
 			return runClientAdd(args[2:], stdout, stderr)
 		}
+	case "backup":
+		return runBackup(args[1:], stdout, stderr)
+	case "restore":
+		return runRestore(args[1:], stdout, stderr)
 	}
 	_, _ = fmt.Fprintln(stderr, "unsupported operator command")
 	return 2
@@ -442,6 +569,305 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return writeJSON(stdout, stderr, pending)
+}
+
+func runBackup(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] == "list" {
+		directory, ok := parseDirectory("backup list", args[1:], stderr)
+		if !ok {
+			return 2
+		}
+		installation, err := operator.Load(directory)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "backup list failed: installation configuration is unavailable")
+			return 1
+		}
+		backups, err := listOperatorBackups(installation.BackupDir)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "backup list failed: backup directory is unavailable")
+			return 1
+		}
+		return writeJSON(stdout, stderr, backups)
+	}
+	if len(args) > 0 && args[0] == "verify" {
+		flags := flag.NewFlagSet("backup verify", flag.ContinueOnError)
+		flags.SetOutput(stderr)
+		path := flags.String("backup", "", "absolute published backup directory")
+		if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *path == "" || !filepath.IsAbs(*path) || filepath.Clean(*path) != *path {
+			return 2
+		}
+		manifest, err := verifyOperatorBackup(*path)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "backup verification failed")
+			return 1
+		}
+		return writeJSON(stdout, stderr, manifest)
+	}
+	directory, ok := parseDirectory("backup", args, stderr)
+	if !ok {
+		return 2
+	}
+	installation, err := operator.Load(directory)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "backup failed: installation configuration is unavailable")
+		return 1
+	}
+	manifest, path, err := createOperatorBackup(context.Background(), installation)
+	if err != nil {
+		var operationErr *punarobackup.OperationError
+		if errors.As(err, &operationErr) && operationErr.Phase == punarobackup.PhaseDataPublished && operationErr.PublishedPath != "" {
+			_, _ = fmt.Fprintf(stderr, "backup published at %s, but parent-directory durability is uncertain; verify it before use\n", operationErr.PublishedPath)
+			return 1
+		}
+		_, _ = fmt.Fprintln(stderr, "backup failed; no complete backup was published")
+		return 1
+	}
+	return writeJSON(stdout, stderr, map[string]any{"status": "verified", "directory": path, "manifest": manifest})
+}
+
+func runRestore(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	backupDirectory := flags.String("backup", "", "absolute verified backup directory")
+	directory := flags.String("into-new-stack", "", "new absolute installation directory")
+	dataDir := flags.String("data-dir", "", "new absolute daemon data directory")
+	backupDir := flags.String("backup-dir", "", "existing private backup root for the restored stack")
+	ownerDSN := flags.String("owner-dsn-file", "", "protected target schema-owner DSN file")
+	appDSN := flags.String("app-dsn-file", "", "protected target application DSN file")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *backupDirectory == "" || *directory == "" || *dataDir == "" || *backupDir == "" || *ownerDSN == "" || *appDSN == "" {
+		return 2
+	}
+	for _, path := range []string{*backupDirectory, *directory, *dataDir, *backupDir, *ownerDSN, *appDSN} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return 2
+		}
+	}
+	state, err := restoreOperatorBackup(context.Background(), restoreRequest{BackupDirectory: *backupDirectory, Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN})
+	if err != nil {
+		var operationErr *punarobackup.OperationError
+		if errors.As(err, &operationErr) && operationErr.Phase != punarobackup.PhasePreflight {
+			_, _ = fmt.Fprintln(stderr, "restore is incomplete; retry the exact same restore command to resume its durable journal")
+		} else {
+			_, _ = fmt.Fprintln(stderr, "restore refused before database mutation")
+		}
+		return 1
+	}
+	return writeJSON(stdout, stderr, map[string]any{"status": "restored", "directory": *directory, "state": state, "external_dependencies_required": []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"}})
+}
+
+func createBackup(ctx context.Context, installation operator.Installation) (punarobackup.Manifest, string, error) {
+	if failures := operator.CheckPaths(installation); len(failures) != 0 {
+		return punarobackup.Manifest{}, "", errors.New("installation safety checks failed")
+	}
+	state, err := inspectSchema(ctx, installation.AppDSNFile)
+	if err != nil || state.Classification != punaropostgres.Compatible {
+		return punarobackup.Manifest{}, "", errors.New("database schema is not compatible")
+	}
+	if err := verifyInstallationPair(ctx, installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
+		return punarobackup.Manifest{}, "", err
+	}
+	owner, err := inspectOwner(ctx, installation.AppDSNFile)
+	if err != nil || owner.ID != installation.OwnerPrincipalID {
+		return punarobackup.Manifest{}, "", errors.New("installation owner does not match configuration")
+	}
+	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
+	if err != nil {
+		return punarobackup.Manifest{}, "", err
+	}
+	defer func() { _ = database.Close() }()
+	source, err := punaropostgres.NewBackupSource(database, installation.OwnerDSNFile, pgDumpSnapshot)
+	if err != nil {
+		return punarobackup.Manifest{}, "", err
+	}
+	return punarobackup.Create(ctx, punarobackup.CreateOptions{
+		BackupRoot:       installation.BackupDir,
+		BlobRoot:         filepath.Join(installation.DataDir, "blobs"),
+		InstallationFile: operator.ConfigFile(installation.Directory),
+		EnvironmentFile:  operator.EnvFile(installation.Directory),
+		ComposeFile:      operator.OverrideFile(installation.Directory),
+		OwnerDSNFile:     installation.OwnerDSNFile,
+		AppDSNFile:       installation.AppDSNFile,
+	}, source)
+}
+
+func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.State, error) {
+	manifest, err := punarobackup.Verify(request.BackupDirectory)
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	if manifest.SchemaVersion != punaropostgres.CurrentManifest().MaxSupported {
+		return punarobackup.State{}, errors.New("backup schema version is not exactly supported by this restore binary")
+	}
+	canonicalSource, err := filepath.EvalSymlinks(request.BackupDirectory)
+	if err != nil {
+		return punarobackup.State{}, errors.New("backup source path cannot be resolved")
+	}
+	canonicalNewBackup, err := filepath.EvalSymlinks(request.BackupDir)
+	if err != nil || cliPathsOverlap(canonicalSource, canonicalNewBackup) {
+		return punarobackup.State{}, errors.New("source and restored backup roots must be separate")
+	}
+	for _, planned := range []string{request.Directory, request.DataDir} {
+		canonicalParent, parentErr := filepath.EvalSymlinks(filepath.Dir(planned))
+		if parentErr != nil || cliPathsOverlap(canonicalSource, filepath.Join(canonicalParent, filepath.Base(planned))) {
+			return punarobackup.State{}, errors.New("restore source and target paths must not overlap")
+		}
+	}
+	installationBody, err := punarobackup.ReadVerifiedFile(request.BackupDirectory, manifest, "config/installation.json", 64<<10)
+	if err != nil {
+		return punarobackup.State{}, errors.New("backup installation configuration changed after verification")
+	}
+	sourceInstallation, err := operator.ParseInstallationArtifact(installationBody)
+	if err != nil || sourceInstallation.OwnerPrincipalID == "" {
+		return punarobackup.State{}, errors.New("backup installation configuration is invalid")
+	}
+	prepared, err := operator.PrepareRestore(operator.RestoreOptions{Source: sourceInstallation, Directory: request.Directory, DataDir: request.DataDir, BackupDir: request.BackupDir, OwnerDSNFile: request.OwnerDSNFile, AppDSNFile: request.AppDSNFile})
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	targetIdentity, err := postgresDatabaseIdentity(ctx, request.AppDSNFile)
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	ownerTargetIdentity, err := postgresOwnerDatabaseIdentity(ctx, request.OwnerDSNFile)
+	if err != nil || ownerTargetIdentity != targetIdentity {
+		return punarobackup.State{}, errors.New("restore database credentials do not identify the same target database")
+	}
+	releaseDatabaseLock, err := punaropostgres.AcquireRestoreLock(ctx, punaropostgres.Config{DSNFile: request.AppDSNFile}, targetIdentity)
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	defer releaseDatabaseLock()
+	canonicalInstallationParent, err := filepath.EvalSymlinks(filepath.Dir(request.Directory))
+	if err != nil {
+		return punarobackup.State{}, errors.New("restore installation parent cannot be resolved")
+	}
+	canonicalOwnerDSN, ownerErr := filepath.EvalSymlinks(request.OwnerDSNFile)
+	canonicalAppDSN, appErr := filepath.EvalSymlinks(request.AppDSNFile)
+	if ownerErr != nil || appErr != nil {
+		return punarobackup.State{}, errors.New("restore database credential paths cannot be resolved")
+	}
+	target := punarobackup.RestoreTarget{
+		InstallationDirectory: filepath.Join(canonicalInstallationParent, filepath.Base(request.Directory)),
+		BackupRoot:            canonicalNewBackup,
+		OwnerDSNFile:          canonicalOwnerDSN,
+		AppDSNFile:            canonicalAppDSN,
+		DatabaseIdentity:      targetIdentity,
+	}
+	state, err := punarobackup.Restore(ctx, punarobackup.RestoreOptions{
+		BackupDirectory: request.BackupDirectory,
+		TargetDataDir:   request.DataDir,
+		Target:          target,
+		Preflight: func(preflightCtx context.Context) error {
+			currentIdentity, identityErr := postgresDatabaseIdentity(preflightCtx, request.AppDSNFile)
+			currentOwnerIdentity, ownerIdentityErr := postgresOwnerDatabaseIdentity(preflightCtx, request.OwnerDSNFile)
+			if identityErr != nil || ownerIdentityErr != nil || currentIdentity != targetIdentity || currentOwnerIdentity != targetIdentity {
+				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: errors.New("restore target database identity changed")}
+			}
+			targetState, inspectErr := inspectSchema(preflightCtx, request.AppDSNFile)
+			if inspectErr != nil || targetState.Classification != punaropostgres.Pristine {
+				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: errors.New("restore target database must be pristine")}
+			}
+			if err := verifyPristinePair(preflightCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
+				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: err}
+			}
+			return nil
+		},
+		RestoreDump: func(restoreCtx context.Context, dump io.Reader) error {
+			currentIdentity, identityErr := postgresDatabaseIdentity(restoreCtx, request.AppDSNFile)
+			currentOwnerIdentity, ownerIdentityErr := postgresOwnerDatabaseIdentity(restoreCtx, request.OwnerDSNFile)
+			if identityErr != nil || ownerIdentityErr != nil || currentIdentity != targetIdentity || currentOwnerIdentity != targetIdentity {
+				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: errors.New("restore target database identity changed")}
+			}
+			targetState, inspectErr := inspectSchema(restoreCtx, request.AppDSNFile)
+			if inspectErr != nil {
+				return inspectErr
+			}
+			switch targetState.Classification {
+			case punaropostgres.Pristine:
+				if err := verifyPristinePair(restoreCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
+					return err
+				}
+				return pgRestoreDump(restoreCtx, request.OwnerDSNFile, dump)
+			case punaropostgres.Compatible:
+				database, openErr := punaropostgres.OpenApplication(restoreCtx, punaropostgres.Config{DSNFile: request.AppDSNFile})
+				if openErr != nil {
+					return openErr
+				}
+				defer func() { _ = database.Close() }()
+				current, currentErr := database.InstallationState(restoreCtx)
+				if currentErr == nil && targetState.Version == manifest.SchemaVersion && current.InstallationID == manifest.State.InstallationID && current.TimelineID == manifest.State.TimelineID && current.ChangeSequence == manifest.State.ChangeSequence {
+					return nil
+				}
+			}
+			return errors.New("restore target database is neither pristine nor the exact restored backup state")
+		},
+		RotateTimeline: func(rotateCtx context.Context, verified punarobackup.Manifest) (punarobackup.State, error) {
+			admin, openErr := punaropostgres.OpenAdministration(rotateCtx, punaropostgres.Config{DSNFile: request.OwnerDSNFile})
+			if openErr != nil {
+				return punarobackup.State{}, openErr
+			}
+			defer func() { _ = admin.Close() }()
+			rotated, rotateErr := admin.RotateRestoredTimeline(rotateCtx, verified.BackupID, punaropostgres.InstallationState{InstallationID: verified.State.InstallationID, TimelineID: verified.State.TimelineID, ChangeSequence: verified.State.ChangeSequence})
+			return punarobackup.State{InstallationID: rotated.InstallationID, TimelineID: rotated.TimelineID, ChangeSequence: rotated.ChangeSequence}, rotateErr
+		},
+		Finalize: func(finalizeCtx context.Context, finalized punarobackup.State) error {
+			schema, inspectErr := inspectSchema(finalizeCtx, request.AppDSNFile)
+			if inspectErr != nil || schema.Classification != punaropostgres.Compatible || schema.Version != punaropostgres.CurrentManifest().MaxSupported || schema.Version != manifest.SchemaVersion {
+				return errors.New("restored database schema is not the exact supported backup schema")
+			}
+			if err := verifyInstallationPair(finalizeCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
+				return errors.New("restored database roles do not match")
+			}
+			owner, ownerErr := inspectOwner(finalizeCtx, request.AppDSNFile)
+			if ownerErr != nil || owner.ID != sourceInstallation.OwnerPrincipalID {
+				return errors.New("restored database owner does not match the backup")
+			}
+			restoredDatabase, openErr := punaropostgres.OpenApplication(finalizeCtx, punaropostgres.Config{DSNFile: request.AppDSNFile})
+			if openErr != nil {
+				return errors.New("restored database cannot be verified")
+			}
+			restoredState, stateErr := restoredDatabase.InstallationState(finalizeCtx)
+			closeErr := restoredDatabase.Close()
+			if stateErr != nil || closeErr != nil || restoredState.InstallationID != finalized.InstallationID || restoredState.TimelineID != finalized.TimelineID || restoredState.ChangeSequence != finalized.ChangeSequence {
+				return errors.New("restored timeline state does not match publication")
+			}
+			return operator.PublishRestore(prepared)
+		},
+	})
+	if err != nil {
+		return punarobackup.State{}, err
+	}
+	if state.InstallationID != manifest.State.InstallationID {
+		return punarobackup.State{}, errors.New("restored installation identity changed")
+	}
+	return state, nil
+}
+
+func postgresDatabaseIdentity(ctx context.Context, appDSNFile string) (string, error) {
+	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: appDSNFile})
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = database.Close() }()
+	return database.Identity(ctx)
+}
+
+func postgresOwnerDatabaseIdentity(ctx context.Context, ownerDSNFile string) (string, error) {
+	return punaropostgres.OwnerDatabaseIdentity(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+}
+
+func cliPathsOverlap(first, second string) bool {
+	first = filepath.Clean(first)
+	second = filepath.Clean(second)
+	if first == second {
+		return true
+	}
+	relative, err := filepath.Rel(first, second)
+	if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return true
+	}
+	relative, err = filepath.Rel(second, first)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func parseDirectory(name string, args []string, stderr io.Writer) (string, bool) {
