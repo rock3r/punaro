@@ -765,7 +765,8 @@ FROM objects, ownership`).Scan(&identityObjectsPresent); err != nil {
 		var backupObjectsPresent bool
 		if err := q.QueryRowContext(ctx, `
 WITH objects AS (
-    SELECT to_regclass('attachment.ready_blob_manifest') AS ready_oid,
+    SELECT to_regnamespace('attachment') AS attachment_namespace_oid,
+           to_regclass('attachment.ready_blob_manifest') AS ready_oid,
            to_regclass('jobs.backup_gc_fences') AS fences_oid,
            to_regclass('jobs.restore_events') AS restores_oid,
            to_regclass('jobs.backup_gc_fences_active') AS active_index_oid,
@@ -817,6 +818,16 @@ WITH objects AS (
 	JOIN pg_class AS relation ON relation.oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
 	CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl, acldefault('r', relation.relowner))) AS acl
 	LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+), schema_acl AS (
+	SELECT count(*) = 3
+	   AND bool_and(pg_get_userbyid(namespace.nspowner) = 'punaro_owner')
+	   AND bool_and(NOT acl.is_grantable)
+	   AND bool_and(grantee.rolname = 'punaro_owner'
+	       OR (grantee.rolname = 'punaro_app' AND acl.privilege_type = 'USAGE')) AS exact
+	FROM objects
+	JOIN pg_namespace AS namespace ON namespace.oid = objects.attachment_namespace_oid
+	CROSS JOIN LATERAL aclexplode(COALESCE(namespace.nspacl, acldefault('n', namespace.nspowner))) AS acl
+	LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
 ), column_expected(relation_oid, column_name, type_oid, type_modifier, required, default_expression) AS (
 	SELECT expected.* FROM objects, LATERAL (VALUES
 		(ready_oid, 'storage_path', 'text'::regtype, -1, true, ''),
@@ -850,10 +861,10 @@ WITH objects AS (
 	JOIN pg_attribute AS attribute ON attribute.attrelid = expected.relation_oid AND attribute.attname = expected.column_name AND attribute.attnum > 0 AND NOT attribute.attisdropped
 	LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid = attribute.attrelid AND default_value.adnum = attribute.attnum
 )
-SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT NULL
+SELECT attachment_namespace_oid IS NOT NULL AND ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT NULL
 	   AND active_index_oid IS NOT NULL AND acquire_oid IS NOT NULL AND bind_oid IS NOT NULL
 	   AND renew_oid IS NOT NULL AND cancel_oid IS NOT NULL AND release_oid IS NOT NULL AND gc_oid IS NOT NULL AND rotate_oid IS NOT NULL
-   AND table_ownership.owned AND routine_safety.safe AND routine_acl.exact AND table_acl.exact AND column_safety.exact
+   AND table_ownership.owned AND routine_safety.safe AND routine_acl.exact AND table_acl.exact AND schema_acl.exact AND column_safety.exact
 	AND (SELECT index.indisunique AND index.indisvalid AND index.indisready AND index.indnkeyatts = 1 AND index.indnatts = 1
 		AND index.indrelid = fences_oid AND index.indkey::text = '2' AND index.indexprs IS NULL AND pg_get_expr(index.indpred, index.indrelid) = '(released_at IS NULL)'
 		FROM pg_index AS index WHERE index.indexrelid = active_index_oid)
@@ -897,8 +908,6 @@ SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT 
    AND NOT has_any_column_privilege('punaro_app', fences_oid, 'INSERT,UPDATE,REFERENCES')
    AND NOT has_table_privilege('punaro_app', restores_oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_any_column_privilege('punaro_app', restores_oid, 'INSERT,UPDATE,REFERENCES')
-	AND has_schema_privilege('punaro_app', 'attachment', 'USAGE')
-	AND NOT has_schema_privilege('punaro_app', 'attachment', 'CREATE')
 	AND NOT has_function_privilege('punaro_app', acquire_oid, 'EXECUTE')
 	AND NOT has_function_privilege('punaro_app', bind_oid, 'EXECUTE')
 	AND NOT has_function_privilege('punaro_app', renew_oid, 'EXECUTE')
@@ -906,7 +915,7 @@ SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT 
 	AND NOT has_function_privilege('punaro_app', release_oid, 'EXECUTE')
    AND has_function_privilege('punaro_app', gc_oid, 'EXECUTE')
    AND NOT has_function_privilege('punaro_app', rotate_oid, 'EXECUTE')
-FROM objects, table_ownership, routine_safety, routine_acl, table_acl, column_safety`).Scan(&backupObjectsPresent); err != nil {
+FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_acl, column_safety`).Scan(&backupObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL backup schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = backupObjectsPresent

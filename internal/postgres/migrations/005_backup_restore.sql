@@ -212,6 +212,7 @@ END
 $function$;
 
 REVOKE ALL ON attachment.ready_blob_manifest, jobs.backup_gc_fences, jobs.restore_events FROM PUBLIC, punaro_app;
+REVOKE ALL ON SCHEMA attachment FROM PUBLIC, punaro_app;
 GRANT USAGE ON SCHEMA attachment TO punaro_app;
 GRANT SELECT ON attachment.ready_blob_manifest TO punaro_app;
 
