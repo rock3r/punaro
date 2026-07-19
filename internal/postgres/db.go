@@ -209,7 +209,7 @@ WITH objects AS (
     SELECT count(*) = 3
        AND bool_and(pg_get_userbyid(proowner) = 'punaro_owner')
        AND bool_and(prosecdef)
-       AND bool_and(proconfig = ARRAY['search_path=pg_catalog']::text[])
+	   AND bool_and(COALESCE(proconfig = ARRAY['search_path=pg_catalog']::text[], false))
        -- PostgreSQL prosrc retains the dollar-quoted boundary newlines; btrim
        -- removes only ordinary spaces, so these are catalog-exact fingerprints.
        AND bool_and(
