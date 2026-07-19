@@ -119,7 +119,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 	restored, err := restoreBackup(ctx, request)
 	if err != nil {
-		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwner, targetApp, targetOwnerDSN), manifest.State)
+		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwner, targetApp, sourceOwnerDSN, targetOwnerDSN), manifest.State)
 	}
 	if restored.InstallationID != manifest.State.InstallationID || restored.TimelineID == manifest.State.TimelineID || restored.ChangeSequence != manifest.State.ChangeSequence {
 		t.Fatalf("restored state=%#v manifest=%#v", restored, manifest.State)
@@ -136,7 +136,7 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 }
 
-func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, ownerDSN string) string {
+func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, sourceOwnerDSN, ownerDSN string) string {
 	db, err := sql.Open("pgx", ownerDSN)
 	if err != nil {
 		return "open-failed"
@@ -155,7 +155,68 @@ func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, owne
 	if admin != nil {
 		_ = admin.Close()
 	}
-	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d app-state=%s/%d app-err=%v admin-err=%v", installationID, timelineID, changeSequence, eventCount, appState.Classification, appState.Version, appErr, adminErr)
+	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d app-state=%s/%d app-err=%v admin-err=%v catalog-diff=%s", installationID, timelineID, changeSequence, eventCount, appState.Classification, appState.Version, appErr, adminErr, restoreCatalogDifference(ctx, sourceOwnerDSN, ownerDSN))
+}
+
+func restoreCatalogDifference(ctx context.Context, sourceDSN, targetDSN string) string {
+	queries := []string{
+		`SELECT format('namespace:%s:%s:%s',nspname,pg_get_userbyid(nspowner),COALESCE(nspacl::text,'')) FROM pg_namespace WHERE nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY nspname`,
+		`SELECT format('relation:%s:%s:%s:%s',class.oid::regclass::text,class.relkind,pg_get_userbyid(class.relowner),COALESCE(class.relacl::text,'')) FROM pg_class AS class JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY class.oid::regclass::text`,
+		`SELECT format('routine:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(proc.prosrc),pg_get_userbyid(proc.proowner),proc.proconfig::text,proc.prosecdef,COALESCE(proc.proacl::text,'')) FROM pg_proc AS proc JOIN pg_namespace AS namespace ON namespace.oid=proc.pronamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('constraint:%s:%s:%s:%s:%s',conrelid::regclass::text,conname,contype,conkey::text,COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint JOIN pg_namespace ON pg_namespace.oid=connamespace WHERE nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY conrelid::regclass::text,conname`,
+		`SELECT format('column:%s:%s:%s:%s:%s:%s',attribute.attrelid::regclass::text,attribute.attname,attribute.atttypid::regtype::text,attribute.atttypmod,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')) FROM pg_attribute AS attribute JOIN pg_class AS class ON class.oid=attribute.attrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') AND attribute.attnum>0 AND NOT attribute.attisdropped ORDER BY attribute.attrelid::regclass::text,attribute.attnum`,
+		`SELECT format('index:%s:%s',indexrelid::regclass::text,pg_get_indexdef(indexrelid)) FROM pg_index JOIN pg_class AS class ON class.oid=indrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY indexrelid::regclass::text`,
+		`SELECT format('trigger:%s:%s:%s:%s',tgrelid::regclass::text,tgname,tgenabled,pg_get_triggerdef(pg_trigger.oid)) FROM pg_trigger JOIN pg_class AS class ON class.oid=tgrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') AND NOT tgisinternal ORDER BY tgrelid::regclass::text,tgname`,
+		`SELECT format('migration:%s:%s:%s:%s',version,name,checksum,status) FROM jobs.schema_migrations ORDER BY version`,
+	}
+	read := func(dsn string) (map[string]bool, error) {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = db.Close() }()
+		result := map[string]bool{}
+		for _, query := range queries {
+			rows, err := db.QueryContext(ctx, query)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				result[line] = true
+			}
+			if err := rows.Close(); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+	source, sourceErr := read(sourceDSN)
+	target, targetErr := read(targetDSN)
+	if sourceErr != nil || targetErr != nil {
+		return fmt.Sprintf("unavailable:%v/%v", sourceErr, targetErr)
+	}
+	differences := make([]string, 0)
+	for line := range source {
+		if !target[line] {
+			differences = append(differences, "source:"+line)
+		}
+	}
+	for line := range target {
+		if !source[line] {
+			differences = append(differences, "target:"+line)
+		}
+	}
+	slices.Sort(differences)
+	joined := strings.Join(differences, ";")
+	if len(joined) > 16<<10 {
+		joined = joined[:16<<10]
+	}
+	return joined
 }
 
 func testInstallation(t *testing.T) string {
