@@ -781,13 +781,13 @@ WITH objects AS (
     FROM pg_class, objects WHERE oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
 ), routine_expected(oid, body_hash, language_name, volatility, security_definer, result_type) AS (
 	SELECT expected.* FROM objects, LATERAL (VALUES
-		(acquire_oid, 'c463308f31c66843c472609c2300ea5d', 'plpgsql', 'v'::"char", true, 'uuid'),
-		(bind_oid, 'cbab918206a45ac87eb0e3f4acf8d318', 'sql', 'v'::"char", true, 'boolean'),
-		(renew_oid, '317cbaa017b68c051fc268e3a73cdd0f', 'plpgsql', 'v'::"char", true, 'boolean'),
-		(cancel_oid, 'b525b20fda387502c5d661074082751c', 'sql', 'v'::"char", true, 'boolean'),
-		(release_oid, 'a4657bd92b6384ea383970690a9c1142', 'sql', 'v'::"char", true, 'boolean'),
-		(gc_oid, 'ed08dbb0bb0cbd127fc7f7ce6c59caa3', 'sql', 's'::"char", true, 'boolean'),
-		(rotate_oid, 'c485843fcadebadb42f6dba134c396a6', 'plpgsql', 'v'::"char", false, 'TABLE(installation_id uuid, timeline_id uuid, change_sequence bigint)')
+		(acquire_oid, 'f6929fb868a6ecf26876141eba7c6225', 'plpgsql', 'v'::"char", true, 'uuid'),
+		(bind_oid, '7cd70c2bf1e678bf0e9457759ddd69d2', 'sql', 'v'::"char", true, 'boolean'),
+		(renew_oid, '2b86effb929fb20879f101e761d8fb6b', 'plpgsql', 'v'::"char", true, 'boolean'),
+		(cancel_oid, 'bfbe9c5f6f92a230acd0ff519167b60a', 'sql', 'v'::"char", true, 'boolean'),
+		(release_oid, 'bcbf6a051343bc3a368c986ae799a1ef', 'sql', 'v'::"char", true, 'boolean'),
+		(gc_oid, '73e11885930565575ee1c496b16749d7', 'sql', 's'::"char", true, 'boolean'),
+		(rotate_oid, 'bacc5a1a2184a80240f570b8624535ea', 'plpgsql', 'v'::"char", false, 'TABLE(installation_id uuid, timeline_id uuid, change_sequence bigint)')
 	) AS expected(oid, body_hash, language_name, volatility, security_definer, result_type)
 ), routine_safety AS (
 	SELECT count(*) = 7
@@ -866,7 +866,7 @@ SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT 
 	AND (SELECT count(*) = 3 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'c' AND convalidated)
 	AND NOT EXISTS (
 		SELECT 1 FROM (VALUES
-			(ARRAY[2]::smallint[], '((size_bytes >= 0) AND (size_bytes <= 17179869184))'),
+			(ARRAY[2]::smallint[], '((size_bytes >= 0) AND (size_bytes <= ''17179869184''::bigint))'),
 			(ARRAY[3]::smallint[], '(sha256 ~ ''^[0-9a-f]{64}$''::text)'),
 			(ARRAY[1]::smallint[], '((storage_path <> ''''::text) AND (char_length(storage_path) <= 1024) AND (octet_length(storage_path) <= 4096) AND (storage_path !~ ''[[:cntrl:]]''::text) AND (storage_path !~ ''(^|/)\.\.?(/|$)''::text) AND (storage_path !~ ''^/''::text) AND (storage_path !~ ''\\''::text))')
 		) AS expected(key, expression)
@@ -876,7 +876,7 @@ SELECT ready_oid IS NOT NULL AND fences_oid IS NOT NULL AND restores_oid IS NOT 
 	AND NOT EXISTS (
 		SELECT 1 FROM (VALUES
 			(ARRAY[5,6]::smallint[], '(expires_at > acquired_at)'),
-			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR ((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
+			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR (((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200)) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
 			(ARRAY[7,8]::smallint[], '((released_at IS NULL) = (verified IS NULL))'),
 			(ARRAY[5,7]::smallint[], '((released_at IS NULL) OR (released_at >= acquired_at))')
 		) AS expected(key, expression)
