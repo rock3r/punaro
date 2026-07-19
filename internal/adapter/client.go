@@ -276,6 +276,9 @@ func (c *HTTPRelayClient) IssuePermit(ctx context.Context, permitRequest attachm
 	if err != nil {
 		return attachmentv2.Permit{}, fmt.Errorf("encode permit request: %w", err)
 	}
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return attachmentv2.Permit{}, err
+	}
 	nonce, err := randomNonce()
 	if err != nil {
 		return attachmentv2.Permit{}, err
@@ -358,6 +361,9 @@ func (c *HTTPRelayClient) DoV3Attachment(ctx context.Context, method, path strin
 	route, err := attachmentv3.ParseAttachmentRoute(method, path)
 	if err != nil || attachmentv3.VerifyAttachmentRoute(route, permit) != nil {
 		return nil, errors.New("invalid v3 attachment route")
+	}
+	if err := c.ensureAccessSession(ctx); err != nil {
+		return nil, err
 	}
 	nonce, err := randomNonce()
 	if err != nil {
@@ -534,6 +540,7 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 		headers.Set("CF-Access-Client-Id", c.accessToken.ClientID)
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
 	}
+	c.addAccessCookies(headers)
 	connection, response, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
 	if response != nil && response.Body != nil {
 		defer func() { _ = response.Body.Close() }()
@@ -555,6 +562,15 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 			return fmt.Errorf("invalid relay notification")
 		}
 		receive(event)
+	}
+}
+
+func (c *HTTPRelayClient) addAccessCookies(headers http.Header) {
+	if c == nil || c.httpClient == nil || c.httpClient.Jar == nil {
+		return
+	}
+	for _, cookie := range c.httpClient.Jar.Cookies(c.baseURL) {
+		headers.Add("Cookie", cookie.Name+"="+cookie.Value)
 	}
 }
 

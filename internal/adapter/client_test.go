@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -48,8 +49,19 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/punaro-access-session" {
+			if r.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatal("signed permit request was replayed during Access preflight")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "CF_Authorization", Value: "permit-session", Path: "/"})
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v2/permits" || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/cbor" {
 			t.Fatalf("unexpected request %s %s type=%q", r.Method, r.URL.String(), r.Header.Get("Content-Type"))
+		}
+		if !strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=permit-session") {
+			t.Fatal("permit request omitted Access session cookie")
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -75,6 +87,7 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	enableTestAccessSession(t, client)
 	permit, err := client.IssuePermit(context.Background(), permitRequest)
 	if err != nil || permit != expectedPermit {
 		t.Fatalf("permit=%+v err=%v", permit, err)
@@ -202,6 +215,14 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/.well-known/punaro-access-session" {
+			if r.Header.Get("X-Punaro-Signature") != "" {
+				t.Fatal("signed v3 attachment request was replayed during Access preflight")
+			}
+			http.SetCookie(w, &http.Cookie{Name: "CF_Authorization", Value: "attachment-session", Path: "/"})
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		gotBody := mustReadAll(t, r)
 		if r.Method != http.MethodPut || r.URL.Path != path || string(gotBody) != string(body) {
 			t.Fatalf("request=%s %s body=%q", r.Method, r.URL.Path, gotBody)
@@ -218,6 +239,9 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 		if !ed25519.Verify(machinePublic, relay.CanonicalRequest(request), request.Signature) {
 			t.Fatal("attachment request did not have valid machine signature")
 		}
+		if !strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=attachment-session") {
+			t.Fatal("v3 attachment request omitted Access session cookie")
+		}
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write([]byte{0xa1})
 	}))
@@ -226,6 +250,7 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	enableTestAccessSession(t, client)
 	result, err := client.DoV3Attachment(context.Background(), http.MethodPut, path, body, permit, op)
 	if err != nil || string(result) != string([]byte{0xa1}) {
 		t.Fatalf("result=%x err=%v", result, err)
@@ -595,6 +620,9 @@ func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
 			t.Fatal("unsigned wake handshake")
 		}
+		if !strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=wake-session") {
+			t.Fatal("wake handshake omitted Access session cookie")
+		}
 		connection, err := websocket.Accept(w, r, nil)
 		if err != nil {
 			t.Fatal(err)
@@ -609,6 +637,12 @@ func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient.Jar = jar
+	jar.SetCookies(client.baseURL, []*http.Cookie{{Name: "CF_Authorization", Value: "wake-session", Path: "/"}})
 	events := make(chan relay.WakeEvent, 1)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -623,6 +657,16 @@ func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	default:
 		t.Fatal("wake was not delivered")
 	}
+}
+
+func enableTestAccessSession(t *testing.T, client *HTTPRelayClient) {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.httpClient.Jar = jar
+	client.access = &accessSession{baseURL: client.baseURL, client: client.httpClient, token: AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"}}
 }
 
 func TestHTTPRelayClientRejectsInsecureRemoteURLAndPartialAccessToken(t *testing.T) {
