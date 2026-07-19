@@ -100,6 +100,14 @@ var (
 		}
 		return owner, err
 	}
+	issueEnrollment = func(ctx context.Context, installation operator.Installation, request punaropostgres.EnrollmentRequest, previewHash string) (punaropostgres.PendingEnrollment, error) {
+		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+		if err != nil {
+			return punaropostgres.PendingEnrollment{}, err
+		}
+		defer func() { _ = admin.Close() }()
+		return admin.CreateEnrollment(ctx, installation.OwnerPrincipalID, request, previewHash)
+	}
 	startServices = func(ctx context.Context, installation operator.Installation) error {
 		command := exec.CommandContext(ctx, "docker", "compose", "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "up", "-d") // #nosec G204 -- fixed executable and generated private file arguments.
 		command.Dir = installation.Directory
@@ -357,16 +365,23 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	preview := map[string]any{"template": "trusted-agent", "preview_hash": previewHash, "grants": grants}
-	if code := writeJSON(stdout, stderr, preview); code != 0 {
-		return code
-	}
 	if !*confirmed {
+		if code := writeJSON(stdout, stderr, preview); code != 0 {
+			return code
+		}
 		_, _ = fmt.Fprintln(stderr, "grant preview printed; rerun with --yes and --confirm-preview-hash to create the enrollment")
 		return 3
 	}
 	if *confirmedHash == "" || *confirmedHash != previewHash {
+		if code := writeJSON(stdout, stderr, preview); code != 0 {
+			return code
+		}
 		_, _ = fmt.Fprintln(stderr, "client enrollment refused: confirmed preview hash does not match the exact grants above")
 		return 3
+	}
+	if failures := operator.CheckPaths(installation); len(failures) != 0 {
+		_, _ = fmt.Fprintln(stderr, "client enrollment refused: installation safety checks failed; run punaro doctor")
+		return 1
 	}
 	state, err := inspectSchema(context.Background(), installation.AppDSNFile)
 	if err != nil || state.Classification != punaropostgres.Compatible {
@@ -377,13 +392,12 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "client enrollment refused: database roles do not target the same installation")
 		return 1
 	}
-	admin, err := punaropostgres.OpenAdministration(context.Background(), punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "client enrollment failed: host-local administration is unavailable")
+	owner, err := inspectOwner(context.Background(), installation.AppDSNFile)
+	if err != nil || owner.ID != installation.OwnerPrincipalID {
+		_, _ = fmt.Fprintln(stderr, "client enrollment refused: database owner does not match the installation configuration")
 		return 1
 	}
-	defer func() { _ = admin.Close() }()
-	pending, err := admin.CreateEnrollment(context.Background(), installation.OwnerPrincipalID, punaropostgres.EnrollmentRequest{ClientBinding: uuid.NewString(), Label: *name, ProjectIDs: projects, AllProjects: *allProjects, TTL: *ttl, CredentialTTL: *credentialTTL}, previewHash)
+	pending, err := issueEnrollment(context.Background(), installation, punaropostgres.EnrollmentRequest{ClientBinding: uuid.NewString(), Label: *name, ProjectIDs: projects, AllProjects: *allProjects, TTL: *ttl, CredentialTTL: *credentialTTL}, previewHash)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "client enrollment failed")
 		return 1

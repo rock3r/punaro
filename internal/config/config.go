@@ -133,8 +133,10 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	// The legacy relay origin stays loopback-only. A non-loopback listener is
-	// admitted only by the complete device-ingress policy validated below.
-	if !deviceAuthEnabled && !isLoopbackListener(listenAddr) {
+	// admitted only when the complete device-ingress policy is validated below
+	// and no legacy route can share that listener.
+	legacyRoutesEnabled := relayEnabled || directoryEnabled || permitIssuanceEnabled || attachmentsEnabled || attachmentV3Enabled
+	if !isLoopbackListener(listenAddr) && (!deviceAuthEnabled || legacyRoutesEnabled) {
 		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
 	}
 	if deviceAuthEnabled {

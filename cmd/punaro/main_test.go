@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,12 +46,13 @@ func preserveDependencies(t *testing.T) {
 	originalInspect, originalOwner, originalMigrate := inspectSchema, inspectOwner, migrateSchema
 	originalCreate, originalRecover := createOwner, recoverInstallationOwner
 	originalVerify := verifyInstallationPair
-	originalStart, originalProbe := startServices, probe
+	originalStart, originalProbe, originalIssue := startServices, probe, issueEnrollment
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migrateSchema = originalInspect, originalOwner, originalMigrate
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
 		verifyInstallationPair = originalVerify
 		startServices, probe = originalStart, originalProbe
+		issueEnrollment = originalIssue
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
@@ -329,5 +332,80 @@ func TestClientAddRefusesMutationWhenDatabaseRolesDiffer(t *testing.T) {
 	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
 	if code := run(args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "database roles") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestClientAddRevalidatesPathsAndOwnerBeforeMutation(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "path drift", mutate: func(t *testing.T, directory string) {
+			installation, err := operator.Load(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(installation.BackupDir); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "owner mismatch", mutate: func(_ *testing.T, _ string) {
+			inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{ID: "22222222-2222-4222-8222-222222222222"}, nil
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			preserveDependencies(t)
+			directory := testInstallation(t)
+			inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+				return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+			}
+			test.mutate(t, directory)
+			issued := false
+			issueEnrollment = func(context.Context, operator.Installation, punaropostgres.EnrollmentRequest, string) (punaropostgres.PendingEnrollment, error) {
+				issued = true
+				return punaropostgres.PendingEnrollment{}, nil
+			}
+			_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(nil, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stdout, stderr bytes.Buffer
+			args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
+			if code := run(args, &stdout, &stderr); code != 1 || issued {
+				t.Fatalf("code=%d issued=%t stdout=%q stderr=%q", code, issued, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestConfirmedClientAddEmitsOnlyEnrollmentJSON(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+	}
+	issueEnrollment = func(_ context.Context, _ operator.Installation, request punaropostgres.EnrollmentRequest, previewHash string) (punaropostgres.PendingEnrollment, error) {
+		return punaropostgres.PendingEnrollment{ID: "22222222-2222-4222-8222-222222222222", ClientBinding: request.ClientBinding, Code: "one-time-code", PreviewHash: previewHash}, nil
+	}
+	_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	decoder := json.NewDecoder(&stdout)
+	var pending punaropostgres.PendingEnrollment
+	if err := decoder.Decode(&pending); err != nil || pending.Code != "one-time-code" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		t.Fatalf("confirmed add emitted multiple JSON documents: extra=%#v err=%v", extra, err)
 	}
 }

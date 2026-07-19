@@ -553,6 +553,11 @@ punaro init ... --mode lan --listen-addr 192.168.50.4:8080 \
   --trusted-lan-cidr 192.168.50.0/24 --allow-lan-http
 ```
 
+A non-loopback trusted-LAN listener is valid only for the two bounded device
+routes added by M-5. Configuration fails closed if legacy relay, directory,
+permit, or attachment routes are enabled on that process. Those surfaces stay
+loopback-only until their separately reviewed public runtime milestone.
+
 Fresh initialization requires the application-role view to be pristine,
 migrates through the owner role, then reopens both roles and proves their
 installation and timeline IDs match before creating the owner. It publishes

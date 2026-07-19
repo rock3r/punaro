@@ -111,6 +111,21 @@ func TestLoadAcceptsOnlyValidatedDeviceIngressProfiles(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsLegacyRoutesOnNonLoopbackDeviceIngress(t *testing.T) {
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "lan")
+	t.Setenv("PUNARO_LISTEN_ADDR", "192.168.50.4:8080")
+	t.Setenv("PUNARO_TRUSTED_LAN_CIDR", "192.168.50.0/24")
+	t.Setenv("PUNARO_TRUSTED_LAN_HTTP", "true")
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-loopback device ingress exposed legacy relay routes")
+	}
+}
+
 func TestLoadRejectsDeviceIngressWithoutPostgres(t *testing.T) {
 	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
 	t.Setenv("PUNARO_INGRESS_MODE", "internet")

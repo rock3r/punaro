@@ -601,7 +601,8 @@ an observed peer in that CIDR. Wildcard/public binds and peers fail closed;
 forwarded headers never establish TLS or source trust. The public surface added
 here is limited to strict, bounded enrollment redemption and a
 bearer-authenticated session check. PostgreSQL remains dark for mail and
-project identity APIs.
+project identity APIs. A non-loopback device listener cannot be combined with
+legacy relay, directory, permit, or attachment routes; those remain loopback-only.
 
 ## Required adversarial acceptance tests
 
