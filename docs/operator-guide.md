@@ -589,7 +589,13 @@ singleton-owner identity, and schema before invoking Compose. Status
 and doctor enforce the same owner binding. The generated file
 has no build context and accepts only the pinned image. The wrapper supplies a
 stable Compose project name from the verified owner UUID, so equal installation
-directory basenames cannot share containers. It starts only a compatible schema;
+directory basenames cannot share containers. It also removes inherited
+`PUNARO_*` and `COMPOSE_*` variables from the Compose subprocess, making the
+validated generated environment authoritative while retaining Docker connection
+settings. The operator-controlled Docker executable, CLI plugins, configuration,
+and selected daemon/context remain trusted dependencies; use a local daemon for
+this host-local wrapper because bind-path validation does not extend to a remote
+Docker host. It starts only a compatible schema;
 a pristine database after initialization is treated as data loss, an old schema
 refuses startup and directs the operator to keep running the previous compatible
 release. This staged M-5 wrapper deliberately has no in-place update command;

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,6 +79,70 @@ func TestComposeUpArgsUseInstallationSpecificProjectName(t *testing.T) {
 	}
 	if _, err := composeUpArgs(operator.Installation{OwnerPrincipalID: "invalid"}); err == nil {
 		t.Fatal("invalid owner identity reached Docker arguments")
+	}
+}
+
+func TestComposeEnvironmentMakesGeneratedInputsAuthoritative(t *testing.T) {
+	directory := filepath.Join(string(filepath.Separator), "srv", "punaro")
+	got := composeEnvironment([]string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/operator",
+		"DOCKER_HOST=unix:///run/user/1000/docker.sock",
+		"DOCKER_CONTEXT=desktop-linux",
+		"DOCKER_CONFIG=/home/operator/.docker",
+		"HTTPS_PROXY=http://proxy.example",
+		"PWD=/stale",
+		"pwd=/also-stale",
+		"PUNARO_IMAGE=attacker.example/punaro:latest",
+		"PuNaRo_Listen_Addr=attacker",
+		"PUNARO_POSTGRES_DSN_FILE=/attacker.dsn",
+		"PUNARO_FUTURE=attacker",
+		"COMPOSE_FILE=/attacker.yaml",
+		"compose_path_separator=attacker",
+		"COMPOSE_PROJECT_NAME=attacker",
+		"COMPOSE_ENV_FILES=/attacker.env",
+		"COMPOSE_PROFILES=attacker",
+		"XPUNARO_IMAGE=unrelated",
+		"XCOMPOSE_FILE=unrelated",
+	}, directory)
+	want := []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=/home/operator",
+		"DOCKER_HOST=unix:///run/user/1000/docker.sock",
+		"DOCKER_CONTEXT=desktop-linux",
+		"DOCKER_CONFIG=/home/operator/.docker",
+		"HTTPS_PROXY=http://proxy.example",
+		"XPUNARO_IMAGE=unrelated",
+		"XCOMPOSE_FILE=unrelated",
+		"PWD=" + directory,
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("environment=%v want=%v", got, want)
+	}
+}
+
+func TestComposeUpCommandWiresSanitizedEnvironmentAndDirectory(t *testing.T) {
+	t.Setenv("PUNARO_IMAGE", "attacker.example/punaro:latest")
+	t.Setenv("COMPOSE_FILE", "/attacker.yaml")
+	installation := operator.Installation{
+		Directory:        filepath.Join(string(filepath.Separator), "srv", "punaro"),
+		OwnerPrincipalID: "11111111-1111-4111-8111-111111111111",
+	}
+	command, err := composeUpCommand(context.Background(), installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Dir != installation.Directory {
+		t.Fatalf("command directory=%q", command.Dir)
+	}
+	for _, entry := range command.Env {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "PUNARO_") || strings.HasPrefix(name, "COMPOSE_") {
+			t.Fatalf("unsafe inherited variable %q", name)
+		}
+	}
+	if !slices.Contains(command.Env, "PWD="+installation.Directory) {
+		t.Fatalf("command environment lacks trusted PWD: %v", command.Env)
 	}
 }
 

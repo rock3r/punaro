@@ -110,12 +110,10 @@ var (
 		return admin.CreateEnrollment(ctx, installation.OwnerPrincipalID, request, previewHash)
 	}
 	startServices = func(ctx context.Context, installation operator.Installation) error {
-		arguments, err := composeUpArgs(installation)
+		command, err := composeUpCommand(ctx, installation)
 		if err != nil {
 			return err
 		}
-		command := exec.CommandContext(ctx, "docker", arguments...) // #nosec G204 -- fixed executable and generated private file arguments.
-		command.Dir = installation.Directory
 		output, err := command.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("service start failed: %s", boundedText(output))
@@ -125,12 +123,36 @@ var (
 	probe = probeHTTP
 )
 
+func composeUpCommand(ctx context.Context, installation operator.Installation) (*exec.Cmd, error) {
+	arguments, err := composeUpArgs(installation)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, "docker", arguments...) // #nosec G204 -- fixed executable and generated private file arguments.
+	command.Dir = installation.Directory
+	command.Env = composeEnvironment(os.Environ(), installation.Directory)
+	return command, nil
+}
+
 func composeUpArgs(installation operator.Installation) ([]string, error) {
 	projectName, err := operator.ComposeProjectName(installation)
 	if err != nil {
 		return nil, err
 	}
 	return []string{"compose", "--project-name", projectName, "--env-file", operator.EnvFile(installation.Directory), "-f", operator.OverrideFile(installation.Directory), "up", "-d"}, nil
+}
+
+func composeEnvironment(environment []string, directory string) []string {
+	sanitized := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		canonicalName := strings.ToUpper(name)
+		if !found || canonicalName == "PWD" || strings.HasPrefix(canonicalName, "PUNARO_") || strings.HasPrefix(canonicalName, "COMPOSE_") {
+			continue
+		}
+		sanitized = append(sanitized, entry)
+	}
+	return append(sanitized, "PWD="+directory)
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
