@@ -588,7 +588,7 @@ ORDER BY principal_id::text LIMIT $3`, sourceID, canonicalID, maxNewlyAuthorized
 		return 0, 0, 0, nil, errors.New("project authorization preview is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	var principals []string
+	principals := make([]string, 0)
 	for rows.Next() {
 		var principalID string
 		if err := rows.Scan(&principalID); err != nil {
