@@ -241,8 +241,8 @@ func runUp(args []string, stdout, stderr io.Writer) int {
 	}
 	switch operator.DecideUp(state) {
 	case operator.StartCompatible:
-	case operator.RefuseAndUpdate:
-		_, _ = fmt.Fprintln(stderr, "punaro up refused: existing schema requires migration; run punaro update")
+	case operator.RefuseUpgradeRequired:
+		_, _ = fmt.Fprintln(stderr, "punaro up refused: existing schema requires migration, but this staged release has no in-place updater; continue the previous compatible release")
 		return 1
 	default:
 		_, _ = fmt.Fprintf(stderr, "punaro up refused: schema is %s; follow the documented recovery procedure\n", state.Classification)

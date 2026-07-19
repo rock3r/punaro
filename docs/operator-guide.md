@@ -529,7 +529,9 @@ with `make operator-binary`; do not run it inside the daemon container. Supply
 only the reviewed release image by immutable registry digest. Run init as the
 non-root Unix account that owns the private paths; root is rejected and the
 same numeric identity runs the container. Data and backup must resolve to
-non-overlapping locations. Neither DSN nor the installation directory may
+non-overlapping locations. Supply every path in its already-clean absolute
+form: `.`/`..` components, duplicate separators, and trailing separators are
+rejected. Neither DSN nor the installation directory may
 resolve beneath the daemon-writable data directory, including through a
 symlinked ancestor. Each private directory and DSN file must be owned by that
 account. Every path ancestor must be owned by root or that account and may not
@@ -589,7 +591,10 @@ has no build context and accepts only the pinned image. The wrapper supplies a
 stable Compose project name from the verified owner UUID, so equal installation
 directory basenames cannot share containers. It starts only a compatible schema;
 a pristine database after initialization is treated as data loss, an old schema
-directs the operator to `punaro update`, and dirty/newer/incompatible state
+refuses startup and directs the operator to keep running the previous compatible
+release. This staged M-5 wrapper deliberately has no in-place update command;
+the separately reviewed M-7 durable update milestone adds that transaction after
+consistent backup/restore exists. Dirty/newer/incompatible state
 requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 

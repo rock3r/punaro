@@ -95,7 +95,7 @@ func TestUpRefusesExistingUpgradeBeforeMigrationOrStart(t *testing.T) {
 	startServices = func(context.Context, operator.Installation) error { started = true; return nil }
 	verifyInstallationPair = func(context.Context, string, string) error { pairChecked = true; return errors.New("must not run") }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"up", "--directory", directory}, &stdout, &stderr); code != 1 || migrated || started || pairChecked || !strings.Contains(stderr.String(), "punaro update") {
+	if code := run([]string{"up", "--directory", directory}, &stdout, &stderr); code != 1 || migrated || started || pairChecked || !strings.Contains(stderr.String(), "no in-place updater") || !strings.Contains(stderr.String(), "previous compatible release") || strings.Contains(stderr.String(), "punaro update") {
 		t.Fatalf("code=%d migrated=%t started=%t pairChecked=%t stdout=%q stderr=%q", code, migrated, started, pairChecked, stdout.String(), stderr.String())
 	}
 }

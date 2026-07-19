@@ -107,7 +107,7 @@ func TestUpActionNeverMigratesExistingSchema(t *testing.T) {
 	}{
 		{state: punaropostgres.Pristine, want: RefuseAndRecover},
 		{state: punaropostgres.Compatible, want: StartCompatible},
-		{state: punaropostgres.UpgradeRequired, want: RefuseAndUpdate},
+		{state: punaropostgres.UpgradeRequired, want: RefuseUpgradeRequired},
 		{state: punaropostgres.Newer, want: RefuseAndRecover},
 		{state: punaropostgres.Dirty, want: RefuseAndRecover},
 		{state: punaropostgres.Incompatible, want: RefuseAndRecover},
@@ -310,6 +310,29 @@ func TestInitRejectsUnsafeSensitivePathAncestorsBeforeBootstrap(t *testing.T) {
 	}
 }
 
+func TestLoadAndResumeRejectExistingNonCanonicalInstallationPath(t *testing.T) {
+	options := validInitOptions(t)
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rawDirectory := options.Directory + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(options.Directory)
+	if _, err := os.Stat(rawDirectory); err != nil {
+		t.Fatalf("non-canonical path does not resolve to the installation: %v", err)
+	}
+	if _, err := Load(rawDirectory); err == nil {
+		t.Fatal("Load accepted an existing non-canonical installation path")
+	}
+	recovered := false
+	if _, err := Resume(context.Background(), rawDirectory, func(context.Context, Installation) (punaropostgres.Principal, error) {
+		recovered = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || recovered {
+		t.Fatalf("Resume err=%v recoveryCalled=%t", err, recovered)
+	}
+}
+
 func TestCheckPathsRejectsSensitivePathAncestorPermissionDrift(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix directory trust semantics")
@@ -456,6 +479,38 @@ func TestInitRequiresDistinctRoleSecretFiles(t *testing.T) {
 		return punaropostgres.Principal{}, nil
 	}); err == nil || called {
 		t.Fatalf("same role file err=%v bootstrapCalled=%t", err, called)
+	}
+}
+
+func TestInitRejectsNonCanonicalSensitivePathsBeforeBootstrap(t *testing.T) {
+	for _, kind := range []string{"installation", "data", "backup", "owner DSN", "application DSN"} {
+		t.Run(kind, func(t *testing.T) {
+			options := validInitOptions(t)
+			root := filepath.Dir(options.Directory)
+			nonCanonical := root + string(filepath.Separator) + "alias" + string(filepath.Separator) + ".." + string(filepath.Separator) + "target"
+			switch kind {
+			case "installation":
+				options.Directory = nonCanonical
+			case "data":
+				options.DataDir = nonCanonical
+			case "backup":
+				options.BackupDir = nonCanonical
+			case "owner DSN":
+				options.OwnerDSNFile = nonCanonical
+			case "application DSN":
+				options.AppDSNFile = nonCanonical
+			}
+			if _, err := validateStatic(options); err == nil {
+				t.Fatalf("validateStatic accepted non-canonical %s path", kind)
+			}
+			called := false
+			if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				called = true
+				return punaropostgres.Principal{}, nil
+			}); err == nil || called {
+				t.Fatalf("non-canonical %s path err=%v bootstrapCalled=%t", kind, err, called)
+			}
+		})
 	}
 }
 

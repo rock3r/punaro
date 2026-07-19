@@ -258,8 +258,8 @@ func validateInit(options InitOptions) (Installation, error) {
 
 func validateStatic(options InitOptions) (Installation, error) {
 	for _, path := range []string{options.Directory, options.DataDir, options.BackupDir, options.OwnerDSNFile, options.AppDSNFile} {
-		if !filepath.IsAbs(path) || !safeEnvPath(path) {
-			return Installation{}, errors.New("installation paths must be absolute and single-line")
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || !safeEnvPath(path) {
+			return Installation{}, errors.New("installation paths must be absolute, canonical, and single-line")
 		}
 	}
 	if filepath.Clean(options.DataDir) == filepath.Clean(options.BackupDir) || strings.TrimSpace(options.OwnerName) == "" || strings.ContainsAny(options.OwnerName, "\r\n") {
@@ -595,8 +595,8 @@ type UpAction string
 const (
 	// StartCompatible permits startup without changing the schema.
 	StartCompatible UpAction = "start_compatible"
-	// RefuseAndUpdate directs the operator to the explicit update workflow.
-	RefuseAndUpdate UpAction = "refuse_and_update"
+	// RefuseUpgradeRequired keeps this staged release from migrating in place.
+	RefuseUpgradeRequired UpAction = "refuse_upgrade_required"
 	// RefuseAndRecover directs the operator to documented recovery.
 	RefuseAndRecover UpAction = "refuse_and_recover"
 )
@@ -607,7 +607,7 @@ func DecideUp(state punaropostgres.SchemaState) UpAction {
 	case punaropostgres.Compatible:
 		return StartCompatible
 	case punaropostgres.UpgradeRequired:
-		return RefuseAndUpdate
+		return RefuseUpgradeRequired
 	default:
 		return RefuseAndRecover
 	}
