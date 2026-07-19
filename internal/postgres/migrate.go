@@ -85,6 +85,10 @@ func migrate(ctx context.Context, db *sql.DB, manifest Manifest) (SchemaState, e
 }
 
 func migrateConn(ctx context.Context, conn *sql.Conn, manifest Manifest) (SchemaState, error) {
+	return migrateConnExpectedAppRole(ctx, conn, manifest, "punaro_app")
+}
+
+func migrateConnExpectedAppRole(ctx context.Context, conn *sql.Conn, manifest Manifest, appRole string) (SchemaState, error) {
 	if err := manifest.Validate(); err != nil {
 		return SchemaState{}, err
 	}
@@ -96,7 +100,7 @@ func migrateConn(ctx context.Context, conn *sql.Conn, manifest Manifest) (Schema
 		defer cancel()
 		_, _ = conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock($1)`, advisoryLockKey)
 	}()
-	if err := verifyMigrationRoles(ctx, conn); err != nil {
+	if err := verifyMigrationRolesNamed(ctx, conn, appRole); err != nil {
 		return SchemaState{}, err
 	}
 

@@ -439,9 +439,15 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyMigrationRolesNamed(ctx, ownerConn, "punaro_guaranteed_missing_app"); err == nil {
+	const missingRole = "punaro_guaranteed_missing_app"
+	var missingRoleExists bool
+	if err := ownerConn.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=$1)`, missingRole).Scan(&missingRoleExists); err != nil || missingRoleExists {
 		_ = ownerConn.Close()
-		t.Fatal("migration role verifier accepted a missing application role")
+		t.Fatalf("missing-role fixture collision=%t err=%v", missingRoleExists, err)
+	}
+	if _, err := migrateConnExpectedAppRole(ctx, ownerConn, CurrentManifest(), missingRole); err == nil {
+		_ = ownerConn.Close()
+		t.Fatal("migrator accepted a missing application role")
 	}
 	if err := ownerConn.Close(); err != nil {
 		t.Fatal(err)
