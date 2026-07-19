@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +27,26 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	canonicalOnly, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "canonical member")
 	if err != nil {
 		t.Fatal(err)
+	}
+	contentOnlyMembers := make([]struct {
+		principalID string
+		capability  Capability
+	}, 0, 5)
+	for _, capability := range []Capability{
+		CapabilityConversationSend,
+		CapabilityMemorySearch,
+		CapabilityMemoryPropose,
+		CapabilityMemoryWrite,
+		CapabilityAttachmentUpload,
+	} {
+		principal, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "canonical "+string(capability)+" member")
+		if err != nil {
+			t.Fatal(err)
+		}
+		contentOnlyMembers = append(contentOnlyMembers, struct {
+			principalID string
+			capability  Capability
+		}{principalID: principal.ID, capability: capability})
 	}
 	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "identity outsider")
 	if err != nil {
@@ -60,6 +82,9 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	grantFixture(canonicalOnly.ID, source.ProjectID, CapabilityProjectRead)
 	grantFixture(canonicalOnly.ID, canonical.ProjectID, CapabilityProjectRead)
 	grantFixture(canonicalOnly.ID, canonical.ProjectID, CapabilityProjectWrite)
+	for _, member := range contentOnlyMembers {
+		grantFixture(member.principalID, canonical.ProjectID, member.capability)
+	}
 
 	local, err := app.AttachProjectIdentity(ctx, ProjectIdentityAttachRequest{
 		ActorPrincipalID: actor.ID,
@@ -204,7 +229,12 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.SourceProjectID != source.ProjectID || preview.CanonicalProjectID != canonical.ProjectID || preview.IdentityCount < 1 || preview.PrivateRecordCount != 1 || preview.PendingEnrollmentCount != 0 || preview.ConflictCount != 0 || len(preview.NewlyAuthorizedPrincipalIDs) != 1 || preview.NewlyAuthorizedPrincipalIDs[0] != canonicalOnly.ID {
+	expectedNewlyAuthorized := []string{canonicalOnly.ID}
+	for _, member := range contentOnlyMembers {
+		expectedNewlyAuthorized = append(expectedNewlyAuthorized, member.principalID)
+	}
+	sort.Strings(expectedNewlyAuthorized)
+	if preview.SourceProjectID != source.ProjectID || preview.CanonicalProjectID != canonical.ProjectID || preview.IdentityCount < 1 || preview.PrivateRecordCount != 1 || preview.PendingEnrollmentCount != 0 || preview.ConflictCount != 0 || !slices.Equal(preview.NewlyAuthorizedPrincipalIDs, expectedNewlyAuthorized) {
 		t.Fatalf("unexpected preview: %#v", preview)
 	}
 	previewRetry, err := app.PreviewProjectIdentityMerge(ctx, previewRequest)

@@ -639,12 +639,12 @@ FROM jobs.outbox WHERE project_id = $1 AND state IN ('queued', 'running')`, sour
 	rows, err := tx.QueryContext(ctx, `WITH canonical_capabilities AS (
     SELECT DISTINCT principal_id, capability FROM auth.capability_grants
     WHERE revoked_at IS NULL
-      AND capability = ANY (ARRAY['project.read','project.write','conversation.receive','conversation.administer','memory.read','memory.administer','memory.purge','attachment.download','attachment.delete']::text[])
+      AND capability = ANY (ARRAY['project.read','project.write','conversation.send','conversation.receive','conversation.administer','memory.search','memory.read','memory.propose','memory.write','memory.administer','memory.purge','attachment.upload','attachment.download','attachment.delete']::text[])
       AND (scope = 'all_projects' OR (scope = 'project' AND project_id = $2))
 ), source_capabilities AS (
     SELECT DISTINCT principal_id, capability FROM auth.capability_grants
     WHERE revoked_at IS NULL
-      AND capability = ANY (ARRAY['project.read','project.write','conversation.receive','conversation.administer','memory.read','memory.administer','memory.purge','attachment.download','attachment.delete']::text[])
+      AND capability = ANY (ARRAY['project.read','project.write','conversation.send','conversation.receive','conversation.administer','memory.search','memory.read','memory.propose','memory.write','memory.administer','memory.purge','attachment.upload','attachment.download','attachment.delete']::text[])
       AND (scope = 'all_projects' OR (scope = 'project' AND project_id = $1))
 ), expanded AS (
     SELECT principal_id, capability FROM canonical_capabilities
