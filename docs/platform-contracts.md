@@ -104,8 +104,12 @@ MCP, Cloudflare ingress, and scheduled backup are opt-in profiles. Containers
 run as non-root with read-only roots, all capabilities dropped,
 `no-new-privileges`, bounded temporary filesystems, and no Docker socket.
 
-The current Dockerfile and Compose file remain an alpha build/run baseline in
-M-0. Later slices may add the production bundle only with clean-start,
+The default Dockerfile and Compose file remain the alpha build/run baseline.
+M-1 adds an explicit `punaro-migrate` image command and a separate, ephemeral
+pgvector Compose stack solely for substrate integration tests. PostgreSQL is
+disabled by default, the relay continues to use SQLite, and the integration
+stack has a private network with no published database port. Later slices may
+add the production bundle only with clean-start,
 readiness, backup/restore, migration refusal, port-isolation, multi-arch, SBOM,
 and image-scan evidence. Active routing does not change merely because a
 PostgreSQL service or image role exists.

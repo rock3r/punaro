@@ -411,6 +411,52 @@ under the target distribution, verify SQLite WAL behavior, and record
 loopback and use a separately reviewed ingress only after the applicable
 public-runtime release gate is complete.
 
+### Dark PostgreSQL substrate
+
+PostgreSQL remains disabled unless both `PUNARO_POSTGRES_ENABLED=true` and an
+absolute `PUNARO_POSTGRES_DSN_FILE` are supplied. The DSN file must be a private
+regular file (`0600` on Unix) for the normal `punaro_app` role. Do not place a
+DSN in an environment value, command line, checked-in dotenv file, or log.
+
+Ordinary `punarod` startup and `/readyz` only inspect the database. They never
+create or repair schema objects. A pristine, dirty, upgrade-required, newer, or
+incompatible schema makes startup fail with a content-free classification. Do
+not grant DDL to `punaro_app` to bypass that refusal.
+
+M-1 exposes the schema-owner action directly for controlled development and
+integration use:
+
+```sh
+go run ./cmd/punaro-migrate -owner-dsn-file /absolute/private/owner.dsn
+```
+
+The same reviewed binary is present in the application image; because the
+alpha image still defaults to `punarod`, invoke the role explicitly and mount
+the protected file read-only:
+
+```sh
+docker run --rm --entrypoint /usr/local/bin/punaro-migrate \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src=/absolute/private/owner.dsn,dst=/run/secrets/owner.dsn,readonly \
+  PUNARO_IMAGE_BY_DIGEST -owner-dsn-file /run/secrets/owner.dsn
+```
+
+The initial M-1 role contract uses the exact roles `punaro_owner` and
+`punaro_app`. Provision `punaro_app` first as a login with no superuser,
+database-create, role-create, public-schema-create, or `punaro_owner` membership;
+the migrator refuses to bootstrap otherwise. The owner DSN must authenticate
+directly as `punaro_owner` (not through `SET ROLE`), remain separately protected,
+and be unavailable to `punarod`. The `--user` selection above lets the container
+read the caller-owned `0600` bind mount without weakening it; use an equivalent
+read-only secret mechanism in an orchestrator.
+Concurrent migrators serialize on a PostgreSQL advisory lock. A migration left
+in `applying` state is a dirty fence and is not silently repaired; preserve the
+database and investigate. Supported backup-gated production updates and dirty
+recovery arrive in later milestones, so this command is not yet a production
+update procedure. The digest-pinned `make test-postgres` stack is ephemeral
+test infrastructure, publishes no database port, and deletes its volume on
+exit.
+
 ## Operations and incident response
 
 There is no supported production backup or restore procedure yet.  Do not

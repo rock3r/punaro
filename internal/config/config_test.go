@@ -27,6 +27,39 @@ func TestLoadRejectsInvalidLevel(t *testing.T) {
 	}
 }
 
+func TestLoadPostgresDefaultsDisabled(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PostgresEnabled || cfg.PostgresDSNFile != "" {
+		t.Fatalf("PostgreSQL unexpectedly enabled: %#v", cfg)
+	}
+}
+
+func TestLoadRequiresAbsolutePostgresDSNFileWhenEnabled(t *testing.T) {
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("enabled PostgreSQL accepted without a DSN file")
+	}
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "relative/postgres.dsn")
+	if _, err := Load(""); err == nil {
+		t.Fatal("enabled PostgreSQL accepted a relative DSN file")
+	}
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	cfg, err := Load("")
+	if err != nil || !cfg.PostgresEnabled || cfg.PostgresDSNFile == "" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+}
+
+func TestLoadRejectsPostgresDSNFileWhileDisabled(t *testing.T) {
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	if _, err := Load(""); err == nil {
+		t.Fatal("disabled PostgreSQL accepted a dangling DSN file")
+	}
+}
+
 func TestLoadRejectsEnabledAttachmentsWithoutEnrollment(t *testing.T) {
 	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
 	if _, err := Load(""); err == nil {

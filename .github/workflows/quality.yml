@@ -26,10 +26,18 @@ jobs:
         with:
           version: v2.11.1
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-      - run: go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 ./...
+      - run: CGO_ENABLED=0 go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude-generated ./...
       - run: go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
       - run: make fuzz
       - run: ./scripts/verify-release-gates.sh
+
+  postgres:
+    name: PostgreSQL integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - run: make test-postgres
 
   configuration:
     name: Configuration lint
@@ -44,11 +52,20 @@ jobs:
       - name: Lint GitHub Actions workflows
         run: docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9
       - name: Verify deployment artifacts
-        run: ./scripts/verify-deployment-files.sh
+        run: ./scripts/verify-deployment-files.sh && ./scripts/verify-postgres-compose.sh && docker compose -f docker-compose.postgres-test.yml config --quiet
       - name: Build the reviewed container context
         run: docker build --tag punaro:ci .
       - name: Verify container command set
         run: sh scripts/verify-container-binaries.sh
+      - name: Smoke explicit container role
+        run: ./scripts/smoke-container-roles.sh punaro:ci
+      - name: Scan container image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: punaro:ci
+          format: table
+          exit-code: '1'
+          severity: CRITICAL,HIGH
 
   windows:
     name: Windows client build

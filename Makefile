@@ -1,10 +1,13 @@
-.PHONY: test test-race vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
+.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz
 
 test:
 	go test -covermode=atomic ./...
 
 test-race:
 	go test -race -count=1 ./...
+
+test-postgres:
+	./scripts/test-postgres-integration.sh
 
 vet:
 	go vet ./...
@@ -27,7 +30,7 @@ vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
 gosec:
-	go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 ./...
+	CGO_ENABLED=0 go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude-generated ./...
 
 secrets:
 	go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
