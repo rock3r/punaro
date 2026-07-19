@@ -54,7 +54,8 @@ func ParseInstallationArtifact(body []byte) (Installation, error) {
 	if err != nil || installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !validImageDigest(installation.Image) || strings.TrimSpace(installation.OwnerName) == "" {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}
-	validated, err := validateStatic(InitOptions{Directory: installation.Directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
+	validationDirectory := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), ".punaro-backup-source")
+	validated, err := validateStatic(InitOptions{Directory: validationDirectory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
 	if err != nil || validated.HealthURL != installation.HealthURL {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}

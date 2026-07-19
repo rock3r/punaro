@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,21 @@ import (
 
 	"github.com/rock3r/punaro/internal/ingress"
 )
+
+func TestParseInstallationArtifactAcceptsOmittedHistoricalDirectory(t *testing.T) {
+	installation := Installation{Version: 1, Directory: filepath.Join(t.TempDir(), "source-installation"), DataDir: filepath.Join(t.TempDir(), "data"), BackupDir: filepath.Join(t.TempDir(), "backups"), Image: testImage, OwnerDSNFile: filepath.Join(t.TempDir(), "owner.dsn"), AppDSNFile: filepath.Join(t.TempDir(), "app.dsn"), OwnerPrincipalID: "11111111-1111-4111-8111-111111111111", OwnerName: "Primary operator", Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, HealthListenAddr: "127.0.0.1:8081", HealthURL: "http://127.0.0.1:8081"}
+	body, err := json.Marshal(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseInstallationArtifact(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Directory != "" || parsed.OwnerPrincipalID != installation.OwnerPrincipalID || parsed.DataDir != installation.DataDir {
+		t.Fatalf("parsed artifact=%#v", parsed)
+	}
+}
 
 func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	root := t.TempDir()
