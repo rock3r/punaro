@@ -1,16 +1,22 @@
 # Security release gates
 
-This checklist is the release authority for Punaro.  A checked box requires a
+This checklist remains the release authority for currently implemented Punaro
+surfaces. The attachment v2/v3 sections are preserved historical gates for
+superseded experimental paths and cannot authorize their production exposure;
+the trusted-relay replacement receives its own gates as it is implemented from
+[`big-brain-plan.md`](big-brain-plan.md). A checked box requires a
 reviewable, committed evidence record under `docs/release-evidence/` that names
 the source commit, target platform, exact commands and artifacts, CI run or
-attestation, and security approver.  An unchecked box means the corresponding
+attestation, and security approver. An unchecked box means the corresponding
 feature remains unavailable.  CI verifies the current withheld state and gate
 syntax; it cannot make a Git commit immutable or establish independent human
-approval.  Before any release, protected branches, required CI, a signed
-release tag, and a release environment with independent security and operations
-approvals are mandatory.  No runtime-exposure change may merge without that
-process, a reviewed evidence record, and an explicit release decision.  The
-current attachment gate is intentionally **closed**.
+approval. Before an official Internet-facing production release, protected
+branches, required CI, a signed release tag, and recorded security and
+operations approvals are mandatory. An official maintained release uses
+independent approvers; a personal self-hosted build may record the operator's
+own review. No Internet/public runtime-exposure change may be released without
+the applicable reviewed evidence and explicit release decision. The current
+attachment gate is intentionally **closed**.
 
 ## Current source assertions (not release evidence)
 
@@ -27,7 +33,7 @@ future artifact release must create a completed record from the
 [`release-evidence template`](release-evidence/README.md) before any box is
 checked.
 
-## Attachment v2 (closed)
+## Attachment v2 (superseded; closed)
 
 - [ ] Implement the versioned RFC's canonical CBOR maps, algorithm identifiers,
       positive/negative vectors, recipient-bound HPKE envelopes, and durable
@@ -45,7 +51,7 @@ checked.
 - [ ] Complete an independent cryptography/protocol review and an operator
       restore/revocation exercise against the release candidate.
 
-## Attachment v3 controlled runtime (not released)
+## Attachment v3 controlled runtime (superseded; not released)
 
 - [ ] Add fixed positive and negative v3 vectors for permit requests, permits,
       operations, manifests, envelopes, offers, and every strict HTTP route;

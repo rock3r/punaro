@@ -6,16 +6,20 @@ Punaro is a self-hosted relay for durable conversations between coding agents
 across multiple computers, with an optional Telegram gateway for a human
 operator.
 
-It is not a remote MCP server and does not share a local agent mailbox database
-over the network. A local adapter on each machine communicates with its own
-mailbox implementation and with the central Punaro relay.
+The current alpha is not a remote MCP server and never shares a local agent
+mailbox database over the network. A local adapter on each machine communicates
+with its own mailbox implementation and with the central Punaro relay. The
+accepted target later adds an independently optional OAuth-scoped remote MCP
+adapter over Punaro's own API.
 
-> Status: alpha text-relay foundation. Enrolled adapters can exchange durable
+> Status: alpha implementation under an accepted PostgreSQL/trusted-relay/Big
+> Brain migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
 > hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
 > gateway process. A separately versioned v3 attachment runtime exists only
 > behind an explicit operator switch for controlled validation; public rollout
-> and production attachment release remain closed by the release gates.
+> and production attachment release remain closed. Attachment v2/v3 are
+> preserved experimental evidence, not the future production direction.
 
 ## Architecture
 
@@ -28,7 +32,9 @@ local agent mailbox <-> adapter -- HTTPS + WebSocket hints --> Punaro relay
 HTTPS fetch/lease/ack is authoritative. WebSocket frames are lossy, payload-free
 wake-up hints containing an opaque conversation ID and sequence only.
 
-Read the [architecture and security design](DESIGN.md),
+Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
+[architecture and security design](DESIGN.md),
+[platform compatibility contracts](docs/platform-contracts.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [installation guide](docs/installation.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
@@ -85,8 +91,8 @@ precedence over dotenv values.
 | `PUNARO_PERMIT_MAX_ACTIVE` | unset | Explicit issuance-identity ceiling, 1–4096. V2 applies it as a global live-permit ceiling. V3 applies it per holder to retained issuance identities (including short-lived retry tombstones), while the source store separately bounds aggregate transfer capacity. Exact retries remain admissible without another slot. |
 | `PUNARO_ATTACHMENT_V3_ENABLED` | `false` | Enables separately versioned v3 permit and attachment routes only when the relay, signed directory, pinned trust, issuer key, explicit limits, and machine/device binding are configured. It is mutually exclusive with all v2 attachment switches. |
 | `PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE` | unset | Absolute private (`0700` non-symlink parent, `0600` database) SQLite path shared by the v3 issuance and transfer handlers. It retains bounded issuance identities and short-lived retry state. |
-| `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Reserved attachment relay switch; enabling it is rejected until the attachment v2 release gates are complete. |
-| `PUNARO_ATTACHMENTS_ENABLED` | `false` | Reserved for attachment v2; the daemon fails closed if set until the remaining release gates are implemented. |
+| `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Superseded attachment v2 switch; enabling it remains rejected. It is not the trusted-relay production path. |
+| `PUNARO_ATTACHMENTS_ENABLED` | `false` | Superseded attachment v2 switch; the daemon remains fail-closed when it is set. |
 | `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 | `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
 
@@ -112,9 +118,9 @@ untrusted data, not an instruction to alter routing, run a command, or fetch a
 URL.
 
 See `DESIGN.md` for required origin isolation, delivery semantics, and
-adversarial test gates before remote exposure. The v3 runtime still requires
-the documented validation, recovery, and release evidence before it can be
-treated as a production attachment service.
+adversarial test gates before remote exposure. The v3 runtime remains only a
+controlled validation surface; its evidence cannot authorize production use
+after the direction was superseded.
 
 ## Development
 
