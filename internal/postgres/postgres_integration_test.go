@@ -584,11 +584,11 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, expiredToken, expiredSnapshot, true); err == nil || confirmed {
 		t.Fatalf("released unverified fence reconciled as verified: confirmed=%t err=%v", confirmed, err)
 	}
-	const missingFenceToken = "018f47f4-7b18-7cc2-98d6-31d4fb5ab743"
-	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceToken, expiredSnapshot, true); err == nil || confirmed {
+	const missingFenceID = "018f47f4-7b18-7cc2-98d6-31d4fb5ab743"
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceID, expiredSnapshot, true); err == nil || confirmed {
 		t.Fatalf("missing fence reconciled as verified: confirmed=%t err=%v", confirmed, err)
 	}
-	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceToken, expiredSnapshot, false); err != nil || !confirmed {
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceID, expiredSnapshot, false); err != nil || !confirmed {
 		t.Fatalf("missing abort fence was not reconciled: confirmed=%t err=%v", confirmed, err)
 	}
 	var verified bool
