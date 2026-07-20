@@ -330,14 +330,15 @@ WITH objects AS (
 		CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
 		LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
 	), table_safety AS (
-		SELECT relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity
+		SELECT COALESCE((SELECT relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity
 		   AND pg_get_userbyid(relation.relowner)='punaro_owner'
 		   AND (SELECT count(*)=CASE WHEN current_setting('server_version_num')::integer/10000 >= 15 THEN 8 ELSE 7 END
 		        AND bool_and(grantee.rolname='punaro_owner' AND NOT acl.is_grantable)
 		        FROM LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
 		        LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee)
-		   AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=relation.oid AND attnum>0 AND attacl IS NOT NULL) AS safe
-		FROM objects JOIN pg_class AS relation ON relation.oid=objects.updates_oid
+		   AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=relation.oid AND attnum>0 AND attacl IS NOT NULL)
+		   FROM pg_class AS relation WHERE relation.oid=objects.updates_oid),false) AS safe
+		FROM objects
 	), trigger_safety AS (
 		SELECT count(*) = 19
 	       AND bool_and(trigger.tgenabled = 'O' AND NOT trigger.tgisinternal
