@@ -233,12 +233,12 @@ WITH objects AS (
 	           to_regprocedure('jobs.maintenance_active()') AS active_oid
 	), expected_routines(oid, body_hash, language_name, volatility, result_type) AS (
 	    SELECT expected.* FROM objects, LATERAL (VALUES
-	        (assert_oid, '76bdbbc1411f2b9624c4730787ff75be', 'plpgsql', 'v'::"char", 'void'),
-			(guard_oid, 'f3339d7f9b6b1ebfec5172945f5c07ef', 'plpgsql', 'v'::"char", 'trigger'),
-			(begin_oid, '5f4cd7037a75c59ccea616622970d29e', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
-			(advance_oid, '4702d7cedcdf4b46e01beaf2b15e47cc', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
-			(restore_oid, '772d62b8629b384e84dc8a49c078be96', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
-	        (active_oid, 'e4475b6b4ac88f44927f2fc357f0ada3', 'sql', 's'::"char", 'boolean')
+	        (assert_oid, 'fc7543952561f0d5bc5113fcdaf813f9', 'plpgsql', 'v'::"char", 'void'),
+			(guard_oid, 'fcc654b13cfd4866c5b1a0197a7271cf', 'plpgsql', 'v'::"char", 'trigger'),
+			(begin_oid, 'c92d3f718820c5dbedafd741d922c6c0', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
+			(advance_oid, 'c32ff93b1819d456830727dcc5193a57', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
+			(restore_oid, 'e472e244c2979791f0b7fbfafd4f9b69', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
+	        (active_oid, 'f653ca3bdcc9dd7109d848c20264b546', 'sql', 's'::"char", 'boolean')
 	    ) AS expected(oid, body_hash, language_name, volatility, result_type)
 	), expected_tables(oid) AS (
     SELECT unnest(ARRAY[
@@ -308,10 +308,16 @@ WITH objects AS (
 		(ARRAY[18,19]::smallint[], '((phase = ANY (ARRAY[''fenced''::text, ''writers_stopped''::text, ''aborted''::text])) OR (backup_id IS NOT NULL))', '((phase = ANY (ARRAY[''fenced''::text, ''writers_stopped''::text, ''aborted''::text])) OR (backup_id IS NOT NULL))'),
 		(ARRAY[18,28]::smallint[], '((phase = ANY (ARRAY[''committed''::text, ''recovered''::text, ''aborted''::text])) = (completed_at IS NOT NULL))', '((phase = ANY (ARRAY[''committed''::text, ''recovered''::text, ''aborted''::text])) = (completed_at IS NOT NULL))')
 	), constraint_safety AS (
-		SELECT (SELECT count(*)=29 FROM pg_constraint,objects WHERE conrelid=updates_oid)
+		SELECT (SELECT count(*) FILTER (WHERE contype IN ('p','f','c'))=29
+		          AND count(*)=29+CASE WHEN current_setting('server_version_num')::integer/10000 >= 18 THEN 20 ELSE 0 END
+		        FROM pg_constraint,objects WHERE conrelid=updates_oid)
 		   AND (SELECT count(*)=1 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='p' AND conkey=ARRAY[1]::smallint[] AND convalidated AND NOT condeferrable AND NOT condeferred)
 		   AND (SELECT count(*)=1 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='f' AND conkey=ARRAY[4]::smallint[] AND confrelid='auth.principals'::regclass AND confkey=ARRAY[1]::smallint[] AND confupdtype='a' AND confdeltype='a' AND confmatchtype='s' AND convalidated AND NOT condeferrable AND NOT condeferred)
 		   AND (SELECT count(*)=27 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='c' AND convalidated AND NOT condeferrable AND NOT condeferred)
+		   AND (current_setting('server_version_num')::integer/10000 < 18 OR NOT EXISTS (
+		       SELECT 1 FROM expected_columns,objects WHERE required AND NOT EXISTS (
+		           SELECT 1 FROM pg_constraint WHERE conrelid=updates_oid AND contype='n'
+		           AND conkey=ARRAY[expected_columns.attnum::smallint] AND convalidated AND NOT condeferrable AND NOT condeferred)))
 		   AND NOT EXISTS (SELECT 1 FROM expected_checks,objects WHERE NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=updates_oid AND contype='c' AND convalidated AND NOT condeferrable AND NOT condeferred AND conkey @> expected_checks.key AND conkey <@ expected_checks.key AND pg_get_expr(conbin,conrelid) IN (expected_checks.migration_expression,expected_checks.restored_expression))) AS safe
 	), routine_safety AS (
 	    SELECT count(*) = 6
