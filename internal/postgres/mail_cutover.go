@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"regexp"
 	"time"
@@ -236,7 +235,6 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 
 func mailCutoverControlsAvailable(ctx context.Context, q queryer) (bool, error) {
 	var available bool
-	var diagnostic string
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('relay.mail_cutover_epochs') AS epochs_oid,
@@ -310,13 +308,13 @@ WITH objects AS (
     ) AS expected(table_oid,constraint_name,constraint_type,column_keys,foreign_table_oid,foreign_column_keys)
 ), actual_constraints AS (
     SELECT con.conrelid,con.conname,con.contype,con.conkey,con.confrelid,COALESCE(con.confkey,'{}'::smallint[])
-    FROM objects JOIN pg_constraint AS con ON con.conrelid=ANY(ARRAY[epochs_oid,staging_oid,checkpoints_oid])
+    FROM objects JOIN pg_constraint AS con ON con.conrelid=ANY(ARRAY[epochs_oid,staging_oid,checkpoints_oid]) AND con.contype<>'n'
 ), constraints AS (
     SELECT NOT EXISTS (SELECT * FROM expected_constraints EXCEPT SELECT * FROM actual_constraints)
        AND NOT EXISTS (SELECT * FROM actual_constraints EXCEPT SELECT * FROM expected_constraints)
        AND (SELECT count(*)=21 AND bool_and(con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
            AND (con.contype<>'f' OR (con.confupdtype='a' AND con.confdeltype='a' AND con.confmatchtype='s')))
-           FROM objects JOIN pg_constraint AS con ON con.conrelid=ANY(ARRAY[epochs_oid,staging_oid,checkpoints_oid]))
+           FROM objects JOIN pg_constraint AS con ON con.conrelid=ANY(ARRAY[epochs_oid,staging_oid,checkpoints_oid]) AND con.contype<>'n')
        AND (SELECT bool_and(CASE con.conname
            WHEN 'mail_cutover_epochs_target_identity_check' THEN pg_get_expr(con.conbin,con.conrelid)='(target_identity ~ ''^[0-9a-f]{64}$''::text)'
            WHEN 'mail_cutover_epochs_source_fingerprint_check' THEN pg_get_expr(con.conbin,con.conrelid)='(source_fingerprint ~ ''^[0-9a-f]{64}$''::text)'
@@ -393,23 +391,7 @@ WITH objects AS (
 SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
-   AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE'),
-   concat_ws(',',
-       CASE WHEN objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL THEN NULL ELSE 'objects' END,
-       CASE WHEN objects.active_index_oid IS NOT NULL THEN NULL ELSE 'index-object' END,
-       CASE WHEN objects.guard_oid IS NOT NULL THEN NULL ELSE 'routine-object' END,
-       CASE WHEN ownership.exact THEN NULL ELSE 'ownership' END,
-       CASE WHEN columns.exact THEN NULL ELSE 'columns' END,
-       CASE WHEN defaults.exact THEN NULL ELSE 'defaults' END,
-       CASE WHEN constraints.exact THEN NULL ELSE 'constraints' END,
-       CASE WHEN active_index.exact THEN NULL ELSE 'active-index' END,
-       CASE WHEN routine.exact THEN NULL ELSE 'routine' END,
-       CASE WHEN guards.exact THEN NULL ELSE 'guards' END,
-       CASE WHEN table_acl.exact THEN NULL ELSE 'table-acl' END,
-       CASE WHEN NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE') THEN NULL ELSE 'routine-acl' END)
-FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available, &diagnostic)
-	if err == nil && !available {
-		return false, fmt.Errorf("mail cutover catalog mismatch: %s", diagnostic)
-	}
+   AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
+FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available)
 	return available, err
 }
