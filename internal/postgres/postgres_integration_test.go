@@ -470,6 +470,13 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if state, err := migrate(ctx, ownerDB, v5Manifest); err != nil || state.Classification != Compatible || state.Version != 5 {
 		t.Fatalf("v5 staging state=%#v err=%v", state, err)
 	}
+	var bridgeOwnerID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals (kind,display_name) VALUES ('owner','v5 bridge owner') RETURNING id::text`).Scan(&bridgeOwnerID); err != nil {
+		t.Fatalf("stage v5 bridge owner: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.installation_owner (principal_id) VALUES ($1)`, bridgeOwnerID); err != nil {
+		t.Fatalf("install v5 bridge owner: %v", err)
+	}
 	if _, err := Migrate(ctx, Config{DSNFile: ownerFile}); err == nil || !strings.Contains(err.Error(), "supported update transaction") {
 		t.Fatalf("ordinary migrator accepted v5 upgrade: %v", err)
 	}
@@ -566,6 +573,15 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
+		t.Fatalf("remove v5 bridge transaction fixture: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM auth.installation_owner WHERE principal_id=$1`, bridgeOwnerID); err != nil {
+		t.Fatalf("remove v5 bridge ownership fixture: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM auth.principals WHERE id=$1`, bridgeOwnerID); err != nil {
+		t.Fatalf("remove v5 bridge principal fixture: %v", err)
 	}
 }
 
