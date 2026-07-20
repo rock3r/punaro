@@ -781,6 +781,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		AppDSNFile:            canonicalAppDSN,
 		DatabaseIdentity:      targetIdentity,
 	}
+	finalizationStage := ""
 	state, err := punarobackup.Restore(ctx, punarobackup.RestoreOptions{
 		BackupDirectory: request.BackupDirectory,
 		TargetDataDir:   request.DataDir,
@@ -839,17 +840,21 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 			return punarobackup.State{InstallationID: rotated.InstallationID, TimelineID: rotated.TimelineID, ChangeSequence: rotated.ChangeSequence}, rotateErr
 		},
 		Finalize: func(finalizeCtx context.Context, finalized punarobackup.State) error {
+			finalizationStage = "schema"
 			schema, inspectErr := inspectSchema(finalizeCtx, request.AppDSNFile)
 			if inspectErr != nil || schema.Classification != punaropostgres.Compatible || schema.Version != punaropostgres.CurrentManifest().MaxSupported || schema.Version != manifest.SchemaVersion {
 				return errors.New("restored database schema is not the exact supported backup schema")
 			}
+			finalizationStage = "roles"
 			if err := verifyInstallationPair(finalizeCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
 				return errors.New("restored database roles do not match")
 			}
+			finalizationStage = "owner"
 			owner, ownerErr := inspectOwner(finalizeCtx, request.AppDSNFile)
 			if ownerErr != nil || owner.ID != sourceInstallation.OwnerPrincipalID {
 				return errors.New("restored database owner does not match the backup")
 			}
+			finalizationStage = "timeline"
 			restoredDatabase, openErr := punaropostgres.OpenApplication(finalizeCtx, punaropostgres.Config{DSNFile: request.AppDSNFile})
 			if openErr != nil {
 				return errors.New("restored database cannot be verified")
@@ -859,10 +864,18 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 			if stateErr != nil || closeErr != nil || restoredState.InstallationID != finalized.InstallationID || restoredState.TimelineID != finalized.TimelineID || restoredState.ChangeSequence != finalized.ChangeSequence {
 				return errors.New("restored timeline state does not match publication")
 			}
-			return operator.PublishRestore(prepared)
+			finalizationStage = "configuration"
+			if err := operator.PublishRestore(prepared); err != nil {
+				return err
+			}
+			finalizationStage = ""
+			return nil
 		},
 	})
 	if err != nil {
+		if finalizationStage != "" {
+			return punarobackup.State{}, fmt.Errorf("%w (finalization stage: %s)", err, finalizationStage)
+		}
 		return punarobackup.State{}, err
 	}
 	if state.InstallationID != manifest.State.InstallationID {
