@@ -495,7 +495,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	bridge, err := BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
 	if err != nil {
-		t.Fatalf("begin abortable bridge: %v", err)
+		t.Fatalf("begin abortable bridge: %v diagnostic=%s", err, v5BridgeDiagnostic(ctx, ownerDB, request))
 	}
 	if err := bridge.Abort(); err != nil {
 		t.Fatalf("abort uncommitted bridge: %v", err)
@@ -567,6 +567,22 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
+}
+
+func v5BridgeDiagnostic(ctx context.Context, ownerDB *sql.DB, request UpdateRequest) string {
+	tx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		return "transaction-failed: " + err.Error()
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, CurrentManifest().Migrations[5].SQL); err != nil {
+		return "migration-failed: " + err.Error()
+	}
+	_, err = scanUpdate(tx.QueryRowContext(ctx, `SELECT `+updateSelectColumns+` FROM jobs.begin_update($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, request.UpdateID, request.SourceRelease, request.TargetRelease, request.SourceImage, request.TargetImage, request.SourceSchema, request.TargetSchema, request.SchemaMin, request.SchemaMax, request.RollbackFloor, request.PostgresMajor, request.ReleaseSHA256, request.ComposeSHA256, request.MigrationManifestSHA256))
+	if err != nil {
+		return "begin-failed: " + err.Error()
+	}
+	return "unexpected-success"
 }
 
 func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
