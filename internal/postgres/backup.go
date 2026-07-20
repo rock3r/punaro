@@ -19,9 +19,125 @@ type DumpSnapshot func(context.Context, string, string, string) error
 
 // BackupSource opens exact, GC-fenced application-role backup snapshots.
 type BackupSource struct {
-	database    *Database
-	dumpDSNFile string
-	dump        DumpSnapshot
+	database         *Database
+	dumpDSNFile      string
+	dump             DumpSnapshot
+	openFenceSession func(context.Context, string) (backupFenceSession, error)
+}
+
+type backupFenceSession interface {
+	Release(context.Context, string, string, bool) (bool, error)
+	Reconcile(context.Context, string, string, bool) (bool, error)
+	Close() error
+}
+
+type postgresBackupFenceSession struct {
+	administration *Administration
+}
+
+func (session *postgresBackupFenceSession) Release(ctx context.Context, token, snapshotID string, verified bool) (bool, error) {
+	return releaseBackupGCFence(ctx, session.administration.db, token, snapshotID, verified)
+}
+
+func (session *postgresBackupFenceSession) Reconcile(ctx context.Context, token, snapshotID string, verified bool) (bool, error) {
+	return reconcileBackupGCFence(ctx, session.administration.db, token, snapshotID, verified)
+}
+
+func (session *postgresBackupFenceSession) Close() error {
+	return session.administration.Close()
+}
+
+type backupSnapshotFinisher struct {
+	mu       sync.Mutex
+	stopped  bool
+	terminal bool
+	stop     func() error
+	finalize func(context.Context, bool) (bool, error)
+	stopErr  error
+	result   error
+}
+
+func (finisher *backupSnapshotFinisher) Finish(ctx context.Context, verified bool) error {
+	finisher.mu.Lock()
+	defer finisher.mu.Unlock()
+
+	if finisher.terminal {
+		return finisher.result
+	}
+	if !finisher.stopped {
+		finisher.stopped = true
+		finisher.stopErr = finisher.stop()
+	}
+	if finisher.stopErr != nil {
+		verified = false
+	}
+	confirmed, err := finisher.finalize(ctx, verified)
+	if !confirmed {
+		return errors.New("PostgreSQL backup GC fence could not be released")
+	}
+	finisher.terminal = true
+	if err != nil {
+		finisher.result = errors.New("PostgreSQL backup authority could not close")
+	} else {
+		finisher.result = finisher.stopErr
+	}
+	return finisher.result
+}
+
+func openBackupFenceSession(ctx context.Context, dsnFile string) (backupFenceSession, error) {
+	administration, err := OpenAdministration(ctx, Config{DSNFile: dsnFile})
+	if err != nil {
+		return nil, err
+	}
+	return &postgresBackupFenceSession{administration: administration}, nil
+}
+
+func finalizeBackupGCFence(ctx context.Context, openSession func(context.Context, string) (backupFenceSession, error), dsnFile, token, snapshotID string, verified bool) (bool, error) {
+	attemptCtx := context.WithoutCancel(ctx)
+	openCtx, cancelOpen := context.WithTimeout(attemptCtx, operationTimeout)
+	session, err := openSession(openCtx, dsnFile)
+	cancelOpen()
+	if err != nil {
+		return false, err
+	}
+	confirmed, finishErr := session.Release(attemptCtx, token, snapshotID, verified)
+	if finishErr != nil {
+		confirmed, finishErr = session.Reconcile(attemptCtx, token, snapshotID, verified)
+	}
+	closeErr := session.Close()
+	if finishErr != nil || !confirmed {
+		if finishErr == nil {
+			finishErr = errors.New("PostgreSQL backup GC fence release was rejected")
+		}
+		return false, finishErr
+	}
+	return true, closeErr
+}
+
+func releaseBackupGCFence(ctx context.Context, db *sql.DB, token, snapshotID string, verified bool) (bool, error) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
+	defer cancel()
+	var released bool
+	err := db.QueryRowContext(releaseCtx, `SELECT jobs.release_backup_gc_fence($1::uuid, $2, $3)`, token, snapshotID, verified).Scan(&released)
+	return released, err
+}
+
+func reconcileBackupGCFence(ctx context.Context, db *sql.DB, token, snapshotID string, verified bool) (bool, error) {
+	reconcileCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
+	defer cancel()
+	var released bool
+	var recorded sql.NullBool
+	err := db.QueryRowContext(reconcileCtx, `SELECT released_at IS NOT NULL, verified FROM jobs.backup_gc_fences WHERE fence_id = $1::uuid AND snapshot_id = $2`, token, snapshotID).Scan(&released, &recorded)
+	if errors.Is(err, sql.ErrNoRows) {
+		if verified {
+			return false, errors.New("PostgreSQL backup GC fence could not be released")
+		}
+		return true, nil
+	}
+	if err != nil || !released || (verified && (!recorded.Valid || !recorded.Bool)) {
+		return false, errors.New("PostgreSQL backup GC fence release could not be confirmed")
+	}
+	return true, nil
 }
 
 // NewBackupSource binds an application database to a password-safe pg_dump
@@ -30,7 +146,12 @@ func NewBackupSource(database *Database, dumpDSNFile string, dump DumpSnapshot) 
 	if database == nil || database.db == nil || dumpDSNFile == "" || dump == nil {
 		return nil, errors.New("PostgreSQL backup source is unavailable")
 	}
-	return &BackupSource{database: database, dumpDSNFile: dumpDSNFile, dump: dump}, nil
+	return &BackupSource{
+		database:         database,
+		dumpDSNFile:      dumpDSNFile,
+		dump:             dump,
+		openFenceSession: openBackupFenceSession,
+	}, nil
 }
 
 // Begin acquires and commits a GC fence before exporting one repeatable-read
@@ -136,33 +257,27 @@ FROM jobs.server_state AS state WHERE state.singleton`).Scan(&snapshotID, &state
 			}
 		}
 	}()
-	var finishOnce sync.Once
-	var finishErr error
-	finish := func(_ context.Context, verified bool) error {
-		finishOnce.Do(func() {
+	finisher := &backupSnapshotFinisher{
+		stop: func() error {
 			close(stopRenewal)
 			<-renewalDone
+			var finishErr error
 			renewalMu.Lock()
 			if renewalErr != nil {
-				verified = false
 				finishErr = renewalErr
 			}
 			renewalMu.Unlock()
 			if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) && finishErr == nil {
-				verified = false
 				finishErr = errors.New("PostgreSQL backup snapshot could not close")
-			}
-			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
-			defer cancel()
-			var released bool
-			if err := administration.db.QueryRowContext(releaseCtx, `SELECT jobs.release_backup_gc_fence($1::uuid, $2, $3)`, token, snapshotID, verified).Scan(&released); err != nil || !released {
-				finishErr = errors.New("PostgreSQL backup GC fence could not be released")
 			}
 			if err := administration.Close(); err != nil && finishErr == nil {
 				finishErr = errors.New("PostgreSQL backup authority could not close")
 			}
-		})
-		return finishErr
+			return finishErr
+		},
+		finalize: func(finishCtx context.Context, verified bool) (bool, error) {
+			return finalizeBackupGCFence(finishCtx, source.openFenceSession, source.dumpDSNFile, token, snapshotID, verified)
+		},
 	}
 	sessionReady = true
 	administrationOwned = false
@@ -174,7 +289,7 @@ FROM jobs.server_state AS state WHERE state.singleton`).Scan(&snapshotID, &state
 		Dump: func(dumpCtx context.Context, destination string) error {
 			return source.dump(dumpCtx, source.dumpDSNFile, snapshotID, destination)
 		},
-		Finish: finish,
+		Finish: finisher.Finish,
 	}, nil
 }
 

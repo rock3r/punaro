@@ -129,6 +129,39 @@ func TestCreateDoesNotPublishFailedOrUnverifiedBackup(t *testing.T) {
 	}
 }
 
+func TestCreateRetriesFailedVerifiedFinishAsAbort(t *testing.T) {
+	root, options := createTestInputs(t)
+	var finished []bool
+	snapshot := &Snapshot{
+		ID:            "00000003-0000001B-1",
+		SchemaVersion: 5,
+		State:         State{InstallationID: "4e02b0e5-1934-4dda-9c4a-767c120c2fac", TimelineID: "797476ad-8fdc-4c05-b144-3ccbb92b54bf", ChangeSequence: 42},
+		Dump: func(_ context.Context, destination string) error {
+			return os.WriteFile(destination, []byte("database"), 0o600)
+		},
+		Finish: func(_ context.Context, verified bool) error {
+			finished = append(finished, verified)
+			if verified {
+				return errors.New("verified release failed")
+			}
+			return nil
+		},
+	}
+	if _, _, err := Create(context.Background(), options, fakeSource{snapshot: snapshot}); err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	if len(finished) != 2 || !finished[0] || finished[1] {
+		t.Fatalf("finish calls=%v, want [true false]", finished)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed backup left filesystem entries: %#v", entries)
+	}
+}
+
 type fakeSource struct {
 	snapshot *Snapshot
 	err      error

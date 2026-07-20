@@ -571,13 +571,115 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.release_backup_gc_fence($1::uuid,$2,true)`, expiredToken, expiredSnapshot).Scan(&expiredRelease); err != nil || expiredRelease.Valid {
 		t.Fatalf("expired fence verified release=%#v err=%v", expiredRelease, err)
 	}
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, expiredToken, expiredSnapshot, false); err == nil || confirmed {
+		t.Fatalf("active expired fence reconciled as released: confirmed=%t err=%v", confirmed, err)
+	}
 	var released bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.release_backup_gc_fence($1::uuid,$2,false)`, expiredToken, expiredSnapshot).Scan(&released); err != nil || !released {
 		t.Fatalf("expired fence unverified release=%t err=%v", released, err)
 	}
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, expiredToken, expiredSnapshot, false); err != nil || !confirmed {
+		t.Fatalf("released unverified fence was not reconciled: confirmed=%t err=%v", confirmed, err)
+	}
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, expiredToken, expiredSnapshot, true); err == nil || confirmed {
+		t.Fatalf("released unverified fence reconciled as verified: confirmed=%t err=%v", confirmed, err)
+	}
+	const missingFenceToken = "018f47f4-7b18-7cc2-98d6-31d4fb5ab743"
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceToken, expiredSnapshot, true); err == nil || confirmed {
+		t.Fatalf("missing fence reconciled as verified: confirmed=%t err=%v", confirmed, err)
+	}
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, missingFenceToken, expiredSnapshot, false); err != nil || !confirmed {
+		t.Fatalf("missing abort fence was not reconciled: confirmed=%t err=%v", confirmed, err)
+	}
 	var verified bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT verified FROM jobs.backup_gc_fences WHERE snapshot_id = $1`, snapshot.ID).Scan(&verified); err != nil || !verified {
 		t.Fatalf("backup fence verification state=%t err=%v", verified, err)
+	}
+	var verifiedToken string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT fence_id::text FROM jobs.backup_gc_fences WHERE snapshot_id = $1`, snapshot.ID).Scan(&verifiedToken); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed, err := reconcileBackupGCFence(ctx, ownerDB, verifiedToken, snapshot.ID, true); err != nil || !confirmed {
+		t.Fatalf("released verified fence was not reconciled: confirmed=%t err=%v", confirmed, err)
+	}
+	retrySource, err := NewBackupSource(app, ownerFile, func(context.Context, string, string, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	retryOpenFenceSession := retrySource.openFenceSession
+	releaseAttempts := 0
+	retrySource.openFenceSession = func(openCtx context.Context, dsnFile string) (backupFenceSession, error) {
+		session, openErr := retryOpenFenceSession(openCtx, dsnFile)
+		if openErr != nil {
+			return nil, openErr
+		}
+		return &fakeBackupFenceSession{
+			release: func(releaseCtx context.Context, token, snapshotID string, releaseVerified bool) (bool, error) {
+				releaseAttempts++
+				if releaseAttempts == 1 {
+					return false, nil
+				}
+				return session.Release(releaseCtx, token, snapshotID, releaseVerified)
+			},
+			reconcile: session.Reconcile,
+			close:     session.Close,
+		}, nil
+	}
+	retrySnapshot, err := retrySource.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = retrySnapshot.Finish(context.Background(), false) }()
+	if err := retrySnapshot.Finish(ctx, true); err == nil {
+		t.Fatal("injected verified fence release failure unexpectedly succeeded")
+	}
+	if err := app.db.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&gcPermitted); err != nil || gcPermitted {
+		t.Fatalf("failed verified release did not retain GC fence: permitted=%t err=%v", gcPermitted, err)
+	}
+	if err := retrySnapshot.Finish(ctx, false); err != nil {
+		t.Fatalf("unverified fence release retry failed: %v", err)
+	}
+	if releaseAttempts != 2 {
+		t.Fatalf("fence release attempts=%d, want 2", releaseAttempts)
+	}
+	if err := app.db.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&gcPermitted); err != nil || !gcPermitted {
+		t.Fatalf("retried GC fence did not release immediately: permitted=%t err=%v", gcPermitted, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT verified FROM jobs.backup_gc_fences WHERE snapshot_id = $1`, retrySnapshot.ID).Scan(&verified); err != nil || verified {
+		t.Fatalf("retried backup fence verification state=%t err=%v", verified, err)
+	}
+	ambiguousSource, err := NewBackupSource(app, ownerFile, func(context.Context, string, string, string) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ambiguousOpenFenceSession := ambiguousSource.openFenceSession
+	ambiguousSource.openFenceSession = func(openCtx context.Context, dsnFile string) (backupFenceSession, error) {
+		session, openErr := ambiguousOpenFenceSession(openCtx, dsnFile)
+		if openErr != nil {
+			return nil, openErr
+		}
+		return &fakeBackupFenceSession{
+			release: func(releaseCtx context.Context, token, snapshotID string, releaseVerified bool) (bool, error) {
+				released, releaseErr := session.Release(releaseCtx, token, snapshotID, releaseVerified)
+				if releaseErr != nil || !released {
+					return released, releaseErr
+				}
+				return false, errors.New("simulated lost release response")
+			},
+			reconcile: session.Reconcile,
+			close:     session.Close,
+		}, nil
+	}
+	ambiguousSnapshot, err := ambiguousSource.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ambiguousSnapshot.Finish(context.Background(), false) }()
+	if err := ambiguousSnapshot.Finish(ctx, true); err != nil {
+		t.Fatalf("committed fence release was not reconciled: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT verified FROM jobs.backup_gc_fences WHERE snapshot_id = $1`, ambiguousSnapshot.ID).Scan(&verified); err != nil || !verified {
+		t.Fatalf("reconciled backup fence verification state=%t err=%v", verified, err)
 	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
