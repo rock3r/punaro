@@ -494,7 +494,7 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	rows, err := d.relayPool().QueryContext(ctx, `SELECT DISTINCT conversation.id::text FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
-		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2 ORDER BY conversation.id`, machineID, now.UTC())
+		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2 ORDER BY conversation.id::text`, machineID, now.UTC())
 	if err != nil {
 		return nil, errors.New("machine conversations are unavailable")
 	}
