@@ -294,28 +294,12 @@ func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID 
 	if request.Limit == 0 {
 		request.Limit = 50
 	}
-	deliveries, err := h.store.LeaseDeliveries(machineID, request.ConsumerID, request.Endpoint, request.ConversationID, now, h.deliveryLeaseTTL, request.Limit)
+	page, err := h.store.LeaseDeliveries(machineID, request.ConsumerID, request.Endpoint, request.ConversationID, now, h.deliveryLeaseTTL, request.Limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	conversationIDs := make(map[string]struct{})
-	if request.ConversationID != "" {
-		conversationIDs[request.ConversationID] = struct{}{}
-	}
-	for _, delivery := range deliveries {
-		conversationIDs[delivery.Message.ConversationID] = struct{}{}
-	}
-	cursors := make(map[string]int64, len(conversationIDs))
-	for conversationID := range conversationIDs {
-		cursor, err := h.store.RecipientCursor(machineID, request.Endpoint, conversationID, now)
-		if err != nil {
-			writeStoreError(w, err)
-			return
-		}
-		cursors[conversationID] = cursor
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"deliveries": deliveries, "cursors": cursors})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (h *handler) ackDelivery(w http.ResponseWriter, body []byte, machineID, deliveryID string, now time.Time) {

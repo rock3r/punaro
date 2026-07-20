@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/relay/contracttest"
 )
@@ -564,6 +565,73 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
+	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
+}
+
+func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.July, 20, 15, 0, 0, 0, time.UTC)
+	const (
+		machineA  = "postgres-cursor-lock-machine-a"
+		machineB  = "postgres-cursor-lock-machine-b"
+		endpointA = "agent/postgres-cursor-lock/a"
+		endpointB = "agent/postgres-cursor-lock/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-cursor-lock-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTx, appendCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appendCancel()
+	defer func() { _ = appendTx.Rollback() }()
+	messageID := uuid.NewString()
+	var sequence int64
+	if err := appendTx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, conversation.ID).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, messageID, conversation.ID, sequence, endpointA, "must remain pending", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, messageID, endpointB); err != nil {
+		t.Fatal(err)
+	}
+	cursorTx, cursorCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursorCancel()
+	defer func() { _ = cursorTx.Rollback() }()
+	if err := postgresAdvanceRecipientCursor(cursorTx, endpointB, conversation.ID); err != nil {
+		t.Fatalf("advance cursor alongside uncommitted append: %v", err)
+	}
+	if err := cursorTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := app.RecipientCursor(machineB, endpointB, conversation.ID, now); err != nil || cursor != 0 {
+		t.Fatalf("cursor crossed concurrent append: cursor=%d err=%v", cursor, err)
+	}
+	page, err := app.LeaseDeliveries(machineB, "postgres-cursor-lock-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Sequence != 1 {
+		t.Fatalf("concurrent delivery page=%#v err=%v", page, err)
+	}
 }
 
 func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {

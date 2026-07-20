@@ -5,6 +5,7 @@ package contracttest
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -77,9 +78,10 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	if err != nil || len(recipients) != 1 || recipients[0] != machineB {
 		t.Fatalf("recipient machines=%#v err=%v", recipients, err)
 	}
-	deliveries, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, now, time.Minute, 10)
-	if err != nil || len(deliveries) != 2 {
-		t.Fatalf("deliveries=%#v err=%v", deliveries, err)
+	page, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, now, time.Minute, 10)
+	deliveries := page.Deliveries
+	if err != nil || len(deliveries) != 2 || page.Cursors[conversation.ID] != 0 {
+		t.Fatalf("page=%#v err=%v", page, err)
 	}
 	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now.Add(time.Second), time.Hour); err != nil {
 		t.Fatal(err)
@@ -107,7 +109,8 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	}
 
 	third := appendMessage("send-3", "third")
-	thirdLease, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, now, time.Minute, 10)
+	thirdPage, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, now, time.Minute, 10)
+	thirdLease := thirdPage.Deliveries
 	if err != nil || len(thirdLease) != 1 || thirdLease[0].Message.ID != third.ID {
 		t.Fatalf("third lease=%#v err=%v", thirdLease, err)
 	}
@@ -121,7 +124,8 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, reclaimAt, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 10)
+	reclaimedPage, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 10)
+	reclaimed := reclaimedPage.Deliveries
 	if err != nil || len(reclaimed) != 1 || reclaimed[0].LeaseGeneration <= thirdLease[0].LeaseGeneration || reclaimed[0].LeaseToken == thirdLease[0].LeaseToken {
 		t.Fatalf("reclaimed=%#v original=%#v err=%v", reclaimed, thirdLease, err)
 	}
@@ -149,7 +153,8 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	if afterSelf.Sequence != 5 {
 		t.Fatalf("post-self sequence=%d", afterSelf.Sequence)
 	}
-	afterSelfLease, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 10)
+	afterSelfPage, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 10)
+	afterSelfLease := afterSelfPage.Deliveries
 	if err != nil || len(afterSelfLease) != 1 || afterSelfLease[0].Message.ID != afterSelf.ID {
 		t.Fatalf("post-self lease=%#v err=%v", afterSelfLease, err)
 	}
@@ -200,7 +205,8 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	}
 
 	abaMessage := appendMessage("aba", "aba")
-	abaLease, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 100)
+	abaPage, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt, time.Minute, 100)
+	abaLease := abaPage.Deliveries
 	if err != nil || len(abaLease) == 0 || abaLease[len(abaLease)-1].Message.ID != abaMessage.ID {
 		t.Fatalf("aba lease=%#v err=%v", abaLease, err)
 	}
@@ -216,7 +222,8 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	if err := backend.AckDelivery(machineB, endpointB, abaLease[len(abaLease)-1].ID, abaLease[len(abaLease)-1].LeaseToken, abaLease[len(abaLease)-1].LeaseGeneration, reclaimAt.Add(2*time.Second)); !errors.Is(err, relay.ErrForbidden) {
 		t.Fatalf("ABA-stale acknowledgement err=%v", err)
 	}
-	releasedAfterABA, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt.Add(2*time.Second), time.Minute, 100)
+	releasedAfterABAPage, err := backend.LeaseDeliveries(machineB, consumerB, endpointB, conversation.ID, reclaimAt.Add(2*time.Second), time.Minute, 100)
+	releasedAfterABA := releasedAfterABAPage.Deliveries
 	if err != nil || len(releasedAfterABA) == 0 || releasedAfterABA[len(releasedAfterABA)-1].LeaseGeneration <= abaLease[len(abaLease)-1].LeaseGeneration {
 		t.Fatalf("post-ABA lease=%#v err=%v", releasedAfterABA, err)
 	}
@@ -233,5 +240,88 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	}
 	if err := backend.ConsumeRequestNonce(machineA, namespace+"-nonce", now, expires); !errors.Is(err, relay.ErrForbidden) {
 		t.Fatalf("replayed nonce err=%v", err)
+	}
+	runLeasePageContract(t, backend, namespace, now)
+}
+
+func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
+	t.Helper()
+	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"
+	senderEndpoint, recipientEndpoint := "agent/"+namespace+"/page-sender", "agent/"+namespace+"/page-recipient"
+	if err := backend.AdvertiseEndpoints(senderMachine, []string{senderEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(recipientMachine, []string{recipientEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	members := []relay.Member{
+		{Endpoint: senderEndpoint, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: recipientEndpoint, Capabilities: relay.CapReceive},
+	}
+	createConversation := func(key string, members []relay.Member) relay.Conversation {
+		t.Helper()
+		conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+			MachineID: senderMachine, IdempotencyKey: namespace + "-" + key,
+			CreatorEndpoint: senderEndpoint, Members: members, Now: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return conversation
+	}
+	firstConversation := createConversation("page-first", members)
+	secondConversation := createConversation("page-second", members)
+	unauthorizedConversation := createConversation("page-unauthorized", members[:1])
+	if _, err := backend.LeaseDeliveries(recipientMachine, namespace+"-failed-consumer", recipientEndpoint, unauthorizedConversation.ID, now, time.Minute, 1); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("unauthorized filtered lease err=%v", err)
+	}
+	appendMessage := func(conversation relay.Conversation, key string, createdAt time.Time) relay.Message {
+		t.Helper()
+		message, duplicate, err := backend.AppendMessage(relay.AppendInput{
+			ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: senderEndpoint,
+			Body: key, IdempotencyKey: namespace + "-" + key, Now: createdAt,
+		})
+		if err != nil || duplicate {
+			t.Fatalf("append %s message=%#v duplicate=%t err=%v", key, message, duplicate, err)
+		}
+		return message
+	}
+	lexicallyEarlier, lexicallyLater := firstConversation, secondConversation
+	if lexicallyEarlier.ID > lexicallyLater.ID {
+		lexicallyEarlier, lexicallyLater = lexicallyLater, lexicallyEarlier
+	}
+	chronologicallyEarlier := appendMessage(lexicallyLater, "page-submillisecond-earlier", now.Add(100*time.Microsecond))
+	chronologicallyLater := appendMessage(lexicallyEarlier, "page-submillisecond-later", now.Add(900*time.Microsecond))
+	if !chronologicallyEarlier.CreatedAt.Equal(now) || !chronologicallyLater.CreatedAt.Equal(now) {
+		t.Fatalf("message timestamps were not normalized to milliseconds: earlier=%s later=%s", chronologicallyEarlier.CreatedAt, chronologicallyLater.CreatedAt)
+	}
+	expected := []relay.Message{
+		chronologicallyEarlier,
+		chronologicallyLater,
+		appendMessage(firstConversation, "page-first-2", now.Add(-time.Second)),
+	}
+	sort.Slice(expected, func(left, right int) bool {
+		if !expected[left].CreatedAt.Equal(expected[right].CreatedAt) {
+			return expected[left].CreatedAt.Before(expected[right].CreatedAt)
+		}
+		if expected[left].ConversationID != expected[right].ConversationID {
+			return expected[left].ConversationID < expected[right].ConversationID
+		}
+		if expected[left].Sequence != expected[right].Sequence {
+			return expected[left].Sequence < expected[right].Sequence
+		}
+		return expected[left].ID < expected[right].ID
+	})
+	page, err := backend.LeaseDeliveries(recipientMachine, namespace+"-page-consumer", recipientEndpoint, "", now, time.Minute, 2)
+	if err != nil || len(page.Deliveries) != 2 {
+		t.Fatalf("ordered lease page=%#v err=%v", page, err)
+	}
+	for index := range page.Deliveries {
+		if page.Deliveries[index].Message.ID != expected[index].ID {
+			t.Fatalf("ordered lease page=%#v expected=%#v", page.Deliveries, expected[:2])
+		}
+		if page.Cursors[page.Deliveries[index].Message.ConversationID] != 0 {
+			t.Fatalf("lease page cursors=%#v", page.Cursors)
+		}
 	}
 }

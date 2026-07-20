@@ -247,7 +247,7 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, errors.New("message retry state is unavailable")
 	}
-	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC()}
+	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
 	} else if err != nil {
@@ -275,40 +275,40 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 }
 
 // LeaseDeliveries claims a bounded fenced PostgreSQL delivery page.
-func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) ([]relay.Delivery, error) {
+func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) (relay.DeliveryLeasePage, error) {
 	if !relay.ValidMachineID(machineID) || !relay.ValidRequestToken(consumerID) || !relay.ValidEndpoint(endpoint) || ttl <= 0 || limit < 1 || limit > 100 {
-		return nil, errors.New("invalid delivery lease request")
+		return relay.DeliveryLeasePage{}, errors.New("invalid delivery lease request")
 	}
 	if conversationID != "" {
 		if _, err := uuid.Parse(conversationID); err != nil {
-			return nil, relay.ErrForbidden
+			return relay.DeliveryLeasePage{}, relay.ErrForbidden
 		}
 	}
 	tx, cancel, err := d.beginRelayTransaction(nil)
 	if err != nil {
-		return nil, errors.New("delivery lease transaction cannot start")
+		return relay.DeliveryLeasePage{}, errors.New("delivery lease transaction cannot start")
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
 	ownershipGeneration, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
 	if err != nil {
-		return nil, err
+		return relay.DeliveryLeasePage{}, err
 	}
 	var activeConsumer sql.NullString
 	var consumerGeneration int64
 	var consumerUntil sql.NullTime
 	if err := tx.QueryRowContext(context.Background(), `SELECT consumer_id,consumer_generation,consumer_lease_until FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint).Scan(&activeConsumer, &consumerGeneration, &consumerUntil); err != nil {
-		return nil, errors.New("endpoint consumer lease is unavailable")
+		return relay.DeliveryLeasePage{}, errors.New("endpoint consumer lease is unavailable")
 	}
 	if activeConsumer.Valid && activeConsumer.String != consumerID && consumerUntil.Valid && consumerUntil.Time.After(now) {
-		return nil, relay.ErrConflict
+		return relay.DeliveryLeasePage{}, relay.ErrConflict
 	}
 	if !activeConsumer.Valid || activeConsumer.String != consumerID || !consumerUntil.Valid || !consumerUntil.Time.After(now) {
 		consumerGeneration++
 	}
 	consumerLeaseUntil := now.Add(ttl).UTC()
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_endpoints SET consumer_id=$1,consumer_generation=$2,consumer_lease_until=$3 WHERE endpoint=$4 AND ownership_generation=$5`, consumerID, consumerGeneration, consumerLeaseUntil, endpoint, ownershipGeneration); err != nil {
-		return nil, relayDatabaseError(err, "claim endpoint consumer lease")
+		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
 	query := `SELECT delivery.id::text,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
 		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
@@ -320,12 +320,12 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		query += ` AND message.conversation_id=$6::uuid ORDER BY message.sequence,message.id LIMIT $7 FOR UPDATE OF delivery SKIP LOCKED`
 		args = append(args, conversationID, limit)
 	} else {
-		query += ` ORDER BY message.created_at,message.conversation_id,message.sequence LIMIT $6 FOR UPDATE OF delivery SKIP LOCKED`
+		query += ` ORDER BY message.created_at,message.conversation_id,message.sequence,message.id LIMIT $6 FOR UPDATE OF delivery SKIP LOCKED`
 		args = append(args, limit)
 	}
 	rows, err := tx.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return nil, errors.New("pending deliveries are unavailable")
+		return relay.DeliveryLeasePage{}, errors.New("pending deliveries are unavailable")
 	}
 	type leasedRow struct {
 		delivery       relay.Delivery
@@ -341,16 +341,16 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		row.delivery.RecipientEndpoint = endpoint
 		if err := rows.Scan(&row.delivery.ID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
 			_ = rows.Close()
-			return nil, errors.New("pending delivery is malformed")
+			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
 		}
 		row.delivery.Message.CreatedAt = row.delivery.Message.CreatedAt.UTC()
 		pending = append(pending, row)
 	}
 	if err := rows.Close(); err != nil {
-		return nil, errors.New("pending deliveries are unavailable")
+		return relay.DeliveryLeasePage{}, errors.New("pending deliveries are unavailable")
 	}
 	if err := rows.Err(); err != nil {
-		return nil, errors.New("pending deliveries are unavailable")
+		return relay.DeliveryLeasePage{}, errors.New("pending deliveries are unavailable")
 	}
 	deliveries := make([]relay.Delivery, 0, len(pending))
 	for _, row := range pending {
@@ -363,15 +363,50 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 			delivery.LeaseToken = uuid.NewString()
 			delivery.LeaseUntil = now.Add(ttl).UTC()
 			if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET lease_machine_id=$1,lease_token=$2::uuid,lease_generation=$3,ownership_generation=$4,consumer_generation=$5,lease_until=$6 WHERE id=$7::uuid`, machineID, delivery.LeaseToken, delivery.LeaseGeneration, ownershipGeneration, consumerGeneration, delivery.LeaseUntil, delivery.ID); err != nil {
-				return nil, relayDatabaseError(err, "lease delivery")
+				return relay.DeliveryLeasePage{}, relayDatabaseError(err, "lease delivery")
 			}
 		}
 		deliveries = append(deliveries, delivery)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, relayDatabaseError(err, "commit delivery lease")
+	conversationIDs := make(map[string]struct{})
+	if conversationID != "" {
+		conversationIDs[conversationID] = struct{}{}
 	}
-	return deliveries, nil
+	for _, delivery := range deliveries {
+		conversationIDs[delivery.Message.ConversationID] = struct{}{}
+	}
+	cursors := make(map[string]int64, len(conversationIDs))
+	for id := range conversationIDs {
+		cursor, err := postgresRecipientCursorForLease(tx, endpoint, id)
+		if err != nil {
+			return relay.DeliveryLeasePage{}, err
+		}
+		cursors[id] = cursor
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "commit delivery lease")
+	}
+	return relay.DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
+}
+
+func postgresRecipientCursorForLease(tx *sql.Tx, endpoint, conversationID string) (int64, error) {
+	var capabilities relay.Capability
+	err := tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
+		return 0, relay.ErrForbidden
+	}
+	if err != nil {
+		return 0, errors.New("recipient cursor authorization is unavailable")
+	}
+	var cursor int64
+	err = tx.QueryRowContext(context.Background(), `SELECT sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$1 AND conversation_id=$2::uuid`, endpoint, conversationID).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, errors.New("recipient cursor is unavailable")
+	}
+	return cursor, nil
 }
 
 // AckDelivery conditionally acknowledges one fenced PostgreSQL delivery.
@@ -559,6 +594,10 @@ func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 }
 
 func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string) error {
+	var maximum int64
+	if err := tx.QueryRowContext(context.Background(), `SELECT next_sequence FROM relay.mail_conversations WHERE id=$1::uuid`, conversationID).Scan(&maximum); err != nil {
+		return errors.New("recipient cursor maximum is unavailable")
+	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_recipient_cursors(recipient_endpoint,conversation_id,sequence) VALUES($1,$2::uuid,0) ON CONFLICT DO NOTHING`, endpoint, conversationID); err != nil {
 		return relayDatabaseError(err, "initialize recipient cursor")
 	}
@@ -576,10 +615,6 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 	if nextPending.Valid {
 		target = nextPending.Int64 - 1
 	} else {
-		var maximum int64
-		if err := tx.QueryRowContext(context.Background(), `SELECT next_sequence FROM relay.mail_conversations WHERE id=$1::uuid`, conversationID).Scan(&maximum); err != nil {
-			return errors.New("recipient cursor maximum is unavailable")
-		}
 		target = maximum
 	}
 	if target > cursor {

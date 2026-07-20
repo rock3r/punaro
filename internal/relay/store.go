@@ -82,6 +82,13 @@ type Delivery struct {
 	LeaseUntil        time.Time `json:"lease_until"`
 }
 
+// DeliveryLeasePage atomically binds leased delivery fences to the durable
+// cursors returned in the same HTTP response.
+type DeliveryLeasePage struct {
+	Deliveries []Delivery       `json:"deliveries"`
+	Cursors    map[string]int64 `json:"cursors"`
+}
+
 // AppendInput contains one client retry domain. IdempotencyKey is scoped to
 // SenderMachineID and may only be reused with identical message data.
 type AppendInput struct {
@@ -532,7 +539,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, fmt.Errorf("read idempotency key: %w", err)
 	}
-	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC()}
+	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
 	} else if err != nil {
@@ -579,34 +586,34 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 // LeaseDeliveries leases a bounded page of pending deliveries for one active
 // endpoint. A retry by the same machine receives its current lease; an expired
 // lease receives a new token and monotonically increasing fence generation.
-func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) ([]Delivery, error) {
+func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) (DeliveryLeasePage, error) {
 	if !ValidMachineID(machineID) || !ValidRequestToken(consumerID) || !ValidEndpoint(endpoint) || ttl <= 0 || limit < 1 || limit > 100 {
-		return nil, fmt.Errorf("invalid delivery lease request")
+		return DeliveryLeasePage{}, fmt.Errorf("invalid delivery lease request")
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
-		return nil, err
+		return DeliveryLeasePage{}, err
 	}
 	defer rollback(tx)
 	ownershipGeneration, err := endpointOwnership(tx, endpoint, machineID, now)
 	if err != nil {
-		return nil, err
+		return DeliveryLeasePage{}, err
 	}
 	var activeConsumer sql.NullString
 	var consumerGeneration int64
 	var consumerUntil sql.NullInt64
 	if err := tx.QueryRowContext(context.Background(), `SELECT consumer_id, consumer_generation, consumer_lease_until FROM endpoints WHERE endpoint = ?`, endpoint).Scan(&activeConsumer, &consumerGeneration, &consumerUntil); err != nil {
-		return nil, fmt.Errorf("read endpoint consumer lease: %w", err)
+		return DeliveryLeasePage{}, fmt.Errorf("read endpoint consumer lease: %w", err)
 	}
 	if activeConsumer.Valid && activeConsumer.String != consumerID && consumerUntil.Valid && consumerUntil.Int64 > now.UnixMilli() {
-		return nil, ErrConflict
+		return DeliveryLeasePage{}, ErrConflict
 	}
 	if !activeConsumer.Valid || activeConsumer.String != consumerID || !consumerUntil.Valid || consumerUntil.Int64 <= now.UnixMilli() {
 		consumerGeneration++
 	}
 	consumerLeaseUntil := now.Add(ttl).UTC()
 	if _, err := tx.ExecContext(context.Background(), `UPDATE endpoints SET consumer_id = ?, consumer_generation = ?, consumer_lease_until = ? WHERE endpoint = ? AND ownership_generation = ?`, consumerID, consumerGeneration, consumerLeaseUntil.UnixMilli(), endpoint, ownershipGeneration); err != nil {
-		return nil, fmt.Errorf("claim endpoint consumer lease: %w", err)
+		return DeliveryLeasePage{}, fmt.Errorf("claim endpoint consumer lease: %w", err)
 	}
 	query := `SELECT d.id, d.lease_machine_id, d.lease_token, d.lease_generation, d.ownership_generation, d.consumer_generation, d.lease_until,
 		m.id, m.conversation_id, m.sequence, m.from_endpoint, m.body, m.created_at
@@ -615,14 +622,16 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		AND (d.lease_until IS NULL OR d.lease_until <= ? OR d.ownership_generation IS NULL OR d.ownership_generation <> ? OR d.consumer_generation IS NULL OR d.consumer_generation <> ? OR d.lease_machine_id = ?)`
 	args := []any{endpoint, now.UnixMilli(), ownershipGeneration, consumerGeneration, machineID}
 	if conversationID != "" {
-		query += " AND m.conversation_id = ?"
+		query += " AND m.conversation_id = ? ORDER BY m.sequence, m.id"
 		args = append(args, conversationID)
+	} else {
+		query += " ORDER BY m.created_at, m.conversation_id, m.sequence, m.id"
 	}
-	query += " ORDER BY m.sequence ASC LIMIT ?"
+	query += " LIMIT ?"
 	args = append(args, limit)
 	rows, err := tx.QueryContext(context.Background(), query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("find deliveries: %w", err)
+		return DeliveryLeasePage{}, fmt.Errorf("find deliveries: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var deliveries []Delivery
@@ -633,7 +642,7 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		var createdAt int64
 		delivery.RecipientEndpoint = endpoint
 		if err := rows.Scan(&delivery.ID, &leaseMachine, &leaseToken, &delivery.LeaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &delivery.Message.ID, &delivery.Message.ConversationID, &delivery.Message.Sequence, &delivery.Message.FromEndpoint, &delivery.Message.Body, &createdAt); err != nil {
-			return nil, err
+			return DeliveryLeasePage{}, err
 		}
 		delivery.Message.CreatedAt = fromMillis(createdAt)
 		if leaseMachine.Valid && leaseMachine.String == machineID && leaseToken.Valid && leaseOwnership.Valid && leaseOwnership.Int64 == ownershipGeneration && leaseConsumer.Valid && leaseConsumer.Int64 == consumerGeneration && leaseUntil.Valid && leaseUntil.Int64 > now.UnixMilli() {
@@ -642,24 +651,62 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		} else {
 			token, err := randomToken()
 			if err != nil {
-				return nil, err
+				return DeliveryLeasePage{}, err
 			}
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = token
 			delivery.LeaseUntil = now.Add(ttl).UTC()
 			if _, err := tx.ExecContext(context.Background(), `UPDATE deliveries SET lease_machine_id = ?, lease_token = ?, lease_generation = ?, ownership_generation = ?, consumer_generation = ?, lease_until = ? WHERE id = ?`, machineID, token, delivery.LeaseGeneration, ownershipGeneration, consumerGeneration, delivery.LeaseUntil.UnixMilli(), delivery.ID); err != nil {
-				return nil, fmt.Errorf("lease delivery: %w", err)
+				return DeliveryLeasePage{}, fmt.Errorf("lease delivery: %w", err)
 			}
 		}
 		deliveries = append(deliveries, delivery)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return DeliveryLeasePage{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return DeliveryLeasePage{}, err
+	}
+	conversationIDs := make(map[string]struct{})
+	if conversationID != "" {
+		conversationIDs[conversationID] = struct{}{}
+	}
+	for _, delivery := range deliveries {
+		conversationIDs[delivery.Message.ConversationID] = struct{}{}
+	}
+	cursors := make(map[string]int64, len(conversationIDs))
+	for id := range conversationIDs {
+		cursor, err := recipientCursorForLease(tx, endpoint, id)
+		if err != nil {
+			return DeliveryLeasePage{}, err
+		}
+		cursors[id] = cursor
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return DeliveryLeasePage{}, err
 	}
-	return deliveries, nil
+	return DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
+}
+
+func recipientCursorForLease(tx *sql.Tx, endpoint, conversationID string) (int64, error) {
+	var capabilities Capability
+	err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&CapReceive == 0 {
+		return 0, ErrForbidden
+	}
+	if err != nil {
+		return 0, fmt.Errorf("authorize recipient cursor: %w", err)
+	}
+	var cursor int64
+	err = tx.QueryRowContext(context.Background(), "SELECT sequence FROM recipient_cursors WHERE recipient_endpoint = ? AND conversation_id = ?", endpoint, conversationID).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read recipient cursor: %w", err)
+	}
+	return cursor, nil
 }
 
 // AckDelivery acknowledges a local mailbox handoff. It is idempotent after a

@@ -67,10 +67,11 @@ func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 		t.Fatalf("recipient machines = %#v", recipients)
 	}
 
-	leased, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
+	page, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
+	leased := page.Deliveries
 	if len(leased) != 1 || leased[0].Message.ID != first.ID || leased[0].Message.Body != "ready for review" {
 		t.Fatalf("leased = %#v", leased)
 	}
@@ -109,7 +110,8 @@ func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "one", IdempotencyKey: "send-1", Now: clock}); err != nil {
 		t.Fatal(err)
 	}
-	firstLease, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
+	firstPage, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
+	firstLease := firstPage.Deliveries
 	if err != nil || len(firstLease) != 1 {
 		t.Fatalf("first lease = %#v, %v", firstLease, err)
 	}
@@ -121,7 +123,8 @@ func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	secondLease, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock.Add(time.Minute+time.Second), time.Minute, 10)
+	secondPage, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock.Add(time.Minute+time.Second), time.Minute, 10)
+	secondLease := secondPage.Deliveries
 	if err != nil || len(secondLease) != 1 {
 		t.Fatalf("second lease = %#v, %v", secondLease, err)
 	}
@@ -162,7 +165,8 @@ func TestStoreRecipientCursorNeverSkipsAcknowledgementGap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	deliveries, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", conversation.ID, now, time.Minute, 10)
+	page, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", conversation.ID, now, time.Minute, 10)
+	deliveries := page.Deliveries
 	if err != nil || len(deliveries) != 2 {
 		t.Fatalf("deliveries=%#v err=%v", deliveries, err)
 	}

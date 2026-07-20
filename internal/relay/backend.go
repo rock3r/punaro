@@ -49,7 +49,7 @@ type Backend interface {
 	CreateConversationIdempotent(CreateConversationInput) (Conversation, error)
 	AuthorizeSender(conversationID, machineID, endpoint string, now time.Time) error
 	AppendMessage(AppendInput) (Message, bool, error)
-	LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) ([]Delivery, error)
+	LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) (DeliveryLeasePage, error)
 	AckDelivery(machineID, endpoint, deliveryID, token string, generation int64, now time.Time) error
 	RecipientCursor(machineID, endpoint, conversationID string, now time.Time) (int64, error)
 	RecipientMachines(messageID string, now time.Time) ([]string, error)
