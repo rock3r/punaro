@@ -171,7 +171,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)'::regprocedure)`).Scan(&nonceDefinition); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION relay.consume_mail_request_nonce(requested_machine_id text,requested_nonce text,requested_now timestamptz,requested_expires_at timestamptz)
 RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$ BEGIN RETURN true; END $function$`); err != nil {
 		t.Fatal(err)
 	}
