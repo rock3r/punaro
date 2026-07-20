@@ -629,16 +629,8 @@ func openMigrationSourceDatabase(path string, readOnly bool) (*sql.DB, error) {
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("relay migration source must be an existing regular file")
 	}
-	directory := filepath.Dir(path)
-	resolvedDirectory, err := filepath.EvalSymlinks(directory)
-	canonicalDirectory := directory
-	for alias, target := range map[string]string{"/var": "/private/var", "/tmp": "/private/tmp"} {
-		if directory == alias || strings.HasPrefix(directory, alias+string(filepath.Separator)) {
-			canonicalDirectory = target + strings.TrimPrefix(directory, alias)
-			break
-		}
-	}
-	if err != nil || resolvedDirectory != canonicalDirectory {
+	directoryInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("relay migration source path must not traverse symlinks")
 	}
 	mode := "rw"
