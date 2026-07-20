@@ -606,6 +606,20 @@ legacy relay, directory, permit, or attachment routes; those remain loopback-onl
 Health and readiness use a distinct concrete loopback-only listener and are
 never mounted on the device/legacy listener.
 
+The sixth foundation slice adds consistent backup, verification, and
+clean-stack restore without changing mail authority. One committed GC fence is
+held while an application-role repeatable-read transaction exports the exact
+snapshot used by the schema-owner `pg_dump` and READY-blob manifest query. The
+fence renews until immutable blobs are copied and verified; only a synchronized,
+strictly verified hidden stage is published. Backups include Punaro-generated
+configuration and database credentials while only declaring host TLS,
+proxy/tunnel, Telegram, and OAuth dependencies. Restore proves both target roles
+reach the same pristine database, restores in one transaction, verifies blobs,
+preserves installation identity, rotates the timeline, durably journals each
+phase, and publishes only new data/operator paths. Exact-command retries resume
+without repeating completed mutation. Abandoned-timeline and future cursors fail closed. This is
+not the later update fence and does not let ordinary startup migrate.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

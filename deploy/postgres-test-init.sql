@@ -6,3 +6,7 @@ CREATE DATABASE punaro_other OWNER punaro_owner;
 GRANT CONNECT ON DATABASE punaro_other TO punaro_app;
 CREATE DATABASE punaro_pair OWNER punaro_owner;
 GRANT CONNECT ON DATABASE punaro_pair TO punaro_app;
+CREATE DATABASE punaro_restore_source OWNER punaro_owner;
+GRANT CONNECT ON DATABASE punaro_restore_source TO punaro_app;
+CREATE DATABASE punaro_restore_target OWNER punaro_owner;
+GRANT CONNECT ON DATABASE punaro_restore_target TO punaro_app;

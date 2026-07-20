@@ -3,22 +3,221 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	punarobackup "github.com/rock3r/punaro/internal/backup"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
 const cliTestImage = "registry.example/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
+	sourceOwnerDSN := os.Getenv("PUNARO_TEST_RESTORE_SOURCE_OWNER_DSN")
+	sourceAppDSN := os.Getenv("PUNARO_TEST_RESTORE_SOURCE_APP_DSN")
+	targetOwnerDSN := os.Getenv("PUNARO_TEST_RESTORE_TARGET_OWNER_DSN")
+	targetAppDSN := os.Getenv("PUNARO_TEST_RESTORE_TARGET_APP_DSN")
+	if sourceOwnerDSN == "" || sourceAppDSN == "" || targetOwnerDSN == "" || targetAppDSN == "" {
+		t.Skip("set the PUNARO_TEST_RESTORE_* DSNs to run the real backup/restore gate")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private integration-test root.
+		t.Fatal(err)
+	}
+	writeDSN := func(name, dsn string) string {
+		path := filepath.Join(root, name)
+		// #nosec G703 -- name is a fixed integration-test fixture label.
+		if err := os.WriteFile(path, []byte(dsn+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	sourceOwner := writeDSN("source-owner.dsn", sourceOwnerDSN)
+	sourceApp := writeDSN("source-app.dsn", sourceAppDSN)
+	targetOwner := writeDSN("target-owner.dsn", targetOwnerDSN)
+	targetApp := writeDSN("target-app.dsn", targetAppDSN)
+	if state, err := punaropostgres.MigratePristinePair(ctx, punaropostgres.Config{DSNFile: sourceApp}, punaropostgres.Config{DSNFile: sourceOwner}); err != nil || state.Classification != punaropostgres.Compatible {
+		t.Fatalf("source migration state=%#v err=%v", state, err)
+	}
+	if state, err := punaropostgres.MigratePristinePair(ctx, punaropostgres.Config{DSNFile: targetApp}, punaropostgres.Config{DSNFile: targetOwner}); err != nil || state.Classification != punaropostgres.Compatible {
+		t.Fatalf("target migration state=%#v err=%v", state, err)
+	}
+	// Return the target to a role-proven pristine state for pg_restore.
+	targetDB, err := sql.Open("pgx", targetOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := targetDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE`); err != nil {
+		_ = targetDB.Close()
+		t.Fatal(err)
+	}
+	if err := targetDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	sourceData := filepath.Join(root, "source-data")
+	sourceBackups := filepath.Join(root, "source-backups")
+	targetBackups := filepath.Join(root, "target-backups")
+	for _, directory := range []string{filepath.Join(sourceData, "blobs", "ready"), sourceBackups, targetBackups} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceData, "blobs", "ready", "test"), []byte("blob"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceInstallation, err := operator.Init(ctx, operator.InitOptions{
+		Directory: filepath.Join(root, "source-installation"), DataDir: sourceData, BackupDir: sourceBackups,
+		Image: cliTestImage, OwnerDSNFile: sourceOwner, AppDSNFile: sourceApp, OwnerName: "Restore integration owner",
+		Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"},
+	}, func(initCtx context.Context, dsnFile, name string) (punaropostgres.Principal, error) {
+		admin, openErr := punaropostgres.OpenAdministration(initCtx, punaropostgres.Config{DSNFile: dsnFile})
+		if openErr != nil {
+			return punaropostgres.Principal{}, openErr
+		}
+		defer func() { _ = admin.Close() }()
+		return admin.BootstrapOwner(initCtx, name)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDB, err := sql.Open("pgx", sourceOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sourceDB.ExecContext(ctx, `INSERT INTO attachment.ready_blob_manifest(storage_path,size_bytes,sha256) VALUES ('ready/test',4,'fa2c8cc4f28176bbeed4b736df569a34c79cd3723e9ec42f9674b4d46ac6b8b8')`); err != nil {
+		_ = sourceDB.Close()
+		t.Fatal(err)
+	}
+	if err := sourceDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manifest, backupDirectory, err := createBackup(ctx, sourceInstallation)
+	if err != nil {
+		t.Fatalf("real backup: %v", err)
+	}
+	request := restoreRequest{
+		BackupDirectory: backupDirectory,
+		Directory:       filepath.Join(root, "target-installation"),
+		DataDir:         filepath.Join(root, "target-data"),
+		BackupDir:       targetBackups,
+		OwnerDSNFile:    targetOwner,
+		AppDSNFile:      targetApp,
+	}
+	restored, err := restoreBackup(ctx, request)
+	if err != nil {
+		t.Fatalf("real restore: %v target=%s manifest=%#v", err, restoreTargetDiagnostic(ctx, targetOwner, targetApp, sourceOwnerDSN, targetOwnerDSN), manifest.State)
+	}
+	if restored.InstallationID != manifest.State.InstallationID || restored.TimelineID == manifest.State.TimelineID || restored.ChangeSequence != manifest.State.ChangeSequence {
+		t.Fatalf("restored state=%#v manifest=%#v", restored, manifest.State)
+	}
+	loaded, err := operator.Load(request.Directory)
+	if err != nil || loaded.OwnerPrincipalID != sourceInstallation.OwnerPrincipalID || loaded.DataDir != request.DataDir || loaded.OwnerDSNFile != targetOwner || loaded.AppDSNFile != targetApp {
+		t.Fatalf("restored installation=%#v err=%v", loaded, err)
+	}
+	if body, err := os.ReadFile(filepath.Join(request.DataDir, "blobs", "ready", "test")); err != nil || string(body) != "blob" { // #nosec G304 -- fixed integration-test restore child.
+		t.Fatalf("restored blob=%q err=%v", body, err)
+	}
+	if retried, err := restoreBackup(ctx, request); err != nil || retried != restored {
+		t.Fatalf("same-command resume state=%#v err=%v", retried, err)
+	}
+}
+
+func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, sourceOwnerDSN, ownerDSN string) string {
+	db, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		return "open-failed"
+	}
+	defer func() { _ = db.Close() }()
+	var installationID, timelineID string
+	var changeSequence, eventCount int64
+	if err := db.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&installationID, &timelineID, &changeSequence); err != nil {
+		return "state-unavailable"
+	}
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM jobs.restore_events`).Scan(&eventCount); err != nil {
+		return "events-unavailable"
+	}
+	appState, appErr := inspectSchema(ctx, appDSNFile)
+	admin, adminErr := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+	if admin != nil {
+		_ = admin.Close()
+	}
+	return fmt.Sprintf("installation=%s timeline=%s sequence=%d events=%d app-state=%s/%d app-err=%v admin-err=%v catalog-diff=%s", installationID, timelineID, changeSequence, eventCount, appState.Classification, appState.Version, appErr, adminErr, restoreCatalogDifference(ctx, sourceOwnerDSN, ownerDSN))
+}
+
+func restoreCatalogDifference(ctx context.Context, sourceDSN, targetDSN string) string {
+	queries := []string{
+		`SELECT format('namespace:%s:%s:%s',nspname,pg_get_userbyid(nspowner),COALESCE(nspacl::text,'')) FROM pg_namespace WHERE nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY nspname`,
+		`SELECT format('relation:%s:%s:%s:%s',class.oid::regclass::text,class.relkind,pg_get_userbyid(class.relowner),COALESCE(class.relacl::text,'')) FROM pg_class AS class JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY class.oid::regclass::text`,
+		`SELECT format('routine:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(proc.prosrc),pg_get_userbyid(proc.proowner),proc.proconfig::text,proc.prosecdef,COALESCE(proc.proacl::text,'')) FROM pg_proc AS proc JOIN pg_namespace AS namespace ON namespace.oid=proc.pronamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('constraint:%s:%s:%s:%s:%s',conrelid::regclass::text,conname,contype,conkey::text,COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint JOIN pg_namespace ON pg_namespace.oid=connamespace WHERE nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY conrelid::regclass::text,conname`,
+		`SELECT format('column:%s:%s:%s:%s:%s:%s',attribute.attrelid::regclass::text,attribute.attname,attribute.atttypid::regtype::text,attribute.atttypmod,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')) FROM pg_attribute AS attribute JOIN pg_class AS class ON class.oid=attribute.attrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') AND attribute.attnum>0 AND NOT attribute.attisdropped ORDER BY attribute.attrelid::regclass::text,attribute.attnum`,
+		`SELECT format('index:%s:%s',indexrelid::regclass::text,pg_get_indexdef(indexrelid)) FROM pg_index JOIN pg_class AS class ON class.oid=indrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') ORDER BY indexrelid::regclass::text`,
+		`SELECT format('trigger:%s:%s:%s:%s',tgrelid::regclass::text,tgname,tgenabled,pg_get_triggerdef(pg_trigger.oid)) FROM pg_trigger JOIN pg_class AS class ON class.oid=tgrelid JOIN pg_namespace AS namespace ON namespace.oid=class.relnamespace WHERE namespace.nspname IN ('auth','relay','attachment','brain','jobs','audit') AND NOT tgisinternal ORDER BY tgrelid::regclass::text,tgname`,
+		`SELECT format('migration:%s:%s:%s:%s',version,name,checksum,status) FROM jobs.schema_migrations ORDER BY version`,
+	}
+	read := func(dsn string) (map[string]bool, error) {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = db.Close() }()
+		result := map[string]bool{}
+		for _, query := range queries {
+			rows, err := db.QueryContext(ctx, query)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var line string
+				if err := rows.Scan(&line); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				result[line] = true
+			}
+			if err := rows.Close(); err != nil {
+				return nil, err
+			}
+		}
+		return result, nil
+	}
+	source, sourceErr := read(sourceDSN)
+	target, targetErr := read(targetDSN)
+	if sourceErr != nil || targetErr != nil {
+		return fmt.Sprintf("unavailable:%v/%v", sourceErr, targetErr)
+	}
+	differences := make([]string, 0)
+	for line := range source {
+		if !target[line] {
+			differences = append(differences, "source:"+line)
+		}
+	}
+	for line := range target {
+		if !source[line] {
+			differences = append(differences, "target:"+line)
+		}
+	}
+	slices.Sort(differences)
+	joined := strings.Join(differences, ";")
+	if len(joined) > 16<<10 {
+		joined = joined[:16<<10]
+	}
+	return joined
+}
 
 func testInstallation(t *testing.T) string {
 	t.Helper()
@@ -49,19 +248,161 @@ func preserveDependencies(t *testing.T) {
 	originalCreate, originalRecover := createOwner, recoverInstallationOwner
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue := startServices, probe, issueEnrollment
+	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair = originalInspect, originalOwner, originalMigrate
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
 		verifyInstallationPair = originalVerify
 		startServices, probe = originalStart, originalProbe
 		issueEnrollment = originalIssue
+		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: "owner"}, nil
 	}
 	verifyInstallationPair = func(context.Context, string, string) error { return nil }
 	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+	}
+}
+
+func TestBackupCommandsUsePublishedInstallationAndStrictVerifier(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	installation, err := operator.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := punarobackup.Manifest{Version: 1, BackupID: "018f47f4-7b18-7cc2-98d6-31d4fb5ab742", CreatedAt: time.Date(2026, 7, 19, 20, 0, 0, 0, time.UTC), SchemaVersion: 5, State: punarobackup.State{InstallationID: "4e02b0e5-1934-4dda-9c4a-767c120c2fac", TimelineID: "797476ad-8fdc-4c05-b144-3ccbb92b54bf", ChangeSequence: 42}}
+	backupPath := filepath.Join(installation.BackupDir, "verified")
+	createOperatorBackup = func(_ context.Context, got operator.Installation) (punarobackup.Manifest, string, error) {
+		if got.Directory != directory {
+			t.Fatalf("unexpected installation: %#v", got)
+		}
+		return manifest, backupPath, nil
+	}
+	listOperatorBackups = func(root string) ([]punarobackup.Summary, error) {
+		if root != installation.BackupDir {
+			t.Fatalf("unexpected backup root: %q", root)
+		}
+		return []punarobackup.Summary{{Directory: backupPath, BackupID: manifest.BackupID, CreatedAt: manifest.CreatedAt, SchemaVersion: 5, State: manifest.State}}, nil
+	}
+	verifyOperatorBackup = func(path string) (punarobackup.Manifest, error) {
+		if path != backupPath {
+			t.Fatalf("unexpected verify path: %q", path)
+		}
+		return manifest, nil
+	}
+
+	for _, command := range [][]string{{"backup", "--directory", directory}, {"backup", "list", "--directory", directory}, {"backup", "verify", "--backup", backupPath}} {
+		var stdout, stderr bytes.Buffer
+		if code := run(command, &stdout, &stderr); code != 0 {
+			t.Fatalf("command=%v code=%d stdout=%s stderr=%s", command, code, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), manifest.BackupID) {
+			t.Fatalf("command=%v omitted backup identity: %s", command, stdout.String())
+		}
+	}
+}
+
+func TestRestoreCommandRequiresExplicitNewStackInputs(t *testing.T) {
+	preserveDependencies(t)
+	root := t.TempDir()
+	backupPath := filepath.Join(root, "backup")
+	if err := os.Mkdir(backupPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requestSeen := restoreRequest{}
+	restoreOperatorBackup = func(_ context.Context, request restoreRequest) (punarobackup.State, error) {
+		requestSeen = request
+		return punarobackup.State{InstallationID: "4e02b0e5-1934-4dda-9c4a-767c120c2fac", TimelineID: "7c016e76-aadb-48f8-b460-e75f7d90e888", ChangeSequence: 42}, nil
+	}
+	args := []string{"restore", "--backup", backupPath, "--into-new-stack", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "new-backups"), "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn")}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("restore code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if requestSeen.BackupDirectory != backupPath || requestSeen.Directory != filepath.Join(root, "install") || requestSeen.DataDir != filepath.Join(root, "data") {
+		t.Fatalf("unexpected restore request: %#v", requestSeen)
+	}
+	if code := run([]string{"restore", "--backup", backupPath}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("incomplete restore code=%d, want 2", code)
+	}
+}
+
+func TestPostgresToolNeverPlacesPasswordInArgumentsOrInheritedEnvironment(t *testing.T) {
+	root := t.TempDir()
+	dsnFile := filepath.Join(root, "owner.dsn")
+	password := "visible-secret-password"
+	if err := os.WriteFile(dsnFile, []byte("postgresql://punaro_owner:"+password+"@127.0.0.1:5432/punaro?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "capture.sh")
+	capture := filepath.Join(root, "capture.txt")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$@\" \"${PGPASSWORD:-missing}\" > \"$CAPTURE_FILE\"\nexit 9\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil { // #nosec G306 -- executable test fixture.
+		t.Fatal(err)
+	}
+	t.Setenv("PGPASSWORD", "inherited-secret")
+	t.Setenv("CAPTURE_FILE", capture)
+	err := runPostgresTool(context.Background(), script, dsnFile, func(connection string) []string { return []string{"--dbname", connection} })
+	if err == nil {
+		t.Fatal("failing capture tool unexpectedly succeeded")
+	}
+	message := err.Error()
+	if strings.Contains(message, password) || strings.Contains(message, "inherited-secret") {
+		t.Fatalf("tool leaked a credential in its error: %q", message)
+	}
+	captured, readErr := os.ReadFile(capture) // #nosec G304 -- fixed private test capture path.
+	if readErr != nil || strings.Contains(string(captured), password) || strings.Contains(string(captured), "inherited-secret") || !strings.Contains(string(captured), "missing") {
+		t.Fatalf("tool leaked or inherited a credential: capture=%q err=%v", captured, readErr)
+	}
+	if !strings.Contains(string(captured), "postgresql://punaro_owner@127.0.0.1:5432/punaro?sslmode=disable") {
+		t.Fatalf("sanitized connection was not passed: %q", captured)
+	}
+}
+
+func TestPostgresDumpUsesPrivatePreopenedOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	root := t.TempDir()
+	dsnFile := filepath.Join(root, "owner.dsn")
+	if err := os.WriteFile(dsnFile, []byte("postgresql://punaro_owner@127.0.0.1:5432/punaro?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "pg_dump")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'private-dump'\n"), 0o700); err != nil { // #nosec G306 -- executable test fixture.
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", root)
+	destination := filepath.Join(root, "database.dump")
+	if err := pgDumpSnapshot(context.Background(), dsnFile, "00000003-0000001B-999", destination); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("dump mode=%v", info.Mode().Perm())
+	}
+	body, err := os.ReadFile(destination) // #nosec G304 -- fixed test artifact path.
+	if err != nil || string(body) != "private-dump" {
+		t.Fatalf("dump=%q err=%v", body, err)
+	}
+}
+
+func TestPostgresToolRejectsSSLPasswordWithoutLeakingIt(t *testing.T) {
+	root := t.TempDir()
+	dsnFile := filepath.Join(root, "owner.dsn")
+	const secret = "client-key-secret" // #nosec G101 -- non-secret rejection sentinel.
+	if err := os.WriteFile(dsnFile, []byte("postgresql://punaro_owner@127.0.0.1:5432/punaro?sslmode=require&sslpassword="+secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := runPostgresTool(context.Background(), filepath.Join(root, "must-not-run"), dsnFile, func(connection string) []string { return []string{"--dbname", connection} })
+	if err == nil || strings.Contains(err.Error(), secret) || !strings.Contains(err.Error(), "password query parameters") {
+		t.Fatalf("sslpassword rejection=%q", err)
 	}
 }
 
@@ -189,7 +530,7 @@ func TestUpRefusesResetPristineDatabase(t *testing.T) {
 	}
 	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		migrateCalls++
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	startServices = func(context.Context, operator.Installation) error { startCalls++; return nil }
 	probe = func(context.Context, string) error { probeCalls++; return nil }
@@ -208,7 +549,7 @@ func TestUpStartsCompatibleThenDoctors(t *testing.T) {
 	inspectCalls, startCalls, probeCalls := 0, 0, 0
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
 		inspectCalls++
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	startServices = func(context.Context, operator.Installation) error { startCalls++; return nil }
 	probe = func(context.Context, string) error { probeCalls++; return nil }
@@ -225,7 +566,7 @@ func TestUpRefusesMismatchedInstallationPairBeforeStart(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	verifyInstallationPair = func(context.Context, string, string) error {
 		return errors.New("different installation")
@@ -249,7 +590,7 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	verifyInstallationPair = func(context.Context, string, string) error {
 		return errors.New("different installation")
@@ -280,11 +621,11 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		if len(sequence) == 1 {
 			return punaropostgres.SchemaState{Classification: punaropostgres.Pristine}, nil
 		}
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		sequence = append(sequence, "migrate")
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	createOwner = func(context.Context, string, string) (punaropostgres.Principal, error) {
 		sequence = append(sequence, "owner")
@@ -340,7 +681,7 @@ func TestInitRefusesAlreadyCompatibleDatabase(t *testing.T) {
 		}
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	created := false
 	createOwner = func(context.Context, string, string) (punaropostgres.Principal, error) {
@@ -361,7 +702,7 @@ func TestUpRefusesCompatibleDatabaseWithDifferentOwner(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{ID: "22222222-2222-4222-8222-222222222222"}, nil
@@ -393,7 +734,7 @@ func TestInitResumeRecoversUncertainOwnerOutcome(t *testing.T) {
 		if inspectCalls == 1 {
 			return punaropostgres.SchemaState{Classification: punaropostgres.Pristine}, nil
 		}
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	createOwner = func(context.Context, string, string) (punaropostgres.Principal, error) {
 		return punaropostgres.Principal{}, context.DeadlineExceeded
@@ -437,7 +778,7 @@ func TestClientAddRefusesMutationWhenDatabaseRolesDiffer(t *testing.T) {
 		return errors.New("different installation")
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	var stdout, stderr bytes.Buffer
 	_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(nil, true)
@@ -475,7 +816,7 @@ func TestClientAddRevalidatesPathsAndOwnerBeforeMutation(t *testing.T) {
 			preserveDependencies(t)
 			directory := testInstallation(t)
 			inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-				return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+				return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 			}
 			test.mutate(t, directory)
 			issued := false
@@ -500,7 +841,7 @@ func TestConfirmedClientAddEmitsOnlyEnrollmentJSON(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 4}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	issueEnrollment = func(_ context.Context, _ operator.Installation, request punaropostgres.EnrollmentRequest, previewHash string) (punaropostgres.PendingEnrollment, error) {
 		return punaropostgres.PendingEnrollment{ID: "22222222-2222-4222-8222-222222222222", ClientBinding: request.ClientBinding, Code: "one-time-code", PreviewHash: previewHash}, nil
