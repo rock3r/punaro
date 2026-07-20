@@ -56,7 +56,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 			cutoverAvailable, cutoverErr = mailCutoverControlsAvailable(ctx, pairDB)
 			_ = pairDB.Close()
 		}
-		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s cutover_available=%t cutover_err=%v diagnostic_open_err=%v", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN), cutoverAvailable, cutoverErr, openErr)
+		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s cutover_constraints=%s cutover_available=%t cutover_err=%v diagnostic_open_err=%v", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN), mailCutoverConstraintDiagnostic(ctx, pairOwnerDSN), cutoverAvailable, cutoverErr, openErr)
 	}
 	pairDB, err := open(ctx, pairOwnerDSN)
 	if err != nil {
@@ -1397,6 +1397,28 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 			}
 		}
 		_ = rows.Close()
+	}
+	return diagnostic.String()
+}
+
+func mailCutoverConstraintDiagnostic(ctx context.Context, ownerDSN string) string {
+	db, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		return "open-failed"
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, `SELECT format('%s:%s:%s:%s:%s:%s:%s:%s:%s', conname, contype, conkey::text, confrelid::regclass::text, COALESCE(confkey,'{}'::smallint[])::text, convalidated, condeferrable, condeferred, COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint WHERE conrelid=ANY(ARRAY[to_regclass('relay.mail_cutover_epochs'),to_regclass('relay.mail_cutover_staging'),to_regclass('relay.mail_cutover_checkpoints')]) ORDER BY conrelid::regclass::text,conname`)
+	if err != nil {
+		return "query-failed"
+	}
+	defer func() { _ = rows.Close() }()
+	var diagnostic strings.Builder
+	for rows.Next() {
+		var line string
+		if rows.Scan(&line) == nil && diagnostic.Len()+len(line) < 16<<10 {
+			diagnostic.WriteString(line)
+			diagnostic.WriteByte(';')
+		}
 	}
 	return diagnostic.String()
 }
