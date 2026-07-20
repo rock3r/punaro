@@ -691,7 +691,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		RollbackFloor:           6,
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "abababababababababababababababababababababababababababababababab",
-		ComposeSHA256:           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+		ComposeSHA256:           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
 		MigrationManifestSHA256: MigrationManifestSHA256(),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
