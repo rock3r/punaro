@@ -885,6 +885,8 @@ SELECT attachment_namespace_oid IS NOT NULL AND ready_oid IS NOT NULL AND fences
 	)
 	AND (SELECT count(*) = 4 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'c' AND convalidated)
 	AND NOT EXISTS (
+		-- PostgreSQL 18 pg_dump/pg_restore flattens the associative AND terms in
+		-- snapshot_id's parse tree; accept only the migrated and restored forms.
 		SELECT 1 FROM (VALUES
 			(ARRAY[5,6]::smallint[], '(expires_at > acquired_at)', '(expires_at > acquired_at)'),
 			(ARRAY[4]::smallint[], '((snapshot_id IS NULL) OR (((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200)) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))', '((snapshot_id IS NULL) OR ((char_length(snapshot_id) >= 1) AND (char_length(snapshot_id) <= 200) AND (snapshot_id ~ ''^[0-9A-Z-]+$''::text)))'),
