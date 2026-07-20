@@ -2,11 +2,23 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"reflect"
 	"sync"
 	"testing"
 )
+
+func TestNewUpdateBackupSourceRequiresExactUpdateIdentity(t *testing.T) {
+	database := &Database{db: &sql.DB{}}
+	dump := func(context.Context, string, string, string) error { return nil }
+	if _, err := NewUpdateBackupSource(database, "owner.dsn", "invalid", dump); err == nil {
+		t.Fatal("invalid update identity accepted")
+	}
+	if source, err := NewUpdateBackupSource(database, "owner.dsn", "019b4eb0-21f8-7d93-84df-10e6cf05ce53", dump); err != nil || source.updateID == "" {
+		t.Fatalf("valid update source=%#v err=%v", source, err)
+	}
+}
 
 func TestBackupSnapshotFinisherRetriesFailedReleaseAsAbort(t *testing.T) {
 	stopCalls := 0

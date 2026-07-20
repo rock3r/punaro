@@ -110,9 +110,9 @@ func (d *Database) CreatePrincipal(ctx context.Context, kind PrincipalKind, disp
 	if !validPrincipalKind(kind) || !validDisplayName(displayName) {
 		return Principal{}, errors.New("invalid principal")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return Principal{}, errors.New("principal transaction cannot start")
+		return Principal{}, mutationStartError(err, "principal transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	var principal Principal
@@ -139,9 +139,9 @@ func (d *Database) GrantCapability(ctx context.Context, actorPrincipalID string,
 	if !validOpaqueID(actorPrincipalID) || grant.Validate() != nil {
 		return "", errors.New("invalid grant")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return "", errors.New("grant transaction cannot start")
+		return "", mutationStartError(err, "grant transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := lockGrantMutations(ctx, tx); err != nil {
@@ -202,9 +202,9 @@ func (d *Database) RevokeGrant(ctx context.Context, actorPrincipalID, grantID st
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(grantID) {
 		return errors.New("invalid grant")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return errors.New("grant transaction cannot start")
+		return mutationStartError(err, "grant transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := lockGrantMutations(ctx, tx); err != nil {
@@ -427,9 +427,9 @@ func (d *Database) CreateProject(ctx context.Context, create ProjectCreate) (Pro
 	if err != nil {
 		return ProjectResult{}, errors.New("project create request cannot be encoded")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return ProjectResult{}, errors.New("project transaction cannot start")
+		return ProjectResult{}, mutationStartError(err, "project transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, IdempotencyRequest{PrincipalID: create.PrincipalID, Operation: "project.create", Key: create.IdempotencyKey, Body: body}, func(control *ControlTx) (IdempotencyOutcome, error) {
@@ -486,9 +486,9 @@ func (d *Database) executeIdempotent(ctx context.Context, request IdempotencyReq
 	if err := request.Validate(); err != nil {
 		return IdempotencyOutcome{}, err
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return IdempotencyOutcome{}, errors.New("idempotency transaction cannot start")
+		return IdempotencyOutcome{}, mutationStartError(err, "idempotency transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, request, mutation)
@@ -622,9 +622,9 @@ func (d *Database) ClaimJobs(ctx context.Context, claim ClaimJobs) ([]LeasedJob,
 	if !knownKind {
 		return []LeasedJob{}, nil
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return nil, errors.New("job claim transaction cannot start")
+		return nil, mutationStartError(err, "job claim transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
@@ -794,9 +794,9 @@ type authorizedJobLease struct {
 }
 
 func (d *Database) authorizedJobLeaseTx(ctx context.Context, lease JobLease) (authorizedJobLease, error) {
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return authorizedJobLease{}, errors.New("job lease transaction cannot start")
+		return authorizedJobLease{}, mutationStartError(err, "job lease transaction cannot start")
 	}
 	if err := lockProjectJobMutations(ctx, tx, false); err != nil {
 		_ = tx.Rollback()
@@ -850,6 +850,9 @@ func (d *Database) PruneTerminalJobs(ctx context.Context, before time.Time, limi
 	}
 	var count int64
 	if err := d.db.QueryRowContext(ctx, `SELECT jobs.prune_terminal($1, $2)`, before, limit).Scan(&count); err != nil {
+		if isMaintenanceError(err) {
+			return 0, ErrMaintenance
+		}
 		return 0, errors.New("terminal jobs could not be pruned")
 	}
 	return count, nil
@@ -862,6 +865,9 @@ func (d *Database) PruneAuditEvents(ctx context.Context, before time.Time, limit
 	}
 	var count int64
 	if err := d.db.QueryRowContext(ctx, `SELECT audit.prune_events($1, $2)`, before, limit).Scan(&count); err != nil {
+		if isMaintenanceError(err) {
+			return 0, ErrMaintenance
+		}
 		return 0, errors.New("audit events could not be pruned")
 	}
 	return count, nil

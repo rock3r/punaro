@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // OperationPhase identifies the last durable boundary reached by an operation.
@@ -52,6 +54,10 @@ type RestoreTarget struct {
 	OwnerDSNFile          string `json:"owner_dsn_file"`
 	AppDSNFile            string `json:"app_dsn_file"`
 	DatabaseIdentity      string `json:"database_identity"`
+	UpdateID              string `json:"update_id,omitempty"`
+	ManifestSHA256        string `json:"manifest_sha256,omitempty"`
+	RecoveryReceiptFile   string `json:"recovery_receipt_file,omitempty"`
+	RecoveryReceiptSHA256 string `json:"recovery_receipt_sha256,omitempty"`
 }
 
 type restoreRequest struct {
@@ -276,7 +282,17 @@ func validRestoreTarget(target RestoreTarget) bool {
 		}
 	}
 	decoded, err := hex.DecodeString(target.DatabaseIdentity)
-	return target.OwnerDSNFile != target.AppDSNFile && err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == target.DatabaseIdentity
+	if target.OwnerDSNFile == target.AppDSNFile || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != target.DatabaseIdentity {
+		return false
+	}
+	if target.UpdateID == "" && target.ManifestSHA256 == "" && target.RecoveryReceiptFile == "" && target.RecoveryReceiptSHA256 == "" {
+		return true
+	}
+	manifestDigest, digestErr := hex.DecodeString(target.ManifestSHA256)
+	receiptDigest, receiptDigestErr := hex.DecodeString(target.RecoveryReceiptSHA256)
+	return uuid.Validate(target.UpdateID) == nil && digestErr == nil && len(manifestDigest) == 32 && hex.EncodeToString(manifestDigest) == target.ManifestSHA256 &&
+		filepath.IsAbs(target.RecoveryReceiptFile) && filepath.Clean(target.RecoveryReceiptFile) == target.RecoveryReceiptFile &&
+		receiptDigestErr == nil && len(receiptDigest) == 32 && hex.EncodeToString(receiptDigest) == target.RecoveryReceiptSHA256
 }
 
 func verifyManifestBlobs(root string, manifest Manifest) error {

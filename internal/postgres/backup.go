@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
 )
 
@@ -23,6 +24,7 @@ type BackupSource struct {
 	dumpDSNFile      string
 	dump             DumpSnapshot
 	openFenceSession func(context.Context, string) (backupFenceSession, error)
+	updateID         string
 }
 
 type backupFenceSession interface {
@@ -154,6 +156,21 @@ func NewBackupSource(database *Database, dumpDSNFile string, dump DumpSnapshot) 
 	}, nil
 }
 
+// NewUpdateBackupSource binds backup creation to one exact active update. It
+// is required for the pre-update backup, including the one-time v5 bridge whose
+// additive controls intentionally remain unrecorded until after verification.
+func NewUpdateBackupSource(database *Database, dumpDSNFile, updateID string, dump DumpSnapshot) (*BackupSource, error) {
+	if uuid.Validate(updateID) != nil {
+		return nil, errors.New("PostgreSQL update backup identity is invalid")
+	}
+	source, err := NewBackupSource(database, dumpDSNFile, dump)
+	if err != nil {
+		return nil, err
+	}
+	source.updateID = updateID
+	return source, nil
+}
+
 // Begin acquires and commits a GC fence before exporting one repeatable-read
 // snapshot. READY blob metadata and server coordinates come from that snapshot.
 func (source *BackupSource) Begin(ctx context.Context) (*punarobackup.Snapshot, error) {
@@ -201,7 +218,13 @@ func (source *BackupSource) Begin(ctx context.Context) (*punarobackup.Snapshot, 
 		return nil, errors.New("PostgreSQL backup schema cannot be inspected")
 	}
 	schemaState := Classify(catalog, manifest)
-	if schemaState.Classification != Compatible || schemaState.Version != manifest.MaxSupported {
+	updateBackupAllowed := false
+	if source.updateID != "" {
+		active, activeErr := administration.ActiveUpdate(ctx)
+		controls, controlsErr := updateControlsAvailable(ctx, administration.db)
+		updateBackupAllowed = activeErr == nil && controlsErr == nil && controls && active.UpdateID == source.updateID && active.Phase == UpdateWritersStopped && active.SourceSchema == schemaState.Version
+	}
+	if (schemaState.Classification != Compatible || schemaState.Version != manifest.MaxSupported) && !updateBackupAllowed {
 		return nil, errors.New("PostgreSQL backup requires the exact current schema")
 	}
 	var state punarobackup.State

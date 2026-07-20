@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -108,31 +107,36 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var wg sync.WaitGroup
-	errorsSeen := make(chan error, 2)
-	for range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, migrateErr := Migrate(ctx, Config{DSNFile: ownerFile})
-			errorsSeen <- migrateErr
-		}()
-	}
-	wg.Wait()
-	close(errorsSeen)
-	for migrateErr := range errorsSeen {
-		if migrateErr != nil {
-			logControlPlaneCatalog(ctx, t, ownerDB)
-			logDeviceAuthCatalog(ctx, t, ownerDB)
-			t.Fatalf("concurrent migration failed: %v", migrateErr)
-		}
-	}
+	testV5UpdateBridgeIntegration(ctx, t, ownerDB, ownerFile)
 
 	app, err = OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = app.Close() }()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER FUNCTION jobs.maintenance_active() PARALLEL SAFE`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("drifted update routine state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER FUNCTION jobs.maintenance_active() PARALLEL UNSAFE`); err != nil {
+		t.Fatal(err)
+	}
+	var phaseConstraint string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT conname FROM pg_constraint WHERE conrelid='jobs.update_transactions'::regclass AND contype='c' AND conkey=ARRAY[18]::smallint[]`).Scan(&phaseConstraint); err != nil {
+		t.Fatal(err)
+	}
+	quotedConstraint := `"` + strings.ReplaceAll(phaseConstraint, `"`, `""`) + `"`
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE jobs.update_transactions DROP CONSTRAINT `+quotedConstraint+`; ALTER TABLE jobs.update_transactions ADD CONSTRAINT `+quotedConstraint+` CHECK (phase IS NOT NULL)`); err != nil { // #nosec G202 -- identifier is read from PostgreSQL and quoted.
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive update constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE jobs.update_transactions DROP CONSTRAINT `+quotedConstraint+`; ALTER TABLE jobs.update_transactions ADD CONSTRAINT `+quotedConstraint+` CHECK (phase IN ('fenced','writers_stopped','backup_verified','migration_started','migrated','candidate_ready','doctor_passed','config_published','recovery_required','recovery_ready','recovery_doctor_passed','recovery_config_published','committed','recovered','aborted'))`); err != nil { // #nosec G202 -- identifier is read from PostgreSQL and quoted.
+		t.Fatal(err)
+	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("migrated application not ready: %v", err)
 	}
@@ -172,6 +176,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
+	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -455,6 +460,292 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {
+	t.Helper()
+	current := CurrentManifest()
+	v5Manifest := Manifest{MinSupported: 5, MaxSupported: 5, Migrations: append([]Migration(nil), current.Migrations[:5]...)}
+	if state, err := migrate(ctx, ownerDB, v5Manifest); err != nil || state.Classification != Compatible || state.Version != 5 {
+		t.Fatalf("v5 staging state=%#v err=%v", state, err)
+	}
+	if _, err := Migrate(ctx, Config{DSNFile: ownerFile}); err == nil || !strings.Contains(err.Error(), "supported update transaction") {
+		t.Fatalf("ordinary migrator accepted v5 upgrade: %v", err)
+	}
+	var postgresMajor int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::integer / 10000`).Scan(&postgresMajor); err != nil {
+		t.Fatal(err)
+	}
+	request := UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2083",
+		SourceRelease:           "v0.6.0",
+		TargetRelease:           "v0.7.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SourceSchema:            5,
+		TargetSchema:            6,
+		SchemaMin:               5,
+		SchemaMax:               6,
+		RollbackFloor:           5,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		ComposeSHA256:           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	bridge, err := BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
+	if err != nil {
+		t.Fatalf("begin abortable bridge: %v", err)
+	}
+	if err := bridge.Abort(); err != nil {
+		t.Fatalf("abort uncommitted bridge: %v", err)
+	}
+	snapshot, err := inspect(ctx, ownerDB)
+	if err != nil || Classify(snapshot, v5Manifest).Classification != Compatible {
+		t.Fatalf("aborted bridge changed v5 compatibility: state=%#v err=%v", Classify(snapshot, v5Manifest), err)
+	}
+	bridge, err = BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
+	if err != nil {
+		t.Fatalf("begin durable bridge: %v", err)
+	}
+	transaction, err := bridge.CommitWritersStopped(ctx)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("commit bridge transaction=%#v err=%v", transaction, err)
+	}
+	snapshot, err = inspect(ctx, ownerDB)
+	if err != nil || Classify(snapshot, v5Manifest).Classification != Compatible {
+		t.Fatalf("active bridge broke old-image schema compatibility: state=%#v err=%v", Classify(snapshot, v5Manifest), err)
+	}
+	admin, err := OpenAdministration(ctx, Config{DSNFile: ownerFile})
+	if err != nil {
+		t.Fatalf("resume bridge administration: %v", err)
+	}
+	defer func() { _ = admin.Close() }()
+	if transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateAborted, nil); err != nil || transaction.Phase != UpdateAborted {
+		t.Fatalf("abort durable bridge transaction=%#v err=%v", transaction, err)
+	}
+	request.UpdateID = "019b4eb0-798c-7a52-8d29-8560fcbb2084"
+	bridge, err = BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
+	if err != nil {
+		t.Fatalf("retry bridge with exact installed controls: %v", err)
+	}
+	transaction, err = bridge.CommitWritersStopped(ctx)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("commit retried bridge transaction=%#v err=%v", transaction, err)
+	}
+	var state InstallationState
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker := &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910fb",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ExportedSnapshotID: "00000003-0000001B-1",
+		ManifestSHA256:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
+	if transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker); err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind bridge backup transaction=%#v err=%v", transaction, err)
+	}
+	if transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil); err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start bridge migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization := UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 6 {
+		logControlPlaneCatalog(ctx, t, ownerDB)
+		logDeviceAuthCatalog(ctx, t, ownerDB)
+		t.Fatalf("bridge migration state=%#v err=%v", state, err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+}
+
+func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	admin := &Administration{db: ownerDB}
+	var postgresVersion int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::integer / 10000`).Scan(&postgresVersion); err != nil {
+		t.Fatal(err)
+	}
+	request := UpdateRequest{
+		UpdateID:                "019b4eb0-21f8-7d93-84df-10e6cf05ce53",
+		SourceRelease:           "v0.6.0",
+		TargetRelease:           "v0.7.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		SourceSchema:            CurrentManifest().MaxSupported,
+		TargetSchema:            CurrentManifest().MaxSupported,
+		SchemaMin:               CurrentManifest().MaxSupported,
+		SchemaMax:               CurrentManifest().MaxSupported,
+		RollbackFloor:           CurrentManifest().MaxSupported,
+		PostgresMajor:           postgresVersion,
+		ReleaseSHA256:           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		ComposeSHA256:           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+
+	// A writer that crossed the shared transaction gate must drain before the
+	// exclusive durable fence can be published.
+	writer, err := app.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `SELECT jobs.assert_application_mutation()`); err != nil {
+		_ = writer.Rollback()
+		t.Fatal(err)
+	}
+	result := make(chan struct {
+		transaction UpdateTransaction
+		err         error
+	}, 1)
+	go func() {
+		transaction, beginErr := admin.BeginUpdate(ctx, request)
+		result <- struct {
+			transaction UpdateTransaction
+			err         error
+		}{transaction, beginErr}
+	}()
+	select {
+	case early := <-result:
+		_ = writer.Rollback()
+		t.Fatalf("fence did not drain in-flight writer: %#v err=%v", early.transaction, early.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var transaction UpdateTransaction
+	select {
+	case completed := <-result:
+		transaction, err = completed.transaction, completed.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("fence acquisition did not resume after writer commit")
+	}
+	if err != nil || transaction.Phase != UpdateFenced || transaction.UpdateID != request.UpdateID {
+		t.Fatalf("begin transaction=%#v err=%v", transaction, err)
+	}
+	if retried, err := admin.BeginUpdate(ctx, request); err != nil || retried != transaction {
+		t.Fatalf("exact begin retry=%#v err=%v", retried, err)
+	}
+	conflict := request
+	conflict.UpdateID = "019b4eb0-798c-7a52-8d29-8560fcbb2083"
+	if _, err := admin.BeginUpdate(ctx, conflict); !errors.Is(err, ErrUpdateConflict) {
+		t.Fatalf("concurrent update error=%v", err)
+	}
+	if _, err := app.AdvanceChange(ctx); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("fenced application mutation error=%v", err)
+	}
+	if _, err := app.CreatePrincipal(ctx, PrincipalKindService, "fenced"); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("fenced transaction mutation error=%v", err)
+	}
+
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("writers stopped=%#v err=%v", transaction, err)
+	}
+	state, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := &UpdateBackupMarker{
+		UpdateID:           request.UpdateID,
+		BackupID:           "019b4eb0-a147-7d6c-8dc5-3824e816cc57",
+		InstallationID:     state.InstallationID,
+		TimelineID:         state.TimelineID,
+		ChangeSequence:     state.ChangeSequence,
+		SourceSchema:       request.SourceSchema,
+		TargetRelease:      request.TargetRelease,
+		TargetImageDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ExportedSnapshotID: "00000003-0000001B-1",
+		ManifestSHA256:     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified || transaction.BackupID != marker.BackupID {
+		t.Fatalf("backup marker=%#v err=%v", transaction, err)
+	}
+	if _, err := admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateCommitted, nil); !errors.Is(err, ErrInvalidUpdateTransition) {
+		t.Fatalf("skipped migration error=%v", err)
+	}
+	for _, transition := range [][2]UpdatePhase{{UpdateBackupVerified, UpdateMigrationStarted}, {UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, transition[0], transition[1], nil)
+		if err != nil || transaction.Phase != transition[1] {
+			t.Fatalf("transition %s -> %s transaction=%#v err=%v", transition[0], transition[1], transaction, err)
+		}
+	}
+	if _, err := admin.ActiveUpdate(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("committed update remained active: %v", err)
+	}
+	latest, err := admin.LatestUpdate(ctx)
+	if err != nil || latest.UpdateID != request.UpdateID || latest.Phase != UpdateCommitted {
+		t.Fatalf("latest update=%#v err=%v", latest, err)
+	}
+	if _, err := app.AdvanceChange(ctx); err != nil {
+		t.Fatalf("mutation remained fenced after commit: %v", err)
+	}
+
+	// A pre-update dump contains the durable row at writers_stopped, before the
+	// external verified-backup marker can be recorded. This is the exact shape
+	// present after restoring that dump into a pristine stack.
+	recoveryRequest := request
+	recoveryRequest.UpdateID = "019b4eb0-798c-7a52-8d29-8560fcbb2083"
+	transaction, err = admin.BeginUpdate(ctx, recoveryRequest)
+	if err != nil {
+		t.Fatalf("begin recovery fixture: %v", err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, recoveryRequest.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("recovery fixture writers stopped=%#v err=%v", transaction, err)
+	}
+	beforeRestore, err := app.InstallationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryMarker := UpdateBackupMarker{
+		UpdateID: recoveryRequest.UpdateID, BackupID: "019b4eb0-c447-7c76-b73f-f442bab67061",
+		InstallationID: beforeRestore.InstallationID, TimelineID: beforeRestore.TimelineID,
+		ChangeSequence: beforeRestore.ChangeSequence, SourceSchema: recoveryRequest.SourceSchema,
+		TargetRelease:      recoveryRequest.TargetRelease,
+		TargetImageDigest:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ExportedSnapshotID: "00000003-0000001B-2",
+		ManifestSHA256:     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
+	mismatch := recoveryMarker
+	mismatch.TargetRelease = "v0.7.1"
+	if _, _, err := admin.RestoreUpdateRecovery(ctx, mismatch); err == nil {
+		t.Fatal("mismatched restored-backup evidence was accepted")
+	}
+	unchanged, err := app.InstallationState(ctx)
+	if err != nil || unchanged != beforeRestore {
+		t.Fatalf("failed recovery authorization mutated timeline: state=%#v err=%v", unchanged, err)
+	}
+	restored, transaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
+	if err != nil || transaction.Phase != UpdateRecoveryRequired || restored.InstallationID != beforeRestore.InstallationID || restored.TimelineID == beforeRestore.TimelineID || restored.ChangeSequence != beforeRestore.ChangeSequence || transaction.BackupID != recoveryMarker.BackupID || transaction.BackupTimelineID != beforeRestore.TimelineID {
+		t.Fatalf("restored update state=%#v transaction=%#v err=%v", restored, transaction, err)
+	}
+	retriedState, retriedTransaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
+	if err != nil || retriedState != restored || retriedTransaction != transaction {
+		t.Fatalf("restored update retry state=%#v transaction=%#v err=%v", retriedState, retriedTransaction, err)
+	}
+	if _, err := app.AdvanceChange(ctx); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("restored recovery did not retain maintenance fence: %v", err)
+	}
+	for _, transition := range [][2]UpdatePhase{{UpdateRecoveryRequired, UpdateRecoveryReady}, {UpdateRecoveryReady, UpdateRecoveryDoctor}, {UpdateRecoveryDoctor, UpdateRecoveryConfig}, {UpdateRecoveryConfig, UpdateRecovered}} {
+		transaction, err = admin.AdvanceUpdate(ctx, recoveryRequest.UpdateID, transition[0], transition[1], nil)
+		if err != nil || transaction.Phase != transition[1] {
+			t.Fatalf("restored recovery transition %s -> %s transaction=%#v err=%v", transition[0], transition[1], transaction, err)
+		}
+	}
+	if _, err := app.AdvanceChange(ctx); err != nil {
+		t.Fatalf("recovered update retained maintenance fence: %v", err)
 	}
 }
 
