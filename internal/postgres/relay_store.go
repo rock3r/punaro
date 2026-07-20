@@ -700,10 +700,10 @@ WITH objects AS (
         (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[])
     ) AS expected(table_oid,constraint_type,column_keys)
 ), actual_keys AS (
-    SELECT constraint.conrelid,constraint.contype,constraint.conkey
-    FROM objects JOIN pg_constraint AS constraint
-      ON constraint.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
-     AND constraint.contype IN ('p','u') AND constraint.convalidated AND NOT constraint.condeferrable AND NOT constraint.condeferred
+    SELECT con.conrelid,con.contype,con.conkey
+    FROM objects JOIN pg_constraint AS con
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+     AND con.contype IN ('p','u') AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), expected_foreign_keys(table_oid,column_keys,foreign_table_oid,foreign_column_keys) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (memberships_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(memberships_oid,ARRAY[2]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
@@ -713,11 +713,11 @@ WITH objects AS (
         (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[])
     ) AS expected(table_oid,column_keys,foreign_table_oid,foreign_column_keys)
 ), actual_foreign_keys AS (
-    SELECT constraint.conrelid,constraint.conkey,constraint.confrelid,constraint.confkey
-    FROM objects JOIN pg_constraint AS constraint
-      ON constraint.conrelid=ANY(ARRAY[memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid])
-     AND constraint.contype='f' AND constraint.convalidated AND NOT constraint.condeferrable AND NOT constraint.condeferred
-     AND constraint.confupdtype='a' AND constraint.confdeltype='a' AND constraint.confmatchtype='s'
+    SELECT con.conrelid,con.conkey,con.confrelid,con.confkey
+    FROM objects JOIN pg_constraint AS con
+      ON con.conrelid=ANY(ARRAY[memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid])
+     AND con.contype='f' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
+     AND con.confupdtype='a' AND con.confdeltype='a' AND con.confmatchtype='s'
 ), expected_check_keys(table_oid,column_keys) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,ARRAY[1]::smallint[]),(endpoints_oid,ARRAY[2]::smallint[]),(endpoints_oid,ARRAY[4]::smallint[]),
@@ -729,10 +729,10 @@ WITH objects AS (
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
 ), actual_check_keys AS (
-    SELECT constraint.conrelid,constraint.conkey
-    FROM objects JOIN pg_constraint AS constraint
-      ON constraint.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
-     AND constraint.contype='c' AND constraint.convalidated AND NOT constraint.condeferrable AND NOT constraint.condeferred
+    SELECT con.conrelid,con.conkey
+    FROM objects JOIN pg_constraint AS con
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+     AND con.contype='c' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), check_expressions AS (
     SELECT NOT EXISTS (SELECT * FROM expected_check_keys EXCEPT ALL SELECT * FROM actual_check_keys)
        AND NOT EXISTS (SELECT * FROM actual_check_keys EXCEPT ALL SELECT * FROM expected_check_keys)
@@ -757,18 +757,18 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=nonces_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(nonce) >= 1) AND (char_length(nonce) <= 128) AND (octet_length(nonce) <= 512) AND (nonce !~ ''[[:cntrl:]]''::text))') AS exact
     FROM objects
 ), constraints AS (
-    SELECT count(*) FILTER (WHERE constraint.contype='p')=9
-       AND count(*) FILTER (WHERE constraint.contype='u')=4
-	       AND count(*) FILTER (WHERE constraint.contype='f')=10
-	       AND count(*) FILTER (WHERE constraint.contype='c')=18
+    SELECT count(*) FILTER (WHERE con.contype='p')=9
+       AND count(*) FILTER (WHERE con.contype='u')=4
+	       AND count(*) FILTER (WHERE con.contype='f')=10
+	       AND count(*) FILTER (WHERE con.contype='c')=18
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_foreign_keys EXCEPT SELECT * FROM expected_foreign_keys)
 	       AND check_expressions.exact AS exact
-    FROM objects JOIN pg_constraint AS constraint
-      ON constraint.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
-     AND constraint.convalidated CROSS JOIN check_expressions
+    FROM objects JOIN pg_constraint AS con
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+     AND con.convalidated CROSS JOIN check_expressions
 ), expected_guards(table_oid, trigger_name) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid, 'mail_endpoints_mutation_guard'),
@@ -783,14 +783,14 @@ WITH objects AS (
     ) AS expected(table_oid, trigger_name)
 ), guards AS (
     SELECT count(*)=9
-       AND bool_and(trigger.tgfoid=objects.guard_oid AND trigger.tgenabled='O' AND NOT trigger.tgisinternal
-                    AND trigger.tgtype=30 AND trigger.tgconstraint=0
-                    AND NOT trigger.tgdeferrable AND NOT trigger.tginitdeferred AND trigger.tgnargs=0
-                    AND trigger.tgqual IS NULL AND trigger.tgnewtable IS NULL AND trigger.tgoldtable IS NULL
-                    AND trigger.tgattr::text='') AS exact
+       AND bool_and(trg.tgfoid=objects.guard_oid AND trg.tgenabled='O' AND NOT trg.tgisinternal
+                    AND trg.tgtype=30 AND trg.tgconstraint=0
+                    AND NOT trg.tgdeferrable AND NOT trg.tginitdeferred AND trg.tgnargs=0
+                    AND trg.tgqual IS NULL AND trg.tgnewtable IS NULL AND trg.tgoldtable IS NULL
+                    AND trg.tgattr::text='') AS exact
     FROM objects JOIN expected_guards ON true
-    JOIN pg_trigger AS trigger
-      ON trigger.tgrelid=expected_guards.table_oid AND trigger.tgname=expected_guards.trigger_name
+    JOIN pg_trigger AS trg
+      ON trg.tgrelid=expected_guards.table_oid AND trg.tgname=expected_guards.trigger_name
 ), function_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proc.proowner)='punaro_owner' AND proc.prosecdef
        AND proc.prokind='f' AND proc.provolatile='v' AND NOT proc.proretset
