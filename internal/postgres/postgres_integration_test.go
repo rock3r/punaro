@@ -42,7 +42,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("pristine DSN pair proof failed: %v", err)
 	}
 	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
-		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s update=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN), updateControlsDiagnostic(ctx, pairOwnerDSN))
+		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN))
 	}
 	pairDB, err := open(ctx, pairOwnerDSN)
 	if err != nil {
@@ -502,7 +502,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	bridge, err := BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
 	if err != nil {
-		t.Fatalf("begin abortable bridge: %v diagnostic=%s", err, v5BridgeDiagnostic(ctx, ownerDB, request))
+		t.Fatalf("begin abortable bridge: %v", err)
 	}
 	if err := bridge.Abort(); err != nil {
 		t.Fatalf("abort uncommitted bridge: %v", err)
@@ -583,22 +583,6 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM auth.principals WHERE id=$1`, bridgeOwnerID); err != nil {
 		t.Fatalf("remove v5 bridge principal fixture: %v", err)
 	}
-}
-
-func v5BridgeDiagnostic(ctx context.Context, ownerDB *sql.DB, request UpdateRequest) string {
-	tx, err := ownerDB.BeginTx(ctx, nil)
-	if err != nil {
-		return "transaction-failed: " + err.Error()
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, CurrentManifest().Migrations[5].SQL); err != nil {
-		return "migration-failed: " + err.Error()
-	}
-	_, err = scanUpdate(tx.QueryRowContext(ctx, `SELECT `+updateSelectColumns+` FROM jobs.begin_update($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, request.UpdateID, request.SourceRelease, request.TargetRelease, request.SourceImage, request.TargetImage, request.SourceSchema, request.TargetSchema, request.SchemaMin, request.SchemaMax, request.RollbackFloor, request.PostgresMajor, request.ReleaseSHA256, request.ComposeSHA256, request.MigrationManifestSHA256))
-	if err != nil {
-		return "begin-failed: " + err.Error()
-	}
-	return "unexpected-success"
 }
 
 func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -812,46 +796,6 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 		_ = rows.Close()
 	}
 	return diagnostic.String()
-}
-
-func updateControlsDiagnostic(ctx context.Context, ownerDSN string) string {
-	db, err := sql.Open("pgx", ownerDSN)
-	if err != nil {
-		return "open-failed: " + err.Error()
-	}
-	defer func() { _ = db.Close() }()
-	var available bool
-	if err := db.QueryRowContext(ctx, updateControlsInspectionSQL).Scan(&available); err != nil {
-		return "query-failed: " + err.Error()
-	}
-	if available {
-		return "available"
-	}
-	queries := []string{
-		`SELECT format('column:%s:%s:%s:%s:%s', attnum, attname, atttypid::regtype::text, atttypmod, attnotnull) FROM pg_attribute WHERE attrelid=to_regclass('jobs.update_transactions') AND attnum>0 AND NOT attisdropped ORDER BY attnum`,
-		`SELECT format('constraint:%s:%s:%s:%s', contype, conkey::text, convalidated, COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint WHERE conrelid=to_regclass('jobs.update_transactions') ORDER BY contype,conkey::text`,
-		`SELECT format('routine:%s:%s:%s:%s:%s:%s:%s:%s:%s', proc.oid::regprocedure::text, md5(btrim(proc.prosrc)), language.lanname, proc.provolatile, proc.prosecdef, pg_get_userbyid(proc.proowner), pg_get_function_result(proc.oid), COALESCE(array_to_string(proc.proconfig,','),''), COALESCE(proc.proargmodes::text,'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid=ANY(ARRAY[to_regprocedure('jobs.assert_application_mutation()'),to_regprocedure('jobs.guard_application_mutation()'),to_regprocedure('jobs.begin_update(uuid,text,text,text,text,bigint,bigint,bigint,bigint,bigint,integer,text,text,text)'),to_regprocedure('jobs.advance_update(uuid,text,text,uuid,uuid,uuid,bigint,bigint,text,text,text,text)'),to_regprocedure('jobs.restore_update_recovery(uuid,uuid,uuid,uuid,bigint,bigint,text,text,text,text)'),to_regprocedure('jobs.maintenance_active()')]) ORDER BY proc.oid::regprocedure::text`,
-		`SELECT format('routine-acl:%s:%s:%s:%s', proc.oid::regprocedure::text, COALESCE(grantee.rolname,'PUBLIC'), acl.privilege_type, acl.is_grantable) FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE proc.oid=ANY(ARRAY[to_regprocedure('jobs.assert_application_mutation()'),to_regprocedure('jobs.guard_application_mutation()'),to_regprocedure('jobs.begin_update(uuid,text,text,text,text,bigint,bigint,bigint,bigint,bigint,integer,text,text,text)'),to_regprocedure('jobs.advance_update(uuid,text,text,uuid,uuid,uuid,bigint,bigint,text,text,text,text)'),to_regprocedure('jobs.restore_update_recovery(uuid,uuid,uuid,uuid,bigint,bigint,text,text,text,text)'),to_regprocedure('jobs.maintenance_active()')]) ORDER BY proc.oid::regprocedure::text,grantee.rolname`,
-		`SELECT format('table:%s:%s:%s:%s:%s:%s', relkind, relpersistence, relrowsecurity, relforcerowsecurity, pg_get_userbyid(relowner), COALESCE(relacl::text,'')) FROM pg_class WHERE oid=to_regclass('jobs.update_transactions')`,
-		`SELECT format('index:%s:%s:%s:%s:%s:%s:%s:%s:%s', indisunique,indisvalid,indisready,indkey::text,indclass::text,indcollation::text,indoption::text,pg_get_expr(indexprs,indrelid),pg_get_expr(indpred,indrelid)) FROM pg_index WHERE indexrelid=to_regclass('jobs.update_transactions_one_active')`,
-		`SELECT format('trigger:%s:%s:%s:%s:%s:%s:%s', count(*),min(tgtype),max(tgtype),bool_and(tgenabled='O'),bool_and(NOT tgisinternal),bool_and(tgqual IS NULL),bool_and(tgattr::text='')) FROM pg_trigger WHERE tgname='application_mutation_fence' AND tgrelid=ANY(ARRAY['jobs.server_state'::regclass,'auth.principals'::regclass,'relay.projects'::regclass,'auth.capability_grants'::regclass,'relay.idempotency_records'::regclass,'audit.events'::regclass,'jobs.queue_capacity'::regclass,'jobs.outbox'::regclass,'auth.installation_owner'::regclass,'auth.pending_enrollments'::regclass,'auth.pending_enrollment_grants'::regclass,'auth.device_credentials'::regclass,'auth.legacy_auth_state'::regclass,'auth.legacy_machines'::regclass,'auth.project_acl_state'::regclass,'relay.project_identities'::regclass,'relay.project_lookup_aliases'::regclass,'relay.project_merge_previews'::regclass,'attachment.ready_blob_manifest'::regclass])`,
-	}
-	var diagnostic strings.Builder
-	for _, query := range queries {
-		rows, queryErr := db.QueryContext(ctx, query)
-		if queryErr != nil {
-			return "unavailable; diagnostic-query-failed: " + queryErr.Error()
-		}
-		for rows.Next() {
-			var line string
-			if rows.Scan(&line) == nil && diagnostic.Len()+len(line) < 16<<10 {
-				diagnostic.WriteString(line)
-				diagnostic.WriteByte(';')
-			}
-		}
-		_ = rows.Close()
-	}
-	return "unavailable; " + diagnostic.String()
 }
 
 func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, ownerFile, appFile string) {
