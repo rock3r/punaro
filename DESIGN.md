@@ -178,12 +178,14 @@ acknowledges each only after local acceptance succeeds.
 sender adapter  POST /v1/conversations/{id}/messages (Idempotency-Key)
 punarod         transaction: authorize, append message, create deliveries
 punarod         best-effort WebSocket hint: {type:"wake", topic_id, sequence}
-recipient       GET /v1/deliveries?topic_id=...&after=...
+recipient       POST /v1/deliveries/lease {endpoint, consumer_id, conversation_id?, limit?}
 recipient       inject into local agent_mailbox
 recipient       POST /v1/deliveries/{id}/ack
 ```
 
-The fetch response is the source of truth. Every recipient has an independent
+The lease response is the source of truth. It contains bounded durable
+deliveries plus a map of conversation IDs to the recipient's highest contiguous
+acknowledged sequence. Every recipient has an independent
 delivery stream; a delivery has a short server-enforced lease, lease generation,
 and lease token. A lease that expires without an acknowledgement becomes
 available again. The recipient must tolerate duplicate delivery by durably
@@ -196,7 +198,10 @@ credentials, or a machine no longer owning the endpoint are rejected. The relay
 advances its per-recipient cursor only across contiguous acknowledged sequences;
 it never skips a gap. Only one consumer holds an endpoint's renewable fencing
 lease at a time, preventing a stale adapter process from injecting alongside a
-replacement.
+replacement. `consumer_id` is a fresh opaque identity generated once per
+adapter process; repeated polls from that process renew its endpoint fence,
+while another process must wait for expiry before it can increment the fence
+and take over.
 
 ## WebSocket wake-up channel
 

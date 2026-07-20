@@ -66,10 +66,12 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 6 || manifest.MaxSupported != 6 || len(manifest.Migrations) != 6 {
-		t.Fatalf("manifest=%#v, want exact v6 compatibility window", manifest)
+	if manifest.MinSupported != 7 || manifest.MaxSupported != 7 || len(manifest.Migrations) != 7 {
+		t.Fatalf("manifest=%#v, want exact v7 compatibility window", manifest)
 	}
-	if manifest.Migrations[0].CompatibilityFloor != 1 || manifest.Migrations[1].CompatibilityFloor != 2 || manifest.Migrations[2].CompatibilityFloor != 3 || manifest.Migrations[3].CompatibilityFloor != 4 || manifest.Migrations[4].CompatibilityFloor != 5 || manifest.Migrations[5].CompatibilityFloor != 6 {
-		t.Fatalf("migration floors=%d,%d,%d,%d,%d, want 1,2,3,4,5", manifest.Migrations[0].CompatibilityFloor, manifest.Migrations[1].CompatibilityFloor, manifest.Migrations[2].CompatibilityFloor, manifest.Migrations[3].CompatibilityFloor, manifest.Migrations[4].CompatibilityFloor)
+	for index, migration := range manifest.Migrations {
+		if migration.CompatibilityFloor != int64(index+1) {
+			t.Fatalf("migration %d floor=%d, want %d", index+1, migration.CompatibilityFloor, index+1)
+		}
 	}
 }

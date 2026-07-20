@@ -2,10 +2,10 @@ package relay
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -60,21 +60,21 @@ type SignedRequest struct {
 // nonces in the relay database so a daemon restart cannot reopen a replay
 // window.
 type Authenticator struct {
-	store    *Store
+	store    NonceStore
 	machines map[string]Machine
 }
 
 // NewAuthenticator accepts a complete explicit enrollment set. Enrollment is
 // configuration-controlled, not message-controlled; duplicate IDs and unsafe
 // endpoint rules fail startup rather than picking an arbitrary credential.
-func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) {
+func NewAuthenticator(store NonceStore, machines []Machine) (*Authenticator, error) {
 	if store == nil || len(machines) == 0 {
 		return nil, fmt.Errorf("relay authenticator requires enrolled machines")
 	}
 	configured := make(map[string]Machine, len(machines))
 	attachmentDevices := make(map[[16]byte]string, len(machines))
 	for _, machine := range machines {
-		if strings.TrimSpace(machine.ID) == "" || len(machine.PublicKey) != ed25519.PublicKeySize || (len(machine.EndpointPrefixes) == 0 && len(machine.Endpoints) == 0) {
+		if !ValidMachineID(machine.ID) || len(machine.PublicKey) != ed25519.PublicKeySize || (len(machine.EndpointPrefixes) == 0 && len(machine.Endpoints) == 0) {
 			return nil, fmt.Errorf("invalid machine enrollment")
 		}
 		if _, exists := configured[machine.ID]; exists {
@@ -93,7 +93,7 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 		}
 		exact := make(map[string]struct{}, len(machine.Endpoints))
 		for _, endpoint := range machine.Endpoints {
-			if endpoint == "" || strings.TrimSpace(endpoint) != endpoint {
+			if !ValidEndpoint(endpoint) {
 				return nil, fmt.Errorf("invalid exact endpoint for machine %q", machine.ID)
 			}
 			if _, duplicate := exact[endpoint]; duplicate {
@@ -137,7 +137,7 @@ func NewAuthenticator(store *Store, machines []Machine) (*Authenticator, error) 
 // trailing slash, a raw prefix comparison could let `agent/a` claim
 // `agent/abuse`; prefixes are authority boundaries, not friendly labels.
 func validEndpointPrefix(prefix string) bool {
-	return prefix == strings.TrimSpace(prefix) && prefix != "/" && strings.HasSuffix(prefix, "/") && !strings.Contains(prefix, "//")
+	return ValidEndpoint(prefix) && prefix != "/" && strings.HasSuffix(prefix, "/") && !strings.Contains(prefix, "//")
 }
 
 // CanonicalRequest returns the stable, unambiguous byte sequence signed by a
@@ -161,22 +161,16 @@ func CanonicalRequest(request SignedRequest) []byte {
 // replays. Errors intentionally use one authorization result at the boundary.
 func (a *Authenticator) Verify(request SignedRequest, now time.Time) error {
 	machine, found := a.machines[request.MachineID]
-	if !found || !validSignedRequest(request, now) || !ed25519.Verify(machine.PublicKey, CanonicalRequest(request), request.Signature) {
+	if !found || !ValidRequestToken(request.Nonce) || !validSignedRequest(request, now) || !ed25519.Verify(machine.PublicKey, CanonicalRequest(request), request.Signature) {
 		return ErrForbidden
 	}
-	tx, err := a.store.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return fmt.Errorf("begin request replay transaction: %w", err)
-	}
-	defer rollback(tx)
-	if _, err := tx.ExecContext(context.Background(), "DELETE FROM request_nonces WHERE expires_at <= ?", now.UnixMilli()); err != nil {
-		return fmt.Errorf("prune request nonces: %w", err)
-	}
-	_, err = tx.ExecContext(context.Background(), "INSERT INTO request_nonces(machine_id, nonce, expires_at) VALUES (?, ?, ?)", request.MachineID, request.Nonce, request.Timestamp.UTC().Add(maxRequestAge).UnixMilli())
-	if err != nil {
+	if err := a.store.ConsumeRequestNonce(request.MachineID, request.Nonce, now, request.Timestamp.UTC().Add(maxRequestAge)); err != nil {
+		if errors.Is(err, ErrMaintenance) {
+			return ErrMaintenance
+		}
 		return ErrForbidden
 	}
-	return tx.Commit()
+	return nil
 }
 
 // AuthenticateHTTP authenticates a request over its exact already-bounded

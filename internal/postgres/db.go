@@ -23,6 +23,7 @@ type Config struct {
 // Database is a least-privilege application connection to the platform substrate.
 type Database struct {
 	db       *sql.DB
+	relayDB  *sql.DB
 	manifest Manifest
 }
 
@@ -47,16 +48,30 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Database{db: db, manifest: CurrentManifest()}, nil
+	relayDB, err := openPool(ctx, dsn, 4, 1)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := verifyApplicationRole(ctx, relayDB); err != nil {
+		_ = relayDB.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest()}, nil
 }
 
 func open(ctx context.Context, dsn string) (*sql.DB, error) {
+	return openPool(ctx, dsn, 8, 2)
+}
+
+func openPool(ctx context.Context, dsn string, maximumOpen, maximumIdle int) (*sql.DB, error) {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, errors.New("PostgreSQL connection configuration is invalid")
 	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(2)
+	db.SetMaxOpenConns(maximumOpen)
+	db.SetMaxIdleConns(maximumIdle)
 	pingCtx, cancel := context.WithTimeout(ctx, operationTimeout)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
@@ -66,8 +81,13 @@ func open(ctx context.Context, dsn string) (*sql.DB, error) {
 	return db, nil
 }
 
-// Close releases the application connection pool.
-func (d *Database) Close() error { return d.db.Close() }
+// Close releases both the general application and reserved relay pools.
+func (d *Database) Close() error {
+	if d.relayDB == nil {
+		return d.db.Close()
+	}
+	return errors.Join(d.relayDB.Close(), d.db.Close())
+}
 
 // SchemaState inspects schema history, required objects, and role safety atomically.
 func (d *Database) SchemaState(ctx context.Context) (SchemaState, error) {
@@ -940,6 +960,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL update-control schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = updateObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 7 {
+		relayObjectsPresent, err := relayControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = relayObjectsPresent
 	}
 	return snapshot, nil
 }

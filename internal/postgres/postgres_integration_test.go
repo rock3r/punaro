@@ -10,6 +10,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/relay"
+	"github.com/rock3r/punaro/internal/relay/contracttest"
 )
 
 func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
@@ -140,6 +144,100 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("migrated application not ready: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DISABLE TRIGGER mail_messages_mutation_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("disabled relay mutation guard state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages ENABLE TRIGGER mail_messages_mutation_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay guard restoration did not recover readiness: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT WHEN (false) EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("conditional relay mutation guard state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("unconditional relay guard restoration did not recover readiness: %v", err)
+	}
+	var nonceDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)'::regprocedure)`).Scan(&nonceDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION relay.consume_mail_request_nonce(requested_machine_id text,requested_nonce text,requested_now timestamptz,requested_expires_at timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$ BEGIN RETURN true; END $function$`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive relay nonce routine state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, nonceDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay nonce routine restoration did not recover readiness: %v", err)
+	}
+	var bodyConstraint string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT conname FROM pg_constraint WHERE conrelid='relay.mail_messages'::regclass AND contype='c' AND conkey=ARRAY[5]::smallint[]`).Scan(&bodyConstraint); err != nil {
+		t.Fatal(err)
+	}
+	quotedBodyConstraint := `"` + strings.ReplaceAll(bodyConstraint, `"`, `""`) + `"`
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DROP CONSTRAINT `+quotedBodyConstraint+`; ALTER TABLE relay.mail_messages ADD CONSTRAINT `+quotedBodyConstraint+` CHECK (body IS NOT NULL)`); err != nil { // #nosec G202 -- catalog identifier is quoted.
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive relay body constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DROP CONSTRAINT `+quotedBodyConstraint+`; ALTER TABLE relay.mail_messages ADD CONSTRAINT `+quotedBodyConstraint+` CHECK (octet_length(body) <= 32768)`); err != nil { // #nosec G202 -- catalog identifier is quoted.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON relay.mail_messages TO pg_monitor`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("extra relay table grantee state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON relay.mail_messages FROM pg_monitor`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON relay.mail_messages TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("public relay table grant state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON relay.mail_messages FROM PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT UPDATE (body) ON relay.mail_messages TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("extra relay column privilege state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE UPDATE (body) ON relay.mail_messages FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE INSERT ON relay.mail_messages FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("missing relay insert privilege state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT INSERT ON relay.mail_messages TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay constraint and ACL restoration did not recover readiness: %v", err)
+	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +275,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
+	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -463,6 +562,151 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	}
 }
 
+func testRelayIntegration(t *testing.T, app *Database) {
+	t.Helper()
+	contracttest.Run(t, app, "postgres-contract")
+	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
+	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
+}
+
+func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.July, 20, 15, 0, 0, 0, time.UTC)
+	const (
+		machineA  = "postgres-cursor-lock-machine-a"
+		machineB  = "postgres-cursor-lock-machine-b"
+		endpointA = "agent/postgres-cursor-lock/a"
+		endpointB = "agent/postgres-cursor-lock/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-cursor-lock-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendTx, appendCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer appendCancel()
+	defer func() { _ = appendTx.Rollback() }()
+	messageID := uuid.NewString()
+	var sequence int64
+	if err := appendTx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, conversation.ID).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, messageID, conversation.ID, sequence, endpointA, "must remain pending", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, messageID, endpointB); err != nil {
+		t.Fatal(err)
+	}
+	cursorTx, cursorCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursorCancel()
+	defer func() { _ = cursorTx.Rollback() }()
+	if err := postgresAdvanceRecipientCursor(cursorTx, endpointB, conversation.ID); err != nil {
+		t.Fatalf("advance cursor alongside uncommitted append: %v", err)
+	}
+	if err := cursorTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := app.RecipientCursor(machineB, endpointB, conversation.ID, now); err != nil || cursor != 0 {
+		t.Fatalf("cursor crossed concurrent append: cursor=%d err=%v", cursor, err)
+	}
+	page, err := app.LeaseDeliveries(machineB, "postgres-cursor-lock-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Sequence != 1 {
+		t.Fatalf("concurrent delivery page=%#v err=%v", page, err)
+	}
+}
+
+func testEndpointAdvertisementUsesCanonicalLockOrder(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.July, 20, 16, 0, 0, 0, time.UTC)
+	const (
+		machineID = "postgres-advertisement-lock-machine"
+		endpointA = "agent/postgres-advertisement-lock/a"
+		endpointZ = "agent/postgres-advertisement-lock/z"
+	)
+	if err := app.AdvertiseEndpoints(machineID, []string{endpointA, endpointZ}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	blocker, blockerCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockerCancel()
+	defer func() { _ = blocker.Rollback() }()
+	if _, err := blocker.ExecContext(context.Background(), `SELECT endpoint FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpointA); err != nil {
+		t.Fatal(err)
+	}
+	advertisementResult := make(chan error, 1)
+	go func() {
+		advertisementResult <- app.AdvertiseEndpoints(machineID, []string{endpointA}, now.Add(time.Second), time.Hour)
+	}()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	for {
+		var waiting bool
+		err := app.relayPool().QueryRowContext(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND usename=current_user AND wait_event_type='Lock'
+			  AND query LIKE 'SELECT endpoint FROM relay.mail_endpoints%'
+		)`).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect advertisement lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case advertiseErr := <-advertisementResult:
+			t.Fatalf("advertisement escaped first endpoint lock: %v", advertiseErr)
+		case <-waitCtx.Done():
+			t.Fatal("advertisement did not wait on the first ordered endpoint")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	probe, probeCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probeCancel()
+	defer func() { _ = probe.Rollback() }()
+	if _, err := probe.ExecContext(context.Background(), `SELECT endpoint FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE NOWAIT`, endpointZ); err != nil {
+		t.Fatalf("advertisement locked a later endpoint before the first: %v", err)
+	}
+	if err := probe.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-advertisementResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordered endpoint advertisement did not complete")
+	}
+}
+
 func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {
 	t.Helper()
 	current := CurrentManifest()
@@ -498,7 +742,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		ComposeSHA256:           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(Manifest{MinSupported: 6, MaxSupported: 6, Migrations: append([]Migration(nil), current.Migrations[:6]...)}),
 	}
 	bridge, err := BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
 	if err != nil {
@@ -563,7 +807,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 6 {
+	v6Manifest := Manifest{MinSupported: 6, MaxSupported: 6, Migrations: append([]Migration(nil), current.Migrations[:6]...)}
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v6Manifest); err != nil || state.Classification != Compatible || state.Version != 6 {
 		logControlPlaneCatalog(ctx, t, ownerDB)
 		logDeviceAuthCatalog(ctx, t, ownerDB)
 		t.Fatalf("bridge migration state=%#v err=%v", state, err)
@@ -572,6 +817,63 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
+		SourceRelease:           "v0.7.0",
+		TargetRelease:           "v0.8.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		SourceSchema:            6,
+		TargetSchema:            7,
+		SchemaMin:               6,
+		SchemaMax:               7,
+		RollbackFloor:           6,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "abababababababababababababababababababababababababababababababab",
+		ComposeSHA256:           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v7 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v7 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910fc",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		ExportedSnapshotID: "00000003-0000001B-2",
+		ManifestSHA256:     "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v7 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v7 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 7 {
+		t.Fatalf("v7 migration state=%#v err=%v", state, err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v7 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
@@ -662,6 +964,13 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	}
 	if _, err := app.CreatePrincipal(ctx, PrincipalKindService, "fenced"); !errors.Is(err, ErrMaintenance) {
 		t.Fatalf("fenced transaction mutation error=%v", err)
+	}
+	if err := app.AdvertiseEndpoints("fenced-relay-machine", []string{"agent/fenced"}, time.Now().UTC(), time.Minute); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("fenced relay mutation error=%v", err)
+	}
+	nonceNow := time.Now().UTC()
+	if err := app.ConsumeRequestNonce("fenced-relay-machine", "fenced-nonce", nonceNow, nonceNow.Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("fenced relay nonce error=%v", err)
 	}
 
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)

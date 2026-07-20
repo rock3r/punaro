@@ -58,11 +58,12 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	if message.Code != http.StatusCreated {
 		t.Fatalf("message status=%d body=%s", message.Code, message.Body.String())
 	}
-	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session"}`, "lease", "")
+	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"consumer-b"}`, "lease", "")
 	if lease.Code != http.StatusOK {
 		t.Fatalf("lease status=%d body=%s", lease.Code, lease.Body.String())
 	}
 	var leased struct {
+		Cursors    map[string]int64 `json:"cursors"`
 		Deliveries []struct {
 			ID              string `json:"id"`
 			LeaseToken      string `json:"lease_token"`
@@ -75,7 +76,7 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	if err := json.NewDecoder(lease.Body).Decode(&leased); err != nil {
 		t.Fatal(err)
 	}
-	if len(leased.Deliveries) != 1 || leased.Deliveries[0].Message.Body != "review complete" {
+	if len(leased.Deliveries) != 1 || leased.Deliveries[0].Message.Body != "review complete" || leased.Cursors[conversation.ID] != 0 {
 		t.Fatalf("leased=%+v", leased)
 	}
 	ackBody, err := json.Marshal(map[string]any{"endpoint": "agent/b/session", "lease_token": leased.Deliveries[0].LeaseToken, "lease_generation": leased.Deliveries[0].LeaseGeneration})
@@ -85,6 +86,13 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	ack := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/"+leased.Deliveries[0].ID+"/ack", string(ackBody), "ack", "")
 	if ack.Code != http.StatusNoContent {
 		t.Fatalf("ack status=%d body=%s", ack.Code, ack.Body.String())
+	}
+	afterAck := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"consumer-b","conversation_id":"`+conversation.ID+`"}`, "lease-after-ack", "")
+	var caughtUp struct {
+		Cursors map[string]int64 `json:"cursors"`
+	}
+	if afterAck.Code != http.StatusOK || json.NewDecoder(afterAck.Body).Decode(&caughtUp) != nil || caughtUp.Cursors[conversation.ID] != 1 {
+		t.Fatalf("caught-up status=%d body=%s cursors=%v", afterAck.Code, afterAck.Body.String(), caughtUp.Cursors)
 	}
 }
 
@@ -205,6 +213,28 @@ func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	handler.ServeHTTP(response, unsigned)
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("unsigned status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPRelayReportsMaintenanceDuringAuthentication(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return ErrMaintenance }), []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }})
+	response := serveSigned(t, handler, private, "machine-a", http.MethodGet, "/v1/conversations", "", "maintenance", "")
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("maintenance status=%d retry-after=%q body=%s", response.Code, response.Header().Get("Retry-After"), response.Body.String())
 	}
 }
 

@@ -42,6 +42,7 @@ type Config struct {
 	PermitMaxActive             uint64
 	RelayEnabled                bool
 	RelayMachinesJSON           string
+	RelayStore                  string
 	AccessIssuer                string
 	AccessAudience              string
 	AccessJWKSURL               string
@@ -113,6 +114,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	permitMaxActive := value("PUNARO_PERMIT_MAX_ACTIVE", "")
 	attachmentV3SourceStoreFile := value("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "")
 	relayMachines := value("PUNARO_RELAY_MACHINES_JSON", "")
+	relayStore := strings.ToLower(value("PUNARO_RELAY_STORE", "sqlite"))
 	accessIssuer := value("PUNARO_ACCESS_ISSUER", "")
 	accessAudience := value("PUNARO_ACCESS_AUDIENCE", "")
 	accessJWKSURL := value("PUNARO_ACCESS_JWKS_URL", "")
@@ -173,6 +175,15 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	if relayEnabled && relayMachines == "" {
 		return Config{}, fmt.Errorf("enabled relay requires PUNARO_RELAY_MACHINES_JSON")
+	}
+	if relayStore != "sqlite" && relayStore != "postgres" {
+		return Config{}, fmt.Errorf("PUNARO_RELAY_STORE must be sqlite or postgres")
+	}
+	if relayStore == "postgres" && (!relayEnabled || !postgresEnabled) {
+		return Config{}, fmt.Errorf("PostgreSQL relay store requires PUNARO_RELAY_ENABLED and PUNARO_POSTGRES_ENABLED")
+	}
+	if relayStore == "postgres" && (directoryEnabled || permitIssuanceEnabled || attachmentV3Enabled || attachmentsEnabled) {
+		return Config{}, fmt.Errorf("PostgreSQL relay store cannot serve superseded attachment or directory routes")
 	}
 	if directoryEnabled && !relayEnabled {
 		return Config{}, fmt.Errorf("directory service requires PUNARO_RELAY_ENABLED")
@@ -244,7 +255,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

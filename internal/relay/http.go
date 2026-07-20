@@ -26,7 +26,7 @@ type HandlerOptions struct {
 
 // NewHandler returns the authenticated relay API. It intentionally does not
 // mount WebSockets or attachment routes; those have separate release gates.
-func NewHandler(store *Store, auth *Authenticator, options HandlerOptions) http.Handler {
+func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http.Handler {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
@@ -44,7 +44,7 @@ func NewHandler(store *Store, auth *Authenticator, options HandlerOptions) http.
 }
 
 type handler struct {
-	store            *Store
+	store            Backend
 	auth             *Authenticator
 	notifier         *Notifier
 	now              func() time.Time
@@ -64,6 +64,10 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	machineID, err := h.authenticate(r, body)
 	if err != nil {
+		if errors.Is(err, ErrMaintenance) {
+			writeStoreError(w, err)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
@@ -189,7 +193,7 @@ func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machine
 }
 
 func (h *handler) createConversation(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
-	if idempotencyKey == "" {
+	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
 		return
 	}
@@ -230,7 +234,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 }
 
 func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
-	if idempotencyKey == "" {
+	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
 		return
 	}
@@ -271,10 +275,15 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID, c
 func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
 	var request struct {
 		Endpoint       string `json:"endpoint"`
+		ConsumerID     string `json:"consumer_id"`
 		ConversationID string `json:"conversation_id"`
 		Limit          int    `json:"limit"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid delivery lease request")
+		return
+	}
+	if !ValidRequestToken(request.ConsumerID) {
 		writeError(w, http.StatusBadRequest, "invalid delivery lease request")
 		return
 	}
@@ -285,12 +294,12 @@ func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID 
 	if request.Limit == 0 {
 		request.Limit = 50
 	}
-	deliveries, err := h.store.LeaseDeliveries(machineID, request.Endpoint, request.ConversationID, now, h.deliveryLeaseTTL, request.Limit)
+	page, err := h.store.LeaseDeliveries(machineID, request.ConsumerID, request.Endpoint, request.ConversationID, now, h.deliveryLeaseTTL, request.Limit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"deliveries": deliveries})
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (h *handler) ackDelivery(w http.ResponseWriter, body []byte, machineID, deliveryID string, now time.Time) {
@@ -364,6 +373,9 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "request conflicts with durable state")
+	case errors.Is(err, ErrMaintenance):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")
 	default:
 		writeError(w, http.StatusBadRequest, "invalid request")
 	}

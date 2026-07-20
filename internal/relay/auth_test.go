@@ -3,10 +3,33 @@ package relay
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+type nonceStoreFunc func(string, string, time.Time, time.Time) error
+
+func (function nonceStoreFunc) ConsumeRequestNonce(machineID, nonce string, now, expiresAt time.Time) error {
+	return function(machineID, nonce, now, expiresAt)
+}
+
+func TestAuthenticatorPreservesMaintenanceRefusal(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return ErrMaintenance }), []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	request := signRequest(private, "machine-a", "GET", "/v1/conversations", nil, now, "nonce")
+	if err := auth.Verify(request, now); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("maintenance authentication err=%v", err)
+	}
+}
 
 func TestAuthenticatorVerifiesRequestAndRejectsReplayAfterRestart(t *testing.T) {
 	t.Parallel()

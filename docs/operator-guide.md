@@ -413,7 +413,7 @@ under the target distribution, verify SQLite WAL behavior, and record
 loopback and use a separately reviewed ingress only after the applicable
 public-runtime release gate is complete.
 
-### Dark PostgreSQL substrate
+### PostgreSQL substrate and relay qualification
 
 PostgreSQL remains disabled unless both `PUNARO_POSTGRES_ENABLED=true` and an
 absolute `PUNARO_POSTGRES_DSN_FILE` are supplied. The DSN file must be a private
@@ -446,16 +446,29 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 6. Versions 1 through 5 are reported
+The current binary requires schema version 7. Versions 1 through 6 are reported
 as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
 additive and creates the host-local ownership, pending enrollment, device
 credential, cache/session generation, and Ed25519 migration-inventory records.
 Migration 6 adds the durable update coordinator, exact recovery evidence, and
-the mutation fence. There is still no relay cutover. Do not
+the mutation fence. Migration 7 adds the PostgreSQL mail store, durable
+recipient cursors, replay protection, and relay-table mutation guards.
+PostgreSQL mail work uses a reserved four-connection application-role pool;
+each operation and lock wait is bounded to five seconds so platform work cannot
+consume the mail budget indefinitely.
+
+SQLite remains the default active relay. Maintainers may explicitly select an
+empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
+the supported v6-to-v7 update. This selector does not import the SQLite file,
+does not dual-write, and is incompatible with the superseded directory and
+attachment routes. Do not point an established installation at an empty
+PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
+a separate release gate. Before that cutover, rollback is selecting `sqlite`
+again while retaining both stores unchanged.
+
+Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
 migration, update, restore, or audit rows to bypass a failure.
-Before any later authority cutover, rollback remains disabling the PostgreSQL
-opt-in and retaining SQLite as the unchanged active relay.
 
 ### Host-local device enrollment
 
