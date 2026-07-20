@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -66,7 +67,7 @@ func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 		t.Fatalf("recipient machines = %#v", recipients)
 	}
 
-	leased, err := store.LeaseDeliveries("machine-b", "agent/b", "", clock, time.Minute, 10)
+	leased, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +109,7 @@ func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "one", IdempotencyKey: "send-1", Now: clock}); err != nil {
 		t.Fatal(err)
 	}
-	firstLease, err := store.LeaseDeliveries("machine-b", "agent/b", "", clock, time.Minute, 10)
+	firstLease, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock, time.Minute, 10)
 	if err != nil || len(firstLease) != 1 {
 		t.Fatalf("first lease = %#v, %v", firstLease, err)
 	}
@@ -120,7 +121,7 @@ func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	secondLease, err := store.LeaseDeliveries("machine-b", "agent/b", "", clock.Add(time.Minute+time.Second), time.Minute, 10)
+	secondLease, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", "", clock.Add(time.Minute+time.Second), time.Minute, 10)
 	if err != nil || len(secondLease) != 1 {
 		t.Fatalf("second lease = %#v, %v", secondLease, err)
 	}
@@ -132,6 +133,50 @@ func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 	}
 	if err := store.AckDelivery("machine-b", "agent/b", secondLease[0].ID, secondLease[0].LeaseToken, secondLease[0].LeaseGeneration, clock.Add(time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStoreRecipientCursorNeverSkipsAcknowledgementGap(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, body := range []string{"first", "second"} {
+		if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: body, IdempotencyKey: fmt.Sprintf("send-%d", index), Now: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliveries, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", conversation.ID, now, time.Minute, 10)
+	if err != nil || len(deliveries) != 2 {
+		t.Fatalf("deliveries=%#v err=%v", deliveries, err)
+	}
+	if err := store.AckDelivery("machine-b", "agent/b", deliveries[1].ID, deliveries[1].LeaseToken, deliveries[1].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-b", "agent/b", conversation.ID, now); err != nil || cursor != 0 {
+		t.Fatalf("cursor=%d err=%v, want gap-preserving zero", cursor, err)
+	}
+	if err := store.AckDelivery("machine-b", "agent/b", deliveries[0].ID, deliveries[0].LeaseToken, deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-b", "agent/b", conversation.ID, now); err != nil || cursor != 2 {
+		t.Fatalf("cursor=%d err=%v, want contiguous two", cursor, err)
 	}
 }
 

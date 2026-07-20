@@ -99,7 +99,16 @@ func run(args []string, stderr io.Writer) int {
 			return 2
 		}
 	}
-	relayHandler, relayStore, err := buildRelayHandler(cfg)
+	var postgresRelay relay.Backend
+	if cfg.RelayStore == "postgres" {
+		var ok bool
+		postgresRelay, ok = platformDB.(relay.Backend)
+		if !ok {
+			_, _ = fmt.Fprintln(stderr, "punarod relay configuration error: PostgreSQL relay store is unavailable")
+			return 2
+		}
+	}
+	relayHandler, relayStore, err := buildRelayHandler(cfg, postgresRelay)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punarod relay configuration error: %v\n", err)
 		return 2
@@ -605,7 +614,7 @@ func buildDirectoryHandler(cfg config.Config, store *relay.Store) (http.Handler,
 	return handler, nil
 }
 
-func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
+func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (http.Handler, *relay.Store, error) {
 	if !cfg.RelayEnabled {
 		return nil, nil, nil
 	}
@@ -613,20 +622,34 @@ func buildRelayHandler(cfg config.Config) (http.Handler, *relay.Store, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	store, err := relay.Open(filepath.Join(cfg.DataDir, "relay.db"))
+	var backend relay.Backend
+	var store *relay.Store
+	if cfg.RelayStore == "postgres" {
+		if len(postgresBackends) != 1 || postgresBackends[0] == nil {
+			return nil, nil, errors.New("PostgreSQL relay store is unavailable")
+		}
+		backend = postgresBackends[0]
+	} else {
+		store, err = relay.Open(filepath.Join(cfg.DataDir, "relay.db"))
+		if err != nil {
+			return nil, nil, err
+		}
+		backend = store
+	}
+	authenticator, err := relay.NewAuthenticator(backend, machines)
 	if err != nil {
+		if store != nil {
+			_ = store.Close()
+		}
 		return nil, nil, err
 	}
-	authenticator, err := relay.NewAuthenticator(store, machines)
-	if err != nil {
-		_ = store.Close()
-		return nil, nil, err
-	}
-	handler := relay.NewHandler(store, authenticator, relay.HandlerOptions{})
+	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{})
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
-			_ = store.Close()
+			if store != nil {
+				_ = store.Close()
+			}
 			return nil, nil, err
 		}
 		handler = verifier.Middleware(handler)

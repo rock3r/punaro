@@ -29,6 +29,21 @@ func TestBuildRelayHandlerRejectsInvalidEnrollment(t *testing.T) {
 	}
 }
 
+func TestBuildRelayCanSelectPostgresBackendWithoutOpeningSQLite(t *testing.T) {
+	backend, err := relay.Open(filepath.Join(t.TempDir(), "postgres-backend-double.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	handler, sqliteStore, err := buildRelayHandler(config.Config{
+		DataDir: t.TempDir(), RelayEnabled: true, RelayStore: "postgres",
+		RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`,
+	}, backend)
+	if err != nil || handler == nil || sqliteStore != nil {
+		t.Fatalf("handler=%v sqlite=%v err=%v", handler, sqliteStore, err)
+	}
+}
+
 func TestBuildPermitHandlerRequiresEnrolledAttachmentDeviceBinding(t *testing.T) {
 	privateDir := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(privateDir, 0o700); err != nil {

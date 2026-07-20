@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rock3r/punaro/internal/relay"
+	"github.com/rock3r/punaro/internal/relay/contracttest"
 )
 
 func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
@@ -140,6 +143,100 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("migrated application not ready: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DISABLE TRIGGER mail_messages_mutation_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("disabled relay mutation guard state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages ENABLE TRIGGER mail_messages_mutation_guard`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay guard restoration did not recover readiness: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT WHEN (false) EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("conditional relay mutation guard state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("unconditional relay guard restoration did not recover readiness: %v", err)
+	}
+	var nonceDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)'::regprocedure)`).Scan(&nonceDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS $function$ BEGIN RETURN true; END $function$`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive relay nonce routine state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, nonceDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay nonce routine restoration did not recover readiness: %v", err)
+	}
+	var bodyConstraint string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT conname FROM pg_constraint WHERE conrelid='relay.mail_messages'::regclass AND contype='c' AND conkey=ARRAY[5]::smallint[]`).Scan(&bodyConstraint); err != nil {
+		t.Fatal(err)
+	}
+	quotedBodyConstraint := `"` + strings.ReplaceAll(bodyConstraint, `"`, `""`) + `"`
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DROP CONSTRAINT `+quotedBodyConstraint+`; ALTER TABLE relay.mail_messages ADD CONSTRAINT `+quotedBodyConstraint+` CHECK (body IS NOT NULL)`); err != nil { // #nosec G202 -- catalog identifier is quoted.
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive relay body constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_messages DROP CONSTRAINT `+quotedBodyConstraint+`; ALTER TABLE relay.mail_messages ADD CONSTRAINT `+quotedBodyConstraint+` CHECK (octet_length(body) <= 32768)`); err != nil { // #nosec G202 -- catalog identifier is quoted.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON relay.mail_messages TO pg_monitor`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("extra relay table grantee state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON relay.mail_messages FROM pg_monitor`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON relay.mail_messages TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("public relay table grant state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON relay.mail_messages FROM PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT UPDATE (body) ON relay.mail_messages TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("extra relay column privilege state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE UPDATE (body) ON relay.mail_messages FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE INSERT ON relay.mail_messages FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("missing relay insert privilege state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT INSERT ON relay.mail_messages TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("relay constraint and ACL restoration did not recover readiness: %v", err)
+	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -177,6 +274,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
+	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -463,6 +561,11 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	}
 }
 
+func testRelayIntegration(t *testing.T, app *Database) {
+	t.Helper()
+	contracttest.Run(t, app, "postgres-contract")
+}
+
 func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {
 	t.Helper()
 	current := CurrentManifest()
@@ -498,7 +601,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		ComposeSHA256:           "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(Manifest{MinSupported: 6, MaxSupported: 6, Migrations: append([]Migration(nil), current.Migrations[:6]...)}),
 	}
 	bridge, err := BeginV5UpdateBridge(ctx, Config{DSNFile: ownerFile}, request)
 	if err != nil {
@@ -563,7 +666,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 6 {
+	v6Manifest := Manifest{MinSupported: 6, MaxSupported: 6, Migrations: append([]Migration(nil), current.Migrations[:6]...)}
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v6Manifest); err != nil || state.Classification != Compatible || state.Version != 6 {
 		logControlPlaneCatalog(ctx, t, ownerDB)
 		logDeviceAuthCatalog(ctx, t, ownerDB)
 		t.Fatalf("bridge migration state=%#v err=%v", state, err)
@@ -572,6 +676,63 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
+		SourceRelease:           "v0.7.0",
+		TargetRelease:           "v0.8.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		SourceSchema:            6,
+		TargetSchema:            7,
+		SchemaMin:               6,
+		SchemaMax:               7,
+		RollbackFloor:           6,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "abababababababababababababababababababababababababababababababab",
+		ComposeSHA256:           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v7 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v7 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910fc",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		ExportedSnapshotID: "00000003-0000001B-2",
+		ManifestSHA256:     "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v7 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v7 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 7 {
+		t.Fatalf("v7 migration state=%#v err=%v", state, err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v7 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
@@ -662,6 +823,13 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	}
 	if _, err := app.CreatePrincipal(ctx, PrincipalKindService, "fenced"); !errors.Is(err, ErrMaintenance) {
 		t.Fatalf("fenced transaction mutation error=%v", err)
+	}
+	if err := app.AdvertiseEndpoints("fenced-relay-machine", []string{"agent/fenced"}, time.Now().UTC(), time.Minute); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("fenced relay mutation error=%v", err)
+	}
+	nonceNow := time.Now().UTC()
+	if err := app.ConsumeRequestNonce("fenced-relay-machine", "fenced-nonce", nonceNow, nonceNow.Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("fenced relay nonce error=%v", err)
 	}
 
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)

@@ -53,6 +53,21 @@ func TestLoadRequiresAbsolutePostgresDSNFileWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestPostgresRelaySelectionIsExplicitAndRequiresPostgres(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
+	t.Setenv("PUNARO_RELAY_STORE", "postgres")
+	if _, err := Load(""); err == nil {
+		t.Fatal("PostgreSQL relay selection succeeded without PostgreSQL")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	cfg, err := Load("")
+	if err != nil || cfg.RelayStore != "postgres" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+}
+
 func TestLoadRejectsPostgresDSNFileWhileDisabled(t *testing.T) {
 	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
 	if _, err := Load(""); err == nil {

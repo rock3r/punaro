@@ -37,6 +37,7 @@ type HTTPRelayClient struct {
 	machineID   string
 	privateKey  ed25519.PrivateKey
 	httpClient  *http.Client
+	consumerID  string
 	accessToken AccessServiceToken
 	access      *accessSession
 }
@@ -84,7 +85,11 @@ func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey,
 		client = http.DefaultClient
 	}
 	clientCopy := *client
-	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, accessToken: accessToken}
+	consumerID, err := randomConsumerID()
+	if err != nil {
+		return nil, fmt.Errorf("create relay consumer identity: %w", err)
+	}
+	result := &HTTPRelayClient{baseURL: baseURL, machineID: machineID, privateKey: append(ed25519.PrivateKey(nil), privateKey...), httpClient: &clientCopy, consumerID: consumerID, accessToken: accessToken}
 	if accessToken.ClientID != "" && !loopbackHost(baseURL.Hostname()) {
 		jar, err := cookiejar.New(nil)
 		if err != nil {
@@ -181,7 +186,7 @@ func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.D
 	var response struct {
 		Deliveries []relay.Delivery `json:"deliveries"`
 	}
-	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/lease", map[string]any{"endpoint": endpoint}, &response)
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/lease", map[string]any{"endpoint": endpoint, "consumer_id": c.consumerID}, &response)
 	return response.Deliveries, err
 }
 
@@ -640,6 +645,14 @@ func randomNonce() (string, error) {
 	value := make([]byte, 24)
 	if _, err := rand.Read(value); err != nil {
 		return "", fmt.Errorf("generate request nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(value), nil
+}
+
+func randomConsumerID() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(value), nil
 }

@@ -16,7 +16,10 @@ import (
 // MigrationManifestSHA256 binds release metadata and the update transaction to
 // the exact ordered embedded migration history without including SQL bodies.
 func MigrationManifestSHA256() string {
-	manifest := CurrentManifest()
+	return migrationManifestSHA256(CurrentManifest())
+}
+
+func migrationManifestSHA256(manifest Manifest) string {
 	hash := sha256.New()
 	for _, migration := range manifest.Migrations {
 		_, _ = hash.Write([]byte(strconv.FormatInt(migration.Version, 10) + "\x00" + migration.Name + "\x00" + migration.Checksum + "\x00" + strconv.FormatInt(migration.CompatibilityFloor, 10) + "\n"))
@@ -36,6 +39,7 @@ var migrationCompatibilityFloors = map[int64]int64{
 	4: 4,
 	5: 5,
 	6: 6,
+	7: 7,
 }
 
 // CurrentManifest returns the immutable migrations embedded in this binary.
@@ -95,6 +99,10 @@ func Migrate(ctx context.Context, cfg Config) (SchemaState, error) {
 // migration advisory lock or staging schema history.
 func MigrateUpdate(ctx context.Context, cfg Config, authorization UpdateMigrationAuthorization) (SchemaState, error) {
 	manifest := CurrentManifest()
+	return migrateUpdateManifest(ctx, cfg, authorization, manifest)
+}
+
+func migrateUpdateManifest(ctx context.Context, cfg Config, authorization UpdateMigrationAuthorization, manifest Manifest) (SchemaState, error) {
 	if authorization.Validate() != nil || authorization.TargetSchema != manifest.MaxSupported {
 		return SchemaState{}, errors.New("invalid update migration authorization")
 	}
@@ -134,7 +142,7 @@ WHERE update_id=$1::uuid AND phase='migration_started' AND backup_id=$2::uuid
   AND target_release=$3 AND target_image=$4 AND target_schema=$5
   AND migration_manifest_sha256=$6
   AND backup_snapshot_id=$7 AND backup_manifest_sha256=$8
-)`, authorization.UpdateID, authorization.BackupID, authorization.TargetRelease, authorization.TargetImage, authorization.TargetSchema, MigrationManifestSHA256(), authorization.ExportedSnapshotID, authorization.ManifestSHA256).Scan(&authorized)
+)`, authorization.UpdateID, authorization.BackupID, authorization.TargetRelease, authorization.TargetImage, authorization.TargetSchema, migrationManifestSHA256(manifest), authorization.ExportedSnapshotID, authorization.ManifestSHA256).Scan(&authorized)
 	if err != nil || !authorized {
 		return SchemaState{}, errors.New("PostgreSQL update migration marker does not match")
 	}
