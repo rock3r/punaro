@@ -446,20 +446,25 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 7. Versions 1 through 6 are reported
+The current binary requires schema version 8. Versions 1 through 7 are reported
 as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
 additive and creates the host-local ownership, pending enrollment, device
 credential, cache/session generation, and Ed25519 migration-inventory records.
 Migration 6 adds the durable update coordinator, exact recovery evidence, and
 the mutation fence. Migration 7 adds the PostgreSQL mail store, durable
 recipient cursors, replay protection, and relay-table mutation guards.
+Migration 8 adds the dark M-9 cutover substrate: owner-only migration epochs,
+bounded staging rows and checkpoints, and an application-role mail-write fence
+for an importing or verified epoch. It does not import rows, activate
+PostgreSQL mail authority, retire SQLite, or change the default relay. Those
+irreversible operations remain disabled until the later M-9 executor slice.
 PostgreSQL mail work uses a reserved four-connection application-role pool;
 each operation and lock wait is bounded to five seconds so platform work cannot
 consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported v6-to-v7 update. This selector does not import the SQLite file,
+the supported update to schema v8. This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is

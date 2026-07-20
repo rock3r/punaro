@@ -392,12 +392,34 @@ func (a *Administration) BeginUpdate(ctx context.Context, request UpdateRequest)
 	if request.Validate() != nil {
 		return UpdateTransaction{}, errors.New("invalid update request")
 	}
-	transaction, err := scanUpdate(a.db.QueryRowContext(ctx, `SELECT `+updateSelectColumns+` FROM jobs.begin_update($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, request.UpdateID, request.SourceRelease, request.TargetRelease, request.SourceImage, request.TargetImage, request.SourceSchema, request.TargetSchema, request.SchemaMin, request.SchemaMax, request.RollbackFloor, request.PostgresMajor, request.ReleaseSHA256, request.ComposeSHA256, request.MigrationManifestSHA256))
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return UpdateTransaction{}, errors.New("update transaction could not acquire the maintenance fence")
+	}
+	defer func() { _ = tx.Rollback() }()
+	transaction, err := scanUpdate(tx.QueryRowContext(ctx, `SELECT `+updateSelectColumns+` FROM jobs.begin_update($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`, request.UpdateID, request.SourceRelease, request.TargetRelease, request.SourceImage, request.TargetImage, request.SourceSchema, request.TargetSchema, request.SchemaMin, request.SchemaMax, request.RollbackFloor, request.PostgresMajor, request.ReleaseSHA256, request.ComposeSHA256, request.MigrationManifestSHA256))
 	if err != nil {
 		if strings.Contains(err.Error(), "update fence is already owned") {
 			return UpdateTransaction{}, ErrUpdateConflict
 		}
 		return UpdateTransaction{}, errors.New("update transaction could not acquire the maintenance fence")
+	}
+	if transaction.Phase != UpdateCommitted && transaction.Phase != UpdateRecovered && transaction.Phase != UpdateAborted {
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+			return UpdateTransaction{}, errors.New("update transaction could not acquire the mail cutover fence")
+		}
+		var cutoverControls, cutoverActive bool
+		if err := tx.QueryRowContext(ctx, `SELECT to_regclass('relay.mail_cutover_epochs') IS NOT NULL`).Scan(&cutoverControls); err != nil {
+			return UpdateTransaction{}, errors.New("update transaction could not inspect the mail cutover fence")
+		}
+		if cutoverControls {
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.mail_cutover_epochs WHERE phase IN ('importing','verified'))`).Scan(&cutoverActive); err != nil || cutoverActive {
+				return UpdateTransaction{}, ErrUpdateConflict
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return UpdateTransaction{}, errors.New("update transaction could not commit the maintenance fence")
 	}
 	return transaction, nil
 }

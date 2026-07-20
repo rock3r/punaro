@@ -114,7 +114,7 @@ precedence over dotenv values.
 | `PUNARO_TRUSTED_LAN_CIDR` | unset | Private/link-local CIDR containing the concrete LAN bind. Valid only in LAN mode. |
 | `PUNARO_TRUSTED_LAN_HTTP` | `false` | Explicit plaintext credential exception for observed peers inside the validated trusted LAN. Public peers never qualify. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
-| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. `postgres` requires PostgreSQL schema v7 and is for empty-destination parity/qualification before the M-9 one-shot cutover; it never imports or dual-writes SQLite. |
+| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. `postgres` requires PostgreSQL schema v8 and is for empty-destination parity/qualification before the M-9 one-shot cutover; it never imports or dual-writes SQLite. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
 | `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
 | `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, root-owned and service-group-readable (`2750` parent, `0640` regular non-symlink) canonical directory snapshot publication file. |

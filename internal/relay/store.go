@@ -36,6 +36,12 @@ var (
 	// ErrMaintenance is a retryable, payload-free refusal while the durable
 	// update fence owns application mutations.
 	ErrMaintenance = errors.New("relay maintenance in progress")
+	// ErrMigrationSourcePrepared means the SQLite relay is fenced for a
+	// resumable PostgreSQL cutover epoch and cannot accept writes.
+	ErrMigrationSourcePrepared = errors.New("relay migration source is prepared")
+	// ErrMigrationSourceRetired means PostgreSQL cutover crossed the permanent
+	// source-retirement boundary. The SQLite file is forensic evidence only.
+	ErrMigrationSourceRetired = errors.New("relay migration source is retired")
 )
 
 // Capability controls an endpoint's membership in a conversation.
@@ -137,6 +143,23 @@ func Open(database string) (*Store, error) {
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	var migrationPhase MigrationSourcePhase
+	if err := db.QueryRowContext(context.Background(), `SELECT phase FROM relay_migration_control WHERE singleton=1`).Scan(&migrationPhase); err != nil {
+		_ = db.Close()
+		return nil, errors.New("relay migration source state is unavailable")
+	}
+	switch migrationPhase {
+	case MigrationSourceActive:
+	case MigrationSourcePrepared:
+		_ = db.Close()
+		return nil, ErrMigrationSourcePrepared
+	case MigrationSourceRetired:
+		_ = db.Close()
+		return nil, ErrMigrationSourceRetired
+	default:
+		_ = db.Close()
+		return nil, errors.New("relay migration source control is invalid")
 	}
 	return store, nil
 }
@@ -240,11 +263,44 @@ func (s *Store) migrate(ctx context.Context) error {
 			expires_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, nonce)
 		)`,
+		`CREATE TABLE IF NOT EXISTS relay_migration_control (
+			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+			source_id TEXT NOT NULL,
+			phase TEXT NOT NULL DEFAULT 'active' CHECK (phase IN ('active', 'prepared', 'retired')),
+			epoch_id TEXT,
+			target_identity TEXT,
+			fingerprint TEXT,
+			last_epoch_id TEXT,
+			last_target_identity TEXT,
+			last_expected_fingerprint TEXT,
+			last_result_fingerprint TEXT,
+			last_cutoff INTEGER,
+			last_transition TEXT CHECK (last_transition IS NULL OR last_transition IN ('prepared', 'aborted', 'retired')),
+			changed_at INTEGER NOT NULL,
+			CHECK (
+				(phase = 'active' AND epoch_id IS NULL AND target_identity IS NULL AND fingerprint IS NULL)
+				OR (phase IN ('prepared', 'retired') AND epoch_id IS NOT NULL AND target_identity IS NOT NULL AND fingerprint IS NOT NULL)
+			)
+		)`,
 		"CREATE INDEX IF NOT EXISTS deliveries_recipient_pending ON deliveries(recipient_endpoint, acked_at, lease_until)",
 		"CREATE INDEX IF NOT EXISTS request_nonces_expiry ON request_nonces(expires_at)",
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate relay database: %w", err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO relay_migration_control(singleton,source_id,changed_at) VALUES(1,?,?)`, uuid.NewString(), time.Now().UTC().UnixMilli()); err != nil {
+		return fmt.Errorf("initialize relay migration control: %w", err)
+	}
+	for _, table := range []string{"endpoints", "conversations", "memberships", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "request_nonces"} {
+		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
+			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
+			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
+				WHEN COALESCE((SELECT phase FROM relay_migration_control WHERE singleton=1), 'missing') <> 'active'
+				BEGIN SELECT RAISE(ABORT, 'relay migration source is not writable'); END`, name, operation, table) // #nosec G201 -- identifiers come only from fixed internal allowlists.
+			if _, err := s.db.ExecContext(ctx, statement); err != nil { // #nosec G202 -- identifiers come only from fixed internal allowlists above.
+				return fmt.Errorf("install relay migration guard: %w", err)
+			}
 		}
 	}
 	for _, column := range []struct {
@@ -256,6 +312,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"endpoints", "consumer_lease_until", "INTEGER"},
 		{"deliveries", "ownership_generation", "INTEGER"},
 		{"deliveries", "consumer_generation", "INTEGER"},
+		{"relay_migration_control", "last_epoch_id", "TEXT"},
+		{"relay_migration_control", "last_target_identity", "TEXT"},
+		{"relay_migration_control", "last_expected_fingerprint", "TEXT"},
+		{"relay_migration_control", "last_result_fingerprint", "TEXT"},
+		{"relay_migration_control", "last_cutoff", "INTEGER"},
+		{"relay_migration_control", "last_transition", "TEXT"},
 	} {
 		if err := ensureSQLiteColumn(ctx, s.db, column.table, column.name, column.definition); err != nil {
 			return err
@@ -265,7 +327,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
-	if table != "endpoints" && table != "deliveries" {
+	if table != "endpoints" && table != "deliveries" && table != "relay_migration_control" {
 		return errors.New("invalid relay migration table")
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")") // #nosec G202 -- table is restricted above to fixed internal names.

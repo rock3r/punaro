@@ -2,11 +2,14 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -156,17 +159,65 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("relay guard restoration did not recover readiness: %v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT WHEN (false) EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT WHEN (false) EXECUTE FUNCTION relay.guard_mail_mutation()`); err != nil {
 		t.Fatal(err)
 	}
 	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
 		t.Fatalf("conditional relay mutation guard state=%#v err=%v", drifted, driftErr)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation()`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_messages_mutation_guard ON relay.mail_messages; CREATE TRIGGER mail_messages_mutation_guard BEFORE INSERT OR UPDATE OR DELETE ON relay.mail_messages FOR EACH STATEMENT EXECUTE FUNCTION relay.guard_mail_mutation()`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("unconditional relay guard restoration did not recover readiness: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_cutover_epochs DROP CONSTRAINT mail_cutover_epochs_phase_check; ALTER TABLE relay.mail_cutover_epochs ADD CONSTRAINT mail_cutover_epochs_phase_check CHECK (phase IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive mail-cutover phase constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_cutover_epochs DROP CONSTRAINT mail_cutover_epochs_phase_check; ALTER TABLE relay.mail_cutover_epochs ADD CONSTRAINT mail_cutover_epochs_phase_check CHECK (phase IN ('importing','verified','active','aborted'))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX relay.mail_cutover_epochs_one_authority; CREATE UNIQUE INDEX mail_cutover_epochs_one_authority ON relay.mail_cutover_epochs ((true)) WHERE phase='importing'`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("weakened mail-cutover authority index state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX relay.mail_cutover_epochs_one_authority; CREATE UNIQUE INDEX mail_cutover_epochs_one_authority ON relay.mail_cutover_epochs ((true)) WHERE phase IN ('importing','verified','active')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON relay.mail_cutover_staging TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("mail-cutover extra grantee state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON relay.mail_cutover_staging FROM PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_cutover_epochs ADD CONSTRAINT mail_cutover_epochs_unexpected_unique UNIQUE(epoch_id,source_id) DEFERRABLE`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("mail-cutover extra constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_cutover_epochs DROP CONSTRAINT mail_cutover_epochs_unexpected_unique`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE TRIGGER mail_endpoints_unexpected_guard BEFORE INSERT ON relay.mail_endpoints FOR EACH STATEMENT EXECUTE FUNCTION relay.guard_mail_mutation()`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("mail-cutover extra trigger state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP TRIGGER mail_endpoints_unexpected_guard ON relay.mail_endpoints`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("mail-cutover catalog restoration did not recover readiness: %v", err)
 	}
 	var nonceDefinition string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('relay.consume_mail_request_nonce(text,text,timestamptz,timestamptz)'::regprocedure)`).Scan(&nonceDefinition); err != nil {
@@ -275,6 +326,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
+	testMailCutoverSubstrate(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -562,6 +614,183 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	}
 }
 
+func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	admin := &Administration{db: ownerDB}
+	var actor string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT principal_id::text FROM auth.installation_owner`).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	targetIdentity, err := app.Identity(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := MailCutoverRequest{
+		EpochID:           "019f7f07-4b88-7c12-a394-b663274a6555",
+		SourceID:          "019f7f07-5b88-7c12-a394-b663274a6555",
+		TargetIdentity:    targetIdentity,
+		SourceFingerprint: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	manifest := relay.MigrationSourceManifest{
+		Version: 1, SourceID: request.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: request.EpochID,
+		TargetIdentity: request.TargetIdentity, Fingerprint: request.SourceFingerprint,
+		TableSHA256: relay.MigrationSourceHashes{
+			Endpoints: strings.Repeat("e", 64), Conversations: strings.Repeat("e", 64), Memberships: strings.Repeat("e", 64),
+			Messages: strings.Repeat("e", 64), Deliveries: strings.Repeat("e", 64), RecipientCursors: strings.Repeat("e", 64),
+			MessageIdempotency: strings.Repeat("e", 64), ConversationIdempotency: strings.Repeat("e", 64), RequestNonces: strings.Repeat("e", 64),
+		},
+	}
+	canonicalManifest, _ := json.Marshal(manifest)
+	request.Manifest, _ = json.MarshalIndent(manifest, "", "  ")
+	manifestDigest := sha256.Sum256(canonicalManifest)
+	request.ManifestSHA256 = hex.EncodeToString(manifestDigest[:])
+	if _, err := admin.BeginMailCutover(ctx, uuid.NewString(), request); err == nil {
+		t.Fatal("non-owner began mail cutover")
+	}
+	wrongTarget := request
+	wrongTarget.TargetIdentity = strings.Repeat("f", 64)
+	manifest.TargetIdentity = wrongTarget.TargetIdentity
+	wrongCanonical, _ := json.Marshal(manifest)
+	wrongTarget.Manifest = wrongCanonical
+	wrongDigest := sha256.Sum256(wrongCanonical)
+	wrongTarget.ManifestSHA256 = hex.EncodeToString(wrongDigest[:])
+	if _, err := admin.BeginMailCutover(ctx, actor, wrongTarget); err == nil {
+		t.Fatal("mail cutover accepted the wrong target identity")
+	}
+	manifest.TargetIdentity = request.TargetIdentity
+	var rejectedEpochs int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM relay.mail_cutover_epochs`).Scan(&rejectedEpochs); err != nil || rejectedEpochs != 0 {
+		t.Fatalf("rejected cutover created epochs=%d err=%v", rejectedEpochs, err)
+	}
+	writer, err := app.relayPool().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `INSERT INTO relay.mail_endpoints(endpoint,machine_id,lease_until) VALUES('agent/cutover/draining','cutover-draining-machine',statement_timestamp()+interval '1 minute')`); err != nil {
+		_ = writer.Rollback()
+		t.Fatal(err)
+	}
+	type beginResult struct {
+		epoch MailCutoverEpoch
+		err   error
+	}
+	beginDone := make(chan beginResult, 1)
+	go func() {
+		epoch, err := admin.BeginMailCutover(ctx, actor, request)
+		beginDone <- beginResult{epoch: epoch, err: err}
+	}()
+	waitDeadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='punaro_owner' AND wait_event='advisory' AND query LIKE 'SELECT pg_advisory_xact_lock(%')`).Scan(&waiting); err != nil {
+			_ = writer.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case result := <-beginDone:
+			_ = writer.Rollback()
+			t.Fatalf("cutover begin escaped an uncommitted application writer: epoch=%#v err=%v", result.epoch, result.err)
+		default:
+		}
+		if time.Now().After(waitDeadline) {
+			_ = writer.Rollback()
+			t.Fatal("cutover begin did not wait for the application writer")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := writer.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-beginDone
+	if result.err == nil {
+		t.Fatalf("cutover accepted a target populated by a drained writer: %#v", result.epoch)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE endpoint='agent/cutover/draining'`); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := admin.BeginMailCutover(ctx, actor, request)
+	if err != nil || epoch.Phase != MailCutoverImporting || epoch.EpochID != request.EpochID {
+		t.Fatalf("begin cutover epoch=%#v err=%v", epoch, err)
+	}
+	durableDigest := sha256.Sum256(epoch.Manifest)
+	if hex.EncodeToString(durableDigest[:]) != request.ManifestSHA256 || string(epoch.Manifest) != string(canonicalManifest) {
+		t.Fatalf("durable manifest=%s digest=%x", epoch.Manifest, durableDigest)
+	}
+	var postgresMajor int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::integer / 10000`).Scan(&postgresMajor); err != nil {
+		t.Fatal(err)
+	}
+	updateRequest := UpdateRequest{
+		UpdateID: "019f7f07-6b88-7c12-a394-b663274a6555", SourceRelease: "cutover-source", TargetRelease: "cutover-target",
+		SourceImage:  "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetImage:  "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		SourceSchema: 8, TargetSchema: 8, SchemaMin: 8, SchemaMax: 8, RollbackFloor: 8, PostgresMajor: postgresMajor,
+		ReleaseSHA256: strings.Repeat("1", 64), ComposeSHA256: strings.Repeat("2", 64), MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	if _, err := admin.BeginUpdate(ctx, updateRequest); !errors.Is(err, ErrUpdateConflict) {
+		t.Fatalf("update overlapped importing mail epoch: %v", err)
+	}
+	repeated, err := admin.BeginMailCutover(ctx, actor, request)
+	if err != nil || !reflect.DeepEqual(repeated, epoch) {
+		t.Fatalf("repeat cutover epoch=%#v err=%v", repeated, err)
+	}
+	changed := request
+	changed.SourceFingerprint = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	if _, err := admin.BeginMailCutover(ctx, actor, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed cutover retry err=%v", err)
+	}
+	if err := app.AdvertiseEndpoints("cutover-fenced-machine", []string{"agent/cutover/fenced"}, time.Now().UTC(), time.Minute); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("application mail write during inactive cutover err=%v", err)
+	}
+	for _, table := range []string{"mail_endpoints", "mail_conversations", "mail_memberships", "mail_messages", "mail_deliveries", "mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency"} {
+		if _, err := app.relayPool().ExecContext(ctx, `INSERT INTO relay.`+table+` DEFAULT VALUES`); !isMaintenanceError(err) { // #nosec G202 -- table comes only from the fixed test allowlist.
+			t.Fatalf("application cutover guard table=%s err=%v", table, err)
+		}
+	}
+	if err := app.ConsumeRequestNonce("cutover-fenced-machine", "cutover-fenced-nonce", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
+		t.Fatalf("application nonce write during cutover err=%v", err)
+	}
+	if err := admin.AbortMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.AbortMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint); err != nil {
+		t.Fatalf("idempotent cutover abort err=%v", err)
+	}
+	status, err := admin.MailCutoverStatus(ctx, actor, request.EpochID)
+	if err != nil || status.Phase != MailCutoverAborted {
+		t.Fatalf("aborted cutover status=%#v err=%v", status, err)
+	}
+	update, err := admin.BeginUpdate(ctx, updateRequest)
+	if err != nil || update.Phase != UpdateFenced {
+		t.Fatalf("begin update after mail abort=%#v err=%v", update, err)
+	}
+	if err := admin.AbortMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("mail abort overlapped active update: %v", err)
+	}
+	changedEpoch := request
+	changedEpoch.EpochID = "019f7f07-7b88-7c12-a394-b663274a6555"
+	manifest.EpochID = changedEpoch.EpochID
+	changedCanonical, _ := json.Marshal(manifest)
+	changedEpoch.Manifest = changedCanonical
+	changedDigest := sha256.Sum256(changedCanonical)
+	changedEpoch.ManifestSHA256 = hex.EncodeToString(changedDigest[:])
+	if _, err := admin.BeginMailCutover(ctx, actor, changedEpoch); !errors.Is(err, ErrMaintenance) {
+		t.Fatalf("mail begin overlapped active update: %v", err)
+	}
+	if update, err = admin.AdvanceUpdate(ctx, updateRequest.UpdateID, UpdateFenced, UpdateAborted, nil); err != nil || update.Phase != UpdateAborted {
+		t.Fatalf("abort update after cutover exclusion=%#v err=%v", update, err)
+	}
+	if err := app.AdvertiseEndpoints("cutover-unfenced-machine", []string{"agent/cutover/unfenced"}, time.Now().UTC(), time.Minute); err != nil {
+		t.Fatalf("mail write after abort: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE endpoint='agent/cutover/unfenced'`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
@@ -819,6 +1048,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 			t.Fatalf("bridge phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
+	v7Manifest := Manifest{MinSupported: 7, MaxSupported: 7, Migrations: append([]Migration(nil), current.Migrations[:7]...)}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
 		SourceRelease:           "v0.7.0",
@@ -833,7 +1063,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "abababababababababababababababababababababababababababababababab",
 		ComposeSHA256:           "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(v7Manifest),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
@@ -867,13 +1097,70 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 7 {
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v7Manifest); err != nil || state.Classification != Compatible || state.Version != 7 {
 		t.Fatalf("v7 migration state=%#v err=%v", state, err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v7 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2086",
+		SourceRelease:           "v0.8.0",
+		TargetRelease:           "v0.9.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		SourceSchema:            7,
+		TargetSchema:            8,
+		SchemaMin:               7,
+		SchemaMax:               8,
+		RollbackFloor:           7,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "1212121212121212121212121212121212121212121212121212121212121212",
+		ComposeSHA256:           "3434343434343434343434343434343434343434343434343434343434343434",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v8 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v8 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910fd",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		ExportedSnapshotID: "00000003-0000001B-3",
+		ManifestSHA256:     "5656565656565656565656565656565656565656565656565656565656565656",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v8 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v8 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 8 {
+		t.Fatalf("v8 migration state=%#v err=%v", state, err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v8 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
