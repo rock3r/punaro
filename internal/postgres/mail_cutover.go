@@ -365,13 +365,13 @@ WITH objects AS (
     SELECT count(*)=9 AND count(DISTINCT trigger.tgrelid)=9
        AND bool_and(trigger.tgfoid=objects.guard_oid AND trigger.tgenabled='O' AND NOT trigger.tgisinternal
        AND trigger.tgtype=30 AND trigger.tgconstraint=0 AND NOT trigger.tgdeferrable AND NOT trigger.tginitdeferred
-       AND trigger.tgnargs=0 AND trigger.tgqual IS NULL AND trigger.tgnewtable IS NULL AND trigger.tgoldtable IS NULL AND trigger.tgattr::text='') AS exact
-    FROM objects JOIN expected_guards ON true
-    JOIN pg_trigger AS trigger ON trigger.tgrelid=expected_guards.table_oid AND trigger.tgname=expected_guards.trigger_name
-	HAVING (SELECT count(*) FROM pg_trigger AS inventory
+       AND trigger.tgnargs=0 AND trigger.tgqual IS NULL AND trigger.tgnewtable IS NULL AND trigger.tgoldtable IS NULL AND trigger.tgattr::text='')
+       AND (SELECT count(*) FROM pg_trigger AS inventory
 			WHERE inventory.tgrelid IN (SELECT table_oid FROM expected_guards) AND NOT inventory.tgisinternal)=9
 	   AND (SELECT count(*) FROM pg_trigger AS inventory
-			WHERE inventory.tgrelid=ANY(ARRAY[to_regclass('relay.mail_cutover_epochs'),to_regclass('relay.mail_cutover_staging'),to_regclass('relay.mail_cutover_checkpoints')]) AND NOT inventory.tgisinternal)=0
+			WHERE inventory.tgrelid=ANY(ARRAY[to_regclass('relay.mail_cutover_epochs'),to_regclass('relay.mail_cutover_staging'),to_regclass('relay.mail_cutover_checkpoints')]) AND NOT inventory.tgisinternal)=0 AS exact
+    FROM objects JOIN expected_guards ON true
+    JOIN pg_trigger AS trigger ON trigger.tgrelid=expected_guards.table_oid AND trigger.tgname=expected_guards.trigger_name
 ), table_acl AS (
     SELECT has_table_privilege('punaro_app',epochs_oid,'SELECT')
        AND NOT has_table_privilege('punaro_app',epochs_oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
