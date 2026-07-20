@@ -566,6 +566,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
+	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 }
 
 func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {
@@ -631,6 +632,78 @@ func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Databas
 	page, err := app.LeaseDeliveries(machineB, "postgres-cursor-lock-consumer", endpointB, conversation.ID, now, time.Minute, 10)
 	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Sequence != 1 {
 		t.Fatalf("concurrent delivery page=%#v err=%v", page, err)
+	}
+}
+
+func testEndpointAdvertisementUsesCanonicalLockOrder(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.July, 20, 16, 0, 0, 0, time.UTC)
+	const (
+		machineID = "postgres-advertisement-lock-machine"
+		endpointA = "agent/postgres-advertisement-lock/a"
+		endpointZ = "agent/postgres-advertisement-lock/z"
+	)
+	if err := app.AdvertiseEndpoints(machineID, []string{endpointA, endpointZ}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	blocker, blockerCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockerCancel()
+	defer func() { _ = blocker.Rollback() }()
+	if _, err := blocker.ExecContext(context.Background(), `SELECT endpoint FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpointA); err != nil {
+		t.Fatal(err)
+	}
+	advertisementResult := make(chan error, 1)
+	go func() {
+		advertisementResult <- app.AdvertiseEndpoints(machineID, []string{endpointA}, now.Add(time.Second), time.Hour)
+	}()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	for {
+		var waiting bool
+		err := app.relayPool().QueryRowContext(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND usename=current_user AND wait_event_type='Lock'
+			  AND query LIKE 'SELECT endpoint FROM relay.mail_endpoints%'
+		)`).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect advertisement lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case advertiseErr := <-advertisementResult:
+			t.Fatalf("advertisement escaped first endpoint lock: %v", advertiseErr)
+		case <-waitCtx.Done():
+			t.Fatal("advertisement did not wait on the first ordered endpoint")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	probe, probeCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probeCancel()
+	defer func() { _ = probe.Rollback() }()
+	if _, err := probe.ExecContext(context.Background(), `SELECT endpoint FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE NOWAIT`, endpointZ); err != nil {
+		t.Fatalf("advertisement locked a later endpoint before the first: %v", err)
+	}
+	if err := probe.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-advertisementResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordered endpoint advertisement did not complete")
 	}
 }
 

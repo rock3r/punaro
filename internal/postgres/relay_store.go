@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,12 +58,29 @@ func (d *Database) AdvertiseEndpoints(machineID string, endpoints []string, now 
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
-	if endpoints == nil {
-		endpoints = []string{}
-	}
-	encodedEndpoints, err := json.Marshal(endpoints)
+	orderedEndpoints := postgresSortedEndpoints(seen)
+	encodedEndpoints, err := json.Marshal(orderedEndpoints)
 	if err != nil {
 		return errors.New("endpoint advertisement is invalid")
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM relay.mail_endpoints
+		WHERE (machine_id=$1 AND lease_until>$2) OR endpoint IN (SELECT value FROM jsonb_array_elements_text($3::jsonb))
+		ORDER BY endpoint COLLATE "C" FOR UPDATE`, machineID, now.UTC(), string(encodedEndpoints))
+	if err != nil {
+		return relayDatabaseError(err, "lock endpoint advertisement")
+	}
+	for rows.Next() {
+		var endpoint string
+		if err := rows.Scan(&endpoint); err != nil {
+			_ = rows.Close()
+			return errors.New("endpoint advertisement lock is malformed")
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return errors.New("endpoint advertisement locks are unavailable")
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("endpoint advertisement locks are unavailable")
 	}
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_endpoints
 		SET lease_until=$2,ownership_generation=ownership_generation+1,consumer_id=NULL,consumer_lease_until=NULL
@@ -70,7 +88,7 @@ func (d *Database) AdvertiseEndpoints(machineID string, endpoints []string, now 
 		return relayDatabaseError(err, "detach endpoints")
 	}
 	until := now.Add(ttl).UTC()
-	for endpoint := range seen {
+	for _, endpoint := range orderedEndpoints {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_endpoints(endpoint,machine_id,lease_until) VALUES($1,$2,$3)
 			ON CONFLICT(endpoint) DO UPDATE SET
 				ownership_generation=CASE WHEN mail_endpoints.machine_id<>excluded.machine_id OR mail_endpoints.lease_until<=$4 THEN mail_endpoints.ownership_generation+1 ELSE mail_endpoints.ownership_generation END,
@@ -131,13 +149,13 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230608))`, input.MachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, errors.New("conversation retry lock is unavailable")
 	}
-	if _, err := postgresEndpointOwnershipLocked(tx, input.CreatorEndpoint, input.MachineID, input.Now); err != nil {
-		return relay.Conversation{}, err
-	}
 	hash := relay.CreateConversationRequestHash(input.CreatorEndpoint, input.Members)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id::text,request_hash FROM relay.mail_conversation_idempotency WHERE machine_id=$1 AND key=$2`, input.MachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
+		if _, err := postgresEndpointOwnershipLocked(tx, input.CreatorEndpoint, input.MachineID, input.Now); err != nil {
+			return relay.Conversation{}, err
+		}
 		if existingHash != hash {
 			return relay.Conversation{}, relay.ErrConflict
 		}
@@ -149,9 +167,18 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Conversation{}, errors.New("conversation retry state is unavailable")
 	}
-	for endpoint := range seen {
-		if err := postgresEndpointActive(tx, endpoint, input.Now); err != nil {
-			return relay.Conversation{}, err
+	for _, endpoint := range postgresSortedEndpoints(seen) {
+		var owner string
+		var until time.Time
+		err := tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpoint).Scan(&owner, &until)
+		if errors.Is(err, sql.ErrNoRows) {
+			return relay.Conversation{}, relay.ErrForbidden
+		}
+		if err != nil {
+			return relay.Conversation{}, errors.New("endpoint lease is unavailable")
+		}
+		if !until.After(input.Now) || endpoint == input.CreatorEndpoint && owner != input.MachineID {
+			return relay.Conversation{}, relay.ErrForbidden
 		}
 	}
 	conversation := relay.Conversation{ID: uuid.NewString()}
@@ -551,14 +578,13 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	return conversations, nil
 }
 
-func postgresEndpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
-	var until time.Time
-	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpoint).Scan(&until); errors.Is(err, sql.ErrNoRows) || !until.After(now) {
-		return relay.ErrForbidden
-	} else if err != nil {
-		return errors.New("endpoint lease is unavailable")
+func postgresSortedEndpoints(endpoints map[string]struct{}) []string {
+	ordered := make([]string, 0, len(endpoints))
+	for endpoint := range endpoints {
+		ordered = append(ordered, endpoint)
 	}
-	return nil
+	sort.Strings(ordered)
+	return ordered
 }
 
 func postgresEndpointOwnedBy(tx *sql.Tx, endpoint, machineID string, now time.Time) error {
