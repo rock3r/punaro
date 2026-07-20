@@ -42,7 +42,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("pristine DSN pair proof failed: %v", err)
 	}
 	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
-		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN))
+		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s update=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN), updateControlsDiagnostic(ctx, pairOwnerDSN))
 	}
 	pairDB, err := open(ctx, pairOwnerDSN)
 	if err != nil {
@@ -780,6 +780,22 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 		_ = rows.Close()
 	}
 	return diagnostic.String()
+}
+
+func updateControlsDiagnostic(ctx context.Context, ownerDSN string) string {
+	db, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		return "open-failed: " + err.Error()
+	}
+	defer func() { _ = db.Close() }()
+	var available bool
+	if err := db.QueryRowContext(ctx, updateControlsInspectionSQL).Scan(&available); err != nil {
+		return "query-failed: " + err.Error()
+	}
+	if available {
+		return "available"
+	}
+	return "unavailable"
 }
 
 func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, ownerFile, appFile string) {

@@ -358,7 +358,7 @@ SELECT updates_oid IS NOT NULL AND active_index_oid IS NOT NULL
 	        AND NOT index.indisprimary AND NOT index.indisexclusion AND NOT index.indisclustered
 	        AND index.indrelid = updates_oid AND index.indnkeyatts=1 AND index.indnatts=1 AND index.indkey::text='0'
 	        AND index.indcollation::text='0' AND index.indoption::text='0'
-	        AND index.indclass::oid[]=ARRAY[(SELECT oid FROM pg_opclass WHERE opcname='bool_ops' AND opcmethod=access_method.oid)]::oid[]
+	        AND index.indclass::text=(SELECT oid::text FROM pg_opclass WHERE opcname='bool_ops' AND opcmethod=access_method.oid)
 	        AND index_relation.relkind='i' AND pg_get_userbyid(index_relation.relowner)='punaro_owner' AND access_method.amname='btree'
 	        AND pg_get_expr(index.indexprs,index.indrelid)='true'
 	        AND pg_get_expr(index.indpred,index.indrelid) = '(phase <> ALL (ARRAY[''committed''::text, ''recovered''::text, ''aborted''::text]))'
