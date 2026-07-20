@@ -67,6 +67,10 @@ func executeUpdate(ctx context.Context, execution updateExecution, executor upda
 			if err != nil {
 				return transaction, err
 			}
+		case punaropostgres.UpdateRecoveryRequired, punaropostgres.UpdateRecoveryReady, punaropostgres.UpdateRecoveryDoctor, punaropostgres.UpdateRecoveryConfig:
+			// Resume the explicitly selected recovery path below.
+		default:
+			return transaction, errors.New("update recovery cannot start in the current phase")
 		}
 	}
 	if execution.RecoveryMode == "" && transaction.Phase != punaropostgres.UpdateRecoveryRequired && transaction.Phase != punaropostgres.UpdateRecoveryReady && transaction.Phase != punaropostgres.UpdateRecoveryDoctor && transaction.Phase != punaropostgres.UpdateRecoveryConfig {

@@ -145,6 +145,24 @@ func TestExecuteUpdateExplicitRecoveryMovesIrreversibleFailureIntoRecovery(t *te
 	}
 }
 
+func TestExecuteUpdateRejectsRecoveryOutsideRecoveryWindow(t *testing.T) {
+	request := testUpdateRequest()
+	for _, phase := range []punaropostgres.UpdatePhase{
+		punaropostgres.UpdateFenced,
+		punaropostgres.UpdateWritersStopped,
+		punaropostgres.UpdateBackupVerified,
+		punaropostgres.UpdateConfigPublished,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			fake := &fakeUpdateExecutor{active: punaropostgres.UpdateTransaction{UpdateRequest: request, Phase: phase}}
+			transaction, err := executeUpdate(context.Background(), updateExecution{Request: request, RecoveryMode: "compatible"}, fake)
+			if err == nil || transaction.Phase != phase || len(fake.actions) != 0 {
+				t.Fatalf("transaction=%#v actions=%v err=%v", transaction, fake.actions, err)
+			}
+		})
+	}
+}
+
 func TestExecuteUpdateRejectsChangedResumeAndLateAbort(t *testing.T) {
 	request := testUpdateRequest()
 	changed := request
