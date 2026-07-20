@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"time"
@@ -235,6 +236,7 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 
 func mailCutoverControlsAvailable(ctx context.Context, q queryer) (bool, error) {
 	var available bool
+	var diagnostic string
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('relay.mail_cutover_epochs') AS epochs_oid,
@@ -391,7 +393,23 @@ WITH objects AS (
 SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
-   AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
-FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available)
+   AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE'),
+   concat_ws(',',
+       CASE WHEN objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL THEN NULL ELSE 'objects' END,
+       CASE WHEN objects.active_index_oid IS NOT NULL THEN NULL ELSE 'index-object' END,
+       CASE WHEN objects.guard_oid IS NOT NULL THEN NULL ELSE 'routine-object' END,
+       CASE WHEN ownership.exact THEN NULL ELSE 'ownership' END,
+       CASE WHEN columns.exact THEN NULL ELSE 'columns' END,
+       CASE WHEN defaults.exact THEN NULL ELSE 'defaults' END,
+       CASE WHEN constraints.exact THEN NULL ELSE 'constraints' END,
+       CASE WHEN active_index.exact THEN NULL ELSE 'active-index' END,
+       CASE WHEN routine.exact THEN NULL ELSE 'routine' END,
+       CASE WHEN guards.exact THEN NULL ELSE 'guards' END,
+       CASE WHEN table_acl.exact THEN NULL ELSE 'table-acl' END,
+       CASE WHEN NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE') THEN NULL ELSE 'routine-acl' END)
+FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available, &diagnostic)
+	if err == nil && !available {
+		return false, fmt.Errorf("mail cutover catalog mismatch: %s", diagnostic)
+	}
 	return available, err
 }

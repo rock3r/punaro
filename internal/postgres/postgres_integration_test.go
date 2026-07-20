@@ -49,7 +49,14 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatalf("pristine DSN pair proof failed: %v", err)
 	}
 	if state, err := MigratePristinePair(ctx, Config{DSNFile: pairAppFile}, Config{DSNFile: pairOwnerFile}); err != nil || state.Classification != Compatible {
-		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN))
+		pairDB, openErr := open(ctx, pairOwnerDSN)
+		var cutoverAvailable bool
+		var cutoverErr error
+		if openErr == nil {
+			cutoverAvailable, cutoverErr = mailCutoverControlsAvailable(ctx, pairDB)
+			_ = pairDB.Close()
+		}
+		t.Fatalf("connection-bound pair migration state=%#v err=%v catalog=%s cutover_available=%t cutover_err=%v diagnostic_open_err=%v", state, err, m6CatalogDiagnostic(ctx, pairOwnerDSN), cutoverAvailable, cutoverErr, openErr)
 	}
 	pairDB, err := open(ctx, pairOwnerDSN)
 	if err != nil {
