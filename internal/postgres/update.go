@@ -242,16 +242,16 @@ WITH objects AS (
 	    ) AS expected(oid, body_hash, language_name, volatility, result_type)
 	), expected_tables(oid) AS (
     SELECT unnest(ARRAY[
-        'jobs.server_state'::regclass, 'auth.principals'::regclass,
-        'relay.projects'::regclass, 'auth.capability_grants'::regclass,
-        'relay.idempotency_records'::regclass, 'audit.events'::regclass,
-        'jobs.queue_capacity'::regclass, 'jobs.outbox'::regclass,
-        'auth.installation_owner'::regclass, 'auth.pending_enrollments'::regclass,
-        'auth.pending_enrollment_grants'::regclass, 'auth.device_credentials'::regclass,
-        'auth.legacy_auth_state'::regclass, 'auth.legacy_machines'::regclass,
-        'auth.project_acl_state'::regclass, 'relay.project_identities'::regclass,
-        'relay.project_lookup_aliases'::regclass, 'relay.project_merge_previews'::regclass,
-        'attachment.ready_blob_manifest'::regclass
+        to_regclass('jobs.server_state'), to_regclass('auth.principals'),
+        to_regclass('relay.projects'), to_regclass('auth.capability_grants'),
+        to_regclass('relay.idempotency_records'), to_regclass('audit.events'),
+        to_regclass('jobs.queue_capacity'), to_regclass('jobs.outbox'),
+        to_regclass('auth.installation_owner'), to_regclass('auth.pending_enrollments'),
+        to_regclass('auth.pending_enrollment_grants'), to_regclass('auth.device_credentials'),
+        to_regclass('auth.legacy_auth_state'), to_regclass('auth.legacy_machines'),
+        to_regclass('auth.project_acl_state'), to_regclass('relay.project_identities'),
+        to_regclass('relay.project_lookup_aliases'), to_regclass('relay.project_merge_previews'),
+        to_regclass('attachment.ready_blob_manifest')
     ])
 	), expected_columns(attnum, column_name, type_oid, type_modifier, required, default_expression) AS (
 		VALUES
@@ -312,7 +312,7 @@ WITH objects AS (
 		          AND count(*)=29+CASE WHEN current_setting('server_version_num')::integer/10000 >= 18 THEN 20 ELSE 0 END
 		        FROM pg_constraint,objects WHERE conrelid=updates_oid)
 		   AND (SELECT count(*)=1 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='p' AND conkey=ARRAY[1]::smallint[] AND convalidated AND NOT condeferrable AND NOT condeferred)
-		   AND (SELECT count(*)=1 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='f' AND conkey=ARRAY[4]::smallint[] AND confrelid='auth.principals'::regclass AND confkey=ARRAY[1]::smallint[] AND confupdtype='a' AND confdeltype='a' AND confmatchtype='s' AND convalidated AND NOT condeferrable AND NOT condeferred)
+		   AND (SELECT count(*)=1 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='f' AND conkey=ARRAY[4]::smallint[] AND confrelid=to_regclass('auth.principals') AND confkey=ARRAY[1]::smallint[] AND confupdtype='a' AND confdeltype='a' AND confmatchtype='s' AND convalidated AND NOT condeferrable AND NOT condeferred)
 		   AND (SELECT count(*)=27 FROM pg_constraint,objects WHERE conrelid=updates_oid AND contype='c' AND convalidated AND NOT condeferrable AND NOT condeferred)
 		   AND (current_setting('server_version_num')::integer/10000 < 18 OR NOT EXISTS (
 		       SELECT 1 FROM expected_columns,objects WHERE required AND NOT EXISTS (
