@@ -765,7 +765,7 @@ WITH objects AS (
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_foreign_keys EXCEPT SELECT * FROM expected_foreign_keys)
-	       AND check_expressions.exact AS exact
+	       AND bool_and(check_expressions.exact) AS exact
     FROM objects JOIN pg_constraint AS con
       ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND con.convalidated CROSS JOIN check_expressions
