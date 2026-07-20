@@ -125,7 +125,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1, 579001230608))`, input.MachineID+"\x00"+input.IdempotencyKey); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230608))`, input.MachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, errors.New("conversation retry lock is unavailable")
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.CreatorEndpoint, input.MachineID, input.Now); err != nil {
@@ -211,7 +211,7 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1, 579001230609))`, input.SenderMachineID+"\x00"+input.IdempotencyKey); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230609))`, input.SenderMachineID, input.IdempotencyKey); err != nil {
 		return relay.Message{}, false, errors.New("message retry lock is unavailable")
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
