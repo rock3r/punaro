@@ -57,6 +57,9 @@ func (d *Database) AdvertiseEndpoints(machineID string, endpoints []string, now 
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	if endpoints == nil {
+		endpoints = []string{}
+	}
 	encodedEndpoints, err := json.Marshal(endpoints)
 	if err != nil {
 		return errors.New("endpoint advertisement is invalid")
