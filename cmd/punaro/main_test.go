@@ -181,7 +181,10 @@ func TestRealV5UpdateBackupReceiptRestoreAndRecoveryRetry(t *testing.T) {
 		}
 		defer func() { _ = database.Close() }()
 		owner := punaropostgres.Principal{ID: "019b4eb0-c447-7c76-b73f-f442bab67061", Kind: punaropostgres.PrincipalKindOwner, DisplayName: name}
-		if _, insertErr := database.ExecContext(initCtx, `INSERT INTO auth.principals(id,kind,display_name) VALUES ($1,'owner',$2); INSERT INTO auth.installation_owner(principal_id) VALUES ($1)`, owner.ID, owner.DisplayName); insertErr != nil {
+		if _, insertErr := database.ExecContext(initCtx, `INSERT INTO auth.principals(id,kind,display_name) VALUES ($1,'owner',$2)`, owner.ID, owner.DisplayName); insertErr != nil {
+			return punaropostgres.Principal{}, insertErr
+		}
+		if _, insertErr := database.ExecContext(initCtx, `INSERT INTO auth.installation_owner(principal_id) VALUES ($1)`, owner.ID); insertErr != nil {
 			return punaropostgres.Principal{}, insertErr
 		}
 		return owner, nil

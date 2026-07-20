@@ -332,7 +332,8 @@ WITH objects AS (
 	), table_safety AS (
 		SELECT relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity
 		   AND pg_get_userbyid(relation.relowner)='punaro_owner'
-		   AND (SELECT count(*)=7 AND bool_and(grantee.rolname='punaro_owner' AND NOT acl.is_grantable)
+		   AND (SELECT count(*)=CASE WHEN current_setting('server_version_num')::integer/10000 >= 15 THEN 8 ELSE 7 END
+		        AND bool_and(grantee.rolname='punaro_owner' AND NOT acl.is_grantable)
 		        FROM LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
 		        LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee)
 		   AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=relation.oid AND attnum>0 AND attacl IS NOT NULL) AS safe
@@ -357,7 +358,7 @@ SELECT updates_oid IS NOT NULL AND active_index_oid IS NOT NULL
 	        AND NOT index.indisprimary AND NOT index.indisexclusion AND NOT index.indisclustered
 	        AND index.indrelid = updates_oid AND index.indnkeyatts=1 AND index.indnatts=1 AND index.indkey::text='0'
 	        AND index.indcollation::text='0' AND index.indoption::text='0'
-	        AND index.indclass[0]=(SELECT oid FROM pg_opclass WHERE opcname='bool_ops' AND opcmethod=access_method.oid)
+	        AND index.indclass::oid[]=ARRAY[(SELECT oid FROM pg_opclass WHERE opcname='bool_ops' AND opcmethod=access_method.oid)]::oid[]
 	        AND index_relation.relkind='i' AND pg_get_userbyid(index_relation.relowner)='punaro_owner' AND access_method.amname='btree'
 	        AND pg_get_expr(index.indexprs,index.indrelid)='true'
 	        AND pg_get_expr(index.indpred,index.indrelid) = '(phase <> ALL (ARRAY[''committed''::text, ''recovered''::text, ''aborted''::text]))'
