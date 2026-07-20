@@ -41,6 +41,14 @@ var (
 		defer func() { _ = database.Close() }()
 		return database.InstallationOwner(ctx)
 	}
+	maintenanceActive = func(ctx context.Context, dsnFile string) (bool, error) {
+		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: dsnFile})
+		if err != nil {
+			return false, err
+		}
+		defer func() { _ = database.Close() }()
+		return database.MaintenanceActive(ctx)
+	}
 	migratePristinePair = func(ctx context.Context, appDSNFile, ownerDSNFile string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.MigratePristinePair(ctx, punaropostgres.Config{DSNFile: appDSNFile}, punaropostgres.Config{DSNFile: ownerDSNFile})
 	}
@@ -135,6 +143,7 @@ var (
 
 type restoreRequest struct {
 	BackupDirectory string
+	RecoveryReceipt string
 	Directory       string
 	DataDir         string
 	BackupDir       string
@@ -310,7 +319,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|backup|restore")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|backup|restore|update")
 		return 2
 	}
 	switch args[0] {
@@ -330,6 +339,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runBackup(args[1:], stdout, stderr)
 	case "restore":
 		return runRestore(args[1:], stdout, stderr)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr)
 	}
 	_, _ = fmt.Fprintln(stderr, "unsupported operator command")
 	return 2
@@ -423,6 +434,15 @@ func runUp(args []string, stdout, stderr io.Writer) int {
 		return 1
 	default:
 		_, _ = fmt.Fprintf(stderr, "punaro up refused: schema is %s; follow the documented recovery procedure\n", state.Classification)
+		return 1
+	}
+	active, err := maintenanceActive(context.Background(), installation.AppDSNFile)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro up refused: maintenance state is unavailable")
+		return 1
+	}
+	if active {
+		_, _ = fmt.Fprintln(stderr, "punaro up refused: an update transaction owns the maintenance fence; resume with punaro update")
 		return 1
 	}
 	if err := verifyInstallationPair(context.Background(), installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
@@ -662,6 +682,7 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 	backupDir := flags.String("backup-dir", "", "existing private backup root for the restored stack")
 	ownerDSN := flags.String("owner-dsn-file", "", "protected target schema-owner DSN file")
 	appDSN := flags.String("app-dsn-file", "", "protected target application DSN file")
+	updateReceipt := flags.String("update-receipt", "", "protected host receipt for an update recovery backup")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *backupDirectory == "" || *directory == "" || *dataDir == "" || *backupDir == "" || *ownerDSN == "" || *appDSN == "" {
 		return 2
 	}
@@ -670,7 +691,10 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 	}
-	state, err := restoreOperatorBackup(context.Background(), restoreRequest{BackupDirectory: *backupDirectory, Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN})
+	if *updateReceipt != "" && (!filepath.IsAbs(*updateReceipt) || filepath.Clean(*updateReceipt) != *updateReceipt) {
+		return 2
+	}
+	state, err := restoreOperatorBackup(context.Background(), restoreRequest{BackupDirectory: *backupDirectory, RecoveryReceipt: *updateReceipt, Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN})
 	if err != nil {
 		var operationErr *punarobackup.OperationError
 		if errors.As(err, &operationErr) && operationErr.Phase != punarobackup.PhasePreflight {
@@ -684,30 +708,45 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 }
 
 func createBackup(ctx context.Context, installation operator.Installation) (punarobackup.Manifest, string, error) {
+	manifest, path, _, err := createBackupWithUpdate(ctx, installation, nil)
+	return manifest, path, err
+}
+
+func createUpdateBackup(ctx context.Context, installation operator.Installation, transaction punaropostgres.UpdateTransaction) (punarobackup.Manifest, string, punaropostgres.UpdateBackupMarker, error) {
+	return createBackupWithUpdate(ctx, installation, &transaction)
+}
+
+func createBackupWithUpdate(ctx context.Context, installation operator.Installation, transaction *punaropostgres.UpdateTransaction) (punarobackup.Manifest, string, punaropostgres.UpdateBackupMarker, error) {
 	if failures := operator.CheckPaths(installation); len(failures) != 0 {
-		return punarobackup.Manifest{}, "", errors.New("installation safety checks failed")
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("installation safety checks failed")
 	}
 	state, err := inspectSchema(ctx, installation.AppDSNFile)
-	if err != nil || state.Classification != punaropostgres.Compatible {
-		return punarobackup.Manifest{}, "", errors.New("database schema is not compatible")
+	bridgeBackup := transaction != nil && transaction.Phase == punaropostgres.UpdateWritersStopped && state.Classification == punaropostgres.UpgradeRequired && state.Version == transaction.SourceSchema
+	if err != nil || (state.Classification != punaropostgres.Compatible && !bridgeBackup) {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("database schema is not compatible")
 	}
 	if err := verifyInstallationPair(ctx, installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
-		return punarobackup.Manifest{}, "", err
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
 	}
 	owner, err := inspectOwner(ctx, installation.AppDSNFile)
 	if err != nil || owner.ID != installation.OwnerPrincipalID {
-		return punarobackup.Manifest{}, "", errors.New("installation owner does not match configuration")
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("installation owner does not match configuration")
 	}
 	database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
 	if err != nil {
-		return punarobackup.Manifest{}, "", err
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
 	}
 	defer func() { _ = database.Close() }()
-	source, err := punaropostgres.NewBackupSource(database, installation.OwnerDSNFile, pgDumpSnapshot)
-	if err != nil {
-		return punarobackup.Manifest{}, "", err
+	var source *punaropostgres.BackupSource
+	if transaction == nil {
+		source, err = punaropostgres.NewBackupSource(database, installation.OwnerDSNFile, pgDumpSnapshot)
+	} else {
+		source, err = punaropostgres.NewUpdateBackupSource(database, installation.OwnerDSNFile, transaction.UpdateID, pgDumpSnapshot)
 	}
-	return punarobackup.Create(ctx, punarobackup.CreateOptions{
+	if err != nil {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
+	}
+	options := punarobackup.CreateOptions{
 		BackupRoot:       installation.BackupDir,
 		BlobRoot:         filepath.Join(installation.DataDir, "blobs"),
 		InstallationFile: operator.ConfigFile(installation.Directory),
@@ -715,7 +754,31 @@ func createBackup(ctx context.Context, installation operator.Installation) (puna
 		ComposeFile:      operator.OverrideFile(installation.Directory),
 		OwnerDSNFile:     installation.OwnerDSNFile,
 		AppDSNFile:       installation.AppDSNFile,
-	}, source)
+	}
+	if transaction != nil {
+		_, digest, found := strings.Cut(transaction.TargetImage, "@")
+		if !found {
+			return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, errors.New("update target image is invalid")
+		}
+		options.Update = &punarobackup.UpdateTarget{UpdateID: transaction.UpdateID, TargetRelease: transaction.TargetRelease, TargetImageDigest: digest}
+	}
+	manifest, path, err := punarobackup.Create(ctx, options, source)
+	if err != nil || transaction == nil {
+		return manifest, path, punaropostgres.UpdateBackupMarker{}, err
+	}
+	binding, err := punarobackup.BuildUpdateBinding(path)
+	if err != nil {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
+	}
+	if _, err := punarobackup.VerifyForUpdate(path, binding); err != nil {
+		return punarobackup.Manifest{}, "", punaropostgres.UpdateBackupMarker{}, err
+	}
+	return manifest, path, punaropostgres.UpdateBackupMarker{
+		UpdateID: binding.UpdateID, BackupID: manifest.BackupID, InstallationID: binding.InstallationID,
+		TimelineID: binding.TimelineID, ChangeSequence: binding.ChangeSequence, SourceSchema: binding.SourceSchema,
+		TargetRelease: binding.TargetRelease, TargetImageDigest: binding.TargetImageDigest,
+		ExportedSnapshotID: binding.ExportedSnapshotID, ManifestSHA256: binding.ManifestSHA256,
+	}, nil
 }
 
 func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.State, error) {
@@ -723,7 +786,38 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 	if err != nil {
 		return punarobackup.State{}, err
 	}
-	if manifest.SchemaVersion != punaropostgres.CurrentManifest().MaxSupported {
+	var updateMarker *punaropostgres.UpdateBackupMarker
+	receiptDigest := ""
+	if manifest.Update != nil {
+		if request.RecoveryReceipt == "" {
+			return punarobackup.State{}, errors.New("update recovery requires an independent host receipt")
+		}
+		receipt, digest, receiptErr := operator.LoadUpdateRecoveryReceipt(request.RecoveryReceipt)
+		if receiptErr != nil {
+			return punarobackup.State{}, errors.New("update recovery receipt is unavailable or invalid")
+		}
+		binding, bindingErr := punarobackup.BuildUpdateBinding(request.BackupDirectory)
+		if bindingErr != nil {
+			return punarobackup.State{}, errors.New("update recovery binding is unavailable")
+		}
+		if _, verifyErr := punarobackup.VerifyForUpdate(request.BackupDirectory, binding); verifyErr != nil {
+			return punarobackup.State{}, errors.New("update recovery binding is invalid")
+		}
+		canonicalBackup, canonicalErr := filepath.EvalSymlinks(request.BackupDirectory)
+		if canonicalErr != nil || receipt.BackupDirectory != canonicalBackup || receipt.BackupID != manifest.BackupID || !receiptMatchesBinding(receipt, binding) {
+			return punarobackup.State{}, errors.New("update recovery receipt does not match the verified backup")
+		}
+		receiptDigest = digest
+		updateMarker = &punaropostgres.UpdateBackupMarker{
+			UpdateID: binding.UpdateID, BackupID: manifest.BackupID, InstallationID: binding.InstallationID,
+			TimelineID: binding.TimelineID, ChangeSequence: binding.ChangeSequence, SourceSchema: binding.SourceSchema,
+			TargetRelease: binding.TargetRelease, TargetImageDigest: binding.TargetImageDigest,
+			ExportedSnapshotID: binding.ExportedSnapshotID, ManifestSHA256: binding.ManifestSHA256,
+		}
+	} else if request.RecoveryReceipt != "" {
+		return punarobackup.State{}, errors.New("ordinary restore does not accept an update recovery receipt")
+	}
+	if manifest.SchemaVersion != punaropostgres.CurrentManifest().MaxSupported && (updateMarker == nil || manifest.SchemaVersion != updateMarker.SourceSchema) {
 		return punarobackup.State{}, errors.New("backup schema version is not exactly supported by this restore binary")
 	}
 	canonicalSource, err := filepath.EvalSymlinks(request.BackupDirectory)
@@ -781,6 +875,12 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		AppDSNFile:            canonicalAppDSN,
 		DatabaseIdentity:      targetIdentity,
 	}
+	if updateMarker != nil {
+		target.UpdateID = updateMarker.UpdateID
+		target.ManifestSHA256 = updateMarker.ManifestSHA256
+		target.RecoveryReceiptFile = request.RecoveryReceipt
+		target.RecoveryReceiptSHA256 = receiptDigest
+	}
 	finalizationStage := ""
 	state, err := punarobackup.Restore(ctx, punarobackup.RestoreOptions{
 		BackupDirectory: request.BackupDirectory,
@@ -817,7 +917,10 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 					return err
 				}
 				return pgRestoreDump(restoreCtx, request.OwnerDSNFile, dump)
-			case punaropostgres.Compatible:
+			case punaropostgres.Compatible, punaropostgres.UpgradeRequired:
+				if targetState.Classification == punaropostgres.UpgradeRequired && (updateMarker == nil || targetState.Version != updateMarker.SourceSchema) {
+					break
+				}
 				database, openErr := punaropostgres.OpenApplication(restoreCtx, punaropostgres.Config{DSNFile: request.AppDSNFile})
 				if openErr != nil {
 					return openErr
@@ -836,14 +939,33 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 				return punarobackup.State{}, openErr
 			}
 			defer func() { _ = admin.Close() }()
+			if updateMarker != nil {
+				rotated, _, rotateErr := admin.RestoreUpdateRecovery(rotateCtx, *updateMarker)
+				return punarobackup.State{InstallationID: rotated.InstallationID, TimelineID: rotated.TimelineID, ChangeSequence: rotated.ChangeSequence}, rotateErr
+			}
 			rotated, rotateErr := admin.RotateRestoredTimeline(rotateCtx, verified.BackupID, punaropostgres.InstallationState{InstallationID: verified.State.InstallationID, TimelineID: verified.State.TimelineID, ChangeSequence: verified.State.ChangeSequence})
 			return punarobackup.State{InstallationID: rotated.InstallationID, TimelineID: rotated.TimelineID, ChangeSequence: rotated.ChangeSequence}, rotateErr
 		},
 		Finalize: func(finalizeCtx context.Context, finalized punarobackup.State) error {
 			finalizationStage = "schema"
 			schema, inspectErr := inspectSchema(finalizeCtx, request.AppDSNFile)
-			if inspectErr != nil || schema.Classification != punaropostgres.Compatible || schema.Version != punaropostgres.CurrentManifest().MaxSupported || schema.Version != manifest.SchemaVersion {
+			schemaMatches := inspectErr == nil && schema.Version == manifest.SchemaVersion && schema.Classification == punaropostgres.Compatible
+			if updateMarker != nil {
+				schemaMatches = inspectErr == nil && schema.Version == updateMarker.SourceSchema && (schema.Classification == punaropostgres.Compatible || schema.Classification == punaropostgres.UpgradeRequired)
+			}
+			if !schemaMatches {
 				return errors.New("restored database schema is not the exact supported backup schema")
+			}
+			if updateMarker != nil {
+				admin, openErr := punaropostgres.OpenAdministration(finalizeCtx, punaropostgres.Config{DSNFile: request.OwnerDSNFile})
+				if openErr != nil {
+					return errors.New("restored update controls are unavailable")
+				}
+				active, activeErr := admin.ActiveUpdate(finalizeCtx)
+				closeErr := admin.Close()
+				if activeErr != nil || closeErr != nil || active.UpdateID != updateMarker.UpdateID || active.Phase != punaropostgres.UpdateRecoveryRequired || active.BackupManifestSHA256 != updateMarker.ManifestSHA256 {
+					return errors.New("restored update transaction does not match the backup")
+				}
 			}
 			finalizationStage = "roles"
 			if err := verifyInstallationPair(finalizeCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
@@ -882,6 +1004,14 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		return punarobackup.State{}, errors.New("restored installation identity changed")
 	}
 	return state, nil
+}
+
+func receiptMatchesBinding(receipt operator.UpdateRecoveryReceipt, binding punarobackup.UpdateBinding) bool {
+	return receipt.UpdateID == binding.UpdateID && receipt.InstallationID == binding.InstallationID &&
+		receipt.TimelineID == binding.TimelineID && receipt.ChangeSequence == binding.ChangeSequence &&
+		receipt.SourceSchema == binding.SourceSchema && receipt.TargetRelease == binding.TargetRelease &&
+		receipt.TargetImageDigest == binding.TargetImageDigest && receipt.ExportedSnapshotID == binding.ExportedSnapshotID &&
+		receipt.ManifestSHA256 == binding.ManifestSHA256
 }
 
 func postgresDatabaseIdentity(ctx context.Context, appDSNFile string) (string, error) {

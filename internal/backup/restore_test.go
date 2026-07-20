@@ -234,6 +234,24 @@ func restoreTargetFixture(parent string) RestoreTarget {
 	}
 }
 
+func TestRestoreTargetBindsUpdateManifestIdentityTogether(t *testing.T) {
+	target := restoreTargetFixture(t.TempDir())
+	target.UpdateID = "019b4eb0-21f8-7d93-84df-10e6cf05ce53"
+	if validRestoreTarget(target) {
+		t.Fatal("restore target accepted update identity without manifest digest")
+	}
+	target.ManifestSHA256 = strings.Repeat("b", 64)
+	target.RecoveryReceiptFile = filepath.Join(t.TempDir(), "recovery.json")
+	target.RecoveryReceiptSHA256 = strings.Repeat("c", 64)
+	if !validRestoreTarget(target) {
+		t.Fatal("restore target rejected exact update journal binding")
+	}
+	target.UpdateID = "invalid"
+	if validRestoreTarget(target) {
+		t.Fatal("restore target accepted invalid update identity")
+	}
+}
+
 func createRestoreFixture(t *testing.T, withBlob bool) (string, Manifest) {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "backup")

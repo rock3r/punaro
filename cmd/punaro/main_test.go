@@ -136,6 +136,181 @@ func TestRealPostgresBackupRestoreCleanStackAndRetry(t *testing.T) {
 	}
 }
 
+func TestRealV5UpdateBackupReceiptRestoreAndRecoveryRetry(t *testing.T) {
+	sourceOwnerDSN := os.Getenv("PUNARO_TEST_UPDATE_SOURCE_OWNER_DSN")
+	sourceAppDSN := os.Getenv("PUNARO_TEST_UPDATE_SOURCE_APP_DSN")
+	targetOwnerDSN := os.Getenv("PUNARO_TEST_UPDATE_TARGET_OWNER_DSN")
+	targetAppDSN := os.Getenv("PUNARO_TEST_UPDATE_TARGET_APP_DSN")
+	if sourceOwnerDSN == "" || sourceAppDSN == "" || targetOwnerDSN == "" || targetAppDSN == "" {
+		t.Skip("set the PUNARO_TEST_UPDATE_* DSNs to run the v5 update recovery gate")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private integration-test root.
+		t.Fatal(err)
+	}
+	writeDSN := func(name, dsn string) string {
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(dsn+"\n"), 0o600); err != nil { // #nosec G703 -- fixed fixture labels.
+			t.Fatal(err)
+		}
+		return path
+	}
+	sourceOwner := writeDSN("update-source-owner.dsn", sourceOwnerDSN)
+	sourceApp := writeDSN("update-source-app.dsn", sourceAppDSN)
+	targetOwner := writeDSN("update-target-owner.dsn", targetOwnerDSN)
+	targetApp := writeDSN("update-target-app.dsn", targetAppDSN)
+	stageV5Database(ctx, t, sourceOwnerDSN)
+
+	sourceData := filepath.Join(root, "update-source-data")
+	sourceBackups := filepath.Join(root, "update-source-backups")
+	targetBackups := filepath.Join(root, "update-target-backups")
+	for _, directory := range []string{filepath.Join(sourceData, "blobs", "ready"), sourceBackups, targetBackups} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceInstallation, err := operator.Init(ctx, operator.InitOptions{
+		Directory: filepath.Join(root, "update-source-installation"), DataDir: sourceData, BackupDir: sourceBackups,
+		Image: cliTestImage, OwnerDSNFile: sourceOwner, AppDSNFile: sourceApp, OwnerName: "Update restore integration owner",
+		Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"},
+	}, func(initCtx context.Context, _ string, name string) (punaropostgres.Principal, error) {
+		database, openErr := sql.Open("pgx", sourceOwnerDSN)
+		if openErr != nil {
+			return punaropostgres.Principal{}, openErr
+		}
+		defer func() { _ = database.Close() }()
+		owner := punaropostgres.Principal{ID: "019b4eb0-c447-7c76-b73f-f442bab67061", Kind: punaropostgres.PrincipalKindOwner, DisplayName: name}
+		if _, insertErr := database.ExecContext(initCtx, `INSERT INTO auth.principals(id,kind,display_name) VALUES ($1,'owner',$2)`, owner.ID, owner.DisplayName); insertErr != nil {
+			return punaropostgres.Principal{}, insertErr
+		}
+		if _, insertErr := database.ExecContext(initCtx, `INSERT INTO auth.installation_owner(principal_id) VALUES ($1)`, owner.ID); insertErr != nil {
+			return punaropostgres.Principal{}, insertErr
+		}
+		return owner, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceDB, err := sql.Open("pgx", sourceOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sourceDB.Close() }()
+	var postgresMajor int
+	if err := sourceDB.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::integer / 10000`).Scan(&postgresMajor); err != nil {
+		t.Fatal(err)
+	}
+	targetImage := "registry.example/punaro@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	updateRequest := punaropostgres.UpdateRequest{
+		UpdateID: "019b4eb0-798c-7a52-8d29-8560fcbb2083", SourceRelease: "v0.6.0", TargetRelease: "v0.7.0",
+		SourceImage: cliTestImage, TargetImage: targetImage, SourceSchema: 5, TargetSchema: 6, SchemaMin: 5, SchemaMax: 6, RollbackFloor: 5,
+		PostgresMajor: postgresMajor, ReleaseSHA256: strings.Repeat("b", 64), ComposeSHA256: strings.Repeat("c", 64),
+		MigrationManifestSHA256: punaropostgres.MigrationManifestSHA256(),
+	}
+	bridge, err := punaropostgres.BeginV5UpdateBridge(ctx, punaropostgres.Config{DSNFile: sourceOwner}, updateRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transaction, err := bridge.CommitWritersStopped(ctx)
+	if err != nil || transaction.Phase != punaropostgres.UpdateWritersStopped {
+		t.Fatalf("v5 bridge transaction=%#v err=%v", transaction, err)
+	}
+	stage := operator.UpdateStage{Directory: sourceInstallation.Directory, UpdateID: updateRequest.UpdateID, PreviousRelease: updateRequest.SourceRelease, PreviousImage: updateRequest.SourceImage, TargetRelease: updateRequest.TargetRelease, TargetImage: updateRequest.TargetImage}
+	staged, err := operator.StageUpdate(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &commandUpdateExecutor{installation: sourceInstallation, request: updateRequest, stage: stage, staged: staged}
+	marker, err := executor.Backup(ctx, transaction)
+	if err != nil {
+		t.Fatalf("v5 update backup: %v", err)
+	}
+	receiptFile := operator.UpdateRecoveryReceiptFile(sourceInstallation.Directory)
+	if _, _, err := operator.LoadUpdateRecoveryReceipt(receiptFile); err != nil {
+		t.Fatalf("independent recovery receipt: %v", err)
+	}
+	sourceAdmin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: sourceOwner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transaction, err = sourceAdmin.AdvanceUpdate(ctx, transaction.UpdateID, punaropostgres.UpdateWritersStopped, punaropostgres.UpdateBackupVerified, &marker); err != nil || transaction.Phase != punaropostgres.UpdateBackupVerified {
+		_ = sourceAdmin.Close()
+		t.Fatalf("record v5 backup marker transaction=%#v err=%v", transaction, err)
+	}
+	if err := sourceAdmin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	receipt, _, err := operator.LoadUpdateRecoveryReceipt(receiptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restore := restoreRequest{
+		BackupDirectory: receipt.BackupDirectory, RecoveryReceipt: receiptFile,
+		Directory: filepath.Join(root, "update-target-installation"), DataDir: filepath.Join(root, "update-target-data"), BackupDir: targetBackups,
+		OwnerDSNFile: targetOwner, AppDSNFile: targetApp,
+	}
+	restored, err := restoreBackup(ctx, restore)
+	if err != nil {
+		t.Fatalf("receipt-bound v5 restore: %v", err)
+	}
+	if retried, retryErr := restoreBackup(ctx, restore); retryErr != nil || retried != restored {
+		t.Fatalf("receipt-bound restore retry=%#v err=%v", retried, retryErr)
+	}
+	targetAdmin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: targetOwner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = targetAdmin.Close() }()
+	active, err := targetAdmin.ActiveUpdate(ctx)
+	if err != nil || active.UpdateID != updateRequest.UpdateID || active.Phase != punaropostgres.UpdateRecoveryRequired || active.BackupManifestSHA256 != marker.ManifestSHA256 {
+		t.Fatalf("restored active update=%#v err=%v", active, err)
+	}
+	for _, transition := range [][2]punaropostgres.UpdatePhase{{punaropostgres.UpdateRecoveryRequired, punaropostgres.UpdateRecoveryReady}, {punaropostgres.UpdateRecoveryReady, punaropostgres.UpdateRecoveryDoctor}, {punaropostgres.UpdateRecoveryDoctor, punaropostgres.UpdateRecoveryConfig}, {punaropostgres.UpdateRecoveryConfig, punaropostgres.UpdateRecovered}} {
+		active, err = targetAdmin.AdvanceUpdate(ctx, active.UpdateID, transition[0], transition[1], nil)
+		if err != nil || active.Phase != transition[1] {
+			t.Fatalf("recovery transition %s -> %s active=%#v err=%v", transition[0], transition[1], active, err)
+		}
+	}
+}
+
+func stageV5Database(ctx context.Context, t *testing.T, ownerDSN string) {
+	t.Helper()
+	database, err := sql.Open("pgx", ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = database.Close() }()
+	migrations := punaropostgres.CurrentManifest().Migrations[:5]
+	for index, migration := range migrations {
+		tx, beginErr := database.BeginTx(ctx, nil)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if index == 0 {
+			_, err = tx.ExecContext(ctx, `CREATE SCHEMA jobs; CREATE TABLE jobs.schema_migrations (version bigint PRIMARY KEY,name text NOT NULL,checksum char(64) NOT NULL,compatibility_floor bigint NOT NULL,status text NOT NULL CHECK (status IN ('applying','applied')),started_at timestamptz NOT NULL DEFAULT statement_timestamp(),applied_at timestamptz)`)
+		} else {
+			_, err = tx.ExecContext(ctx, `INSERT INTO jobs.schema_migrations(version,name,checksum,compatibility_floor,status) VALUES ($1,$2,$3,$4,'applying')`, migration.Version, migration.Name, migration.Checksum, migration.CompatibilityFloor)
+		}
+		if err == nil && index == 0 {
+			_, err = tx.ExecContext(ctx, `INSERT INTO jobs.schema_migrations(version,name,checksum,compatibility_floor,status) VALUES ($1,$2,$3,$4,'applying')`, migration.Version, migration.Name, migration.Checksum, migration.CompatibilityFloor)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, migration.SQL)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE jobs.schema_migrations SET status='applied',applied_at=statement_timestamp() WHERE version=$1 AND status='applying'`, migration.Version)
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("stage v5 migration %d: %v", migration.Version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func restoreTargetDiagnostic(ctx context.Context, ownerDSNFile, appDSNFile, sourceOwnerDSN, ownerDSN string) string {
 	db, err := sql.Open("pgx", ownerDSN)
 	if err != nil {
@@ -244,13 +419,13 @@ func testInstallation(t *testing.T) string {
 
 func preserveDependencies(t *testing.T) {
 	t.Helper()
-	originalInspect, originalOwner, originalMigrate := inspectSchema, inspectOwner, migratePristinePair
+	originalInspect, originalOwner, originalMigrate, originalMaintenance := inspectSchema, inspectOwner, migratePristinePair, maintenanceActive
 	originalCreate, originalRecover := createOwner, recoverInstallationOwner
 	originalVerify := verifyInstallationPair
 	originalStart, originalProbe, originalIssue := startServices, probe, issueEnrollment
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	t.Cleanup(func() {
-		inspectSchema, inspectOwner, migratePristinePair = originalInspect, originalOwner, originalMigrate
+		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
 		createOwner, recoverInstallationOwner = originalCreate, originalRecover
 		verifyInstallationPair = originalVerify
 		startServices, probe = originalStart, originalProbe
@@ -263,6 +438,22 @@ func preserveDependencies(t *testing.T) {
 	verifyInstallationPair = func(context.Context, string, string) error { return nil }
 	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+	}
+	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
+}
+
+func TestUpRefusesActiveUpdateBeforeStartingWriters(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 6}, nil
+	}
+	maintenanceActive = func(context.Context, string) (bool, error) { return true, nil }
+	started := false
+	startServices = func(context.Context, operator.Installation) error { started = true; return nil }
+	var stderr bytes.Buffer
+	if code := run([]string{"up", "--directory", directory}, io.Discard, &stderr); code != 1 || started || !strings.Contains(stderr.String(), "punaro update") {
+		t.Fatalf("code=%d started=%t stderr=%q", code, started, stderr.String())
 	}
 }
 
@@ -327,6 +518,16 @@ func TestRestoreCommandRequiresExplicitNewStackInputs(t *testing.T) {
 	}
 	if code := run([]string{"restore", "--backup", backupPath}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("incomplete restore code=%d, want 2", code)
+	}
+}
+
+func TestRunRoutesUpdateCommand(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := run([]string{"update"}, io.Discard, &stderr); code != 2 {
+		t.Fatalf("run(update) = %d, want 2", code)
+	}
+	if strings.Contains(stderr.String(), "unsupported operator command") {
+		t.Fatalf("update command was not routed: %q", stderr.String())
 	}
 }
 

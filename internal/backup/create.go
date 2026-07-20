@@ -51,6 +51,16 @@ type CreateOptions struct {
 	AppDSNFile       string
 	Now              func() time.Time
 	NewID            func() string
+	Update           *UpdateTarget
+}
+
+// UpdateTarget requests a v2 manifest for one update transaction. Source
+// coordinates are derived from the exported snapshot and cannot be supplied by
+// the caller.
+type UpdateTarget struct {
+	UpdateID          string
+	TargetRelease     string
+	TargetImageDigest string
 }
 
 // Create publishes a backup only after its exact snapshot dump, configuration,
@@ -85,9 +95,21 @@ func Create(ctx context.Context, options CreateOptions, source Source) (Manifest
 			_ = snapshot.Finish(abortCtx, false)
 		}
 	}()
-	manifest := Manifest{Version: 1, BackupID: backupID, CreatedAt: createdAt, SnapshotID: snapshot.ID, SchemaVersion: snapshot.SchemaVersion, State: snapshot.State, ExternalDependencies: []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"}}
 	if err := validateSnapshot(snapshot); err != nil {
 		return Manifest{}, "", err
+	}
+	manifest := Manifest{Version: 1, BackupID: backupID, CreatedAt: createdAt, SnapshotID: snapshot.ID, SchemaVersion: snapshot.SchemaVersion, State: snapshot.State, ExternalDependencies: []string{"host-tls", "oauth", "reverse-proxy", "telegram", "tunnel"}}
+	if options.Update != nil {
+		manifest.Version = 2
+		manifest.Update = &UpdateMetadata{
+			UpdateID: options.Update.UpdateID, SourceSchema: snapshot.SchemaVersion,
+			InstallationID: snapshot.State.InstallationID, TimelineID: snapshot.State.TimelineID,
+			ChangeSequence: snapshot.State.ChangeSequence, TargetRelease: options.Update.TargetRelease,
+			TargetImageDigest: options.Update.TargetImageDigest, ExportedSnapshotID: snapshot.ID,
+		}
+		if err := validateUpdateMetadata(*manifest.Update); err != nil {
+			return Manifest{}, "", errors.New("backup update target is invalid")
+		}
 	}
 	if len(snapshot.ReadyBlobs) != 0 && trustedPrivateDirectory(options.BlobRoot) != nil {
 		return Manifest{}, "", errors.New("READY blob root is unavailable or unsafe")

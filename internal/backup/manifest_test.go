@@ -28,6 +28,129 @@ func TestVerifyAcceptsExactPrivateBackup(t *testing.T) {
 	}
 }
 
+func TestVerifyForUpdateRequiresExactV2ManifestBinding(t *testing.T) {
+	directory := t.TempDir()
+	requirePrivate(t, directory)
+	paths := writeRequiredTestFiles(t, directory)
+	manifest := testManifest(t, directory, paths)
+	manifest.Version = 2
+	manifest.Update = &UpdateMetadata{
+		UpdateID:           "0190ea2e-8a2d-7d42-b320-8515f7604bc1",
+		SourceSchema:       manifest.SchemaVersion,
+		InstallationID:     manifest.State.InstallationID,
+		TimelineID:         manifest.State.TimelineID,
+		ChangeSequence:     manifest.State.ChangeSequence,
+		TargetRelease:      "v0.7.0-rc.1",
+		TargetImageDigest:  "sha256:" + strings.Repeat("a", 64),
+		ExportedSnapshotID: manifest.SnapshotID,
+	}
+	writeManifest(t, directory, manifest)
+
+	binding, err := BuildUpdateBinding(directory)
+	if err != nil {
+		t.Fatalf("build update binding: %v", err)
+	}
+	verified, err := VerifyForUpdate(directory, binding)
+	if err != nil {
+		t.Fatalf("verify for update: %v", err)
+	}
+	if verified.Update == nil || binding.UpdateID != verified.Update.UpdateID || len(binding.ManifestSHA256) != 64 {
+		t.Fatalf("unexpected verified binding: %#v, %#v", verified.Update, binding)
+	}
+
+	// The decoded manifest remains identical, but the marker must bind the exact
+	// published bytes rather than merely equivalent JSON values.
+	body, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawManifest(t, directory, append(body, '\n'))
+	if _, err := Verify(directory); err != nil {
+		t.Fatalf("ordinary verification after canonical rewrite: %v", err)
+	}
+	if _, err := VerifyForUpdate(directory, binding); err == nil {
+		t.Fatal("update verification accepted a replaced manifest")
+	}
+}
+
+func TestVerifyRejectsMalformedV2UpdateMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Manifest)
+	}{
+		{name: "missing metadata", mutate: func(manifest *Manifest) { manifest.Update = nil }},
+		{name: "partial metadata", mutate: func(manifest *Manifest) { manifest.Update.TargetRelease = "" }},
+		{name: "source schema mismatch", mutate: func(manifest *Manifest) { manifest.Update.SourceSchema++ }},
+		{name: "installation mismatch", mutate: func(manifest *Manifest) { manifest.Update.InstallationID = "5e02b0e5-1934-4dda-9c4a-767c120c2fac" }},
+		{name: "timeline mismatch", mutate: func(manifest *Manifest) { manifest.Update.TimelineID = "897476ad-8fdc-4c05-b144-3ccbb92b54bf" }},
+		{name: "change sequence mismatch", mutate: func(manifest *Manifest) { manifest.Update.ChangeSequence++ }},
+		{name: "snapshot mismatch", mutate: func(manifest *Manifest) { manifest.Update.ExportedSnapshotID = "00000003-0000001B-2" }},
+		{name: "release path", mutate: func(manifest *Manifest) { manifest.Update.TargetRelease = "../v0.7.0" }},
+		{name: "unpinned image", mutate: func(manifest *Manifest) { manifest.Update.TargetImageDigest = "registry.example/punaro:latest" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			requirePrivate(t, directory)
+			paths := writeRequiredTestFiles(t, directory)
+			manifest := testManifest(t, directory, paths)
+			manifest.Version = 2
+			manifest.Update = &UpdateMetadata{
+				UpdateID: "0190ea2e-8a2d-7d42-b320-8515f7604bc1", SourceSchema: manifest.SchemaVersion,
+				InstallationID: manifest.State.InstallationID, TimelineID: manifest.State.TimelineID,
+				ChangeSequence: manifest.State.ChangeSequence, TargetRelease: "v0.7.0",
+				TargetImageDigest: "sha256:" + strings.Repeat("a", 64), ExportedSnapshotID: manifest.SnapshotID,
+			}
+			test.mutate(&manifest)
+			writeManifest(t, directory, manifest)
+			if _, err := Verify(directory); err == nil {
+				t.Fatal("malformed v2 manifest was accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyForUpdateRejectsPartialOrMismatchedBinding(t *testing.T) {
+	directory := t.TempDir()
+	requirePrivate(t, directory)
+	paths := writeRequiredTestFiles(t, directory)
+	manifest := testManifest(t, directory, paths)
+	manifest.Version = 2
+	manifest.Update = &UpdateMetadata{
+		UpdateID: "0190ea2e-8a2d-7d42-b320-8515f7604bc1", SourceSchema: manifest.SchemaVersion,
+		InstallationID: manifest.State.InstallationID, TimelineID: manifest.State.TimelineID,
+		ChangeSequence: manifest.State.ChangeSequence, TargetRelease: "v0.7.0",
+		TargetImageDigest: "sha256:" + strings.Repeat("a", 64), ExportedSnapshotID: manifest.SnapshotID,
+	}
+	writeManifest(t, directory, manifest)
+	binding, err := BuildUpdateBinding(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*UpdateBinding)
+	}{
+		{name: "partial", mutate: func(binding *UpdateBinding) { binding.TargetRelease = "" }},
+		{name: "update ID", mutate: func(binding *UpdateBinding) { binding.UpdateID = "0290ea2e-8a2d-7d42-b320-8515f7604bc1" }},
+		{name: "source schema", mutate: func(binding *UpdateBinding) { binding.SourceSchema++ }},
+		{name: "state", mutate: func(binding *UpdateBinding) { binding.ChangeSequence++ }},
+		{name: "target", mutate: func(binding *UpdateBinding) { binding.TargetRelease = "v0.7.1" }},
+		{name: "image digest", mutate: func(binding *UpdateBinding) { binding.TargetImageDigest = "sha256:" + strings.Repeat("b", 64) }},
+		{name: "snapshot", mutate: func(binding *UpdateBinding) { binding.ExportedSnapshotID = "00000003-0000001B-2" }},
+		{name: "manifest digest", mutate: func(binding *UpdateBinding) { binding.ManifestSHA256 = strings.Repeat("b", 64) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := binding
+			test.mutate(&candidate)
+			if _, err := VerifyForUpdate(directory, candidate); err == nil {
+				t.Fatal("mismatched binding was accepted")
+			}
+		})
+	}
+}
+
 func TestReadVerifiedFileRejectsPathReplacementAfterManifestVerification(t *testing.T) {
 	directory := t.TempDir()
 	requirePrivate(t, directory)

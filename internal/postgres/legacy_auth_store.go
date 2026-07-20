@@ -35,9 +35,9 @@ func (a *Administration) RegisterLegacyMachine(ctx context.Context, actorPrincip
 		return LegacyMachine{}, errors.New("invalid legacy machine")
 	}
 	digest := sha256.Sum256(publicKey)
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return LegacyMachine{}, errors.New("legacy registration cannot start")
+		return LegacyMachine{}, mutationStartError(err, "legacy registration cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
@@ -134,9 +134,9 @@ func (a *Administration) RetireLegacyMachine(ctx context.Context, actorPrincipal
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(legacyPrincipalID) {
 		return errors.New("invalid legacy retirement")
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return errors.New("legacy retirement cannot start")
+		return mutationStartError(err, "legacy retirement cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
@@ -171,9 +171,9 @@ func (a *Administration) DisableLegacyAuthentication(ctx context.Context, actorP
 	if !validOpaqueID(actorPrincipalID) {
 		return errors.New("invalid legacy disable request")
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return errors.New("legacy disable cannot start")
+		return mutationStartError(err, "legacy disable cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {

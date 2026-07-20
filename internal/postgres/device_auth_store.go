@@ -70,7 +70,15 @@ func OpenAdministration(ctx context.Context, cfg Config) (*Administration, error
 		_ = db.Close()
 		return nil, err
 	}
-	if state := Classify(snapshot, CurrentManifest()); state.Classification != Compatible {
+	state := Classify(snapshot, CurrentManifest())
+	bridgeControls, knownBridge := false, false
+	if state.Classification == UpgradeRequired && state.Version == 5 {
+		bridgeControls, err = updateControlsAvailable(ctx, db)
+		if err == nil && bridgeControls {
+			err = db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM jobs.update_transactions WHERE source_schema=5 AND target_schema=6)`).Scan(&knownBridge)
+		}
+	}
+	if err != nil || !administrationSchemaAllowed(state, bridgeControls, knownBridge) {
 		_ = db.Close()
 		return nil, contentFreeMigrationError(state.Classification)
 	}
@@ -184,9 +192,9 @@ func (a *Administration) BootstrapOwner(ctx context.Context, label string) (Prin
 	if !validDisplayName(label) {
 		return Principal{}, errors.New("invalid owner")
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return Principal{}, errors.New("owner bootstrap cannot start")
+		return Principal{}, mutationStartError(err, "owner bootstrap cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, bootstrapLockKey); err != nil {
@@ -248,9 +256,9 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	code := base64.RawURLEncoding.EncodeToString(codeBytes)
 	codeDigest := sha256.Sum256(codeBytes)
 	previewDigest, _ := hex.DecodeString(previewHash)
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return PendingEnrollment{}, errors.New("enrollment transaction cannot start")
+		return PendingEnrollment{}, mutationStartError(err, "enrollment transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
@@ -348,9 +356,9 @@ func (d *Database) redeemEnrollment(ctx context.Context, redeem RedeemEnrollment
 	codeDigest := sha256.Sum256(codeBytes)
 	credentialSecret := deriveEnrollmentCredentialSecret(redeem, codeBytes)
 	secretDigest := sha256.Sum256(credentialSecret[:])
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return DeviceCredential{}, errors.New("enrollment redemption cannot start")
+		return DeviceCredential{}, mutationStartError(err, "enrollment redemption cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := lockGrantMutations(ctx, tx); err != nil {
@@ -520,9 +528,9 @@ func (a *Administration) BeginDeviceCredentialRotation(ctx context.Context, acto
 	}
 	code := base64.RawURLEncoding.EncodeToString(codeBytes)
 	digest := sha256.Sum256(codeBytes)
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return PendingCredentialRotation{}, errors.New("credential rotation cannot start")
+		return PendingCredentialRotation{}, mutationStartError(err, "credential rotation cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
@@ -559,9 +567,9 @@ func (a *Administration) RotateDeviceCredential(ctx context.Context, actorPrinci
 	codeDigest := sha256.Sum256(codeBytes)
 	secret := deriveRotationCredentialSecret(rotate, codeBytes)
 	digest := sha256.Sum256(secret[:])
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return DeviceCredential{}, errors.New("credential rotation cannot start")
+		return DeviceCredential{}, mutationStartError(err, "credential rotation cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
@@ -635,9 +643,9 @@ func (a *Administration) RevokeDeviceCredential(ctx context.Context, actorPrinci
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(lookupID) {
 		return errors.New("invalid credential revocation")
 	}
-	tx, err := a.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, a.db)
 	if err != nil {
-		return errors.New("credential revocation cannot start")
+		return mutationStartError(err, "credential revocation cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {

@@ -620,6 +620,31 @@ phase, and publishes only new data/operator paths. Exact-command retries resume
 without repeating completed mutation. Abandoned-timeline and future cursors fail closed. This is
 not the later update fence and does not let ordinary startup migrate.
 
+The seventh foundation slice adds the single-node supported update transaction.
+Every PostgreSQL business mutation takes the shared side of one transactional
+maintenance gate; the owner-side update fence drains prior writers, rejects
+later writes before acknowledgement, and remains durable through crashes. The
+host wrapper verifies protected release metadata, the exact pulled image digest,
+the generated Compose artifact, PostgreSQL major, installation identity, disk
+capacity, and current health before fencing. It then stops the generated writer,
+creates an update-bound M-6 backup, and runs the exact target image as a hardened
+one-shot owner migrator. The target starts under the still-active fence and must
+pass readiness and a non-mutating doctor before marker-last configuration
+publication and database commit reopen writes.
+
+Update phases and the previous image lock are durable. Exact retries resume;
+pre-migration abort restarts and doctors the previous image before releasing the
+fence. After migration starts, an explicit compatible-image recovery is allowed
+only when the previous image actually starts and passes its recovery doctor against
+the migrated schema. Otherwise the exact bound backup plus its independently
+durable host receipt must be restored into a pristine stopped/new stack; restore rotates the timeline,
+reconstructs the same fenced update transaction, and requires the restored source
+image to pass readiness and doctor before recovery commits. Raw daemon/Compose
+startup and the ordinary migrator cannot cross an existing-schema migration.
+This generated-stack contract covers the single configured `punarod` writer and
+externally provisioned PostgreSQL; the production PostgreSQL/profile bundle is
+still M-23.
+
 ## Required adversarial acceptance tests
 
 The implementation is not internet-exposure-ready until these cases pass:

@@ -64,6 +64,38 @@ func TestCreatePublishesOnlyVerifiedSnapshot(t *testing.T) {
 	}
 }
 
+func TestCreatePublishesV2UpdateBoundSnapshot(t *testing.T) {
+	_, options := createTestInputs(t)
+	options.Update = &UpdateTarget{
+		UpdateID:          "0190ea2e-8a2d-7d42-b320-8515f7604bc1",
+		TargetRelease:     "v0.7.0",
+		TargetImageDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	snapshot := &Snapshot{
+		ID:            "00000003-0000001B-1",
+		SchemaVersion: 5,
+		State:         State{InstallationID: "4e02b0e5-1934-4dda-9c4a-767c120c2fac", TimelineID: "797476ad-8fdc-4c05-b144-3ccbb92b54bf", ChangeSequence: 42},
+		Dump: func(_ context.Context, destination string) error {
+			return os.WriteFile(destination, []byte("database"), 0o600)
+		},
+		Finish: func(context.Context, bool) error { return nil },
+	}
+	manifest, directory, err := Create(context.Background(), options, fakeSource{snapshot: snapshot})
+	if err != nil {
+		t.Fatalf("create update backup: %v", err)
+	}
+	if manifest.Version != 2 || manifest.Update == nil || manifest.Update.SourceSchema != snapshot.SchemaVersion || manifest.Update.State() != snapshot.State || manifest.Update.ExportedSnapshotID != snapshot.ID {
+		t.Fatalf("update manifest did not bind exported source: %#v", manifest)
+	}
+	binding, err := BuildUpdateBinding(directory)
+	if err != nil {
+		t.Fatalf("build binding: %v", err)
+	}
+	if _, err := VerifyForUpdate(directory, binding); err != nil {
+		t.Fatalf("verify update backup: %v", err)
+	}
+}
+
 func TestCreateDoesNotPublishFailedOrUnverifiedBackup(t *testing.T) {
 	tests := []struct {
 		name   string

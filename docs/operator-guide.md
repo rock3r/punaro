@@ -425,23 +425,12 @@ create or repair schema objects. A pristine, dirty, upgrade-required, newer, or
 incompatible schema makes startup fail with a content-free classification. Do
 not grant DDL to `punaro_app` to bypass that refusal.
 
-M-1 through M-5 expose the schema-owner action directly for controlled development and
-integration use:
-
-```sh
-go run ./cmd/punaro-migrate -owner-dsn-file /absolute/private/owner.dsn
-```
-
-The same reviewed binary is present in the application image; because the
-alpha image still defaults to `punarod`, invoke the role explicitly and mount
-the protected file read-only:
-
-```sh
-docker run --rm --entrypoint /usr/local/bin/punaro-migrate \
-  --user "$(id -u):$(id -g)" \
-  --mount type=bind,src=/absolute/private/owner.dsn,dst=/run/secrets/owner.dsn,readonly \
-  PUNARO_IMAGE_BY_DIGEST -owner-dsn-file /run/secrets/owner.dsn
-```
+Existing-schema migration is available only through `punaro update`. The
+`punaro-migrate` image role requires the exact active update ID, verified backup
+marker, target release/image/schema, exported snapshot, and manifest digest.
+The host wrapper supplies those values to a hardened one-shot container and
+mounts the owner DSN read-only; invoking the role without that durable evidence
+fails closed. Pristine initialization remains part of `punaro init`.
 
 The role contract uses the exact roles `punaro_owner` and
 `punaro_app`. Provision `punaro_app` first as a login with no superuser,
@@ -453,19 +442,18 @@ read the caller-owned `0600` bind mount without weakening it; use an equivalent
 read-only secret mechanism in an orchestrator.
 Concurrent migrators serialize on a PostgreSQL advisory lock. A migration left
 in `applying` state is a dirty fence and is not silently repaired; preserve the
-database and investigate. Supported backup-gated production updates and dirty
-recovery arrive in later milestones, so this command is not yet a production
-update procedure. The digest-pinned `make test-postgres` stack is ephemeral
+database and investigate. The digest-pinned `make test-postgres` stack is ephemeral
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 5. Versions 1 through 4 are reported
+The current binary requires schema version 6. Versions 1 through 5 are reported
 as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
 additive and creates the host-local ownership, pending enrollment, device
 credential, cache/session generation, and Ed25519 migration-inventory records.
-There is still no relay cutover or production update wrapper. Do not
+Migration 6 adds the durable update coordinator, exact recovery evidence, and
+the mutation fence. There is still no relay cutover. Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
-migration, or audit rows to bypass a failure.
+migration, update, restore, or audit rows to bypass a failure.
 Before any later authority cutover, rollback remains disabling the PostgreSQL
 opt-in and retaining SQLite as the unchanged active relay.
 
@@ -596,12 +584,11 @@ validated generated environment authoritative while retaining Docker connection
 settings. The operator-controlled Docker executable, CLI plugins, configuration,
 and selected daemon/context remain trusted dependencies; use a local daemon for
 this host-local wrapper because bind-path validation does not extend to a remote
-Docker host. It starts only a compatible schema;
+Docker host. It starts only a compatible schema and refuses while an update
+transaction owns the maintenance fence;
 a pristine database after initialization is treated as data loss, an old schema
-refuses startup and directs the operator to keep running the previous compatible
-release. This staged M-5 wrapper deliberately has no in-place update command;
-the separately reviewed M-7 durable update milestone adds that transaction after
-consistent backup/restore exists. Dirty/newer/incompatible state
+refuses startup and directs the operator to use the supported update or previous
+compatible release. Dirty/newer/incompatible state
 requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 
@@ -678,6 +665,17 @@ punaro restore \
   --app-dsn-file /absolute/private/restored-app.dsn
 ```
 
+For an update-bound recovery backup, the exact command must also name the
+independent receipt written by the failed update before migration:
+
+```text
+  --update-receipt /absolute/private/old-installation/.update/recovery.json
+```
+
+Keep that receipt until the update is committed, recovered, or aborted. It is
+deliberately outside the backup; a v2 update backup cannot authorize its own
+restore.
+
 Restore re-verifies the complete backup before mutation, stages and verifies
 all blobs, restores the database in one `pg_restore` transaction, preserves the
 installation ID, rotates the timeline, and publishes the new data and generated
@@ -691,9 +689,86 @@ unrotated timeline fail closed. Clients observing the new timeline must discard 
 cursors/caches and re-enumerate authoritative state. Optional gateways remain
 not ready until their external dependencies are supplied or re-enrolled.
 
-M-6 is not the M-7 production update transaction and does not make raw Compose
-or daemon startup migrate. Run restore drills and retain a verified off-host
-copy before admitting irreplaceable data.
+Update-created version 2 backups additionally bind the exact update ID, source
+schema and state coordinates, target release/image digest, exported snapshot,
+and raw manifest digest. Before the database accepts that backup marker, the
+host writes a protected receipt outside the backup. Restore requires both and
+binds the receipt path and digest into its resume journal before mutation.
+Restoring one automatically reconstructs the same fenced update transaction on
+the rotated timeline; it does not reopen writes.
+Run restore drills and retain a verified off-host copy before admitting
+irreplaceable data.
+
+### Supported update and rollback
+
+`punaro update` is the only supported existing-schema migration path. It manages
+the one generated `punarod` writer and the externally provisioned PostgreSQL
+database. Any additional writer using the same database is outside this
+generated-stack contract and must be stopped separately before adoption. The
+bundled production PostgreSQL/profile shape remains M-23.
+
+Run the host-side `punaro` wrapper shipped by the target release; its embedded
+migration manifest and generated Compose template are part of the target
+boundary and a source-release wrapper is intentionally rejected. Use the
+target release's published, protected metadata whose `image` is digest-pinned,
+`release_sha256` equals that image digest without the `sha256:` prefix,
+`compose_sha256` matches the generated Compose artifact, and migration-manifest,
+schema-range, rollback-floor, and PostgreSQL-major values match the target
+release. The file must be an absolute private regular file. On the first update
+from an installation without a release-name lock, supply the current release:
+
+```sh
+punaro update \
+  --directory /absolute/private/punaro-installation \
+  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --source-release v0.6.0
+```
+
+Before maintenance, the wrapper checks private paths, current health and owner
+identity, disk capacity, PostgreSQL major, target compatibility, the exact
+pulled image digest, and the Compose hash. It then acquires the transactional
+database fence, drains earlier mutations, stops the configured writer, proves
+it stopped, creates and verifies the bound backup, and records that marker. The
+exact target image runs the one-shot migrator with a read-only owner DSN mount;
+the normal daemon never receives that credential. The target starts while the
+fence still rejects business writes and must pass readiness and doctor before
+configuration is published and the database commit reopens writes.
+
+Rerun the exact command after a crash or uncertain external command. It resumes
+the durable PostgreSQL phase and private host journal without repeating completed
+work or requiring another registry pull. Do not edit `.update`, the release
+metadata, database update rows, or the verified backup. A pre-migration failure
+may be abandoned only with the same arguments plus `--abort`; the previous
+digest must start and pass doctor before the fence is released:
+
+```sh
+punaro update \
+  --directory /absolute/private/punaro-installation \
+  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --source-release v0.6.0 \
+  --abort
+```
+
+After migration starts, `--abort` is refused. Explicitly select `--recover
+compatible` only when the recorded previous image actually starts and passes
+readiness plus the recovery doctor against the migrated schema while still
+fenced. Otherwise restore the exact update-bound backup into a stopped,
+pristine database and new paths using the normal `punaro restore` command above
+with its `--update-receipt`. Then
+resume the reconstructed transaction from the restored installation:
+
+```sh
+punaro update \
+  --directory /absolute/private/restored-installation \
+  --release-metadata /absolute/private/releases/v0.7.0.json \
+  --recover restore
+```
+
+The restored source image, source schema, owner, installation/timeline state,
+backup marker, readiness, and doctor must all match before recovery commits and
+writes reopen. Keep the abandoned stack stopped. Raw `docker compose up`, raw
+`punarod`, and direct `punaro-migrate` invocation never clear or bypass a live
+fence.
 
 ## Operations and incident response
 

@@ -119,9 +119,9 @@ func (d *Database) AttachProjectIdentity(ctx context.Context, request ProjectIde
 		Kind      ProjectIdentityKind `json:"kind"`
 		Locator   string              `json:"locator"`
 	}{request.ProjectID, request.Kind, locator})
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return ProjectIdentityAttachment{}, errors.New("project identity transaction cannot start")
+		return ProjectIdentityAttachment{}, mutationStartError(err, "project identity transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, IdempotencyRequest{PrincipalID: request.ActorPrincipalID, Operation: "project.identity.attach", Key: request.IdempotencyKey, Body: body}, func(control *ControlTx) (IdempotencyOutcome, error) {
@@ -255,9 +255,9 @@ func (d *Database) PreviewProjectIdentityMerge(ctx context.Context, request Proj
 		Kind            ProjectIdentityKind `json:"kind"`
 		Locator         string              `json:"locator"`
 	}{request.SourceProjectID, request.Kind, locator})
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return ProjectMergePreview{}, errors.New("project merge preview transaction cannot start")
+		return ProjectMergePreview{}, mutationStartError(err, "project merge preview transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, IdempotencyRequest{PrincipalID: request.ActorPrincipalID, Operation: "project.merge.preview", Key: request.IdempotencyKey, Body: body}, func(control *ControlTx) (IdempotencyOutcome, error) {
@@ -360,9 +360,9 @@ func (d *Database) ApproveProjectIdentityMerge(ctx context.Context, approval Pro
 	if !validOpaqueID(approval.ActorPrincipalID) || !validOpaqueID(approval.PreviewID) {
 		return ProjectMergeResult{}, errors.New("invalid project merge approval")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return ProjectMergeResult{}, errors.New("project merge transaction cannot start")
+		return ProjectMergeResult{}, mutationStartError(err, "project merge transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := lockProjectJobMutations(ctx, tx, true); err != nil {
@@ -732,9 +732,9 @@ func (d *Database) advanceProjectContentGeneration(ctx context.Context, actorPri
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(projectID) {
 		return 0, errors.New("invalid project content mutation")
 	}
-	tx, err := d.db.BeginTx(ctx, nil)
+	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return 0, errors.New("project content transaction cannot start")
+		return 0, mutationStartError(err, "project content transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	project, err := lockDirectActiveProject(ctx, tx, projectID)

@@ -114,6 +114,15 @@ func (d *Database) InstallationState(ctx context.Context) (InstallationState, er
 	return state, nil
 }
 
+// PostgreSQLMajor returns the exact server major used by release preflight.
+func (d *Database) PostgreSQLMajor(ctx context.Context) (int, error) {
+	var major int
+	if err := d.db.QueryRowContext(ctx, `SELECT current_setting('server_version_num')::integer / 10000`).Scan(&major); err != nil || major < minimumSupportedPostgresMajor {
+		return 0, errors.New("PostgreSQL major version is unavailable")
+	}
+	return major, nil
+}
+
 // Identity returns a content-free fingerprint of the exact target database
 // within its PostgreSQL server. It is stable across schema restore operations.
 func (d *Database) Identity(ctx context.Context) (string, error) {
@@ -215,6 +224,9 @@ func (d *Database) AdvanceChange(ctx context.Context) (InstallationState, error)
 	var state InstallationState
 	err := d.db.QueryRowContext(ctx, `SELECT installation_id::text, timeline_id::text, change_sequence FROM jobs.advance_change_sequence()`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence)
 	if err != nil {
+		if isMaintenanceError(err) {
+			return InstallationState{}, ErrMaintenance
+		}
 		return InstallationState{}, errors.New("PostgreSQL change sequence could not be advanced")
 	}
 	return state, nil
@@ -921,6 +933,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL backup schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = backupObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 6 {
+		updateObjectsPresent, err := updateControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL update-control schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = updateObjectsPresent
 	}
 	return snapshot, nil
 }

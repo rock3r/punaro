@@ -50,16 +50,50 @@ type File struct {
 	SHA256 string `json:"sha256"`
 }
 
+// UpdateMetadata binds a v2 backup to the immutable source and target of one
+// update transaction. It deliberately contains identifiers only, never paths
+// or credentials.
+type UpdateMetadata struct {
+	UpdateID           string `json:"update_id"`
+	SourceSchema       int64  `json:"source_schema"`
+	InstallationID     string `json:"installation_id"`
+	TimelineID         string `json:"timeline_id"`
+	ChangeSequence     int64  `json:"change_sequence"`
+	TargetRelease      string `json:"target_release"`
+	TargetImageDigest  string `json:"target_image_digest"`
+	ExportedSnapshotID string `json:"exported_snapshot_id"`
+}
+
+// State returns the source-state coordinate recorded by the update metadata.
+func (metadata UpdateMetadata) State() State {
+	return State{InstallationID: metadata.InstallationID, TimelineID: metadata.TimelineID, ChangeSequence: metadata.ChangeSequence}
+}
+
+// UpdateBinding is the update marker persisted outside the backup. Its digest
+// binds the marker to the exact bytes of the verified manifest.json file.
+type UpdateBinding struct {
+	UpdateID           string `json:"update_id"`
+	SourceSchema       int64  `json:"source_schema"`
+	InstallationID     string `json:"installation_id"`
+	TimelineID         string `json:"timeline_id"`
+	ChangeSequence     int64  `json:"change_sequence"`
+	TargetRelease      string `json:"target_release"`
+	TargetImageDigest  string `json:"target_image_digest"`
+	ExportedSnapshotID string `json:"exported_snapshot_id"`
+	ManifestSHA256     string `json:"manifest_sha256"`
+}
+
 // Manifest is the single authoritative index for a published backup.
 type Manifest struct {
-	Version              int       `json:"version"`
-	BackupID             string    `json:"backup_id"`
-	CreatedAt            time.Time `json:"created_at"`
-	SnapshotID           string    `json:"snapshot_id"`
-	SchemaVersion        int64     `json:"schema_version"`
-	State                State     `json:"state"`
-	Files                []File    `json:"files"`
-	ExternalDependencies []string  `json:"external_dependencies"`
+	Version              int             `json:"version"`
+	BackupID             string          `json:"backup_id"`
+	CreatedAt            time.Time       `json:"created_at"`
+	SnapshotID           string          `json:"snapshot_id"`
+	SchemaVersion        int64           `json:"schema_version"`
+	State                State           `json:"state"`
+	Files                []File          `json:"files"`
+	ExternalDependencies []string        `json:"external_dependencies"`
+	Update               *UpdateMetadata `json:"update,omitempty"`
 }
 
 // Summary is safe, content-free metadata returned by backup list.
@@ -74,29 +108,34 @@ type Summary struct {
 // Verify strictly validates the manifest and every declared file without
 // following links. Undeclared regular files are rejected.
 func Verify(directory string) (Manifest, error) {
+	manifest, _, err := verify(directory)
+	return manifest, err
+}
+
+func verify(directory string) (Manifest, string, error) {
 	if err := trustedPrivateDirectory(directory); err != nil {
-		return Manifest{}, errors.New("backup directory is unavailable or unsafe")
+		return Manifest{}, "", errors.New("backup directory is unavailable or unsafe")
 	}
-	manifest, err := readManifest(filepath.Join(directory, manifestName))
+	manifest, manifestDigest, err := readManifest(filepath.Join(directory, manifestName))
 	if err != nil {
-		return Manifest{}, errors.New("backup manifest is unavailable or invalid")
+		return Manifest{}, "", errors.New("backup manifest is unavailable or invalid")
 	}
 	if err := validateManifest(manifest); err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	declared := make(map[string]File, len(manifest.Files))
 	for _, entry := range manifest.Files {
 		if _, exists := declared[entry.Path]; exists {
-			return Manifest{}, errors.New("backup manifest contains duplicate files")
+			return Manifest{}, "", errors.New("backup manifest contains duplicate files")
 		}
 		declared[entry.Path] = entry
 		if err := verifyFile(directory, entry); err != nil {
-			return Manifest{}, fmt.Errorf("backup file %q failed verification", entry.Path)
+			return Manifest{}, "", fmt.Errorf("backup file %q failed verification", entry.Path)
 		}
 	}
 	for _, path := range requiredFiles {
 		if _, ok := declared[path]; !ok {
-			return Manifest{}, errors.New("backup manifest is missing required files")
+			return Manifest{}, "", errors.New("backup manifest is missing required files")
 		}
 	}
 	seen := map[string]bool{manifestName: true}
@@ -135,7 +174,45 @@ func Verify(directory string) (Manifest, error) {
 		return nil
 	})
 	if err != nil {
-		return Manifest{}, errors.New("backup filesystem contents are invalid")
+		return Manifest{}, "", errors.New("backup filesystem contents are invalid")
+	}
+	return manifest, manifestDigest, nil
+}
+
+// BuildUpdateBinding verifies a v2 backup and returns the complete marker that
+// must be recorded before an updater may consume it.
+func BuildUpdateBinding(directory string) (UpdateBinding, error) {
+	manifest, digest, err := verify(directory)
+	if err != nil || manifest.Version != 2 || manifest.Update == nil {
+		return UpdateBinding{}, errors.New("update backup is unavailable or invalid")
+	}
+	metadata := *manifest.Update
+	return UpdateBinding{
+		UpdateID: metadata.UpdateID, SourceSchema: metadata.SourceSchema,
+		InstallationID: metadata.InstallationID, TimelineID: metadata.TimelineID,
+		ChangeSequence: metadata.ChangeSequence, TargetRelease: metadata.TargetRelease,
+		TargetImageDigest: metadata.TargetImageDigest, ExportedSnapshotID: metadata.ExportedSnapshotID,
+		ManifestSHA256: digest,
+	}, nil
+}
+
+// VerifyForUpdate requires a complete marker matching both the decoded v2
+// metadata and the digest of the exact manifest bytes opened for verification.
+func VerifyForUpdate(directory string, binding UpdateBinding) (Manifest, error) {
+	if err := validateUpdateBinding(binding); err != nil {
+		return Manifest{}, err
+	}
+	manifest, digest, err := verify(directory)
+	if err != nil || manifest.Version != 2 || manifest.Update == nil {
+		return Manifest{}, errors.New("update backup is unavailable or invalid")
+	}
+	metadata := *manifest.Update
+	if binding.UpdateID != metadata.UpdateID || binding.SourceSchema != metadata.SourceSchema ||
+		binding.InstallationID != metadata.InstallationID || binding.TimelineID != metadata.TimelineID ||
+		binding.ChangeSequence != metadata.ChangeSequence || binding.TargetRelease != metadata.TargetRelease ||
+		binding.TargetImageDigest != metadata.TargetImageDigest || binding.ExportedSnapshotID != metadata.ExportedSnapshotID ||
+		binding.ManifestSHA256 != digest {
+		return Manifest{}, errors.New("update binding does not match the verified backup")
 	}
 	return manifest, nil
 }
@@ -170,36 +247,37 @@ func List(root string) ([]Summary, error) {
 	return result, nil
 }
 
-func readManifest(path string) (Manifest, error) {
+func readManifest(path string) (Manifest, string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > maximumManifest || (runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0) || trustedProtectedFile(path, maximumManifest) != nil {
-		return Manifest{}, errors.New("manifest file is unsafe")
+		return Manifest{}, "", errors.New("manifest file is unsafe")
 	}
 	file, err := os.Open(path) // #nosec G304 -- child of an explicit private backup directory.
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	opened, statErr := file.Stat()
 	if statErr != nil || !os.SameFile(info, opened) {
 		_ = file.Close()
-		return Manifest{}, errors.New("manifest changed during open")
+		return Manifest{}, "", errors.New("manifest changed during open")
 	}
 	defer func() { _ = file.Close() }()
 	body, err := io.ReadAll(io.LimitReader(file, maximumManifest+1))
 	if err != nil || len(body) > maximumManifest || rejectDuplicateJSONKeys(body) != nil {
-		return Manifest{}, errors.New("manifest JSON is invalid")
+		return Manifest{}, "", errors.New("manifest JSON is invalid")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var manifest Manifest
 	if err := decoder.Decode(&manifest); err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return Manifest{}, errors.New("manifest has trailing JSON")
+		return Manifest{}, "", errors.New("manifest has trailing JSON")
 	}
-	return manifest, nil
+	digest := sha256.Sum256(body)
+	return manifest, hex.EncodeToString(digest[:]), nil
 }
 
 func rejectDuplicateJSONKeys(body []byte) error {
@@ -257,8 +335,16 @@ func rejectDuplicateJSONKeys(body []byte) error {
 }
 
 func validateManifest(manifest Manifest) error {
-	if manifest.Version != 1 || uuid.Validate(manifest.BackupID) != nil || manifest.CreatedAt.IsZero() || manifest.CreatedAt.Location() != time.UTC || manifest.SchemaVersion <= 0 || uuid.Validate(manifest.State.InstallationID) != nil || uuid.Validate(manifest.State.TimelineID) != nil || manifest.State.ChangeSequence < 0 || len(manifest.Files) == 0 || len(manifest.Files) > maximumFileCount {
+	if (manifest.Version != 1 && manifest.Version != 2) || uuid.Validate(manifest.BackupID) != nil || manifest.CreatedAt.IsZero() || manifest.CreatedAt.Location() != time.UTC || manifest.SchemaVersion <= 0 || uuid.Validate(manifest.State.InstallationID) != nil || uuid.Validate(manifest.State.TimelineID) != nil || manifest.State.ChangeSequence < 0 || len(manifest.Files) == 0 || len(manifest.Files) > maximumFileCount {
 		return errors.New("backup manifest metadata is invalid")
+	}
+	if manifest.Version == 1 && manifest.Update != nil {
+		return errors.New("v1 backup manifest cannot contain update metadata")
+	}
+	if manifest.Version == 2 {
+		if manifest.Update == nil || validateUpdateMetadata(*manifest.Update) != nil || manifest.Update.SourceSchema != manifest.SchemaVersion || manifest.Update.State() != manifest.State || manifest.Update.ExportedSnapshotID != manifest.SnapshotID {
+			return errors.New("v2 backup update metadata is invalid")
+		}
 	}
 	if !validSnapshotID(manifest.SnapshotID) {
 		return errors.New("backup snapshot identity is invalid")
@@ -296,6 +382,48 @@ func validateManifest(manifest Manifest) error {
 		}
 	}
 	return nil
+}
+
+func validateUpdateMetadata(metadata UpdateMetadata) error {
+	if uuid.Validate(metadata.UpdateID) != nil || metadata.SourceSchema <= 0 || uuid.Validate(metadata.InstallationID) != nil || uuid.Validate(metadata.TimelineID) != nil || metadata.ChangeSequence < 0 || !validRelease(metadata.TargetRelease) || !validImageDigest(metadata.TargetImageDigest) || !validSnapshotID(metadata.ExportedSnapshotID) {
+		return errors.New("update metadata is invalid")
+	}
+	return nil
+}
+
+func validateUpdateBinding(binding UpdateBinding) error {
+	metadata := UpdateMetadata{
+		UpdateID: binding.UpdateID, SourceSchema: binding.SourceSchema,
+		InstallationID: binding.InstallationID, TimelineID: binding.TimelineID,
+		ChangeSequence: binding.ChangeSequence, TargetRelease: binding.TargetRelease,
+		TargetImageDigest: binding.TargetImageDigest, ExportedSnapshotID: binding.ExportedSnapshotID,
+	}
+	if validateUpdateMetadata(metadata) != nil || !validSHA256(binding.ManifestSHA256) {
+		return errors.New("update binding is incomplete or invalid")
+	}
+	return nil
+}
+
+func validRelease(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		alphaNumeric := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+		if !alphaNumeric && (index == 0 || character != '.' && character != '-' && character != '+' && character != '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func validImageDigest(value string) bool {
+	return strings.HasPrefix(value, "sha256:") && len(value) == len("sha256:")+sha256.Size*2 && validSHA256(strings.TrimPrefix(value, "sha256:"))
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
 }
 
 func maximumForPath(path string) (int64, bool) {

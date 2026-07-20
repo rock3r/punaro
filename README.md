@@ -58,8 +58,9 @@ make operator-binary
 ```
 
 The host wrapper also provides exported-snapshot `backup`, strict `backup
-verify`, and clean-stack `restore --into-new-stack`; see the operator guide for
-the private-path, PostgreSQL-role, external-dependency, and restore-drill rules.
+verify`, clean-stack `restore --into-new-stack`, and the durable backup-gated
+`update` path; see the operator guide for private-path, PostgreSQL-role,
+rollback, recovery, external-dependency, and restore-drill rules.
 
 ```sh
 cp .env.example .env
