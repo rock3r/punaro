@@ -20,6 +20,11 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	if err != nil {
 		t.Fatal(err)
 	}
+	actorLookup := "88888888-8888-4888-8888-888888888881"
+	actorCredentialDigest := sha256.Sum256([]byte("identity administrator credential"))
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES ($1,$2,'identity administrator credential',$3)`, actorLookup, actor.ID, actorCredentialDigest[:]); err != nil {
+		t.Fatal(err)
+	}
 	sourceOnly, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "source member")
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +232,7 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	}
 	grantFixture(actor.ID, source.ProjectID, CapabilityAttachmentUpload)
 	attachmentDigest := sha256.Sum256([]byte("merge fence"))
-	mergeFence, err := app.ReserveAttachment(ctx, AttachmentReservationRequest{PrincipalID: actor.ID, ProjectID: source.ProjectID, IdempotencyKey: "99999999-9999-4999-8999-999999999989", SizeBytes: 11, SHA256: attachmentDigest, DisplayName: "merge-fence.txt", MediaType: "text/plain", Lifetime: 5 * time.Minute})
+	mergeFence, err := app.ReserveAttachment(ctx, AttachmentReservationRequest{PrincipalID: actor.ID, CredentialLookupID: actorLookup, CredentialGeneration: 1, ProjectID: source.ProjectID, IdempotencyKey: "99999999-9999-4999-8999-999999999989", SizeBytes: 11, SHA256: attachmentDigest, DisplayName: "merge-fence.txt", MediaType: "text/plain", Lifetime: 5 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,3 +1,75 @@
+CREATE FUNCTION attachment.reserve_upload(
+    requested_principal uuid,
+    requested_lookup uuid,
+    requested_credential_generation bigint,
+    requested_project uuid,
+    request_key uuid,
+    request_hash bytea,
+    requested_size bigint,
+    requested_sha256 text,
+    requested_display_name text,
+    requested_media_type text,
+    requested_lifetime interval
+)
+RETURNS TABLE (
+    artifact_id uuid,
+    project_id uuid,
+    principal_id uuid,
+    timeline_id uuid,
+    size_bytes bigint,
+    sha256 text,
+    display_name text,
+    media_type text,
+    state text,
+    attempt_generation bigint,
+    expires_at timestamptz,
+    ready_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    canonical_project uuid;
+    authority_id uuid;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    SELECT active.id INTO canonical_project
+    FROM relay.projects AS requested
+    LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id = requested.id
+    JOIN relay.projects AS active ON active.id = COALESCE(alias.canonical_project_id, requested.id)
+    WHERE requested.id = requested_project AND active.merged_into IS NULL
+      AND ((requested.merged_into IS NULL AND alias.alias_project_id IS NULL)
+           OR requested.merged_into = alias.canonical_project_id)
+    FOR UPDATE OF active;
+    IF canonical_project IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment reservation is not authorized';
+    END IF;
+    SELECT principal.id INTO authority_id
+    FROM auth.principals AS principal
+    JOIN auth.device_credentials AS credential ON credential.principal_id = principal.id
+    WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
+      AND credential.lookup_id = requested_lookup
+      AND credential.generation = requested_credential_generation
+      AND credential.revoked_at IS NULL
+      AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+    FOR SHARE OF principal, credential;
+    IF authority_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment reservation is not authorized';
+    END IF;
+    RETURN QUERY
+    SELECT reserved.artifact_id, reserved.project_id, reserved.principal_id,
+           reserved.timeline_id, reserved.size_bytes, reserved.sha256,
+           reserved.display_name, reserved.media_type, reserved.state,
+           reserved.attempt_generation, reserved.expires_at, reserved.ready_at
+    FROM attachment.reserve_upload(
+        requested_principal, requested_project, request_key, request_hash,
+        requested_size, requested_sha256, requested_display_name,
+        requested_media_type, requested_lifetime
+    ) AS reserved;
+END
+$function$;
+
 CREATE FUNCTION attachment.publish_upload(
     requested_principal uuid,
     requested_lookup uuid,
@@ -91,8 +163,11 @@ BEGIN
 END
 $function$;
 
+REVOKE ALL ON FUNCTION attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval) FROM punaro_app;
+REVOKE ALL ON FUNCTION attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval) FROM PUBLIC;
 REVOKE ALL ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text) FROM punaro_app;
 REVOKE ALL ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION attachment.gc_candidates(uuid,integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval) TO punaro_app;
 GRANT EXECUTE ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text) TO punaro_app;
 GRANT EXECUTE ON FUNCTION attachment.gc_candidates(uuid,integer) TO punaro_app;

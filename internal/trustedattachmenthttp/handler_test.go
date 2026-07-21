@@ -112,7 +112,7 @@ func TestHandlerBindsReservationUploadDownloadAndDeleteToDevice(t *testing.T) {
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusCreated || database.request.PrincipalID != httpPrincipalID || database.request.IdempotencyKey != httpIdempotency {
+	if response.Code != http.StatusCreated || database.request.PrincipalID != httpPrincipalID || database.request.CredentialLookupID != httpLookupID || database.request.CredentialGeneration != 7 || database.request.IdempotencyKey != httpIdempotency {
 		t.Fatalf("reservation status=%d request=%#v body=%s", response.Code, database.request, response.Body.String())
 	}
 

@@ -18,7 +18,11 @@ WITH objects AS (
            to_regclass('attachment.uploads_reconcile_order') AS reconcile_index_oid,
            to_regclass('attachment.recipient_grants') AS recipient_grants_oid,
            to_regclass('attachment.deletions') AS deletions_oid,
-           to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS reserve_oid,
+           to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS legacy_reserve_oid,
+           CASE WHEN $1 >= 13
+                THEN to_regprocedure('attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval)')
+                ELSE to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)')
+           END AS reserve_oid,
            to_regprocedure('attachment.claim_upload(uuid,uuid,interval)') AS claim_oid,
            to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)') AS legacy_publish_oid,
            CASE WHEN $1 >= 13
@@ -88,7 +92,8 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (reserve_oid,'503c810da6c7090c8bdc306f474c161d','v'::"char"),
+      (reserve_oid,CASE WHEN $1 >= 13 THEN '8653ed9c4bb61d8b175b90022db21aa4'
+                        ELSE '503c810da6c7090c8bdc306f474c161d' END,'v'::"char"),
       (claim_oid,CASE WHEN recipient_grants_oid IS NULL
                       THEN '475ac4e1df29cabe6dbcae9e83038891'
                       ELSE 'a20da734d30b78d9e6868c27094cd549' END,'v'::"char"),
@@ -137,6 +142,19 @@ WITH objects AS (
     FROM objects
     JOIN pg_proc AS proc ON proc.oid = legacy_publish_oid
     JOIN pg_language AS language ON language.oid = proc.prolang
+), legacy_reserve_safety AS (
+    SELECT $1 < 13 OR (pg_get_userbyid(proc.proowner) = 'punaro_owner'
+       AND language.lanname = 'plpgsql' AND proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = 'v'
+       AND proc.proconfig = ARRAY['search_path=pg_catalog']::text[]
+       AND md5(btrim(proc.prosrc)) = '503c810da6c7090c8bdc306f474c161d'
+       AND (SELECT count(*) = 1
+                  AND bool_and(grantee.rolname = 'punaro_owner')
+                  AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+            FROM aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
+            LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee)) AS exact
+    FROM objects
+    JOIN pg_proc AS proc ON proc.oid = legacy_reserve_oid
+    JOIN pg_language AS language ON language.oid = proc.prolang
 ), table_safety AS (
     SELECT count(*) = 5 AND bool_and(pg_get_userbyid(relation.relowner) = 'punaro_owner')
        AND bool_and(relation.relkind = 'r' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
@@ -165,10 +183,10 @@ WITH objects AS (
 SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT NULL
    AND project_oid IS NOT NULL AND principal_oid IS NOT NULL
    AND project_state_index_oid IS NOT NULL AND reconcile_index_oid IS NOT NULL
-   AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND legacy_publish_oid IS NOT NULL AND publish_oid IS NOT NULL
+   AND legacy_reserve_oid IS NOT NULL AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND legacy_publish_oid IS NOT NULL AND publish_oid IS NOT NULL
    AND begin_reap_oid IS NOT NULL AND release_oid IS NOT NULL AND corrupt_oid IS NOT NULL AND reconcile_oid IS NOT NULL AND project_records_oid IS NOT NULL
    AND ($1 < 13 OR gc_candidates_oid IS NOT NULL)
-   AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact AND legacy_publish_safety.exact
+   AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact AND legacy_publish_safety.exact AND legacy_reserve_safety.exact
    AND constraint_safety.exact AND index_safety.exact
 	AND EXISTS (
 	    SELECT 1 FROM pg_constraint
@@ -194,6 +212,6 @@ SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT N
        SELECT 1 FROM expected_routines AS expected
        WHERE NOT has_function_privilege('punaro_app',expected.oid,'EXECUTE')
    )
-FROM objects, table_safety, table_acl, routine_safety, routine_acl, legacy_publish_safety, constraint_safety, index_safety`, schemaVersion).Scan(&available)
+FROM objects, table_safety, table_acl, routine_safety, routine_acl, legacy_publish_safety, legacy_reserve_safety, constraint_safety, index_safety`, schemaVersion).Scan(&available)
 	return available, err
 }

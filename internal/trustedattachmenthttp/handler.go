@@ -159,7 +159,7 @@ func (h *handler) reserve(response http.ResponseWriter, request *http.Request) {
 		writeError(response, http.StatusBadRequest, "request is invalid")
 		return
 	}
-	reservationRequest := postgres.AttachmentReservationRequest{PrincipalID: device.PrincipalID, ProjectID: input.ProjectID, IdempotencyKey: input.IdempotencyKey, SizeBytes: input.SizeBytes, SHA256: digest, DisplayName: input.DisplayName, MediaType: input.MediaType, Lifetime: time.Duration(input.LifetimeSeconds) * time.Second}
+	reservationRequest := postgres.AttachmentReservationRequest{PrincipalID: device.PrincipalID, CredentialLookupID: device.LookupID, CredentialGeneration: device.Generation, ProjectID: input.ProjectID, IdempotencyKey: input.IdempotencyKey, SizeBytes: input.SizeBytes, SHA256: digest, DisplayName: input.DisplayName, MediaType: input.MediaType, Lifetime: time.Duration(input.LifetimeSeconds) * time.Second}
 	if err := reservationRequest.Validate(); err != nil {
 		writeError(response, http.StatusBadRequest, "request is invalid")
 		return

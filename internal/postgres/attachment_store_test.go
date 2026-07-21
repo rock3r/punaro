@@ -10,14 +10,16 @@ import (
 
 func TestAttachmentReservationRequestValidation(t *testing.T) {
 	valid := AttachmentReservationRequest{
-		PrincipalID:    "11111111-1111-4111-8111-111111111111",
-		ProjectID:      "22222222-2222-4222-8222-222222222222",
-		IdempotencyKey: "33333333-3333-4333-8333-333333333333",
-		SizeBytes:      4,
-		SHA256:         sha256.Sum256([]byte("body")),
-		DisplayName:    "report.txt",
-		MediaType:      "text/plain",
-		Lifetime:       30 * time.Minute,
+		PrincipalID:          "11111111-1111-4111-8111-111111111111",
+		CredentialLookupID:   "44444444-4444-4444-8444-444444444444",
+		CredentialGeneration: 1,
+		ProjectID:            "22222222-2222-4222-8222-222222222222",
+		IdempotencyKey:       "33333333-3333-4333-8333-333333333333",
+		SizeBytes:            4,
+		SHA256:               sha256.Sum256([]byte("body")),
+		DisplayName:          "report.txt",
+		MediaType:            "text/plain",
+		Lifetime:             30 * time.Minute,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid request: %v", err)
@@ -27,6 +29,8 @@ func TestAttachmentReservationRequestValidation(t *testing.T) {
 		edit func(*AttachmentReservationRequest)
 	}{
 		{name: "principal", edit: func(request *AttachmentReservationRequest) { request.PrincipalID = "friendly" }},
+		{name: "credential lookup", edit: func(request *AttachmentReservationRequest) { request.CredentialLookupID = "friendly" }},
+		{name: "credential generation", edit: func(request *AttachmentReservationRequest) { request.CredentialGeneration = 0 }},
 		{name: "project", edit: func(request *AttachmentReservationRequest) { request.ProjectID = "friendly" }},
 		{name: "key", edit: func(request *AttachmentReservationRequest) { request.IdempotencyKey = "friendly" }},
 		{name: "zero size", edit: func(request *AttachmentReservationRequest) { request.SizeBytes = 0 }},

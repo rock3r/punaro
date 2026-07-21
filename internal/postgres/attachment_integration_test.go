@@ -44,7 +44,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 
 	body := []byte("trusted attachment integration body")
 	digest := sha256.Sum256(body)
-	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	lockOrderReservation, err := app.ReserveAttachment(ctx, lockOrderRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +110,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		}
 		return nil
 	})
-	request := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	request := AttachmentReservationRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	reservation, err := app.ReserveAttachment(ctx, request)
 	if err != nil || reservation.State != AttachmentReserved || reservation.ProjectID != project.ProjectID || reservation.SHA256 != digest {
 		t.Fatalf("reservation=%#v err=%v", reservation, err)
@@ -601,6 +601,12 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET revoked_at=statement_timestamp() WHERE lookup_id=$1`, uploaderLookup); err != nil {
 		t.Fatal(err)
+	}
+	revokedReservationRequest := request
+	revokedReservationRequest.IdempotencyKey = "a2000000-0000-4000-8000-000000000010"
+	revokedReservationRequest.DisplayName = "credential-revoked-reservation.txt"
+	if _, err := app.ReserveAttachment(ctx, revokedReservationRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked credential reservation error=%v", err)
 	}
 	credentialRevokedPublish := AttachmentPublishRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ArtifactID: credentialRevokedReservation.ArtifactID, AttemptGeneration: credentialRevokedClaim.AttemptGeneration, ClaimToken: credentialRevokedClaim.ClaimToken, StoragePath: "ready/" + credentialRevokedReservation.ArtifactID + ".blob", SizeBytes: credentialRevokedReservation.SizeBytes, SHA256: credentialRevokedReservation.SHA256}
 	if _, err := app.PublishAttachment(ctx, credentialRevokedPublish); !errors.Is(err, ErrForbidden) {

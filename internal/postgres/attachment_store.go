@@ -60,20 +60,23 @@ const (
 // AttachmentReservationRequest binds authority, immutable metadata, and one
 // operation-specific idempotency key without including attachment bytes.
 type AttachmentReservationRequest struct {
-	PrincipalID    string
-	ProjectID      string
-	IdempotencyKey string
-	SizeBytes      int64
-	SHA256         [sha256.Size]byte
-	DisplayName    string
-	MediaType      string
-	Lifetime       time.Duration
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ProjectID            string
+	IdempotencyKey       string
+	SizeBytes            int64
+	SHA256               [sha256.Size]byte
+	DisplayName          string
+	MediaType            string
+	Lifetime             time.Duration
 }
 
-// Validate enforces the same portable bounds as schema v10 before database
-// access. Display metadata never becomes a filesystem path.
+// Validate enforces the portable metadata bounds and complete current-device
+// authority before database access. Display metadata never becomes a path.
 func (request AttachmentReservationRequest) Validate() error {
-	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.ProjectID) || !validOpaqueID(request.IdempotencyKey) ||
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 ||
+		!validOpaqueID(request.ProjectID) || !validOpaqueID(request.IdempotencyKey) ||
 		request.SizeBytes < 1 || request.SizeBytes > maxAttachmentBytes ||
 		request.Lifetime < minAttachmentReservation || request.Lifetime > maxAttachmentReservation ||
 		!validAttachmentDisplayName(request.DisplayName) || !attachmentMediaTypePattern.MatchString(request.MediaType) {
@@ -324,7 +327,7 @@ func (d *Database) ReserveAttachment(ctx context.Context, request AttachmentRese
 	}
 	requestHash := sha256.Sum256(body)
 	row := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,principal_id::text,timeline_id::text,size_bytes,sha256,display_name,media_type,state,attempt_generation,expires_at,ready_at
-FROM attachment.reserve_upload($1,$2,$3,$4,$5,$6,$7,$8,$9::interval)`, request.PrincipalID, request.ProjectID, request.IdempotencyKey, requestHash[:], request.SizeBytes, hex.EncodeToString(request.SHA256[:]), request.DisplayName, request.MediaType, attachmentInterval(request.Lifetime))
+FROM attachment.reserve_upload($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::interval)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ProjectID, request.IdempotencyKey, requestHash[:], request.SizeBytes, hex.EncodeToString(request.SHA256[:]), request.DisplayName, request.MediaType, attachmentInterval(request.Lifetime))
 	reservation, err := scanAttachmentReservation(row)
 	if err != nil {
 		return AttachmentReservation{}, attachmentStoreError(err, "attachment reservation failed")
