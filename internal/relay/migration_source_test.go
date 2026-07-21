@@ -365,6 +365,55 @@ func TestMigrationSourceRefusesUnexpectedIndex(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRefusesNonPortableLegacyRequestTokens(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		query string
+	}{
+		{name: "invalid UTF-8", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'ff' AS TEXT),1)`},
+		{name: "NUL", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'610062' AS TEXT),1)`},
+		{name: "resume delimiter", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'611f62' AS TEXT),1)`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "relay.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.ExecContext(context.Background(), test.query); err != nil { // #nosec G202 -- query is a fixed test-only SQL expression.
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InspectMigrationSource(context.Background(), path); err == nil {
+				t.Fatal("non-portable legacy request token was accepted")
+			}
+		})
+	}
+}
+
+func TestMigrationSourceRefusesDelimiterInLegacyUUIDKey(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO conversations(id,next_sequence,created_at) VALUES(CAST(X'611f62' AS TEXT),0,1)`); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(context.Background(), path); err == nil {
+		t.Fatal("resume delimiter in legacy UUID key was accepted")
+	}
+}
+
 func TestMigrationSourceRefusesMalformedRuntimeType(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "relay.db")

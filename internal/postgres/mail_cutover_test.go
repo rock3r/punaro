@@ -143,6 +143,19 @@ func TestMailCutoverEnrollmentKeysExactlyMatchMigratedInventory(t *testing.T) {
 	}
 }
 
+func TestPostgresAppendRejectsNonPortableBodyBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+	database := &Database{}
+	base := relay.AppendInput{ConversationID: "019f7f07-4b88-7c12-a394-b663274a6555", SenderMachineID: "machine-a", FromEndpoint: "agent/a", IdempotencyKey: "portable-key"}
+	for _, body := range []string{string([]byte{0xff}), "body\x00value"} {
+		input := base
+		input.Body = body
+		if _, _, err := database.AppendMessage(input); err == nil || !strings.Contains(err.Error(), "portable UTF-8") {
+			t.Fatalf("non-portable body %q err=%v", body, err)
+		}
+	}
+}
+
 func migrationEndpointRow(t *testing.T, endpoint, machine string, generation int64) relay.MigrationSourceRow {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{

@@ -572,6 +572,9 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if len(input.Body) > maxMessageBodyBytes {
 		return Message{}, false, fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
 	}
+	if !ValidMessageBody(input.Body) {
+		return Message{}, false, errors.New("message body is not portable UTF-8 text")
+	}
 	requestHash := appendHash(input)
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {

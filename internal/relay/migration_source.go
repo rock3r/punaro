@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -347,7 +348,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 				_ = rows.Close()
 				return MigrationSourceManifest{}, errors.New("relay migration source row is malformed")
 			}
-			for _, value := range values {
+			for index, value := range values {
+				if err := validateMigrationSourceValue(spec.name, columns[index], value); err != nil {
+					_ = rows.Close()
+					return MigrationSourceManifest{}, err
+				}
 				if err := writeMigrationHashValue(tableHash, value); err != nil {
 					_ = rows.Close()
 					return MigrationSourceManifest{}, err
@@ -616,6 +621,32 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 	return nil
 }
 
+func validateMigrationSourceValue(table, column string, value any) error {
+	text, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	var valid bool
+	switch table + "." + column {
+	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
+		valid = ValidEndpoint(text)
+	case "endpoints.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "request_nonces.machine_id":
+		valid = ValidMachineID(text)
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "request_nonces.nonce":
+		valid = ValidRequestToken(text)
+	case "messages.body":
+		valid = ValidMessageBody(text)
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id":
+		valid = uuid.Validate(text) == nil
+	default:
+		return nil
+	}
+	if !valid {
+		return errors.New("relay migration source contains invalid portable text")
+	}
+	return nil
+}
+
 func writeMigrationHashValue(destination hash.Hash, value any) error {
 	var kind byte
 	var body []byte
@@ -627,6 +658,9 @@ func writeMigrationHashValue(destination hash.Hash, value any) error {
 		body = make([]byte, 8)
 		binary.BigEndian.PutUint64(body, uint64(typed)) // #nosec G115 -- two's-complement bits are the canonical signed-int encoding.
 	case string:
+		if !utf8.ValidString(typed) || strings.ContainsRune(typed, 0) {
+			return errors.New("relay migration source contains non-portable text")
+		}
 		kind, body = 2, []byte(typed)
 	case []byte:
 		kind, body = 3, typed

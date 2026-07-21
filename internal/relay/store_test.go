@@ -3,9 +3,27 @@ package relay
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestStoreRejectsNonPortableRequestAndMessageText(t *testing.T) {
+	t.Parallel()
+	invalidUTF8 := string([]byte{0xff})
+	if ValidRequestToken(invalidUTF8) || ValidRequestToken("token\x00value") {
+		t.Fatal("non-portable request token was accepted")
+	}
+	store := &Store{}
+	base := AppendInput{ConversationID: "019f7f07-4b88-7c12-a394-b663274a6555", SenderMachineID: "machine-a", FromEndpoint: "agent/a", IdempotencyKey: "portable-key"}
+	for _, body := range []string{invalidUTF8, "body\x00value"} {
+		input := base
+		input.Body = body
+		if _, _, err := store.AppendMessage(input); err == nil || !strings.Contains(err.Error(), "portable UTF-8") {
+			t.Fatalf("non-portable body %q err=%v", body, err)
+		}
+	}
+}
 
 func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	t.Parallel()

@@ -232,6 +232,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if len(input.Body) > postgresRelayMaxMessageBytes {
 		return relay.Message{}, false, errors.New("message body exceeds limit")
 	}
+	if !relay.ValidMessageBody(input.Body) {
+		return relay.Message{}, false, errors.New("message body is not portable UTF-8 text")
+	}
 	if _, err := uuid.Parse(input.ConversationID); err != nil {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
