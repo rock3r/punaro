@@ -5,14 +5,18 @@ import (
 	"errors"
 	"hash/fnv"
 	"io"
-	"sync"
 	"time"
 
 	"github.com/rock3r/punaro/internal/postgres"
 )
 
-// Repository is the narrow schema-v10 lifecycle surface. It deliberately has
-// no download, recipient-grant, or sharing operation.
+const (
+	maxConcurrentDownloads = 16
+	maxDownloadLifetime    = 10 * time.Minute
+)
+
+// Repository is the narrow trusted attachment lifecycle and authorization
+// surface. Recipient grants themselves are created only by mail append.
 type Repository interface {
 	ClaimAttachmentUpload(context.Context, string, string, time.Duration) (postgres.AttachmentClaim, error)
 	PublishAttachment(context.Context, postgres.AttachmentPublishRequest) (postgres.AttachmentArtifact, error)
@@ -20,14 +24,53 @@ type Repository interface {
 	MarkAttachmentCorrupt(context.Context, string) (bool, error)
 	BeginAttachmentReap(context.Context, string) (string, bool, error)
 	ReleaseExpiredAttachment(context.Context, string, string) (bool, error)
+	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
+}
+
+// Download authorizes one current recipient principal under the artifact lock,
+// verifies the complete immutable file before output, and emits exactly the
+// recorded byte count.
+func (service *Service) Download(ctx context.Context, request postgres.AttachmentDownloadRequest, destination io.Writer) (postgres.AttachmentDownload, error) {
+	if service == nil || destination == nil || request.Validate() != nil {
+		return postgres.AttachmentDownload{}, errors.New("invalid trusted attachment download")
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, service.downloadLifetime)
+	defer cancel()
+	select {
+	case service.downloadSlots <- struct{}{}:
+		defer func() { <-service.downloadSlots }()
+	case <-downloadCtx.Done():
+		return postgres.AttachmentDownload{}, downloadCtx.Err()
+	}
+	unlock, err := service.lockArtifact(downloadCtx, request.ArtifactID)
+	if err != nil {
+		return postgres.AttachmentDownload{}, err
+	}
+	defer func() { _ = unlock() }()
+	download, err := service.repository.AuthorizeAttachmentDownload(downloadCtx, request)
+	if err != nil {
+		return postgres.AttachmentDownload{}, err
+	}
+	if download.ArtifactID != request.ArtifactID || download.StoragePath != "ready/"+download.ArtifactID+".blob" {
+		return postgres.AttachmentDownload{}, errors.New("trusted attachment download authority is malformed")
+	}
+	if err := service.store.StreamVerified(downloadCtx, PublishedBlob{StoragePath: download.StoragePath, SizeBytes: download.SizeBytes, SHA256: download.SHA256}, destination); err != nil {
+		if downloadCtx.Err() != nil {
+			return postgres.AttachmentDownload{}, downloadCtx.Err()
+		}
+		return postgres.AttachmentDownload{}, err
+	}
+	return download, nil
 }
 
 // Service coordinates database authority with private durable publication.
 // A filesystem final remains hidden until PublishAttachment commits READY.
 type Service struct {
-	repository Repository
-	store      *BlobStore
-	locks      [64]sync.Mutex
+	repository       Repository
+	store            *BlobStore
+	locks            [64]chan struct{}
+	downloadSlots    chan struct{}
+	downloadLifetime time.Duration
 }
 
 // NewService binds lifecycle authority to one verified private blob store.
@@ -35,7 +78,11 @@ func NewService(repository Repository, store *BlobStore) (*Service, error) {
 	if repository == nil || store == nil {
 		return nil, errors.New("trusted attachment service dependencies are unavailable")
 	}
-	return &Service{repository: repository, store: store}, nil
+	service := &Service{repository: repository, store: store, downloadSlots: make(chan struct{}, maxConcurrentDownloads), downloadLifetime: maxDownloadLifetime}
+	for index := range service.locks {
+		service.locks[index] = make(chan struct{}, 1)
+	}
+	return service, nil
 }
 
 // Upload consumes one bounded stream under a fresh claim, durably publishes
@@ -170,16 +217,20 @@ func (service *Service) reconcileCandidate(ctx context.Context, candidate postgr
 func (service *Service) lockArtifact(ctx context.Context, artifactID string) (func() error, error) {
 	hasher := fnv.New64a()
 	_, _ = hasher.Write([]byte(artifactID))
-	lock := &service.locks[hasher.Sum64()%uint64(len(service.locks))]
-	lock.Lock()
+	lock := service.locks[hasher.Sum64()%uint64(len(service.locks))]
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	fileUnlock, err := service.store.LockArtifact(ctx, artifactID)
 	if err != nil {
-		lock.Unlock()
+		<-lock
 		return nil, err
 	}
 	return func() error {
 		err := fileUnlock()
-		lock.Unlock()
+		<-lock
 		return err
 	}, nil
 }

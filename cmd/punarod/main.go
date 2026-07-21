@@ -60,11 +60,12 @@ func (a postgresTransitionAuthority) AuthorizeTransition(ctx context.Context, cr
 		return relay.TransitionAuthorization{}, relay.ErrForbidden
 	}
 	if credential == "" {
-		if _, err := a.database.ResolveLegacyMachine(ctx, legacyKey); err != nil {
+		principalID, err := a.database.ResolveLegacyMachine(ctx, legacyKey)
+		if err != nil {
 			return relay.TransitionAuthorization{}, relay.ErrForbidden
 		}
 		key := append(ed25519.PublicKey(nil), legacyKey...)
-		return relay.TransitionAuthorization{LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
+		return relay.TransitionAuthorization{PrincipalID: principalID, LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
 			if _, err := a.database.ResolveLegacyMachine(currentCtx, key); err != nil {
 				return relay.ErrForbidden
 			}
@@ -80,7 +81,7 @@ func (a postgresTransitionAuthority) AuthorizeTransition(ctx context.Context, cr
 		return relay.TransitionAuthorization{}, relay.ErrForbidden
 	}
 	key := append(ed25519.PublicKey(nil), publicKey...)
-	return relay.TransitionAuthorization{LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
+	return relay.TransitionAuthorization{PrincipalID: authenticated.PrincipalID, CredentialLookupID: authenticated.LookupID, CredentialGeneration: authenticated.Generation, LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
 		current, err := a.database.DeviceSessionCurrent(currentCtx, authenticated)
 		if err != nil || !current {
 			return relay.ErrForbidden

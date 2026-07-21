@@ -66,3 +66,16 @@ func lockArtifactFile(ctx context.Context, path string) (func() error, error) {
 		}
 	}
 }
+
+func openPrivateRead(path string) (*os.File, error) {
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path) // #nosec G115 -- syscall.Open returned a checked non-negative descriptor.
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, errors.New("attachment file is unavailable")
+	}
+	return file, nil
+}

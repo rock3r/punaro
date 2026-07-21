@@ -615,6 +615,18 @@ func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourc
 		if hasAttachmentRecords {
 			return 0, 0, 0, 0, 0, nil, ErrProjectMergeAttachmentState
 		}
+		var recipientFenceAvailable bool
+		if err := tx.QueryRowContext(ctx, `SELECT to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)') IS NOT NULL`).Scan(&recipientFenceAvailable); err != nil {
+			return 0, 0, 0, 0, 0, nil, errors.New("project attachment recipient state is unavailable")
+		}
+		if recipientFenceAvailable {
+			if err := tx.QueryRowContext(ctx, `SELECT attachment.project_has_recipient_records($1,$2)`, actorPrincipalID, sourceID).Scan(&hasAttachmentRecords); err != nil {
+				return 0, 0, 0, 0, 0, nil, errors.New("project attachment recipient state is unavailable")
+			}
+			if hasAttachmentRecords {
+				return 0, 0, 0, 0, 0, nil, ErrProjectMergeAttachmentState
+			}
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT
     count(*) FILTER (WHERE project_id = $1), count(*) FILTER (WHERE project_id = $2)

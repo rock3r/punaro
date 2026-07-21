@@ -57,6 +57,40 @@ func TestMachineAuthenticationMiddlewareRestoresBoundedAuthenticatedBody(t *test
 	}
 }
 
+func TestMachineAuthenticationMiddlewarePreservesTransitionPrincipal(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewTransitionAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return nil }), []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential != testTransitionToken || legacyKey != nil {
+			return TransitionAuthorization{}, ErrForbidden
+		}
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222", CredentialGeneration: 1, LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	middleware, err := NewMachineAuthenticationMiddleware(auth, 1024, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, ok := AuthenticatedMachineSession(r.Context())
+		if !ok || session.MachineID != "machine-a" || session.PrincipalID != "11111111-1111-4111-8111-111111111111" || session.CredentialLookupID != "22222222-2222-4222-8222-222222222222" || session.CredentialGeneration != 1 {
+			t.Errorf("authenticated session=%#v present=%t", session, ok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "http://example.test/v1/attachments/22222222-2222-4222-8222-222222222222", nil)
+	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestMachineAuthenticationMiddlewareRejectsUnsignedQueryBeforeNonceUse(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

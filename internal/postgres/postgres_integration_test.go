@@ -325,6 +325,56 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("trusted-attachment catalog restoration did not recover readiness: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.endpoint_principals DROP CONSTRAINT endpoint_principals_credential_generation_check; ALTER TABLE attachment.endpoint_principals ADD CONSTRAINT endpoint_principals_credential_generation_check CHECK (credential_generation >= 1 OR true)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive recipient credential-generation constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.endpoint_principals DROP CONSTRAINT endpoint_principals_credential_generation_check; ALTER TABLE attachment.endpoint_principals ADD CONSTRAINT endpoint_principals_credential_generation_check CHECK (credential_generation >= 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.recipient_grants_principal; CREATE INDEX recipient_grants_principal ON attachment.recipient_grants (artifact_id,recipient_principal_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("recipient grant lookup index drift state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.recipient_grants_principal; CREATE INDEX recipient_grants_principal ON attachment.recipient_grants (recipient_principal_id,artifact_id)`); err != nil {
+		t.Fatal(err)
+	}
+	var downloadDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('attachment.authorize_download(uuid,uuid,bigint,uuid)'::regprocedure)`).Scan(&downloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	driftedDownloadDefinition := strings.Replace(downloadDefinition, "TABLE(artifact_id uuid", "TABLE(wrong_artifact_id uuid", 1)
+	if driftedDownloadDefinition == downloadDefinition {
+		t.Fatal("download function definition did not expose the expected TABLE result signature")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, driftedDownloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) FROM PUBLIC; GRANT EXECUTE ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("attachment download result-signature drift state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, downloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) FROM PUBLIC; GRANT EXECUTE ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("attachment-recipient catalog restoration did not recover readiness: %v", err)
+	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -1343,6 +1393,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	v7Manifest := Manifest{MinSupported: 7, MaxSupported: 7, Migrations: append([]Migration(nil), current.Migrations[:7]...)}
 	v8Manifest := Manifest{MinSupported: 8, MaxSupported: 8, Migrations: append([]Migration(nil), current.Migrations[:8]...)}
 	v9Manifest := Manifest{MinSupported: 8, MaxSupported: 9, Migrations: append([]Migration(nil), current.Migrations[:9]...)}
+	v10Manifest := Manifest{MinSupported: 9, MaxSupported: 10, Migrations: append([]Migration(nil), current.Migrations[:10]...)}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
 		SourceRelease:           "v0.7.0",
@@ -1539,8 +1590,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if snapshot, inspectErr := inspect(ctx, ownerDB); inspectErr != nil {
 		t.Fatalf("inspect v9 schema with current manifest: %v", inspectErr)
-	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 9 {
-		t.Fatalf("current manifest rejected exact v9 schema: %#v", state)
+	} else if state := Classify(snapshot, current); state.Classification != UpgradeRequired || state.Version != 9 {
+		t.Fatalf("current manifest did not require the v9 to v10 update: %#v", state)
 	}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2088",
@@ -1556,7 +1607,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9191919191919191919191919191919191919191919191919191919191919191",
 		ComposeSHA256:           "9292929292929292929292929292929292929292929292929292929292929292",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(v10Manifest),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
@@ -1590,16 +1641,76 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v10Manifest); err != nil || state.Classification != Compatible || state.Version != 10 {
 		t.Fatalf("v10 migration state=%#v err=%v", state, err)
 	}
-	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v10 schema: %v", err)
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
+		t.Fatal("mail cutover accepted v10 while the current v11 schema was pending")
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v10 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
+		SourceRelease:           "v0.10.0",
+		TargetRelease:           "v0.11.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
+		SourceSchema:            10,
+		TargetSchema:            11,
+		SchemaMin:               10,
+		SchemaMax:               11,
+		RollbackFloor:           10,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
+		ComposeSHA256:           "9595959595959595959595959595959595959595959595959595959595959595",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v11 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v11 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd9771991100",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:abababababababababababababababababababababababababababababababab",
+		ExportedSnapshotID: "00000003-0000001B-6",
+		ManifestSHA256:     "9696969696969696969696969696969696969696969696969696969696969696",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v11 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v11 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		t.Fatalf("v11 migration state=%#v err=%v", state, err)
+	}
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		t.Fatalf("mail cutover rejected exact v11 schema: %v", err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v11 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {

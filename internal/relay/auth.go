@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const maxRequestAge = 5 * time.Minute
@@ -81,15 +83,23 @@ type TransitionAuthority interface {
 // key and a non-secret current-session fence. Current must recheck the durable
 // gate or device generation without retaining bearer material.
 type TransitionAuthorization struct {
-	LegacyPublicKey ed25519.PublicKey
-	Current         func(context.Context) error
+	// PrincipalID is the stable database authority authenticated for this
+	// request. It is deliberately distinct from the configured transport label.
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	LegacyPublicKey      ed25519.PublicKey
+	Current              func(context.Context) error
 }
 
 // MachineSession is the authenticated relay identity plus an optional durable
 // revalidation fence for long-lived transports.
 type MachineSession struct {
-	MachineID string
-	current   func(context.Context) error
+	MachineID            string
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	current              func(context.Context) error
 }
 
 // Current fails closed when the durable transition authority is no longer
@@ -291,13 +301,13 @@ func (a *Authenticator) AuthenticateHTTPSession(request *http.Request, body []by
 		return MachineSession{}, err
 	}
 	authorization, err := a.transition.AuthorizeTransition(request.Context(), "", machine.PublicKey)
-	if err != nil || authorization.Current == nil || !bytes.Equal(authorization.LegacyPublicKey, machine.PublicKey) {
+	if err != nil || uuid.Validate(authorization.PrincipalID) != nil || authorization.Current == nil || !bytes.Equal(authorization.LegacyPublicKey, machine.PublicKey) {
 		return MachineSession{}, ErrForbidden
 	}
 	if err := a.consumeNonce(machine.ID, signed, now.UTC()); err != nil {
 		return MachineSession{}, err
 	}
-	return MachineSession{MachineID: signed.MachineID, current: authorization.Current}, nil
+	return MachineSession{MachineID: signed.MachineID, PrincipalID: authorization.PrincipalID, current: authorization.Current}, nil
 }
 
 func (a *Authenticator) authenticateTransitionDevice(request *http.Request, authorization string) (MachineSession, error) {
@@ -309,14 +319,14 @@ func (a *Authenticator) authenticateTransitionDevice(request *http.Request, auth
 		return MachineSession{}, ErrForbidden
 	}
 	transition, err := a.transition.AuthorizeTransition(request.Context(), credential, nil)
-	if err != nil || transition.Current == nil || len(transition.LegacyPublicKey) != ed25519.PublicKeySize {
+	if err != nil || uuid.Validate(transition.PrincipalID) != nil || uuid.Validate(transition.CredentialLookupID) != nil || transition.CredentialGeneration < 1 || transition.Current == nil || len(transition.LegacyPublicKey) != ed25519.PublicKeySize {
 		return MachineSession{}, ErrForbidden
 	}
 	machineID, found := a.transitionMachineIDs[sha256.Sum256(transition.LegacyPublicKey)]
 	if !found || !bytes.Equal(a.machines[machineID].PublicKey, transition.LegacyPublicKey) {
 		return MachineSession{}, ErrForbidden
 	}
-	return MachineSession{MachineID: machineID, current: transition.Current}, nil
+	return MachineSession{MachineID: machineID, PrincipalID: transition.PrincipalID, CredentialLookupID: transition.CredentialLookupID, CredentialGeneration: transition.CredentialGeneration, current: transition.Current}, nil
 }
 
 // AllowsEndpoint checks a configured endpoint namespace. It is used before an

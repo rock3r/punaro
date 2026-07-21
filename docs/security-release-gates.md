@@ -47,8 +47,11 @@ checked.
 - [ ] Complete adversarial authorization, filesystem, quota-race, backup,
       restore, load, and operations review against the final release candidate.
 
-Schema v10 is not release evidence: it deliberately exposes no trusted-relay
-HTTP route, no recipient grant, no download, and no deletion operation.
+Schema v11 is not release evidence: it adds owner-only stable recipient
+snapshots and an internal authenticated, fully verified bounded download
+service, but deliberately exposes no trusted-relay HTTP route and implements no
+deletion operation. The boxes remain closed until the native client, destructive
+lifecycle, adversarial matrix, and release-evidence record are complete.
 
 ## Attachment v2 (superseded; closed)
 

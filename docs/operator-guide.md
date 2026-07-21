@@ -583,6 +583,20 @@ The later route-mounting milestone must run the bounded reconciler after restore
 and before accepting uploads so abandoned-timeline reservations are removed
 before their quota is released; schema v10 exposes no operator upload command.
 
+Migration 11 adds dark stable-principal recipient snapshots and bounded
+download authorization. Device-bearer endpoint advertisement records its
+principal with the lease; legacy-signed advertisement clears that binding and
+keeps the endpoint mail-only. Project-bound conversations and attachment-bearing
+messages recheck current capability and credential generation, and the message
+transaction creates recipient grants from its exact delivery snapshot. The
+application role has execute-only routines and cannot inspect the grant tables.
+The server-side service verifies the complete exact private blob before any
+download bytes are emitted, limits downloads to 16 concurrent streams and ten
+minutes, and makes artifact-lock waits cancellation-aware. Project-bound
+conversations fence project merge. Migration 11 still mounts no reservation, upload,
+download, or delete route, so it creates no new operator command or public
+surface.
+
 ### Operator wrapper and device ingress
 
 `punaro init` is the supported first-install path for the staged PostgreSQL

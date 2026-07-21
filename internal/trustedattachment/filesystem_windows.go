@@ -2,7 +2,10 @@
 
 package trustedattachment
 
-import "context"
+import (
+	"context"
+	"os"
+)
 
 func sameFilesystem(_, _ string) (bool, error) {
 	// Windows is not a supported trusted-relay server platform. Keep the package
@@ -15,4 +18,8 @@ func lockArtifactFile(context.Context, string) (func() error, error) {
 	// The trusted-relay server is unsupported on Windows; keep client-wide
 	// cross-builds working without claiming cross-process locking semantics.
 	return func() error { return nil }, nil
+}
+
+func openPrivateRead(path string) (*os.File, error) {
+	return os.Open(path) // #nosec G304 -- Windows trusted-relay server runtime remains disabled.
 }

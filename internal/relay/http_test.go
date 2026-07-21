@@ -97,6 +97,60 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+type principalEndpointRecordingBackend struct {
+	Backend
+	plainCalls     int
+	principalCalls int
+}
+
+func (backend *principalEndpointRecordingBackend) AdvertiseEndpoints(machineID string, endpoints []string, now time.Time, ttl time.Duration) error {
+	backend.plainCalls++
+	return backend.Backend.AdvertiseEndpoints(machineID, endpoints, now, ttl)
+}
+
+func (backend *principalEndpointRecordingBackend) AdvertiseEndpointsForPrincipal(machineID string, _ PrincipalAuthority, endpoints []string, now time.Time, ttl time.Duration) error {
+	backend.principalCalls++
+	return backend.Backend.AdvertiseEndpoints(machineID, endpoints, now, ttl)
+}
+
+func TestHTTPEndpointAdvertisementUsesPrincipalBindingOnlyForDeviceBearer(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewTransitionAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential == "" && bytes.Equal(legacyKey, public) {
+			return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+		}
+		if credential == testTransitionToken && legacyKey == nil {
+			return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222", CredentialGeneration: 1, LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+		}
+		return TransitionAuthorization{}, ErrForbidden
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &principalEndpointRecordingBackend{Backend: store}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(backend, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	legacy := serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/legacy"]}`, "legacy-advertise", "")
+	if legacy.Code != http.StatusOK || backend.plainCalls != 1 || backend.principalCalls != 0 {
+		t.Fatalf("legacy status=%d plain=%d principal=%d body=%s", legacy.Code, backend.plainCalls, backend.principalCalls, legacy.Body.String())
+	}
+	request := httptest.NewRequestWithContext(context.Background(), http.MethodPut, "/v1/machines/me/endpoints", strings.NewReader(`{"endpoints":["agent/a/device"]}`))
+	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || backend.plainCalls != 1 || backend.principalCalls != 1 {
+		t.Fatalf("device status=%d plain=%d principal=%d body=%s", response.Code, backend.plainCalls, backend.principalCalls, response.Body.String())
+	}
+}
+
 func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T) {
 	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -299,7 +353,7 @@ func TestHTTPNotificationsCloseWithinFenceWhenTransitionAuthorityHangs(t *testin
 		if credential != testTransitionToken || legacyKey != nil {
 			return TransitionAuthorization{}, ErrForbidden
 		}
-		return TransitionAuthorization{LegacyPublicKey: public, Current: func(ctx context.Context) error {
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222", CredentialGeneration: 1, LegacyPublicKey: public, Current: func(ctx context.Context) error {
 			switch current.Load() {
 			case 1:
 				return nil
