@@ -367,7 +367,40 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 
 	// Leave the shared integration database content-free for backup and merge tests.
-	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.recipient_grant_endpoints WHERE message_id=$1; DELETE FROM attachment.recipient_grants WHERE message_id=$1; DELETE FROM attachment.message_artifacts WHERE message_id=$1; DELETE FROM attachment.conversation_projects WHERE conversation_id=$2; DELETE FROM attachment.endpoint_principals WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient'); DELETE FROM relay.mail_deliveries WHERE message_id=$1; DELETE FROM relay.mail_message_idempotency WHERE message_id=$1; DELETE FROM relay.mail_messages WHERE id=$1; DELETE FROM relay.mail_memberships WHERE conversation_id=$2; DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$2; DELETE FROM relay.mail_conversations WHERE id=$2; DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient'); DELETE FROM attachment.ready_artifacts; DELETE FROM attachment.ready_blob_manifest; DELETE FROM attachment.uploads; DELETE FROM attachment.project_quotas; DELETE FROM attachment.principal_quotas; UPDATE attachment.global_quota SET reserved_bytes=0,used_bytes=0,reserved_uploads=0,ready_artifacts=0`, message.ID, conversation.ID); err != nil {
+	cleanupTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM attachment.recipient_grant_endpoints WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.recipient_grants WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.message_artifacts WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.conversation_projects WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM attachment.endpoint_principals WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
+		{`DELETE FROM relay.mail_deliveries WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_messages WHERE id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_conversations WHERE id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
+		{`DELETE FROM attachment.ready_artifacts`, nil},
+		{`DELETE FROM attachment.ready_blob_manifest`, nil},
+		{`DELETE FROM attachment.uploads`, nil},
+		{`DELETE FROM attachment.project_quotas`, nil},
+		{`DELETE FROM attachment.principal_quotas`, nil},
+		{`UPDATE attachment.global_quota SET reserved_bytes=0,used_bytes=0,reserved_uploads=0,ready_artifacts=0`, nil},
+	}
+	for _, statement := range cleanup {
+		if _, err := cleanupTx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			_ = cleanupTx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := cleanupTx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 }
