@@ -189,6 +189,10 @@ func (s *Store) ConsumeRequestNonce(machineID, nonce string, now, expiresAt time
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	var migrationControlExisted bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExisted); err != nil {
+		return fmt.Errorf("inspect relay migration control: %w", err)
+	}
 	for _, statement := range []string{
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
@@ -289,8 +293,10 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate relay database: %w", err)
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO relay_migration_control(singleton,source_id,changed_at) VALUES(1,?,?)`, uuid.NewString(), time.Now().UTC().UnixMilli()); err != nil {
-		return fmt.Errorf("initialize relay migration control: %w", err)
+	if !migrationControlExisted {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO relay_migration_control(singleton,source_id,changed_at) VALUES(1,?,?)`, uuid.NewString(), time.Now().UTC().UnixMilli()); err != nil {
+			return fmt.Errorf("initialize relay migration control: %w", err)
+		}
 	}
 	for _, table := range []string{"endpoints", "conversations", "memberships", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "request_nonces"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {

@@ -205,12 +205,20 @@ func TestMigrationSourceGuardFailsClosedWithoutControlRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = store.Close() }()
 	if _, err := store.db.ExecContext(context.Background(), `DELETE FROM relay_migration_control`); err != nil {
+		_ = store.Close()
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine','nonce',1)`); err == nil || !strings.Contains(err.Error(), "relay migration source is not writable") {
+		_ = store.Close()
 		t.Fatalf("write without control singleton err=%v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path); err == nil {
+		_ = reopened.Close()
+		t.Fatal("ordinary startup recreated the missing migration-control singleton")
 	}
 }
 
