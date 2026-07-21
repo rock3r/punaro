@@ -739,6 +739,12 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	}
 	changed := request
 	changed.SourceFingerprint = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	changedManifest := manifest
+	changedManifest.Fingerprint = changed.SourceFingerprint
+	changedCanonical, _ := json.Marshal(changedManifest)
+	changed.Manifest = changedCanonical
+	changedDigest := sha256.Sum256(changedCanonical)
+	changed.ManifestSHA256 = hex.EncodeToString(changedDigest[:])
 	if _, err := admin.BeginMailCutover(ctx, actor, changed); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("changed cutover retry err=%v", err)
 	}
@@ -773,10 +779,10 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	changedEpoch := request
 	changedEpoch.EpochID = "019f7f07-7b88-7c12-a394-b663274a6555"
 	manifest.EpochID = changedEpoch.EpochID
-	changedCanonical, _ := json.Marshal(manifest)
-	changedEpoch.Manifest = changedCanonical
-	changedDigest := sha256.Sum256(changedCanonical)
-	changedEpoch.ManifestSHA256 = hex.EncodeToString(changedDigest[:])
+	changedEpochCanonical, _ := json.Marshal(manifest)
+	changedEpoch.Manifest = changedEpochCanonical
+	changedEpochDigest := sha256.Sum256(changedEpochCanonical)
+	changedEpoch.ManifestSHA256 = hex.EncodeToString(changedEpochDigest[:])
 	if _, err := admin.BeginMailCutover(ctx, actor, changedEpoch); !errors.Is(err, ErrMaintenance) {
 		t.Fatalf("mail begin overlapped active update: %v", err)
 	}
