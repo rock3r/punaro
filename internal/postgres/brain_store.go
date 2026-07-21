@@ -76,6 +76,9 @@ func (d *Database) CreateMemory(ctx context.Context, raw MemoryCreateRequest) (M
 		if !allowed {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
+		if err := guardMemoryDocument(ctx, tx, project.ID, request.Document); err != nil {
+			return IdempotencyOutcome{}, err
+		}
 		scopeID, err := ensureMemoryScope(ctx, tx, project.ID, request.PrincipalID)
 		if err != nil {
 			return IdempotencyOutcome{}, err
@@ -171,6 +174,9 @@ func (d *Database) UpdateMemory(ctx context.Context, raw MemoryUpdateRequest) (M
 	return d.mutateMemory(ctx, request.PrincipalID, request.IdempotencyKey, "memory.update", body, request.ProjectID, request.ItemID, CapabilityMemoryWrite, func(tx *sql.Tx, control *ControlTx, locked lockedMemory) (MemoryMutationResult, error) {
 		if !memoryETagMatches(request.ExpectedETag, request.ItemID, locked.Revision) {
 			return MemoryMutationResult{}, ErrStaleMemoryETag
+		}
+		if err := guardMemoryDocument(ctx, tx, locked.ProjectID, request.Document); err != nil {
+			return MemoryMutationResult{}, err
 		}
 		next := locked.Revision + 1
 		if err := insertMemoryRevision(ctx, tx, request.ItemID, next, request.Document, request.PrincipalID, MemoryChangeUpdate); err != nil {

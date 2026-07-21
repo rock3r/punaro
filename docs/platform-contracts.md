@@ -161,8 +161,27 @@ and timeline-aware; authorized project pages may contain global-sequence gaps an
 reject abandoned or future cursors. Live brain records or retained brain
 history fail closed at project
 merge until a later collision-aware rehome contract is implemented. Secret
-guarding, evidence/proposals, lexical search, clients, and embeddings remain
-separate later slices.
+guarding begins at schema version 15; evidence/proposals, lexical search,
+clients, and embeddings remain separate later slices.
+
+Schema version 15 adds the shared deterministic secret scanner and
+content-free exception registry. Canonical create and update scan only after
+project authorization and before their first durable effect. Rejection returns
+the rule and escaped RFC 6901 JSON Pointer without the matched value or its fingerprint and
+rolls back idempotency, audit, changes, revisions, scopes, content generation,
+and jobs. The same pure scanner is available for immediate native-client
+feedback, but the in-transaction server result is authoritative.
+
+Accepted references include `op://` locators, environment names/references,
+and explicit placeholders/redactions; resolved private keys, supported bearer
+tokens, credential assignments, and credential-field values are rejected.
+Only `memory.administer` can add or revoke an exception, and every exception is
+bound to the exact project, compiled rule version, rule ID, JSON path, and
+SHA-256 value fingerprint. There is no wildcard, free-form pattern, or
+write-request override. Exception operations are idempotent and audited without
+content. Readiness verifies the exact stored rule identity, table shape,
+ownership, mutation fences, index, and bidirectional table/column ACL sets.
+Schema version 16 adds rule-update rescans and operator quarantine review.
 
 ### Implemented dark control-plane primitives
 

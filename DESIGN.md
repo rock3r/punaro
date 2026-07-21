@@ -267,6 +267,25 @@ history fails closed at project-merge preview/approval rather than stranding or
 widening access.
 WebSocket reconnect never alters delivery cursors.
 
+Schema version 15 places one deterministic secret guard inside the authorized
+create/update transaction before any scope, revision, change, audit,
+idempotency result, or derived job can be written. Findings contain only the
+compiled rule version, stable rule ID, escaped RFC 6901 JSON Pointer, and an exact SHA-256
+fingerprint; public errors omit both the suspected value and fingerprint.
+Private-key material, supported bearer-token families, credential assignments,
+and resolved values in credential-named fields fail closed. `op://` locators,
+environment names/references, and explicit placeholders remain inert accepted
+text.
+
+There is no request or model override. A principal with
+`memory.administer` may approve or revoke only one exact
+project/rule-version/rule/path/fingerprint tuple through an idempotent,
+content-free operation. The database stores no rejected value and readiness
+binds the stored rule version/digest to the exact compiled scanner. Future
+proposal approval, import, consolidation, and attachment-text ingestion must
+call this same guard before publication or enqueue. Bounded rescan and
+quarantine follow in schema version 16.
+
 ## Minimal HTTP surface
 
 All remote requests use HTTPS and require Punaro machine authentication.
