@@ -203,6 +203,9 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if err != nil || len(candidates) < 2 {
 		t.Fatalf("reconcile candidates=%d err=%v", len(candidates), err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'project.administer')`, uploader.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
 	if hasRecords, err := app.ProjectHasAttachmentRecords(ctx, uploader.ID, project.ProjectID); err != nil || !hasRecords {
 		t.Fatalf("project attachment records=%t err=%v", hasRecords, err)
 	}
