@@ -123,6 +123,7 @@ WITH objects AS (
        AND count(*) FILTER (WHERE contype = 'f' AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's') = 6 AS exact
     FROM pg_constraint, objects
     WHERE conrelid = ANY(ARRAY[uploads_oid,ready_oid,global_oid,project_oid,principal_oid])
+      AND contype <> 'n'
 ), index_safety AS (
     SELECT count(*) = 9
        AND bool_and(indisvalid AND indisready)
