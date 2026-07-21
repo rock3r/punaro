@@ -234,7 +234,7 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	if _, err := app.PreviewProjectIdentityMerge(ctx, previewRequest); !errors.Is(err, ErrProjectMergeAttachmentState) {
 		t.Fatalf("attachment-bearing project merge preview error=%v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, mergeFence.ArtifactID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, mergeFence.ArtifactID); err != nil {
 		t.Fatal(err)
 	}
 	reapTestAttachment(ctx, t, app, mergeFence.ArtifactID)
