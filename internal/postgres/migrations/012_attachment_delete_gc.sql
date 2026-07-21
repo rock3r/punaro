@@ -354,26 +354,26 @@ BEGIN
     DELETE FROM attachment.message_artifacts WHERE message_artifacts.artifact_id = requested_artifact;
     DELETE FROM attachment.uploads WHERE uploads.artifact_id = requested_artifact;
 
-    UPDATE attachment.global_quota
-    SET used_bytes = used_bytes - deletion.size_bytes,
-        ready_artifacts = ready_artifacts - 1
-    WHERE singleton AND used_bytes >= deletion.size_bytes AND ready_artifacts >= 1;
+    UPDATE attachment.global_quota AS quota
+    SET used_bytes = quota.used_bytes - deletion.size_bytes,
+        ready_artifacts = quota.ready_artifacts - 1
+    WHERE quota.singleton AND quota.used_bytes >= deletion.size_bytes AND quota.ready_artifacts >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment global quota is inconsistent';
     END IF;
-    UPDATE attachment.project_quotas
-    SET used_bytes = used_bytes - deletion.size_bytes,
-        ready_artifacts = ready_artifacts - 1
-    WHERE project_id = upload.project_id
-      AND used_bytes >= deletion.size_bytes AND ready_artifacts >= 1;
+    UPDATE attachment.project_quotas AS quota
+    SET used_bytes = quota.used_bytes - deletion.size_bytes,
+        ready_artifacts = quota.ready_artifacts - 1
+    WHERE quota.project_id = upload.project_id
+      AND quota.used_bytes >= deletion.size_bytes AND quota.ready_artifacts >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment project quota is inconsistent';
     END IF;
-    UPDATE attachment.principal_quotas
-    SET used_bytes = used_bytes - deletion.size_bytes,
-        ready_artifacts = ready_artifacts - 1
-    WHERE principal_id = upload.principal_id
-      AND used_bytes >= deletion.size_bytes AND ready_artifacts >= 1;
+    UPDATE attachment.principal_quotas AS quota
+    SET used_bytes = quota.used_bytes - deletion.size_bytes,
+        ready_artifacts = quota.ready_artifacts - 1
+    WHERE quota.principal_id = upload.principal_id
+      AND quota.used_bytes >= deletion.size_bytes AND quota.ready_artifacts >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment principal quota is inconsistent';
     END IF;

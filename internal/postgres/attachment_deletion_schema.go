@@ -91,7 +91,7 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
       (tombstone_oid,'b35bc0a6a2bea7243bf9793730389833','record',true,'plpgsql','v'),
       (claim_oid,'f9118b6ca10485fb4b764ee8066d950e','record',true,'plpgsql','v'),
-      (finalize_oid,'3f75f3b0a4e0cbcab9ac03a94e74346e','record',true,'plpgsql','v'),
+      (finalize_oid,'92180383d2ef021d59470babee7c879a','record',true,'plpgsql','v'),
       (orphan_oid,'c88c556c0242673bd1694025bd414057','boolean',false,'sql','s')
     ) AS expected(oid,body_hash,result_type,returns_set,language_name,volatility)
 ), routine_safety AS (
