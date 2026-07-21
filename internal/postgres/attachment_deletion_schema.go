@@ -43,8 +43,8 @@ WITH objects AS (
       ('deletions_size_bytes_check','c','{5}',false,false),
       ('deletions_sha256_check','c','{6}',false,false),
       ('deletions_state_check','c','{7}',false,false),
-      ('deletions_storage_path_check','c','{1,4}',false,false),
-      ('deletions_gc_after_check','c','{8,9}',false,false),
+      ('deletions_storage_path_check','c','{4,1}',false,false),
+      ('deletions_gc_after_check','c','{9,8}',false,false),
       ('deletions_gc_generation_check','c','{10}',false,false),
       ('deletions_lifecycle_check','c','{7,11,12,13}',false,false)
 ), actual_constraints AS (
