@@ -43,6 +43,19 @@ func (a *Administration) RegisterLegacyMachine(ctx context.Context, actorPrincip
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
 		return LegacyMachine{}, ErrForbidden
 	}
+	// Lock in the same order as activation readiness. Once a mail cutover
+	// epoch exists, no new intended legacy identity may appear between the
+	// pre-retirement proof and PostgreSQL activation.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+		return LegacyMachine{}, errors.New("legacy registration cannot be serialized with mail cutover")
+	}
+	var cutoverActive bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.mail_cutover_epochs WHERE phase IN ('importing','verified','active'))`).Scan(&cutoverActive); err != nil {
+		return LegacyMachine{}, errors.New("legacy registration cannot inspect mail cutover")
+	}
+	if cutoverActive {
+		return LegacyMachine{}, errors.New("legacy registration is unavailable during mail cutover")
+	}
 	if err := lockLegacyMutations(ctx, tx); err != nil {
 		return LegacyMachine{}, err
 	}

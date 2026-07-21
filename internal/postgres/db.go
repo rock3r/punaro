@@ -969,7 +969,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = relayObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 8 {
-		cutoverObjectsPresent, err := mailCutoverControlsAvailable(ctx, q)
+		cutoverObjectsPresent, err := mailCutoverControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL mail-cutover schema cannot be inspected")
 		}

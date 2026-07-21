@@ -751,7 +751,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 		UpdateID: "019f7f07-6b88-7c12-a394-b663274a6555", SourceRelease: "cutover-source", TargetRelease: "cutover-target",
 		SourceImage:  "ghcr.io/rock3r/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		TargetImage:  "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-		SourceSchema: 8, TargetSchema: 8, SchemaMin: 8, SchemaMax: 8, RollbackFloor: 8, PostgresMajor: postgresMajor,
+		SourceSchema: CurrentManifest().MaxSupported, TargetSchema: CurrentManifest().MaxSupported, SchemaMin: 8, SchemaMax: CurrentManifest().MaxSupported, RollbackFloor: 8, PostgresMajor: postgresMajor,
 		ReleaseSHA256: strings.Repeat("1", 64), ComposeSHA256: strings.Repeat("2", 64), MigrationManifestSHA256: MigrationManifestSHA256(),
 	}
 	if _, err := admin.BeginUpdate(ctx, updateRequest); !errors.Is(err, ErrUpdateConflict) {
@@ -892,6 +892,54 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	}
 	if _, err := admin.VerifyMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
 		t.Fatal(err)
+	}
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, uuid.NewString(), activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
+		t.Fatal("non-owner passed activation readiness")
+	}
+	pendingLegacyKey := make([]byte, 32)
+	pendingLegacyKey[0] = 42
+	pendingLegacyDigest := sha256.Sum256(pendingLegacyKey)
+	var pendingLegacyID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals(kind,display_name) VALUES('legacy_machine','cutover readiness fixture') RETURNING id::text`).Scan(&pendingLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.legacy_machines(principal_id,public_key,public_key_digest) VALUES($1,$2,$3)`, pendingLegacyID, pendingLegacyKey, pendingLegacyDigest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
+		t.Fatal("activation readiness accepted a pending legacy machine")
+	}
+	if sourceState, err := relay.InspectMigrationSource(ctx, sourcePath); err != nil || sourceState.Phase != relay.MigrationSourcePrepared {
+		t.Fatalf("readiness failure retired source state=%#v err=%v", sourceState, err)
+	}
+	if err := admin.RetireLegacyMachine(ctx, actor, pendingLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
+		t.Fatalf("resolved activation readiness: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.legacy_auth_state SET enabled=true,changed_at=statement_timestamp() WHERE singleton`); err != nil {
+		t.Fatal(err)
+	}
+	registrationResult := make(chan error, 1)
+	go func() {
+		key := make([]byte, 32)
+		key[0] = 84
+		_, registerErr := admin.RegisterLegacyMachine(ctx, actor, "cutover readiness race", key)
+		registrationResult <- registerErr
+	}()
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
+		t.Fatalf("concurrent activation readiness: %v", err)
+	}
+	if err := <-registrationResult; err == nil {
+		t.Fatal("legacy registration crossed a verified mail cutover")
+	}
+	var pendingAfterReadiness bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.legacy_machines WHERE state='pending')`).Scan(&pendingAfterReadiness); err != nil || pendingAfterReadiness {
+		t.Fatalf("pending legacy inventory crossed readiness pending=%t err=%v", pendingAfterReadiness, err)
+	}
+	if sourceState, err := relay.InspectMigrationSource(ctx, sourcePath); err != nil || sourceState.Phase != relay.MigrationSourcePrepared {
+		t.Fatalf("registration race retired source state=%#v err=%v", sourceState, err)
 	}
 	retiredManifest, err := relay.RetirePreparedMigrationSource(ctx, sourcePath, activationRequest.EpochID, targetIdentity, activationRequest.SourceFingerprint)
 	if err != nil {
@@ -1178,6 +1226,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		}
 	}
 	v7Manifest := Manifest{MinSupported: 7, MaxSupported: 7, Migrations: append([]Migration(nil), current.Migrations[:7]...)}
+	v8Manifest := Manifest{MinSupported: 8, MaxSupported: 8, Migrations: append([]Migration(nil), current.Migrations[:8]...)}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
 		SourceRelease:           "v0.7.0",
@@ -1238,7 +1287,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2086",
 		SourceRelease:           "v0.8.0",
-		TargetRelease:           "v0.9.0",
+		TargetRelease:           "v0.8.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		SourceSchema:            7,
@@ -1249,7 +1298,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "1212121212121212121212121212121212121212121212121212121212121212",
 		ComposeSHA256:           "3434343434343434343434343434343434343434343434343434343434343434",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(v8Manifest),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
@@ -1283,13 +1332,76 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != 8 {
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v8Manifest); err != nil || state.Classification != Compatible || state.Version != 8 {
 		t.Fatalf("v8 migration state=%#v err=%v", state, err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v8 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	if snapshot, inspectErr := inspect(ctx, ownerDB); inspectErr != nil {
+		t.Fatalf("inspect v8 schema with current manifest: %v", inspectErr)
+	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 8 {
+		t.Fatalf("current manifest rejected exact v8 schema: %#v", state)
+	}
+
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2087",
+		SourceRelease:           "v0.8.0",
+		TargetRelease:           "v0.9.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		SourceSchema:            8,
+		TargetSchema:            9,
+		SchemaMin:               8,
+		SchemaMax:               9,
+		RollbackFloor:           8,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "7878787878787878787878787878787878787878787878787878787878787878",
+		ComposeSHA256:           "8989898989898989898989898989898989898989898989898989898989898989",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v9 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v9 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910fe",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		ExportedSnapshotID: "00000003-0000001B-4",
+		ManifestSHA256:     "9090909090909090909090909090909090909090909090909090909090909090",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v9 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v9 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		t.Fatalf("v9 migration state=%#v err=%v", state, err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v9 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {

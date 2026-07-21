@@ -299,7 +299,7 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 	return nil
 }
 
-func mailCutoverControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func mailCutoverControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -392,7 +392,11 @@ WITH objects AS (
            WHEN 'mail_cutover_epochs_aborted_at_check' THEN pg_get_expr(con.conbin,con.conrelid)='((phase = ''aborted''::text) = (aborted_at IS NOT NULL))'
            WHEN 'mail_cutover_staging_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
            WHEN 'mail_cutover_staging_row_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((octet_length(row_key) >= 1) AND (octet_length(row_key) <= 4096))'
-           WHEN 'mail_cutover_staging_payload_check' THEN pg_get_expr(con.conbin,con.conrelid)='((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 65536))'
+		WHEN 'mail_cutover_staging_payload_check' THEN pg_get_expr(con.conbin,con.conrelid)=CASE
+			WHEN $1 >= 9
+			THEN '((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 262144))'
+			ELSE '((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 65536))'
+		END
            WHEN 'mail_cutover_staging_row_sha256_check' THEN pg_get_expr(con.conbin,con.conrelid)='(row_sha256 ~ ''^[0-9a-f]{64}$''::text)'
            WHEN 'mail_cutover_checkpoints_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
            WHEN 'mail_cutover_checkpoints_last_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((last_key IS NULL) OR ((octet_length(last_key) >= 1) AND (octet_length(last_key) <= 4096)))'
@@ -458,6 +462,6 @@ SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND ob
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
    AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
-FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available)
+FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

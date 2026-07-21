@@ -24,6 +24,7 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 	abort := flags.Bool("abort", false, "abort the exact prepared epoch before source retirement")
 	epochID := flags.String("epoch-id", "", "explicit cutover epoch UUID")
 	expectedFingerprint := flags.String("expected-source-fingerprint", "", "exact fingerprint printed by dry-run")
+	relayMachinesFile := flags.String("relay-machines-file", "", "protected static relay enrollment JSON to persist before execution")
 	confirmed := flags.Bool("yes", false, "confirm the irreversible source retirement and PostgreSQL activation")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || execute == nil {
 		return 2
@@ -32,11 +33,11 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 		_, _ = fmt.Fprintln(stderr, "mail cutover execution requires --epoch-id, --expected-source-fingerprint, and --yes")
 		return 2
 	}
-	if *dryRun && (*abort || *confirmed || *epochID != "" || *expectedFingerprint != "") {
+	if *dryRun && (*abort || *confirmed || *epochID != "" || *expectedFingerprint != "" || *relayMachinesFile != "") {
 		_, _ = fmt.Fprintln(stderr, "mail cutover dry-run does not accept execution authorization")
 		return 2
 	}
-	if *abort && (!*confirmed || *epochID == "" || *expectedFingerprint != "") {
+	if *abort && (!*confirmed || *epochID == "" || *expectedFingerprint != "" || *relayMachinesFile != "") {
 		_, _ = fmt.Fprintln(stderr, "mail cutover abort requires --epoch-id and --yes")
 		return 2
 	}
@@ -50,6 +51,19 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "mail cutover installation is unavailable")
 		return 1
+	}
+	if !*dryRun && !*abort {
+		if *relayMachinesFile != "" {
+			installation, err = operator.ConfigureMailCutoverRelayMachines(*directory, *relayMachinesFile)
+			if err != nil {
+				_, _ = fmt.Fprintln(stderr, "mail cutover relay enrollment is unavailable")
+				return 1
+			}
+		}
+		if installation.RelayMachinesJSON == "" {
+			_, _ = fmt.Fprintln(stderr, "mail cutover execution requires --relay-machines-file")
+			return 2
+		}
 	}
 	if (*dryRun || *abort) && len(operator.CheckPaths(installation)) != 0 {
 		_, _ = fmt.Fprintln(stderr, "mail cutover installation paths are not ready")

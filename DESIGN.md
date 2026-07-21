@@ -544,6 +544,8 @@ leases, advances their generations, and installs a durable write fence that
 also stops already-open older daemons. PostgreSQL schema v8 can durably record
 one owner-authorized import epoch plus bounded staging/checkpoint state and
 fences application-role mail writes while that epoch is importing or verified.
+Schema v9 expands only the staging payload bound to cover worst-case JSON
+escaping for every valid 32 KiB message body while retaining the same ACLs.
 The one-shot executor now consumes that substrate. It exports canonical rows in
 bounded order-preserving pages, durably checkpoints exact idempotent staging,
 streams every table back through the source-manifest hash, and materializes all
@@ -612,7 +614,10 @@ The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the
 source fingerprint, exact counts, and PostgreSQL target identity without a
 mutation. Execution accepts no arbitrary source path and requires a caller
-chosen epoch UUID, the dry-run fingerprint, and `--yes`. SQLite prepare fences
+chosen epoch UUID, the dry-run fingerprint, `--yes`, and a complete validated
+public static relay enrollment on first execution. That enrollment is published
+marker-last before SQLite prepare, remains the canonical endpoint authority
+after cutover, and cannot be changed by a recovery retry. SQLite prepare fences
 old daemons and clears every lease holder while advancing fences. Staging is
 bounded to 128 rows per page and resumes from durable PostgreSQL checkpoints.
 Verification rejects any missing, extra, reordered, malformed, or changed row.

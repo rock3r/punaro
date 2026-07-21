@@ -19,6 +19,10 @@ const maxMigrationBatchRows = 256
 
 var migrationRowDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// MaxMigrationSourcePayloadBytes accounts for worst-case JSON escaping of a
+// valid 32 KiB message body plus its bounded canonical metadata.
+const MaxMigrationSourcePayloadBytes = 256 << 10
+
 // MigrationSourceRow is one canonical, content-addressed SQLite relay row.
 // Payload contains only the allowlisted logical columns from the source
 // manifest; Key is an opaque resume cursor derived from the table primary key.
@@ -58,7 +62,7 @@ func NewMigrationTableHasher(table string) (*MigrationTableHasher, error) {
 
 // Add verifies one row envelope and adds its source values in manifest order.
 func (h *MigrationTableHasher) Add(row MigrationSourceRow) error {
-	if h == nil || h.hash == nil || row.Table != h.table || row.Key == "" || len(row.Key) > 4096 || len(row.Payload) == 0 || len(row.Payload) > 65536 || !migrationRowDigestPattern.MatchString(row.SHA256) {
+	if h == nil || h.hash == nil || row.Table != h.table || row.Key == "" || len(row.Key) > 4096 || len(row.Payload) == 0 || len(row.Payload) > MaxMigrationSourcePayloadBytes || !migrationRowDigestPattern.MatchString(row.SHA256) {
 		return errors.New("invalid relay migration row")
 	}
 	digest := sha256.Sum256(row.Payload)
@@ -243,7 +247,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 			payloadValues[column] = values[index]
 		}
 		payload, err := json.Marshal(payloadValues)
-		if err != nil || len(payload) == 0 || len(payload) > 65536 {
+		if err != nil || len(payload) == 0 || len(payload) > MaxMigrationSourcePayloadBytes {
 			return MigrationSourceBatch{}, errors.New("relay migration batch payload is invalid")
 		}
 		digest := sha256.Sum256(payload)

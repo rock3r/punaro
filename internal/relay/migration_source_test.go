@@ -215,6 +215,61 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
+func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 21, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "large-create", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("\x01", maxMessageBodyBytes)
+	if _, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/source/a",
+		Body: body, IdempotencyKey: "large-message", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("append large message duplicate=%t err=%v", duplicate, err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), active.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 1)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("large message batch=%#v err=%v", batch, err)
+	}
+	if len(batch.Rows[0].Payload) <= 65536 || len(batch.Rows[0].Payload) > MaxMigrationSourcePayloadBytes {
+		t.Fatalf("large message payload bytes=%d", len(batch.Rows[0].Payload))
+	}
+	hasher, err := NewMigrationTableHasher("mail_messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(batch.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.Messages || digest != prepared.TableSHA256.Messages {
+		t.Fatalf("large message evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
 func TestMigrationSourceRefusesMissingOrPermissiveGuard(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

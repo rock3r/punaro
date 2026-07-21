@@ -56,7 +56,45 @@ func publishMailCutover(directory string, publication MailCutoverPublication, af
 		}
 		return installation, nil
 	}
+	if installation.RelayMachinesJSON == "" {
+		return Installation{}, errors.New("mail cutover relay enrollment is unavailable")
+	}
 	installation.MailCutover = &publication
+	return publishMailCutoverInstallation(directory, installation, afterStep)
+}
+
+// ConfigureMailCutoverRelayMachines durably records the exact non-secret
+// static relay authority before any irreversible source transition begins.
+func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Installation, error) {
+	if !filepath.IsAbs(enrollmentFile) || filepath.Clean(enrollmentFile) != enrollmentFile || requireTrustedProtectedFile(enrollmentFile, maxRelayMachinesBytes) != nil {
+		return Installation{}, errors.New("mail cutover relay enrollment file is unavailable")
+	}
+	body, err := os.ReadFile(enrollmentFile) // #nosec G304 -- explicit protected operator input.
+	if err != nil {
+		return Installation{}, errors.New("mail cutover relay enrollment file is unavailable")
+	}
+	canonical, err := canonicalRelayMachinesJSON(string(body))
+	if err != nil {
+		return Installation{}, err
+	}
+	installation, err := LoadMailCutoverRecovery(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.RelayMachinesJSON != "" {
+		if installation.RelayMachinesJSON != canonical {
+			return Installation{}, errors.New("mail cutover relay enrollment conflicts with the installation")
+		}
+		return installation, nil
+	}
+	if installation.MailCutover != nil {
+		return Installation{}, errors.New("active mail cutover relay enrollment cannot change")
+	}
+	installation.RelayMachinesJSON = canonical
+	return publishMailCutoverInstallation(directory, installation, nil)
+}
+
+func publishMailCutoverInstallation(directory string, installation Installation, afterStep func(string) error) (Installation, error) {
 	envStage := filepath.Join(directory, ".punarod.env.mail-cutover")
 	overrideStage := filepath.Join(directory, ".compose.operator.mail-cutover.yaml")
 	markerStage := filepath.Join(directory, ".installation.mail-cutover.json")
@@ -175,14 +213,20 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 	}
 	markerStage := filepath.Join(directory, ".installation.mail-cutover.json")
 	candidate, err := readInstallation(markerStage)
-	if err != nil || candidate.MailCutover == nil || candidate.MailCutover.Validate() != nil {
+	if err != nil || candidate.MailCutover != nil && candidate.MailCutover.Validate() != nil || candidate.RelayMachinesJSON != "" && validateRelayMachinesJSON(candidate.RelayMachinesJSON) != nil {
 		return Installation{}, errors.New("mail cutover recovery marker is unavailable")
 	}
 	candidate.Directory = directory
 	baseComparable, candidateComparable := base, candidate
 	baseComparable.MailCutover, candidateComparable.MailCutover = nil, nil
+	baseComparable.RelayMachinesJSON, candidateComparable.RelayMachinesJSON = "", ""
 	if baseComparable != candidateComparable {
 		return Installation{}, errors.New("mail cutover recovery marker does not match the installation")
+	}
+	cutoverAdvance := base.MailCutover == nil && candidate.MailCutover != nil && base.RelayMachinesJSON == candidate.RelayMachinesJSON
+	enrollmentAdvance := base.MailCutover == nil && candidate.MailCutover == nil && base.RelayMachinesJSON == "" && candidate.RelayMachinesJSON != ""
+	if !cutoverAdvance && !enrollmentAdvance {
+		return Installation{}, errors.New("mail cutover recovery marker transition is invalid")
 	}
 	for _, file := range []struct {
 		path          string
@@ -195,7 +239,15 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 			return Installation{}, errors.New("mail cutover recovery file is unavailable")
 		}
 		body, err := os.ReadFile(file.path) // #nosec G304 -- validated fixed generated path.
-		if err != nil || string(body) != file.old && string(body) != file.intended {
+		legacyOld := ""
+		if base.MailCutover == nil && base.RelayMachinesJSON == "" {
+			if file.path == EnvFile(directory) {
+				legacyOld = legacyDaemonEnv(base)
+			} else {
+				legacyOld = legacyComposeOverride()
+			}
+		}
+		if err != nil || string(body) != file.old && string(body) != file.intended && string(body) != legacyOld {
 			return Installation{}, errors.New("mail cutover recovery file does not match either durable state")
 		}
 	}

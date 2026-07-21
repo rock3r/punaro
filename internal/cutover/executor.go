@@ -42,6 +42,7 @@ type Destination interface {
 	MailCutoverCheckpoint(context.Context, string, string, string) (postgres.MailCutoverCheckpoint, error)
 	StageMailCutoverBatch(context.Context, string, postgres.MailCutoverBatch) (postgres.MailCutoverCheckpoint, error)
 	VerifyMailCutover(context.Context, string, string, string) (postgres.MailCutoverEpoch, error)
+	CheckMailCutoverActivationReadiness(context.Context, string, string, string) error
 	ActivateMailCutover(context.Context, string, string, string, relay.MigrationSourceManifest) (postgres.MailCutoverEpoch, error)
 	AbortMailCutover(context.Context, string, string, string) error
 }
@@ -192,6 +193,9 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 	}
 	if epoch.Phase == postgres.MailCutoverVerified {
 		if manifest.Phase == relay.MigrationSourcePrepared {
+			if err := e.Destination.CheckMailCutoverActivationReadiness(ctx, request.ActorPrincipalID, request.EpochID, prepared.Fingerprint); err != nil {
+				return Result{}, err
+			}
 			manifest, err = e.Source.Retire(ctx, request.EpochID, target, prepared.Fingerprint)
 			if err != nil {
 				return Result{}, err

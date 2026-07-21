@@ -54,6 +54,15 @@ func TestParseMachineEnrollmentsRejectsNonCanonicalAttachmentDeviceBinding(t *te
 	}
 }
 
+func TestValidateMachineEnrollmentsRejectsAmbiguousAuthority(t *testing.T) {
+	if err := ValidateMachineEnrollments(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/"]},{"id":"machine-b","public_key":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`); err == nil {
+		t.Fatal("overlapping endpoint authority was accepted")
+	}
+	if err := ValidateMachineEnrollments(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]},{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"]}]`); err == nil {
+		t.Fatal("ambiguous transition public key was accepted")
+	}
+}
+
 func TestAuthenticatorRejectsDuplicatedAttachmentDeviceBinding(t *testing.T) {
 	publicKey := make([]byte, 32)
 	publicKey[0] = 1

@@ -260,7 +260,7 @@ func (a *Administration) VerifyMailCutover(ctx context.Context, actorPrincipalID
 		if err != nil {
 			return MailCutoverEpoch{}, errors.New("mail cutover table is unavailable")
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT row_key,payload::text,row_sha256 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name=$2 ORDER BY row_key`, epochID, table)
+		rows, err := tx.QueryContext(ctx, `SELECT row_key,payload::text,row_sha256 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name=$2 ORDER BY row_key COLLATE "C"`, epochID, table)
 		if err != nil {
 			return MailCutoverEpoch{}, errors.New("mail cutover staging is unavailable")
 		}
@@ -355,33 +355,75 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_endpoints(endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until)
 	 SELECT payload->>'endpoint',payload->>'machine_id',TIMESTAMPTZ 'epoch'+(payload->>'lease_until')::bigint*INTERVAL '1 millisecond',(payload->>'ownership_generation')::bigint,payload->>'consumer_id',(payload->>'consumer_generation')::bigint,
 	 CASE WHEN payload->>'consumer_lease_until' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'consumer_lease_until')::bigint*INTERVAL '1 millisecond' END
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_endpoints' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_endpoints' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_conversations(id,next_sequence,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'next_sequence')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversations' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversations' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities)
 	 SELECT (payload->>'conversation_id')::uuid,payload->>'endpoint',(payload->>'capabilities')::smallint
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_memberships' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_memberships' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint,payload->>'from_endpoint',payload->>'body',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_messages' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_messages' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'message_id')::uuid,payload->>'recipient_endpoint',payload->>'lease_machine_id',(payload->>'lease_token')::uuid,(payload->>'lease_generation')::bigint,(payload->>'ownership_generation')::bigint,(payload->>'consumer_generation')::bigint,
 	 CASE WHEN payload->>'lease_until' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'lease_until')::bigint*INTERVAL '1 millisecond' END,
 	 CASE WHEN payload->>'acked_at' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'acked_at')::bigint*INTERVAL '1 millisecond' END
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_deliveries' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_deliveries' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_recipient_cursors(recipient_endpoint,conversation_id,sequence)
 	 SELECT payload->>'recipient_endpoint',(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_recipient_cursors' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_recipient_cursors' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_message_idempotency(machine_id,key,request_hash,message_id,created_at)
 	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'message_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_message_idempotency' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_message_idempotency' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_conversation_idempotency(machine_id,key,request_hash,conversation_id,created_at)
 	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'conversation_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_idempotency' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_idempotency' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_request_nonces(machine_id,nonce,expires_at)
 	 SELECT payload->>'machine_id',payload->>'nonce',TIMESTAMPTZ 'epoch'+(payload->>'expires_at')::bigint*INTERVAL '1 millisecond'
-	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_request_nonces' ORDER BY row_key`,
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_request_nonces' ORDER BY row_key COLLATE "C"`,
+}
+
+// CheckMailCutoverActivationReadiness proves that the verified destination has
+// no known pending legacy identity before the host irreversibly retires SQLite.
+// ActivateMailCutover repeats this proof while closing the legacy gate in the
+// same transaction as PostgreSQL activation.
+func (a *Administration) CheckMailCutoverActivationReadiness(ctx context.Context, actorPrincipalID, epochID, sourceFingerprint string) error {
+	if !validOpaqueID(actorPrincipalID) || uuid.Validate(epochID) != nil || !mailCutoverDigestPattern.MatchString(sourceFingerprint) {
+		return errors.New("invalid mail cutover activation readiness check")
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.New("mail cutover activation readiness cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := guardMutation(ctx, tx); err != nil {
+		return err
+	}
+	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
+		return errors.New("mail cutover activation readiness is not authorized")
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+		return errors.New("mail cutover activation readiness cannot be serialized")
+	}
+	if err := lockLegacyMutations(ctx, tx); err != nil {
+		return err
+	}
+	var phase MailCutoverPhase
+	if err := tx.QueryRowContext(ctx, `SELECT phase FROM relay.mail_cutover_epochs WHERE epoch_id=$1 AND source_fingerprint=$2 FOR UPDATE`, epochID, sourceFingerprint).Scan(&phase); err != nil || phase != MailCutoverVerified {
+		return errors.New("mail cutover is not verified")
+	}
+	var pending, legacyStatePresent bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.legacy_machines WHERE state='pending'),EXISTS (SELECT 1 FROM auth.legacy_auth_state WHERE singleton)`).Scan(&pending, &legacyStatePresent); err != nil || !legacyStatePresent {
+		return errors.New("legacy inventory is unavailable")
+	}
+	if pending {
+		return errors.New("legacy authentication still has pending machines")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("mail cutover activation readiness cannot commit")
+	}
+	return nil
 }
 
 // ActivateMailCutover crosses the PostgreSQL authority barrier only after the

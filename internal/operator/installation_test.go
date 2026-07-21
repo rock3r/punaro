@@ -16,6 +16,21 @@ import (
 
 const testImage = "registry.example/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+const testRelayMachinesJSON = `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`
+
+func configureTestRelayMachines(t *testing.T, installation Installation) Installation {
+	t.Helper()
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-machines.json")
+	if err := os.WriteFile(path, []byte(testRelayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureMailCutoverRelayMachines(installation.Directory, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return configured
+}
+
 func protectedFile(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("postgres://example.invalid/punaro\n"), 0o600); err != nil {
@@ -468,6 +483,10 @@ func TestPublishMailCutoverSwitchesRuntimeMarkerLast(t *testing.T) {
 		Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555",
 		TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64),
 	}
+	if _, err := PublishMailCutover(installation.Directory, publication); err == nil {
+		t.Fatal("mail cutover publication accepted missing relay authority")
+	}
+	installation = configureTestRelayMachines(t, installation)
 	published, err := PublishMailCutover(installation.Directory, publication)
 	if err != nil || published.MailCutover == nil || *published.MailCutover != publication {
 		t.Fatalf("published installation=%#v err=%v", published, err)
@@ -477,7 +496,7 @@ func TestPublishMailCutoverSwitchesRuntimeMarkerLast(t *testing.T) {
 		t.Fatalf("loaded installation=%#v err=%v", loaded, err)
 	}
 	environment, err := os.ReadFile(EnvFile(installation.Directory)) // #nosec G304 -- generated test installation path.
-	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_STORE=postgres\n") || !strings.Contains(string(environment), "PUNARO_CREDENTIAL_TRANSITION_ENABLED=true\n") {
+	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_ENABLED=true\n") || !strings.Contains(string(environment), "PUNARO_RELAY_STORE=postgres\n") || !strings.Contains(string(environment), "PUNARO_CREDENTIAL_TRANSITION_ENABLED=true\n") {
 		t.Fatalf("cutover environment=%q err=%v", environment, err)
 	}
 	if failures := CheckPaths(loaded); len(failures) != 0 {
@@ -485,6 +504,9 @@ func TestPublishMailCutoverSwitchesRuntimeMarkerLast(t *testing.T) {
 	}
 	if repeated, err := PublishMailCutover(installation.Directory, publication); err != nil || repeated.MailCutover == nil || *repeated.MailCutover != publication {
 		t.Fatalf("cutover publication retry=%#v err=%v", repeated, err)
+	}
+	if repeated := configureTestRelayMachines(t, published); repeated.MailCutover == nil || *repeated.MailCutover != publication {
+		t.Fatalf("exact enrollment retry lost active cutover: %#v", repeated)
 	}
 	changed := publication
 	changed.SourceFingerprint = strings.Repeat("c", 64)
@@ -503,6 +525,7 @@ func TestPublishMailCutoverRecoversEveryDurableBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			installation = configureTestRelayMachines(t, installation)
 			publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
 			injected := errors.New("injected publication crash")
 			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
@@ -537,6 +560,7 @@ func TestPublishMailCutoverRecoveryNeverDropsDurableCandidate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			installation = configureTestRelayMachines(t, installation)
 			publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
 			injected := errors.New("injected publication crash")
 			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
@@ -563,6 +587,72 @@ func TestPublishMailCutoverRecoveryNeverDropsDurableCandidate(t *testing.T) {
 				t.Fatalf("step=%s recovered=%#v err=%v", step, recovered, err)
 			}
 		})
+	}
+}
+
+func TestMailCutoverRelayConfigurationRepairsExactLegacyTemplates(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); !containsFailure(failures, "generated daemon environment does not match installation configuration") {
+		t.Fatalf("tampered current template accepted: %v", failures)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(legacyDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(legacyComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); len(failures) != 0 {
+		t.Fatalf("exact legacy templates rejected: %v", failures)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(daemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); !containsFailure(failures, "generated Compose override does not match installation configuration") {
+		t.Fatalf("mixed legacy/current templates accepted: %v", failures)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(legacyDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured := configureTestRelayMachines(t, installation)
+	if configured.RelayMachinesJSON != testRelayMachinesJSON || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v failures=%v", configured, CheckPaths(configured))
+	}
+	environment, err := os.ReadFile(EnvFile(installation.Directory))
+	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_ENABLED=false\n") || !strings.Contains(string(environment), "PUNARO_RELAY_MACHINES_JSON='"+testRelayMachinesJSON+"'\n") {
+		t.Fatalf("environment=%q err=%v", environment, err)
+	}
+}
+
+func TestMailCutoverRelayConfigurationQuotesDotenvMetacharacters(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-machines-metacharacters.json")
+	input := `[{"id":"machine-$authority","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoints":["agent/o'hare/#1"]}]`
+	if err := os.WriteFile(path, []byte(input), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureMailCutoverRelayMachines(installation.Directory, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.ReplaceAll(input, "'", `\u0027`)
+	environment, err := os.ReadFile(EnvFile(installation.Directory))
+	if err != nil || configured.RelayMachinesJSON != want || !strings.Contains(string(environment), "PUNARO_RELAY_MACHINES_JSON='"+want+"'\n") {
+		t.Fatalf("configured=%q environment=%q err=%v", configured.RelayMachinesJSON, environment, err)
 	}
 }
 

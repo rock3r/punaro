@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -36,16 +38,21 @@ func TestMailCutoverCommandRequiresDryRunBindingAndExplicitConfirmation(t *testi
 
 func TestMailCutoverCommandPassesExactIrreversibleAuthorization(t *testing.T) {
 	directory := testInstallation(t)
+	relayMachines := filepath.Join(filepath.Dir(directory), "relay-machines.json")
+	const relayMachinesJSON = `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`
+	if err := os.WriteFile(relayMachines, []byte(relayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	epoch := "019f7f07-8b88-7c12-a394-b663274a6555"
 	fingerprint := strings.Repeat("a", 64)
 	execute := func(_ context.Context, installation operator.Installation, dryRun, abort bool, request cutover.Request) (any, error) {
-		if dryRun || abort || request.ActorPrincipalID != installation.OwnerPrincipalID || request.EpochID != epoch || request.ExpectedSourceFingerprint != fingerprint || request.Cutoff.IsZero() {
+		if dryRun || abort || installation.RelayMachinesJSON != relayMachinesJSON || request.ActorPrincipalID != installation.OwnerPrincipalID || request.EpochID != epoch || request.ExpectedSourceFingerprint != fingerprint || request.Cutoff.IsZero() {
 			t.Fatalf("installation=%#v request=%#v dry=%t abort=%t", installation, request, dryRun, abort)
 		}
 		return cutover.Result{EpochID: epoch, SourceFingerprint: fingerprint, SourcePhase: relay.MigrationSourceRetired, Phase: postgres.MailCutoverActive}, nil
 	}
 	var stdout, stderr bytes.Buffer
-	args := []string{"--directory", directory, "--epoch-id", epoch, "--expected-source-fingerprint", fingerprint, "--yes"}
+	args := []string{"--directory", directory, "--relay-machines-file", relayMachines, "--epoch-id", epoch, "--expected-source-fingerprint", fingerprint, "--yes"}
 	if code := runMailCutover(args, &stdout, &stderr, execute); code != 0 || !strings.Contains(stdout.String(), `"phase": "active"`) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}

@@ -114,6 +114,15 @@ func TestMailCutoverBatchValidationAndRollingDigest(t *testing.T) {
 	}
 }
 
+func TestMailCutoverMaterializationUsesBinaryResumeOrdering(t *testing.T) {
+	t.Parallel()
+	for index, statement := range mailCutoverMaterializationStatements {
+		if !strings.Contains(statement, `ORDER BY row_key COLLATE "C"`) {
+			t.Fatalf("materialization statement %d lacks binary ordering: %s", index, statement)
+		}
+	}
+}
+
 func migrationEndpointRow(t *testing.T, endpoint, machine string, generation int64) relay.MigrationSourceRow {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{

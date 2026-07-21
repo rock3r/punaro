@@ -465,7 +465,7 @@ consume the mail budget indefinitely.
 
 SQLite remains the default active relay. Maintainers may explicitly select an
 empty PostgreSQL relay with `PUNARO_RELAY_STORE=postgres` only after completing
-the supported update to schema v8. This selector does not import the SQLite file,
+the supported update through schema v9. This selector does not import the SQLite file,
 does not dual-write, and is incompatible with the superseded directory and
 attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
@@ -481,19 +481,24 @@ First stop ordinary operator changes, confirm every intended legacy machine is
 punaro mail cutover --directory /absolute/private/punaro --dry-run
 ```
 
-Record the printed `source_fingerprint` and `target_identity`. Choose one UUID
-for the durable epoch, then execute exactly that binding:
+Record the printed `source_fingerprint` and `target_identity`. Prepare one
+protected JSON file containing the complete public static relay enrollment;
+private keys and device bearer credentials must never appear in it. Choose one
+UUID for the durable epoch, then execute exactly that binding:
 
 ```sh
 punaro mail cutover --directory /absolute/private/punaro \
+  --relay-machines-file /absolute/private/relay-machines.json \
   --epoch-id 019f7f07-8b88-7c12-a394-b663274a6555 \
   --expected-source-fingerprint SOURCE_SHA256 --yes
 ```
 
-The same command is the crash-recovery command. It resumes the exact prepared
-source, checkpointed staging, verified destination, retired source, active
-database, or marker-last publication. Before source retirement only, abort the
-same epoch explicitly:
+Punaro validates and durably publishes that public authority before preparing
+the SQLite source. Exact retries may omit `--relay-machines-file` after this
+publication; a different enrollment is rejected. The same command is the
+crash-recovery command. It resumes the exact prepared source, checkpointed
+staging, verified destination, retired source, active database, or marker-last
+publication. Before source retirement only, abort the same epoch explicitly:
 
 ```sh
 punaro mail cutover --directory /absolute/private/punaro \

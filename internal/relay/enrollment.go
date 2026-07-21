@@ -1,13 +1,38 @@
 package relay
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
+
+type enrollmentValidationStore struct{}
+
+func (enrollmentValidationStore) ConsumeRequestNonce(string, string, time.Time, time.Time) error {
+	return nil
+}
+
+type enrollmentValidationTransition struct{}
+
+func (enrollmentValidationTransition) AuthorizeTransition(context.Context, string, ed25519.PublicKey) (TransitionAuthorization, error) {
+	return TransitionAuthorization{}, ErrForbidden
+}
+
+// ValidateMachineEnrollments proves that raw enrollment JSON is safe for the
+// transition runtime, including non-overlapping authority and unique keys.
+func ValidateMachineEnrollments(raw string) error {
+	machines, err := ParseMachineEnrollments(raw)
+	if err != nil {
+		return err
+	}
+	_, err = newAuthenticator(enrollmentValidationStore{}, machines, enrollmentValidationTransition{})
+	return err
+}
 
 // ParseMachineEnrollments parses the non-secret daemon enrollment setting. It
 // deliberately accepts public keys only; an adapter's private key must never
