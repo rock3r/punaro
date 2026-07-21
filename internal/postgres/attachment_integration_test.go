@@ -131,7 +131,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		t.Fatal("application role mutated trusted attachment quota directly")
 	}
 
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET expires_at=statement_timestamp()-interval '1 second',claim_token=NULL,claim_until=NULL WHERE artifact_id=$1`, revokedReservation.ArtifactID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second',claim_token=NULL,claim_until=NULL WHERE artifact_id=$1`, revokedReservation.ArtifactID); err != nil {
 		t.Fatal(err)
 	}
 	reapTestAttachment(ctx, t, app, revokedReservation.ArtifactID)
@@ -147,7 +147,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, err := app.ReserveAttachment(ctx, changedLifetime); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("changed subsecond lifetime retry error=%v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, lifetimeReservation.ArtifactID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, lifetimeReservation.ArtifactID); err != nil {
 		t.Fatal(err)
 	}
 	reapTestAttachment(ctx, t, app, lifetimeReservation.ArtifactID)
@@ -190,7 +190,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		t.Fatalf("quota race succeeded=%d rejected=%d", succeeded, quotaRejected)
 	}
 	for artifactID := range artifacts {
-		if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, artifactID); err != nil {
+		if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, artifactID); err != nil {
 			t.Fatal(err)
 		}
 		reapTestAttachment(ctx, t, app, artifactID)
