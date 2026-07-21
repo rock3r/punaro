@@ -40,6 +40,32 @@ func httpResponse(status int, body string, headers http.Header) *http.Response {
 	return &http.Response{StatusCode: status, Header: headers, Body: io.NopCloser(strings.NewReader(body)), ContentLength: -1}
 }
 
+func TestClientDisablesEnvironmentProxyForCredentialTraffic(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://127.0.0.1:65535")
+	for _, provided := range []*http.Client{nil, {}} {
+		client, err := New("http://127.0.0.1:8080", "credential", provided)
+		if err != nil {
+			t.Fatal(err)
+		}
+		transport, ok := client.http.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("transport=%T", client.http.Transport)
+		}
+		if transport.Proxy != nil {
+			t.Fatal("default client retained environment proxying")
+		}
+	}
+	proxying := http.DefaultTransport.(*http.Transport).Clone()
+	proxying.Proxy = http.ProxyFromEnvironment
+	client, err := New("http://127.0.0.1:8080", "credential", &http.Client{Transport: proxying})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transport := client.http.Transport.(*http.Transport); transport.Proxy != nil {
+		t.Fatal("provided standard transport retained environment proxying")
+	}
+}
+
 func TestClientReservesThenStreamsExactFile(t *testing.T) {
 	body := []byte("native sender body")
 	file := filepath.Join(t.TempDir(), "report.txt")

@@ -79,15 +79,32 @@ func New(rawBase, credential string, provided *http.Client) (*Client, error) {
 		return nil, errors.New("invalid trusted attachment credential")
 	}
 	if provided == nil {
-		provided = &http.Client{Timeout: 11 * time.Minute}
+		provided = &http.Client{Timeout: 11 * time.Minute, Transport: directTransport()}
 	}
 	client := *provided
+	switch transport := client.Transport.(type) {
+	case nil:
+		client.Transport = directTransport()
+	case *http.Transport:
+		clone := transport.Clone()
+		clone.Proxy = nil
+		client.Transport = clone
+	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	if client.Timeout == 0 {
 		client.Timeout = 11 * time.Minute
 	}
 	base.Path = ""
 	return &Client{base: base, credential: credential, http: &client, receiveSlots: make(chan struct{}, maxConcurrentReceivers)}, nil
+}
+
+func directTransport() *http.Transport {
+	if transport, ok := http.DefaultTransport.(*http.Transport); ok {
+		clone := transport.Clone()
+		clone.Proxy = nil
+		return clone
+	}
+	return &http.Transport{}
 }
 
 func safeClientScheme(base *url.URL) bool {
