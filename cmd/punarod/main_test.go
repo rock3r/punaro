@@ -116,8 +116,10 @@ func TestConfiguredServerKeepsShortGlobalTimeoutsForMailAndDeviceRoutes(t *testi
 type scriptedAttachmentReconciler struct {
 	mu          sync.Mutex
 	reconcile   []trustedattachment.ReconcileResult
+	gc          []trustedattachment.GarbageCollectResult
 	orphans     []trustedattachment.OrphanReconcileResult
 	reconcileAt int
+	gcAt        int
 	orphanAt    int
 }
 
@@ -137,16 +139,59 @@ func (reconciler *scriptedAttachmentReconciler) ReconcileOrphanBatch(context.Con
 	return result, nil
 }
 
+func (reconciler *scriptedAttachmentReconciler) GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	result := reconciler.gc[reconciler.gcAt]
+	reconciler.gcAt++
+	return result, nil
+}
+
 func TestTrustedAttachmentReconciliationRestartsChangedPagesAndFinishesBothNamespaces(t *testing.T) {
 	reconciler := &scriptedAttachmentReconciler{
 		reconcile: []trustedattachment.ReconcileResult{{Scanned: 100, Changed: 1}, {Scanned: 100, Next: punaropostgres.AttachmentReconcileCursor{ArtifactID: "11111111-1111-4111-8111-111111111111"}}, {Scanned: 2}},
+		gc:        []trustedattachment.GarbageCollectResult{{Scanned: 100, Changed: 1}, {Scanned: 1}},
 		orphans:   []trustedattachment.OrphanReconcileResult{{Scanned: 100, Changed: 1}, {Scanned: 1}},
 	}
 	if err := reconcileTrustedAttachments(context.Background(), reconciler); err != nil {
 		t.Fatal(err)
 	}
-	if reconciler.reconcileAt != 3 || reconciler.orphanAt != 2 {
-		t.Fatalf("reconcile calls=%d orphan calls=%d", reconciler.reconcileAt, reconciler.orphanAt)
+	if reconciler.reconcileAt != 3 || reconciler.gcAt != 2 || reconciler.orphanAt != 2 {
+		t.Fatalf("reconcile calls=%d GC calls=%d orphan calls=%d", reconciler.reconcileAt, reconciler.gcAt, reconciler.orphanAt)
+	}
+}
+
+type changeBoundAttachmentReconciler struct{ stage string }
+
+func (reconciler changeBoundAttachmentReconciler) ReconcileBatch(context.Context, punaropostgres.AttachmentReconcileCursor, int) (trustedattachment.ReconcileResult, error) {
+	if reconciler.stage == "database" {
+		return trustedattachment.ReconcileResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.ReconcileResult{}, nil
+}
+
+func (reconciler changeBoundAttachmentReconciler) GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error) {
+	if reconciler.stage == "deletion" {
+		return trustedattachment.GarbageCollectResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.GarbageCollectResult{}, nil
+}
+
+func (reconciler changeBoundAttachmentReconciler) ReconcileOrphanBatch(context.Context, string, int, time.Duration) (trustedattachment.OrphanReconcileResult, error) {
+	if reconciler.stage == "filesystem" {
+		return trustedattachment.OrphanReconcileResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.OrphanReconcileResult{}, nil
+}
+
+func TestTrustedAttachmentReconciliationFailsClosedAfterChangeRestartBound(t *testing.T) {
+	for _, stage := range []string{"database", "deletion", "filesystem"} {
+		t.Run(stage, func(t *testing.T) {
+			err := reconcileTrustedAttachments(context.Background(), changeBoundAttachmentReconciler{stage: stage})
+			if err == nil || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("error=%v, want %s bound", err, stage)
+			}
+		})
 	}
 }
 

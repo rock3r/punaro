@@ -48,6 +48,7 @@ type fakeRepository struct {
 	gcFenceActive      int
 	gcFenceReleases    int
 	gcFenceReleaseHook func()
+	gcCandidates       []string
 	gcClaim            postgres.AttachmentGCClaim
 	gcClaimed          bool
 	gcClaimErr         error
@@ -176,6 +177,20 @@ func (repository *fakeRepository) DeleteAttachment(context.Context, postgres.Att
 		}
 	}
 	return repository.deleteResult, repository.deleteErr
+}
+
+func (repository *fakeRepository) AttachmentGCCandidates(_ context.Context, after string, limit int) ([]string, string, error) {
+	start := 0
+	for start < len(repository.gcCandidates) && repository.gcCandidates[start] <= after {
+		start++
+	}
+	end := min(start+limit, len(repository.gcCandidates))
+	candidates := append([]string(nil), repository.gcCandidates[start:end]...)
+	next := after
+	if len(candidates) != 0 {
+		next = candidates[len(candidates)-1]
+	}
+	return candidates, next, nil
 }
 
 func (repository *fakeRepository) BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error) {
@@ -382,6 +397,28 @@ func TestServiceGCUnlinksBeforeTokenFencedFinalization(t *testing.T) {
 	got, finalized, err := service.GarbageCollect(context.Background(), testArtifactID, time.Minute)
 	if err != nil || !finalized || got != deleted || repository.gcFinalizeCalls != 1 {
 		t.Fatalf("GC=%#v finalized=%t calls=%d err=%v", got, finalized, repository.gcFinalizeCalls, err)
+	}
+}
+
+func TestServiceGarbageCollectBatchResumesAfterBlobRemoval(t *testing.T) {
+	body := []byte("already removed before crash")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentGCClaim{AttachmentDeletion: postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentGCClaimed, GCGeneration: 4, GCAfter: time.Now().Add(-time.Hour),
+	}, GCToken: "55555555-5555-4555-8555-555555555555", GCLeaseUntil: time.Now().Add(time.Minute)}
+	deleted := claim.AttachmentDeletion
+	deleted.State = postgres.AttachmentDeleted
+	deleted.DeletedAt = time.Now()
+	repository := &fakeRepository{
+		gcCandidates: []string{testArtifactID}, gcClaim: claim, gcClaimed: true,
+		gcFinalizeResult: deleted, gcFinalizeAllowed: true,
+	}
+	service := newTestService(t, repository)
+	result, err := service.GarbageCollectBatch(context.Background(), "", 100, time.Minute)
+	if err != nil || result.Scanned != 1 || result.Changed != 1 || result.Next != "" || repository.gcFinalizeCalls != 1 {
+		t.Fatalf("GC batch=%#v finalize calls=%d err=%v", result, repository.gcFinalizeCalls, err)
 	}
 }
 

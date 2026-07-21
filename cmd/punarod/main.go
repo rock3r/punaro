@@ -37,6 +37,7 @@ const (
 	trustedReconcileBatch    = 100
 	trustedReconcileMaxPages = 1000
 	trustedOrphanGrace       = 24 * time.Hour
+	trustedGCClaimLifetime   = time.Minute
 	trustedReconcileInterval = 5 * time.Minute
 )
 
@@ -393,6 +394,7 @@ func (runtime *trustedAttachmentRuntime) Close() {
 
 type attachmentReconciler interface {
 	ReconcileBatch(context.Context, punaropostgres.AttachmentReconcileCursor, int) (trustedattachment.ReconcileResult, error)
+	GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error)
 	ReconcileOrphanBatch(context.Context, string, int, time.Duration) (trustedattachment.OrphanReconcileResult, error)
 }
 
@@ -401,6 +403,7 @@ func reconcileTrustedAttachments(ctx context.Context, reconciler attachmentRecon
 		return errors.New("trusted attachment reconciler is unavailable")
 	}
 	cursor := punaropostgres.AttachmentReconcileCursor{}
+	databaseComplete := false
 	for page := 0; page < trustedReconcileMaxPages; page++ {
 		result, err := reconciler.ReconcileBatch(ctx, cursor, trustedReconcileBatch)
 		if err != nil {
@@ -411,14 +414,36 @@ func reconcileTrustedAttachments(ctx context.Context, reconciler attachmentRecon
 			continue
 		}
 		if result.Scanned < trustedReconcileBatch {
+			databaseComplete = true
 			break
 		}
 		cursor = result.Next
-		if page == trustedReconcileMaxPages-1 {
-			return errors.New("trusted attachment database reconciliation exceeds startup bound")
+	}
+	if !databaseComplete {
+		return errors.New("trusted attachment database reconciliation exceeds startup bound")
+	}
+	gcAfter := ""
+	gcComplete := false
+	for page := 0; page < trustedReconcileMaxPages; page++ {
+		result, err := reconciler.GarbageCollectBatch(ctx, gcAfter, trustedReconcileBatch, trustedGCClaimLifetime)
+		if err != nil {
+			return err
 		}
+		if result.Changed != 0 {
+			gcAfter = ""
+			continue
+		}
+		if result.Scanned < trustedReconcileBatch {
+			gcComplete = true
+			break
+		}
+		gcAfter = result.Next
+	}
+	if !gcComplete {
+		return errors.New("trusted attachment deletion garbage collection exceeds startup bound")
 	}
 	after := ""
+	filesystemComplete := false
 	for page := 0; page < trustedReconcileMaxPages; page++ {
 		result, err := reconciler.ReconcileOrphanBatch(ctx, after, trustedReconcileBatch, trustedOrphanGrace)
 		if err != nil {
@@ -429,12 +454,13 @@ func reconcileTrustedAttachments(ctx context.Context, reconciler attachmentRecon
 			continue
 		}
 		if result.Scanned < trustedReconcileBatch {
-			return nil
+			filesystemComplete = true
+			break
 		}
 		after = result.Next
-		if page == trustedReconcileMaxPages-1 {
-			return errors.New("trusted attachment filesystem reconciliation exceeds startup bound")
-		}
+	}
+	if !filesystemComplete {
+		return errors.New("trusted attachment filesystem reconciliation exceeds startup bound")
 	}
 	return nil
 }

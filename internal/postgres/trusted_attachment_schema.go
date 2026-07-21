@@ -29,7 +29,8 @@ WITH objects AS (
            to_regprocedure('attachment.release_expired_upload(uuid,uuid)') AS release_oid,
            to_regprocedure('attachment.mark_corrupt(uuid)') AS corrupt_oid,
            to_regprocedure('attachment.reconcile_candidates(text,timestamp with time zone,uuid,integer)') AS reconcile_oid,
-           to_regprocedure('attachment.project_has_records(uuid,uuid)') AS project_records_oid
+           to_regprocedure('attachment.project_has_records(uuid,uuid)') AS project_records_oid,
+           to_regprocedure('attachment.gc_candidates(uuid,integer)') AS gc_candidates_oid
 ), expected_columns(relation_name, column_name, type_name, type_modifier, required) AS (
     VALUES
       ('attachment.uploads','artifact_id','uuid',-1,true),
@@ -103,10 +104,11 @@ WITH objects AS (
                         WHEN deletions_oid IS NULL THEN '51e6b83ed153fcce5b53dbddc37056b8'
                         ELSE 'b86070c52d01fb33abe1079d54e099da' END,'v'::"char"),
       (reconcile_oid,'25df2c05deb346a8df8a86349a00a478','s'::"char"),
-      (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char")
+      (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char"),
+      (CASE WHEN $1 >= 13 THEN gc_candidates_oid END,'6c9219520a5dc33176663f8967849208','s'::"char")
     ) AS expected(oid,body_hash,volatility)
 ), routine_safety AS (
-    SELECT count(*) = 8
+	SELECT count(*) = CASE WHEN $1 >= 13 THEN 9 ELSE 8 END
        AND bool_and(pg_get_userbyid(proc.proowner) = 'punaro_owner')
        AND bool_and(language.lanname IN ('sql','plpgsql'))
        AND bool_and(proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = expected.volatility)
@@ -116,7 +118,7 @@ WITH objects AS (
     JOIN pg_proc AS proc ON proc.oid = expected.oid
     JOIN pg_language AS language ON language.oid = proc.prolang
 ), routine_acl AS (
-    SELECT count(*) = 16 AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+	SELECT count(*) = CASE WHEN $1 >= 13 THEN 18 ELSE 16 END AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
        AND bool_and(grantee.rolname IN ('punaro_owner','punaro_app')) AS exact
     FROM expected_routines AS expected
     JOIN pg_proc AS proc ON proc.oid = expected.oid
@@ -165,6 +167,7 @@ SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT N
    AND project_state_index_oid IS NOT NULL AND reconcile_index_oid IS NOT NULL
    AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND legacy_publish_oid IS NOT NULL AND publish_oid IS NOT NULL
    AND begin_reap_oid IS NOT NULL AND release_oid IS NOT NULL AND corrupt_oid IS NOT NULL AND reconcile_oid IS NOT NULL AND project_records_oid IS NOT NULL
+   AND ($1 < 13 OR gc_candidates_oid IS NOT NULL)
    AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact AND legacy_publish_safety.exact
    AND constraint_safety.exact AND index_safety.exact
 	AND EXISTS (

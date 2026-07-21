@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/postgres"
 )
 
@@ -26,6 +27,7 @@ type Repository interface {
 	ReleaseExpiredAttachment(context.Context, string, string) (bool, error)
 	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
 	DeleteAttachment(context.Context, postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error)
+	AttachmentGCCandidates(context.Context, string, int) ([]string, string, error)
 	BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error)
 	ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error)
 	FinalizeAttachmentGC(context.Context, string, int64, string) (postgres.AttachmentDeletion, bool, error)
@@ -278,6 +280,43 @@ type OrphanReconcileResult struct {
 	Scanned int
 	Changed int
 	Next    string
+}
+
+// GarbageCollectResult describes one bounded, cursor-addressable pass over
+// post-cutoff deletion records. A finalized page restarts from the beginning.
+type GarbageCollectResult struct {
+	Scanned int
+	Changed int
+	Next    string
+}
+
+// GarbageCollectBatch drives durable deletion recovery from database authority
+// so quota finalization still resumes after a crash removed every blob path.
+func (service *Service) GarbageCollectBatch(ctx context.Context, after string, limit int, claimLifetime time.Duration) (GarbageCollectResult, error) {
+	if service == nil || (after != "" && uuid.Validate(after) != nil) || limit < 1 || limit > 100 || claimLifetime < 30*time.Second || claimLifetime > 10*time.Minute {
+		return GarbageCollectResult{}, errors.New("invalid attachment GC batch")
+	}
+	candidates, next, err := service.repository.AttachmentGCCandidates(ctx, after, limit)
+	if err != nil {
+		return GarbageCollectResult{}, err
+	}
+	result := GarbageCollectResult{Scanned: len(candidates), Next: next}
+	for _, artifactID := range candidates {
+		if err := ctx.Err(); err != nil {
+			return GarbageCollectResult{}, err
+		}
+		_, finalized, err := service.GarbageCollect(ctx, artifactID, claimLifetime)
+		if err != nil {
+			return GarbageCollectResult{}, err
+		}
+		if finalized {
+			result.Changed++
+		}
+	}
+	if result.Changed != 0 {
+		result.Next = ""
+	}
+	return result, nil
 }
 
 // ReconcileOrphanBatch removes only UUID namespaces older than grace whose

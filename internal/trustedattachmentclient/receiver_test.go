@@ -112,6 +112,10 @@ func TestSafeDownloadNameRejectsPortableReservedNames(t *testing.T) {
 	if got := safeDownloadName("quarterly report.pdf", receiverArtifactID); got != "quarterly report.pdf" {
 		t.Fatalf("safe name=%q", got)
 	}
+	stageName := ".punaro-" + receiverArtifactID + "-0123456789abcdef0123456789abcdef.part"
+	if got := safeDownloadName(stageName, receiverArtifactID); got != "attachment-"+receiverArtifactID {
+		t.Fatalf("stage-like safe name=%q", got)
+	}
 }
 
 func TestReceiverAcceptsValidLongUnicodeMetadataWithOpaqueFallback(t *testing.T) {

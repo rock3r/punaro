@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -354,8 +355,22 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
 		t.Fatalf("pre-cutoff GC claimed=%t err=%v", claimed, err)
 	}
+	if candidates, next, err := app.AttachmentGCCandidates(ctx, "", 100); err != nil || len(candidates) != 0 || next != "" {
+		t.Fatalf("pre-cutoff GC candidates=%v next=%q err=%v", candidates, next, err)
+	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET tombstoned_at=statement_timestamp()-interval '2 seconds',gc_after=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
 		t.Fatal(err)
+	}
+	if candidates, next, err := app.AttachmentGCCandidates(ctx, "", 100); err != nil || len(candidates) != 1 || candidates[0] != reservation.ArtifactID || next != reservation.ArtifactID {
+		t.Fatalf("eligible GC candidates=%v next=%q err=%v", candidates, next, err)
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT * FROM attachment.gc_candidates(NULL,NULL)`); err == nil {
+		t.Fatal("null GC candidate limit was accepted")
+	} else {
+		var postgresError *pgconn.PgError
+		if !errors.As(err, &postgresError) || postgresError.Code != "22023" {
+			t.Fatalf("null GC candidate limit error=%v", err)
+		}
 	}
 	var backupFence string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&backupFence); err != nil {

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"crypto/sha256"
 	"strings"
 	"testing"
@@ -61,6 +62,22 @@ func TestAttachmentReconcileCursorValidation(t *testing.T) {
 	invalid.ArtifactID = ""
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("partial cursor accepted")
+	}
+}
+
+func TestAttachmentGCCandidateRequestValidation(t *testing.T) {
+	database := &Database{}
+	for _, test := range []struct {
+		after string
+		limit int
+	}{
+		{after: "friendly", limit: 1},
+		{limit: 0},
+		{limit: maxAttachmentReconcileBatch + 1},
+	} {
+		if _, _, err := database.AttachmentGCCandidates(context.Background(), test.after, test.limit); err == nil {
+			t.Fatalf("after=%q limit=%d accepted", test.after, test.limit)
+		}
 	}
 }
 

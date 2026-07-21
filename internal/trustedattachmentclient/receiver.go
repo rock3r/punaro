@@ -250,7 +250,7 @@ func copyDownload(ctx context.Context, destination io.Writer, source io.Reader, 
 
 func safeDownloadName(displayName, artifactID string) string {
 	fallback := "attachment-" + artifactID
-	if displayName == "" || len(displayName) > 255 || !utf8.ValidString(displayName) || displayName == "." || displayName == ".." || strings.HasSuffix(displayName, ".") || strings.HasSuffix(displayName, " ") {
+	if displayName == "" || len(displayName) > 255 || !utf8.ValidString(displayName) || displayName == "." || displayName == ".." || strings.HasSuffix(displayName, ".") || strings.HasSuffix(displayName, " ") || privateStageName(displayName) {
 		return fallback
 	}
 	for _, character := range displayName {

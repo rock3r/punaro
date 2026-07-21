@@ -212,6 +212,37 @@ type AttachmentGCClaim struct {
 	GCLeaseUntil time.Time
 }
 
+// AttachmentGCCandidates returns one bounded exclusive UUID page of deletion
+// records whose backup safety cutoff has elapsed and whose claim is available.
+func (d *Database) AttachmentGCCandidates(ctx context.Context, after string, limit int) ([]string, string, error) {
+	if (after != "" && !validOpaqueID(after)) || limit < 1 || limit > maxAttachmentReconcileBatch {
+		return nil, "", errors.New("invalid attachment GC candidate request")
+	}
+	var afterValue any
+	if after != "" {
+		afterValue = after
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT artifact_id::text FROM attachment.gc_candidates($1,$2)`, afterValue, limit)
+	if err != nil {
+		return nil, "", attachmentStoreError(err, "attachment GC candidate query failed")
+	}
+	defer func() { _ = rows.Close() }()
+	candidates := make([]string, 0, limit)
+	next := after
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil || !validOpaqueID(artifactID) || artifactID <= next {
+			return nil, "", errors.New("attachment GC candidate result is malformed")
+		}
+		candidates = append(candidates, artifactID)
+		next = artifactID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", errors.New("attachment GC candidate query failed")
+	}
+	return candidates, next, nil
+}
+
 // AttachmentPublishRequest binds completion to one database claim and the
 // exact immutable blob proven by the filesystem layer.
 type AttachmentPublishRequest struct {

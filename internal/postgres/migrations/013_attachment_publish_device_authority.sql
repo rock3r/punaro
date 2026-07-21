@@ -65,6 +65,34 @@ BEGIN
 END
 $function$;
 
+CREATE FUNCTION attachment.gc_candidates(
+    requested_after uuid,
+    requested_limit integer
+)
+RETURNS TABLE (artifact_id uuid)
+LANGUAGE plpgsql
+SECURITY DEFINER
+STABLE
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF requested_limit IS NULL OR requested_limit < 1 OR requested_limit > 100 THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid attachment GC candidate limit';
+    END IF;
+    RETURN QUERY
+    SELECT candidate.artifact_id
+    FROM attachment.deletions AS candidate
+    WHERE candidate.gc_after <= statement_timestamp()
+      AND (candidate.state = 'tombstoned'
+           OR (candidate.state = 'gc_claimed' AND candidate.gc_lease_until <= statement_timestamp()))
+      AND (requested_after IS NULL OR candidate.artifact_id > requested_after)
+    ORDER BY candidate.artifact_id
+    LIMIT requested_limit;
+END
+$function$;
+
 REVOKE ALL ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text) FROM punaro_app;
 REVOKE ALL ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION attachment.gc_candidates(uuid,integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text) TO punaro_app;
+GRANT EXECUTE ON FUNCTION attachment.gc_candidates(uuid,integer) TO punaro_app;
