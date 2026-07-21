@@ -296,8 +296,156 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("revoked download capability error=%v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'attachment.delete')`, uploader.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	deleteRequest := AttachmentDeleteRequest{
+		PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
+		ArtifactID: reservation.ArtifactID, IdempotencyKey: "a4000000-0000-4000-8000-000000000001",
+	}
+	unauthorizedDelete := deleteRequest
+	unauthorizedDelete.PrincipalID = outsider.ID
+	unauthorizedDelete.CredentialLookupID = recipientLookup
+	unauthorizedDelete.CredentialGeneration = 2
+	unauthorizedDelete.IdempotencyKey = "a4000000-0000-4000-8000-000000000002"
+	if _, err := app.DeleteAttachment(ctx, unauthorizedDelete); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unauthorized attachment delete error=%v", err)
+	}
+	guessedDelete := deleteRequest
+	guessedDelete.ArtifactID = "a4000000-0000-4000-8000-000000000003"
+	guessedDelete.IdempotencyKey = "a4000000-0000-4000-8000-000000000004"
+	if _, err := app.DeleteAttachment(ctx, guessedDelete); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("guessed attachment delete error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE lookup_id=$1`, uploaderLookup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DeleteAttachment(ctx, deleteRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expired credential attachment delete error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET expires_at=NULL WHERE lookup_id=$1`, uploaderLookup); err != nil {
+		t.Fatal(err)
+	}
+	deletion, err := app.DeleteAttachment(ctx, deleteRequest)
+	if err != nil || deletion.State != AttachmentTombstoned || deletion.ArtifactID != reservation.ArtifactID || deletion.ProjectID != project.ProjectID || deletion.StoragePath != ready.StoragePath || !deletion.DeletedAt.IsZero() || !deletion.GCAfter.After(time.Now().UTC()) {
+		t.Fatalf("attachment tombstone=%#v err=%v", deletion, err)
+	}
+	if retry, retryErr := app.DeleteAttachment(ctx, deleteRequest); retryErr != nil || retry != deletion {
+		t.Fatalf("attachment tombstone retry=%#v err=%v", retry, retryErr)
+	}
+	if _, err := app.AuthorizeAttachmentDownload(ctx, AttachmentDownloadRequest{PrincipalID: outsider.ID, CredentialLookupID: recipientLookup, CredentialGeneration: 2, ArtifactID: reservation.ArtifactID}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("tombstoned attachment download error=%v", err)
+	}
+	var usedBeforeGC int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT used_bytes FROM attachment.global_quota WHERE singleton`).Scan(&usedBeforeGC); err != nil || usedBeforeGC < reservation.SizeBytes {
+		t.Fatalf("tombstone quota used=%d err=%v", usedBeforeGC, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability='attachment.delete' AND revoked_at IS NULL`, uploader.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DeleteAttachment(ctx, deleteRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked exact delete retry error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'attachment.delete')`, uploader.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
+		t.Fatalf("pre-cutoff GC claimed=%t err=%v", claimed, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET tombstoned_at=statement_timestamp()-interval '2 seconds',gc_after=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	var backupFence string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&backupFence); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
+		t.Fatalf("backup-fenced GC claimed=%t err=%v", claimed, err)
+	}
+	if releasePhysicalGC, permitted, err := app.BeginAttachmentPhysicalGC(ctx); err != nil || permitted || releasePhysicalGC != nil {
+		t.Fatalf("backup-fenced physical GC permitted=%t release=%v err=%v", permitted, releasePhysicalGC != nil, err)
+	}
+	var fenceReleased bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.cancel_unbound_backup_gc_fence($1)`, backupFence).Scan(&fenceReleased); err != nil || !fenceReleased {
+		t.Fatalf("release GC test fence=%t err=%v", fenceReleased, err)
+	}
+	releasePhysicalGC, permitted, err := app.BeginAttachmentPhysicalGC(ctx)
+	if err != nil || !permitted || releasePhysicalGC == nil {
+		t.Fatalf("physical GC fence permitted=%t release=%v err=%v", permitted, releasePhysicalGC != nil, err)
+	}
+	secondGCCtx, cancelSecondGC := context.WithTimeout(ctx, 100*time.Millisecond)
+	if secondRelease, secondPermitted, secondErr := app.BeginAttachmentPhysicalGC(secondGCCtx); !errors.Is(secondErr, context.DeadlineExceeded) || secondPermitted || secondRelease != nil {
+		cancelSecondGC()
+		t.Fatalf("concurrent physical GC holder release=%v permitted=%t err=%v", secondRelease != nil, secondPermitted, secondErr)
+	}
+	cancelSecondGC()
+	type backupAcquireResult struct {
+		token string
+		err   error
+	}
+	backupAcquireDone := make(chan backupAcquireResult, 1)
+	go func() {
+		var token string
+		acquireErr := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&token)
+		backupAcquireDone <- backupAcquireResult{token: token, err: acquireErr}
+	}()
+	select {
+	case result := <-backupAcquireDone:
+		t.Fatalf("backup crossed active physical GC fence: token=%s err=%v", result.token, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := releasePhysicalGC(); err != nil {
+		t.Fatalf("release physical GC fence: %v", err)
+	}
+	var acquiredAfterGC backupAcquireResult
+	select {
+	case acquiredAfterGC = <-backupAcquireDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backup did not acquire after physical GC fence release")
+	}
+	if acquiredAfterGC.err != nil || acquiredAfterGC.token == "" {
+		t.Fatalf("backup after physical GC token=%s err=%v", acquiredAfterGC.token, acquiredAfterGC.err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.cancel_unbound_backup_gc_fence($1)`, acquiredAfterGC.token).Scan(&fenceReleased); err != nil || !fenceReleased {
+		t.Fatalf("release post-GC backup fence=%t err=%v", fenceReleased, err)
+	}
+	gcClaim, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute)
+	if err != nil || !claimed || gcClaim.State != AttachmentGCClaimed || gcClaim.GCGeneration != 1 || gcClaim.GCToken == "" {
+		t.Fatalf("attachment GC claim=%#v claimed=%t err=%v", gcClaim, claimed, err)
+	}
+	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
+		t.Fatalf("competing GC claim acquired=%t err=%v", claimed, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET gc_lease_until=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute)
+	if err != nil || !claimed || reclaimed.GCGeneration != gcClaim.GCGeneration+1 || reclaimed.GCToken == gcClaim.GCToken {
+		t.Fatalf("attachment GC reclaim=%#v claimed=%t err=%v", reclaimed, claimed, err)
+	}
+	if _, finalized, err := app.FinalizeAttachmentGC(ctx, reservation.ArtifactID, gcClaim.GCGeneration, gcClaim.GCToken); err != nil || finalized {
+		t.Fatalf("expired GC claim finalized=%t err=%v", finalized, err)
+	}
+	gcClaim = reclaimed
+	if _, finalized, err := app.FinalizeAttachmentGC(ctx, reservation.ArtifactID, gcClaim.GCGeneration, "a5000000-0000-4000-8000-000000000001"); err != nil || finalized {
+		t.Fatalf("stale GC finalized=%t err=%v", finalized, err)
+	}
+	deleted, finalized, err := app.FinalizeAttachmentGC(ctx, reservation.ArtifactID, gcClaim.GCGeneration, gcClaim.GCToken)
+	if err != nil || !finalized || deleted.State != AttachmentDeleted || deleted.DeletedAt.IsZero() {
+		t.Fatalf("attachment GC deletion=%#v finalized=%t err=%v", deleted, finalized, err)
+	}
+	if retry, finalized, err := app.FinalizeAttachmentGC(ctx, reservation.ArtifactID, gcClaim.GCGeneration, gcClaim.GCToken); err != nil || !finalized || retry != deleted {
+		t.Fatalf("duplicate GC result=%#v finalized=%t err=%v", retry, finalized, err)
+	}
+	var usedAfterGC int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT used_bytes FROM attachment.global_quota WHERE singleton`).Scan(&usedAfterGC); err != nil || usedAfterGC != usedBeforeGC-reservation.SizeBytes {
+		t.Fatalf("finalized quota used=%d before=%d err=%v", usedAfterGC, usedBeforeGC, err)
+	}
 	if _, err := app.db.ExecContext(ctx, `SELECT * FROM attachment.recipient_grants`); err == nil {
 		t.Fatal("application role read attachment recipient grants directly")
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT * FROM attachment.deletions`); err == nil {
+		t.Fatal("application role read attachment deletion state directly")
 	}
 
 	duplicate := request
@@ -314,6 +462,11 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	duplicateReady, err := app.PublishAttachment(ctx, AttachmentPublishRequest{PrincipalID: uploader.ID, ArtifactID: duplicateReservation.ArtifactID, AttemptGeneration: duplicateClaim.AttemptGeneration, ClaimToken: duplicateClaim.ClaimToken, StoragePath: "ready/" + duplicateReservation.ArtifactID + ".blob", SizeBytes: duplicateReservation.SizeBytes, SHA256: duplicateReservation.SHA256})
 	if err != nil || duplicateReady.StoragePath == ready.StoragePath || duplicateReady.SHA256 != ready.SHA256 {
 		t.Fatalf("duplicate READY=%#v err=%v", duplicateReady, err)
+	}
+	changedDelete := deleteRequest
+	changedDelete.ArtifactID = duplicateReservation.ArtifactID
+	if _, err := app.DeleteAttachment(ctx, changedDelete); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed attachment delete retry error=%v", err)
 	}
 	if marked, err := app.MarkAttachmentCorrupt(ctx, duplicateReservation.ArtifactID); err != nil || !marked {
 		t.Fatalf("mark duplicate corrupt=%t err=%v", marked, err)
@@ -457,6 +610,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		{`DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
 		{`DELETE FROM attachment.ready_artifacts`, nil},
 		{`DELETE FROM attachment.ready_blob_manifest`, nil},
+		{`DELETE FROM attachment.deletions`, nil},
 		{`DELETE FROM attachment.uploads`, nil},
 		{`DELETE FROM attachment.project_quotas`, nil},
 		{`DELETE FROM attachment.principal_quotas`, nil},

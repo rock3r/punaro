@@ -22,9 +22,10 @@ type Config struct {
 
 // Database is a least-privilege application connection to the platform substrate.
 type Database struct {
-	db       *sql.DB
-	relayDB  *sql.DB
-	manifest Manifest
+	db                        *sql.DB
+	relayDB                   *sql.DB
+	manifest                  Manifest
+	attachmentPhysicalGCSlots chan struct{}
 }
 
 // InstallationState identifies one installation timeline and its last change.
@@ -58,7 +59,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest()}, nil
+	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest(), attachmentPhysicalGCSlots: make(chan struct{}, 1)}, nil
 }
 
 func open(ctx context.Context, dsn string) (*sql.DB, error) {
@@ -814,7 +815,7 @@ WITH objects AS (
     FROM pg_class, objects WHERE oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
 ), routine_expected(oid, body_hash, language_name, volatility, security_definer, result_type) AS (
 	SELECT expected.* FROM objects, LATERAL (VALUES
-		(acquire_oid, 'f6929fb868a6ecf26876141eba7c6225', 'plpgsql', 'v'::"char", true, 'uuid'),
+		(acquire_oid, CASE WHEN $1 < 12 THEN 'f6929fb868a6ecf26876141eba7c6225' ELSE 'a038bbe60ba9b15eb6f308bb9fc9827d' END, 'plpgsql', 'v'::"char", true, 'uuid'),
 		(bind_oid, '7cd70c2bf1e678bf0e9457759ddd69d2', 'sql', 'v'::"char", true, 'boolean'),
 		(renew_oid, '2b86effb929fb20879f101e761d8fb6b', 'plpgsql', 'v'::"char", true, 'boolean'),
 		(cancel_oid, 'bfbe9c5f6f92a230acd0ff519167b60a', 'sql', 'v'::"char", true, 'boolean'),
@@ -991,6 +992,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL attachment-recipient schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = recipientObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 12 {
+		deletionObjectsPresent, err := attachmentDeletionControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL attachment-deletion schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = deletionObjectsPresent
 	}
 	return snapshot, nil
 }

@@ -606,7 +606,22 @@ IDs, revoked authority, absent grants, and
 hidden or corrupt artifacts do not expose which condition failed. There are no
 ranges, public URLs, redirects, URL fetches, or display-name paths. Reservation,
 upload, download, and delete HTTP routes remain unmounted until the native
-client and destructive lifecycle receive their separate reviews.
+client and final release surface receive their separate reviews.
+
+Schema v12 adds tombstone-first deletion without mounting a route. An
+operation-bound idempotency record, current device generation, current
+`attachment.delete` capability, and the canonical project lock authorize the
+visibility transition. The same artifact lock serializes deletion with active
+downloads. Tombstoning withdraws recipient grants and the READY backup
+projection but retains the exact private path, size, digest, and charged quota
+through a database-time 24-hour restore window. Post-cutoff physical GC is
+permitted only outside an active backup fence, uses a generation/token/lease
+claim, durably removes the final and private stages, then conditionally marks
+the tombstone deleted and releases quota exactly once. Corrupt artifacts use
+the same delayed path. A bounded deterministic filesystem scan removes only
+old UUID namespaces whose database absence and backup permission are rechecked
+under the artifact lock; any state change restarts its cursor. Restoring an
+older snapshot may therefore resurrect data that was deleted later.
 
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique

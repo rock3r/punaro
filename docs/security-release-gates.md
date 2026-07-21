@@ -47,11 +47,13 @@ checked.
 - [ ] Complete adversarial authorization, filesystem, quota-race, backup,
       restore, load, and operations review against the final release candidate.
 
-Schema v11 is not release evidence: it adds owner-only stable recipient
+Schema v12 is not release evidence: schema v11 adds owner-only stable recipient
 snapshots and an internal authenticated, fully verified bounded download
-service, but deliberately exposes no trusted-relay HTTP route and implements no
-deletion operation. The boxes remain closed until the native client, destructive
-lifecycle, adversarial matrix, and release-evidence record are complete.
+service; schema v12 adds authorized tombstone-first deletion, backup-fenced
+token/lease GC, exact-once quota release, and bounded restore-skew cleanup. It
+deliberately exposes no trusted-relay HTTP route. The boxes remain closed until
+the native client, disk-pressure and restore-skew drills, adversarial matrix,
+and release-evidence record are complete.
 
 ## Attachment v2 (superseded; closed)
 

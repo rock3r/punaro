@@ -9,6 +9,7 @@ import (
 	"errors"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -17,12 +18,16 @@ import (
 )
 
 const (
-	maxAttachmentBytes          int64 = 16 << 30
-	minAttachmentReservation          = 5 * time.Minute
-	maxAttachmentReservation          = time.Hour
-	minAttachmentClaim                = 30 * time.Second
-	maxAttachmentClaim                = 10 * time.Minute
-	maxAttachmentReconcileBatch       = 100
+	maxAttachmentBytes            int64 = 16 << 30
+	minAttachmentReservation            = 5 * time.Minute
+	maxAttachmentReservation            = time.Hour
+	minAttachmentClaim                  = 30 * time.Second
+	maxAttachmentClaim                  = 10 * time.Minute
+	minAttachmentGCClaim                = 30 * time.Second
+	maxAttachmentGCClaim                = 10 * time.Minute
+	maxAttachmentReconcileBatch         = 100
+	attachmentGCAdvisoryKeyClass        = 1347768658
+	attachmentGCAdvisoryKeyObject       = 1094927683
 )
 
 var attachmentMediaTypePattern = regexp.MustCompile(`^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$`)
@@ -148,6 +153,63 @@ type AttachmentDownload struct {
 	DisplayName string
 	MediaType   string
 	ReadyAt     time.Time
+}
+
+// AttachmentDeleteRequest binds one current device principal to an
+// operation-specific idempotency key. The artifact's project is always read
+// from authoritative metadata rather than accepted from the caller.
+type AttachmentDeleteRequest struct {
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ArtifactID           string
+	IdempotencyKey       string
+}
+
+// Validate rejects incomplete current-device authority and friendly labels
+// before a lookup can reveal attachment existence.
+func (request AttachmentDeleteRequest) Validate() error {
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 ||
+		!validOpaqueID(request.ArtifactID) || !validOpaqueID(request.IdempotencyKey) {
+		return errors.New("invalid attachment delete request")
+	}
+	return nil
+}
+
+// AttachmentDeletionState is the durable physical-removal lifecycle. It is
+// separate from upload publication state so a content-free tombstone survives
+// final removal of the publication row.
+type AttachmentDeletionState string
+
+const (
+	// AttachmentTombstoned is hidden while its immutable bytes remain charged
+	// through the backup/restore safety window.
+	AttachmentTombstoned AttachmentDeletionState = "tombstoned"
+	// AttachmentGCClaimed is owned by one generation/token/lease worker.
+	AttachmentGCClaimed AttachmentDeletionState = "gc_claimed"
+	// AttachmentDeleted records completed physical removal and quota release.
+	AttachmentDeleted AttachmentDeletionState = "deleted"
+)
+
+// AttachmentDeletion is the hidden, backup-window-fenced deletion record.
+type AttachmentDeletion struct {
+	ArtifactID   string
+	ProjectID    string
+	StoragePath  string
+	SizeBytes    int64
+	SHA256       [sha256.Size]byte
+	State        AttachmentDeletionState
+	GCGeneration int64
+	GCAfter      time.Time
+	DeletedAt    time.Time
+}
+
+// AttachmentGCClaim fences one physical removal worker and contains only
+// server-derived immutable paths and integrity metadata.
+type AttachmentGCClaim struct {
+	AttachmentDeletion
+	GCToken      string
+	GCLeaseUntil time.Time
 }
 
 // AttachmentPublishRequest binds completion to one database claim and the
@@ -296,6 +358,150 @@ FROM attachment.authorize_download($1,$2,$3,$4)`, request.PrincipalID, request.C
 	return download, nil
 }
 
+// DeleteAttachment reauthorizes one current device operation and commits the
+// visibility tombstone before any filesystem mutation is attempted.
+func (d *Database) DeleteAttachment(ctx context.Context, request AttachmentDeleteRequest) (AttachmentDeletion, error) {
+	if request.Validate() != nil {
+		return AttachmentDeletion{}, errors.New("invalid attachment delete request")
+	}
+	body, err := json.Marshal(struct {
+		ArtifactID string `json:"artifact_id"`
+	}{ArtifactID: request.ArtifactID})
+	if err != nil {
+		return AttachmentDeletion{}, errors.New("attachment delete request cannot be encoded")
+	}
+	requestHash := sha256.Sum256(body)
+	row := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,state,gc_generation,gc_after,deleted_at
+FROM attachment.tombstone_artifact($1,$2,$3,$4,$5,$6)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ArtifactID, request.IdempotencyKey, requestHash[:])
+	deletion, err := scanAttachmentDeletion(row)
+	if err != nil {
+		return AttachmentDeletion{}, attachmentStoreError(err, "attachment delete failed")
+	}
+	return deletion, nil
+}
+
+// BeginAttachmentPhysicalGC holds a transaction-scoped shared advisory lock
+// until its release function is called. Backup fence acquisition takes the
+// matching exclusive lock before publishing its durable fence, so a permitted
+// holder remains backup-exclusive across filesystem unlink and finalization.
+func (d *Database) BeginAttachmentPhysicalGC(ctx context.Context) (func() error, bool, error) {
+	if d == nil || d.attachmentPhysicalGCSlots == nil {
+		return nil, false, errors.New("attachment physical GC is unavailable")
+	}
+	select {
+	case d.attachmentPhysicalGCSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-d.attachmentPhysicalGCSlots
+		}
+	}()
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, false, attachmentStoreError(err, "attachment physical GC connection is unavailable")
+	}
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not start")
+	}
+	var closeOnce sync.Once
+	var closeErr error
+	closeFence := func() error {
+		closeOnce.Do(func() {
+			rollbackErr := tx.Rollback()
+			connectionErr := conn.Close()
+			<-d.attachmentPhysicalGCSlots
+			if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				closeErr = rollbackErr
+			} else {
+				closeErr = connectionErr
+			}
+		})
+		return closeErr
+	}
+	releaseSlot = false
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1::integer,$2::integer)`, attachmentGCAdvisoryKeyClass, attachmentGCAdvisoryKeyObject); err != nil {
+		_ = closeFence()
+		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not be acquired")
+	}
+	var permitted bool
+	if err := tx.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&permitted); err != nil {
+		_ = closeFence()
+		return nil, false, attachmentStoreError(err, "attachment physical GC permission is unavailable")
+	}
+	if !permitted {
+		if err := closeFence(); err != nil {
+			return nil, false, attachmentStoreError(err, "attachment physical GC fence could not be released")
+		}
+		return nil, false, nil
+	}
+	return closeFence, true, nil
+}
+
+// ClaimAttachmentGC acquires one generation/token/lease fence only after the
+// backup safety cutoff and while physical blob GC is currently permitted.
+func (d *Database) ClaimAttachmentGC(ctx context.Context, artifactID string, lifetime time.Duration) (AttachmentGCClaim, bool, error) {
+	if !validOpaqueID(artifactID) || lifetime < minAttachmentGCClaim || lifetime > maxAttachmentGCClaim {
+		return AttachmentGCClaim{}, false, errors.New("invalid attachment GC claim")
+	}
+	var claim AttachmentGCClaim
+	var digestText string
+	var token sql.NullString
+	var lease sql.NullTime
+	var deletedAt sql.NullTime
+	err := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,state,gc_generation,gc_token::text,gc_lease_until,gc_after,deleted_at
+FROM attachment.claim_artifact_gc($1,$2::interval)`, artifactID, attachmentInterval(lifetime)).Scan(
+		&claim.ArtifactID, &claim.ProjectID, &claim.StoragePath, &claim.SizeBytes, &digestText, &claim.State,
+		&claim.GCGeneration, &token, &lease, &claim.GCAfter, &deletedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AttachmentGCClaim{}, false, nil
+	}
+	if err != nil {
+		return AttachmentGCClaim{}, false, attachmentStoreError(err, "attachment GC claim failed")
+	}
+	if !token.Valid || !lease.Valid || deletedAt.Valid || !validOpaqueID(token.String) || !decodeAttachmentDigest(digestText, &claim.SHA256) || claim.State != AttachmentGCClaimed {
+		return AttachmentGCClaim{}, false, errors.New("attachment GC claim is malformed")
+	}
+	claim.GCToken = token.String
+	claim.GCLeaseUntil = lease.Time
+	return claim, true, nil
+}
+
+// FinalizeAttachmentGC conditionally releases used quota exactly once after
+// the claimed immutable final and stages have been durably removed.
+func (d *Database) FinalizeAttachmentGC(ctx context.Context, artifactID string, generation int64, token string) (AttachmentDeletion, bool, error) {
+	if !validOpaqueID(artifactID) || generation < 1 || !validOpaqueID(token) {
+		return AttachmentDeletion{}, false, errors.New("invalid attachment GC finalization")
+	}
+	row := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,state,gc_generation,gc_after,deleted_at
+FROM attachment.finalize_artifact_gc($1,$2,$3)`, artifactID, generation, token)
+	deletion, err := scanAttachmentDeletion(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AttachmentDeletion{}, false, nil
+	}
+	if err != nil {
+		return AttachmentDeletion{}, false, attachmentStoreError(err, "attachment GC finalization failed")
+	}
+	return deletion, true, nil
+}
+
+// AttachmentOrphanGCAllowed rechecks authoritative database absence and the
+// backup fence immediately before filesystem-only skew cleanup.
+func (d *Database) AttachmentOrphanGCAllowed(ctx context.Context, artifactID string) (bool, error) {
+	if !validOpaqueID(artifactID) {
+		return false, errors.New("invalid attachment orphan query")
+	}
+	var allowed bool
+	if err := d.db.QueryRowContext(ctx, `SELECT attachment.orphan_gc_allowed($1)`, artifactID).Scan(&allowed); err != nil {
+		return false, attachmentStoreError(err, "attachment orphan authority is unavailable")
+	}
+	return allowed, nil
+}
+
 // BeginAttachmentReap fences an expired or restored-timeline reservation.
 func (d *Database) BeginAttachmentReap(ctx context.Context, artifactID string) (string, bool, error) {
 	if !validOpaqueID(artifactID) {
@@ -421,6 +627,28 @@ type attachmentReservationScanner interface {
 	Scan(...any) error
 }
 
+func scanAttachmentDeletion(row attachmentReservationScanner) (AttachmentDeletion, error) {
+	var deletion AttachmentDeletion
+	var digestText string
+	var deletedAt sql.NullTime
+	if err := row.Scan(&deletion.ArtifactID, &deletion.ProjectID, &deletion.StoragePath, &deletion.SizeBytes,
+		&digestText, &deletion.State, &deletion.GCGeneration, &deletion.GCAfter, &deletedAt); err != nil {
+		return AttachmentDeletion{}, err
+	}
+	if !validOpaqueID(deletion.ArtifactID) || !validOpaqueID(deletion.ProjectID) ||
+		deletion.StoragePath != "ready/"+deletion.ArtifactID+".blob" || deletion.SizeBytes < 1 || deletion.SizeBytes > maxAttachmentBytes ||
+		!decodeAttachmentDigest(digestText, &deletion.SHA256) || !validAttachmentDeletionState(deletion.State) || deletion.GCGeneration < 0 || deletion.GCAfter.IsZero() {
+		return AttachmentDeletion{}, errors.New("attachment deletion result is malformed")
+	}
+	if deletedAt.Valid {
+		deletion.DeletedAt = deletedAt.Time
+	}
+	if (deletion.State == AttachmentDeleted) != deletedAt.Valid {
+		return AttachmentDeletion{}, errors.New("attachment deletion result is malformed")
+	}
+	return deletion, nil
+}
+
 func scanAttachmentReservation(row attachmentReservationScanner) (AttachmentReservation, error) {
 	var reservation AttachmentReservation
 	var digestText string
@@ -495,4 +723,8 @@ func validAttachmentState(state AttachmentState) bool {
 
 func validAttachmentReconcileState(state AttachmentState) bool {
 	return state == AttachmentReserved || state == AttachmentReaping || state == AttachmentReady || state == AttachmentCorrupt
+}
+
+func validAttachmentDeletionState(state AttachmentDeletionState) bool {
+	return state == AttachmentTombstoned || state == AttachmentGCClaimed || state == AttachmentDeleted
 }
