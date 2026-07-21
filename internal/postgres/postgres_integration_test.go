@@ -1287,7 +1287,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2086",
 		SourceRelease:           "v0.8.0",
-		TargetRelease:           "v0.8.0",
+		TargetRelease:           "v0.9.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		SourceSchema:            7,
@@ -1349,8 +1349,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2087",
-		SourceRelease:           "v0.8.0",
-		TargetRelease:           "v0.9.0",
+		SourceRelease:           "v0.9.0",
+		TargetRelease:           "v0.10.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		SourceSchema:            8,
