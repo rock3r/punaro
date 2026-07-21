@@ -17,6 +17,7 @@ WITH objects AS (
            to_regclass('attachment.uploads_project_state') AS project_state_index_oid,
            to_regclass('attachment.uploads_reconcile_order') AS reconcile_index_oid,
            to_regclass('attachment.recipient_grants') AS recipient_grants_oid,
+           to_regclass('attachment.deletions') AS deletions_oid,
            to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS reserve_oid,
            to_regprocedure('attachment.claim_upload(uuid,uuid,interval)') AS claim_oid,
            to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)') AS publish_oid,
@@ -95,7 +96,8 @@ WITH objects AS (
                         ELSE '2a0a87320eb4124de1f1f65ecd629662' END,'v'::"char"),
       (corrupt_oid,CASE WHEN recipient_grants_oid IS NULL
                         THEN 'c4949387c79f3843bef73ddb408f9db2'
-                        ELSE '51e6b83ed153fcce5b53dbddc37056b8' END,'v'::"char"),
+                        WHEN deletions_oid IS NULL THEN '51e6b83ed153fcce5b53dbddc37056b8'
+                        ELSE 'b86070c52d01fb33abe1079d54e099da' END,'v'::"char"),
       (reconcile_oid,'25df2c05deb346a8df8a86349a00a478','s'::"char"),
       (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char")
     ) AS expected(oid,body_hash,volatility)

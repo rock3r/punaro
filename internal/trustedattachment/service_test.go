@@ -34,6 +34,21 @@ type fakeRepository struct {
 	publishHook       func()
 	download          postgres.AttachmentDownload
 	downloadErr       error
+	deleteResult      postgres.AttachmentDeletion
+	deleteErr         error
+	deleteCalls       int
+	deleteEntered     chan struct{}
+	gcClaim           postgres.AttachmentGCClaim
+	gcClaimed         bool
+	gcClaimErr        error
+	gcFinalizeResult  postgres.AttachmentDeletion
+	gcFinalizeAllowed bool
+	gcFinalizeErr     error
+	gcFinalizeErrors  []error
+	gcFinalizeCalls   int
+	gcFinalizeHook    func()
+	orphanGCAllowed   bool
+	orphanGCErr       error
 }
 
 type testDownloadWriter struct {
@@ -48,6 +63,22 @@ type blockingDeadlineWriter struct {
 	entered chan struct{}
 	release chan struct{}
 }
+
+type blockingDownloadWriter struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (writer *blockingDownloadWriter) Write(value []byte) (int, error) {
+	select {
+	case writer.entered <- struct{}{}:
+	default:
+	}
+	<-writer.release
+	return len(value), nil
+}
+
+func (*blockingDownloadWriter) SetWriteDeadline(time.Time) error { return nil }
 
 func (writer *blockingDeadlineWriter) Write(value []byte) (int, error) { return len(value), nil }
 
@@ -123,6 +154,41 @@ func (repository *fakeRepository) AuthorizeAttachmentDownload(context.Context, p
 	return repository.download, repository.downloadErr
 }
 
+func (repository *fakeRepository) DeleteAttachment(context.Context, postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	repository.deleteCalls++
+	if repository.deleteEntered != nil {
+		select {
+		case repository.deleteEntered <- struct{}{}:
+		default:
+		}
+	}
+	return repository.deleteResult, repository.deleteErr
+}
+
+func (repository *fakeRepository) ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error) {
+	return repository.gcClaim, repository.gcClaimed, repository.gcClaimErr
+}
+
+func (repository *fakeRepository) FinalizeAttachmentGC(context.Context, string, int64, string) (postgres.AttachmentDeletion, bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	index := repository.gcFinalizeCalls
+	repository.gcFinalizeCalls++
+	if repository.gcFinalizeHook != nil {
+		repository.gcFinalizeHook()
+	}
+	if index < len(repository.gcFinalizeErrors) && repository.gcFinalizeErrors[index] != nil {
+		return postgres.AttachmentDeletion{}, false, repository.gcFinalizeErrors[index]
+	}
+	return repository.gcFinalizeResult, repository.gcFinalizeAllowed, repository.gcFinalizeErr
+}
+
+func (repository *fakeRepository) AttachmentOrphanGCAllowed(context.Context, string) (bool, error) {
+	return repository.orphanGCAllowed, repository.orphanGCErr
+}
+
 func TestServiceAuthorizesAndVerifiesBeforeDownloadBytes(t *testing.T) {
 	body := []byte("recipient snapshot body")
 	digest := sha256.Sum256(body)
@@ -142,6 +208,138 @@ func TestServiceAuthorizesAndVerifiesBeforeDownloadBytes(t *testing.T) {
 	output.Reset()
 	if _, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output}); !errors.Is(err, postgres.ErrForbidden) || output.Len() != 0 {
 		t.Fatalf("denied download emitted=%d err=%v", output.Len(), err)
+	}
+}
+
+func TestServiceTombstonesBeforePhysicalGC(t *testing.T) {
+	body := []byte("delete after backup window")
+	digest := sha256.Sum256(body)
+	request := postgres.AttachmentDeleteRequest{
+		PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222",
+		CredentialGeneration: 1, ArtifactID: testArtifactID, IdempotencyKey: "33333333-3333-4333-8333-333333333333",
+	}
+	tombstone := postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentTombstoned, GCAfter: time.Now().Add(24 * time.Hour),
+	}
+	repository := &fakeRepository{deleteResult: tombstone}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Delete(context.Background(), request)
+	if err != nil || got != tombstone || repository.deleteCalls != 1 {
+		t.Fatalf("delete=%#v calls=%d err=%v", got, repository.deleteCalls, err)
+	}
+	if err := service.store.Verify(PublishedBlob{StoragePath: tombstone.StoragePath, SizeBytes: tombstone.SizeBytes, SHA256: tombstone.SHA256}); err != nil {
+		t.Fatalf("tombstone removed bytes before GC: %v", err)
+	}
+}
+
+func TestServiceDeleteWaitsForActiveDownload(t *testing.T) {
+	body := []byte("complete this authorized stream")
+	digest := sha256.Sum256(body)
+	download := postgres.AttachmentDownload{
+		ArtifactID: testArtifactID, ProjectID: "11111111-1111-4111-8111-111111111111",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+	}
+	deletion := postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: download.ProjectID, StoragePath: download.StoragePath,
+		SizeBytes: download.SizeBytes, SHA256: digest, State: postgres.AttachmentTombstoned,
+		GCAfter: time.Now().Add(24 * time.Hour),
+	}
+	repository := &fakeRepository{download: download, deleteResult: deletion, deleteEntered: make(chan struct{}, 1)}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	writer := &blockingDownloadWriter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	downloadDone := make(chan error, 1)
+	go func() {
+		_, err := service.Download(context.Background(), postgres.AttachmentDownloadRequest{
+			PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333",
+			CredentialGeneration: 1, ArtifactID: testArtifactID,
+		}, writer)
+		downloadDone <- err
+	}()
+	select {
+	case <-writer.entered:
+	case <-time.After(time.Second):
+		t.Fatal("download did not reach its destination")
+	}
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := service.Delete(context.Background(), postgres.AttachmentDeleteRequest{
+			PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333",
+			CredentialGeneration: 1, ArtifactID: testArtifactID, IdempotencyKey: "44444444-4444-4444-8444-444444444444",
+		})
+		deleteDone <- err
+	}()
+	select {
+	case <-repository.deleteEntered:
+		close(writer.release)
+		t.Fatal("delete reached database authority before the active download completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(writer.release)
+	if err := <-downloadDone; err != nil {
+		t.Fatalf("download failed: %v", err)
+	}
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+}
+
+func TestServiceGCUnlinksBeforeTokenFencedFinalization(t *testing.T) {
+	body := []byte("physically removed")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentGCClaim{AttachmentDeletion: postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentGCClaimed, GCGeneration: 2, GCAfter: time.Now().Add(-time.Hour),
+	}, GCToken: "55555555-5555-4555-8555-555555555555", GCLeaseUntil: time.Now().Add(time.Minute)}
+	deleted := claim.AttachmentDeletion
+	deleted.State = postgres.AttachmentDeleted
+	deleted.DeletedAt = time.Now()
+	repository := &fakeRepository{gcClaim: claim, gcClaimed: true, gcFinalizeResult: deleted, gcFinalizeAllowed: true}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	repository.gcFinalizeHook = func() {
+		if err := service.store.Verify(PublishedBlob{StoragePath: claim.StoragePath, SizeBytes: claim.SizeBytes, SHA256: claim.SHA256}); err == nil {
+			t.Error("GC finalized quota before removing bytes")
+		}
+	}
+	got, finalized, err := service.GarbageCollect(context.Background(), testArtifactID, time.Minute)
+	if err != nil || !finalized || got != deleted || repository.gcFinalizeCalls != 1 {
+		t.Fatalf("GC=%#v finalized=%t calls=%d err=%v", got, finalized, repository.gcFinalizeCalls, err)
+	}
+}
+
+func TestServiceRetriesAmbiguousGCFinalizationExactlyOnce(t *testing.T) {
+	body := []byte("ambiguous finalization")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentGCClaim{AttachmentDeletion: postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentGCClaimed, GCGeneration: 3, GCAfter: time.Now().Add(-time.Hour),
+	}, GCToken: "55555555-5555-4555-8555-555555555555", GCLeaseUntil: time.Now().Add(time.Minute)}
+	deleted := claim.AttachmentDeletion
+	deleted.State = postgres.AttachmentDeleted
+	deleted.DeletedAt = time.Now()
+	repository := &fakeRepository{
+		gcClaim: claim, gcClaimed: true, gcFinalizeResult: deleted, gcFinalizeAllowed: true,
+		gcFinalizeErrors: []error{net.ErrClosed},
+	}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	got, finalized, err := service.GarbageCollect(context.Background(), testArtifactID, time.Minute)
+	if err != nil || !finalized || got != deleted || repository.gcFinalizeCalls != 2 {
+		t.Fatalf("GC=%#v finalized=%t calls=%d err=%v", got, finalized, repository.gcFinalizeCalls, err)
 	}
 }
 
@@ -421,6 +619,66 @@ func TestServiceMarksMissingReadyBlobCorrupt(t *testing.T) {
 	}
 	if len(repository.markCorruptCalls) != 1 || repository.markCorruptCalls[0] != testArtifactID {
 		t.Fatalf("corrupt calls=%v", repository.markCorruptCalls)
+	}
+}
+
+func TestReconcileRestartsAfterFinalizedCorruptGC(t *testing.T) {
+	body := []byte("corrupt retirement")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentGCClaim{AttachmentDeletion: postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentGCClaimed, GCGeneration: 1, GCAfter: time.Now().Add(-time.Hour),
+	}, GCToken: "55555555-5555-4555-8555-555555555555", GCLeaseUntil: time.Now().Add(time.Minute)}
+	deleted := claim.AttachmentDeletion
+	deleted.State = postgres.AttachmentDeleted
+	deleted.DeletedAt = time.Now()
+	repository := &fakeRepository{
+		candidates:        []postgres.AttachmentReconcileCandidate{{ArtifactID: testArtifactID, State: postgres.AttachmentCorrupt, ExpiresAt: time.Unix(200, 0)}},
+		gcClaim:           claim,
+		gcClaimed:         true,
+		gcFinalizeResult:  deleted,
+		gcFinalizeAllowed: true,
+	}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ReconcileBatch(context.Background(), postgres.AttachmentReconcileCursor{}, 10)
+	if err != nil || result.Changed != 1 || result.Next != (postgres.AttachmentReconcileCursor{}) {
+		t.Fatalf("reconcile=%#v err=%v", result, err)
+	}
+}
+
+func TestOrphanReconcileRequiresGraceAndDatabaseAbsence(t *testing.T) {
+	body := []byte("restore skew orphan")
+	digest := sha256.Sum256(body)
+	repository := &fakeRepository{}
+	service := newTestService(t, repository)
+	blob, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(filepath.Join(service.store.root, filepath.FromSlash(blob.StoragePath)), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(service.store.stagingDir, testArtifactID), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := service.ReconcileOrphanBatch(context.Background(), "", 10, 24*time.Hour); err != nil || result.Scanned != 1 || result.Changed != 0 {
+		t.Fatalf("database-owned orphan result=%#v err=%v", result, err)
+	}
+	if err := service.store.Verify(blob); err != nil {
+		t.Fatalf("database-owned bytes were removed: %v", err)
+	}
+	repository.orphanGCAllowed = true
+	result, err := service.ReconcileOrphanBatch(context.Background(), "", 10, 24*time.Hour)
+	if err != nil || result.Scanned != 1 || result.Changed != 1 || result.Next != "" {
+		t.Fatalf("orphan result=%#v err=%v", result, err)
+	}
+	if err := service.store.Verify(blob); err == nil {
+		t.Fatal("authorized restore-skew orphan survived reconciliation")
 	}
 }
 

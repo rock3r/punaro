@@ -25,6 +25,10 @@ type Repository interface {
 	BeginAttachmentReap(context.Context, string) (string, bool, error)
 	ReleaseExpiredAttachment(context.Context, string, string) (bool, error)
 	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
+	DeleteAttachment(context.Context, postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error)
+	ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error)
+	FinalizeAttachmentGC(context.Context, string, int64, string) (postgres.AttachmentDeletion, bool, error)
+	AttachmentOrphanGCAllowed(context.Context, string) (bool, error)
 }
 
 // DownloadWriter is a destination whose blocked writes can be interrupted.
@@ -74,6 +78,72 @@ func (service *Service) Download(ctx context.Context, request postgres.Attachmen
 		return postgres.AttachmentDownload{}, err
 	}
 	return download, nil
+}
+
+// Delete commits the authorization-checked tombstone while holding the same
+// artifact lock used by download and publication. It deliberately leaves the
+// immutable bytes in place for the backup/restore safety window.
+func (service *Service) Delete(ctx context.Context, request postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error) {
+	if service == nil || request.Validate() != nil {
+		return postgres.AttachmentDeletion{}, errors.New("invalid trusted attachment deletion")
+	}
+	unlock, err := service.lockArtifact(ctx, request.ArtifactID)
+	if err != nil {
+		return postgres.AttachmentDeletion{}, err
+	}
+	defer func() { _ = unlock() }()
+	deletion, err := service.repository.DeleteAttachment(ctx, request)
+	if err != nil {
+		return postgres.AttachmentDeletion{}, err
+	}
+	if deletion.ArtifactID != request.ArtifactID || deletion.StoragePath != "ready/"+request.ArtifactID+".blob" ||
+		(deletion.State != postgres.AttachmentTombstoned && deletion.State != postgres.AttachmentGCClaimed && deletion.State != postgres.AttachmentDeleted) {
+		return postgres.AttachmentDeletion{}, errors.New("trusted attachment deletion result is malformed")
+	}
+	return deletion, nil
+}
+
+// GarbageCollect claims one post-cutoff tombstone, durably removes its exact
+// final and private stages, then conditionally releases quota. A crash after
+// unlink is safe because removal and the token-fenced finalization are both
+// idempotent.
+func (service *Service) GarbageCollect(ctx context.Context, artifactID string, claimLifetime time.Duration) (postgres.AttachmentDeletion, bool, error) {
+	if service == nil {
+		return postgres.AttachmentDeletion{}, false, errors.New("trusted attachment service is unavailable")
+	}
+	unlock, err := service.lockArtifact(ctx, artifactID)
+	if err != nil {
+		return postgres.AttachmentDeletion{}, false, err
+	}
+	defer func() { _ = unlock() }()
+	return service.garbageCollectLocked(ctx, artifactID, claimLifetime)
+}
+
+func (service *Service) garbageCollectLocked(ctx context.Context, artifactID string, claimLifetime time.Duration) (postgres.AttachmentDeletion, bool, error) {
+	claim, claimed, err := service.repository.ClaimAttachmentGC(ctx, artifactID, claimLifetime)
+	if err != nil || !claimed {
+		return postgres.AttachmentDeletion{}, false, err
+	}
+	if claim.ArtifactID != artifactID || claim.State != postgres.AttachmentGCClaimed || claim.GCGeneration < 1 || claim.GCToken == "" ||
+		claim.StoragePath != "ready/"+artifactID+".blob" {
+		return postgres.AttachmentDeletion{}, false, errors.New("trusted attachment GC claim is malformed")
+	}
+	if err := service.store.RemoveDeleted(PublishedBlob{StoragePath: claim.StoragePath, SizeBytes: claim.SizeBytes, SHA256: claim.SHA256}); err != nil {
+		return postgres.AttachmentDeletion{}, false, err
+	}
+	deletion, finalized, err := service.repository.FinalizeAttachmentGC(ctx, artifactID, claim.GCGeneration, claim.GCToken)
+	if err != nil && ctx.Err() == nil && retryAmbiguousPublication(err) {
+		// The exact generation/token retry closes the commit-succeeded/response-
+		// lost window without allowing a stale worker to release quota.
+		deletion, finalized, err = service.repository.FinalizeAttachmentGC(ctx, artifactID, claim.GCGeneration, claim.GCToken)
+	}
+	if err != nil || !finalized {
+		return postgres.AttachmentDeletion{}, false, err
+	}
+	if deletion.ArtifactID != artifactID || deletion.State != postgres.AttachmentDeleted || deletion.GCGeneration != claim.GCGeneration || deletion.StoragePath != claim.StoragePath {
+		return postgres.AttachmentDeletion{}, false, errors.New("trusted attachment GC result is malformed")
+	}
+	return deletion, true, nil
 }
 
 func armDownloadWriteDeadline(ctx context.Context, destination DownloadWriter) (func(), error) {
@@ -181,6 +251,55 @@ type ReconcileResult struct {
 	Next    postgres.AttachmentReconcileCursor
 }
 
+// OrphanReconcileResult describes one bounded deterministic filesystem-only
+// skew scan. A changed page restarts from the beginning on the next call.
+type OrphanReconcileResult struct {
+	Scanned int
+	Changed int
+	Next    string
+}
+
+// ReconcileOrphanBatch removes only UUID namespaces older than grace whose
+// authoritative database absence and backup-fence permission are rechecked
+// under the cross-process artifact lock.
+func (service *Service) ReconcileOrphanBatch(ctx context.Context, after string, limit int, grace time.Duration) (OrphanReconcileResult, error) {
+	if service == nil || grace < time.Hour || grace > 30*24*time.Hour {
+		return OrphanReconcileResult{}, errors.New("invalid attachment orphan reconciliation")
+	}
+	candidates, next, err := service.store.OrphanCandidates(after, time.Now().Add(-grace), limit)
+	if err != nil {
+		return OrphanReconcileResult{}, err
+	}
+	result := OrphanReconcileResult{Scanned: len(candidates), Next: next}
+	for _, candidate := range candidates {
+		if err := ctx.Err(); err != nil {
+			return OrphanReconcileResult{}, err
+		}
+		unlock, err := service.lockArtifact(ctx, candidate.ArtifactID)
+		if err != nil {
+			return OrphanReconcileResult{}, err
+		}
+		allowed, authorityErr := service.repository.AttachmentOrphanGCAllowed(ctx, candidate.ArtifactID)
+		if authorityErr == nil && allowed {
+			authorityErr = service.store.RemoveUnpublished(candidate.ArtifactID)
+			if authorityErr == nil {
+				result.Changed++
+			}
+		}
+		unlockErr := unlock()
+		if authorityErr != nil {
+			return OrphanReconcileResult{}, authorityErr
+		}
+		if unlockErr != nil {
+			return OrphanReconcileResult{}, unlockErr
+		}
+	}
+	if result.Changed != 0 {
+		result.Next = ""
+	}
+	return result, nil
+}
+
 // ReconcileBatch repairs only M-10 publication invariants: READY bytes are
 // verified, and expired or restored-timeline RESERVED bytes are removed before
 // their quota is released. CORRUPT retention belongs to the later lifecycle.
@@ -204,6 +323,11 @@ func (service *Service) ReconcileBatch(ctx context.Context, cursor postgres.Atta
 		if changed {
 			result.Changed++
 		}
+	}
+	if result.Changed != 0 {
+		// State-changing passes restart from the beginning so an artifact which
+		// moved between lifecycle orderings cannot be skipped by a stale cursor.
+		result.Next = postgres.AttachmentReconcileCursor{}
 	}
 	return result, nil
 }
@@ -248,8 +372,8 @@ func (service *Service) reconcileCandidate(ctx context.Context, candidate postgr
 		}
 		return released, nil
 	case postgres.AttachmentCorrupt:
-		// M-10 detects and records corruption but exposes no deletion API.
-		return false, nil
+		_, finalized, gcErr := service.garbageCollectLocked(ctx, candidate.ArtifactID, time.Minute)
+		return finalized, gcErr
 	default:
 		return false, errors.New("trusted attachment reconciliation state is invalid")
 	}

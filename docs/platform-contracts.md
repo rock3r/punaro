@@ -60,7 +60,8 @@ handles and must not grow into one cross-domain god interface.
 - Idempotency store: `(principal, operation, key)` bound to request hash and an
   immutable prior result.
 - Attachment store/blob store: reservations, lifecycle metadata, grants,
-  quotas, immutable blob operations, tombstones, and reconciliation.
+  quotas, immutable blob operations, tombstones, token-fenced delayed GC, and
+  bounded restore-skew reconciliation.
 - Brain store: scoped canonical revisions, sources, proposals, derived-index
   state, usage, and change sequences.
 - Job/audit stores: fenced bounded work and content-free events.

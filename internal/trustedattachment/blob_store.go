@@ -9,13 +9,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 const maxArtifactBytes int64 = 16 << 30
+
+const maxOrphanNamespaceEntries = 100000
+
+// OrphanCandidate is one UUID namespace whose final and stage entries are all
+// older than the configured grace cutoff. Database authority is rechecked
+// separately immediately before removal.
+type OrphanCandidate struct {
+	ArtifactID string
+}
 
 // UploadClaim is the database-fenced authority to write one immutable blob.
 type UploadClaim struct {
@@ -252,6 +263,140 @@ func (s *BlobStore) RemoveUnpublished(artifactID string) error {
 		return errors.New("unpublished attachment final cannot be retired")
 	}
 	return nil
+}
+
+// RemoveDeleted durably removes the exact server-recorded immutable final and
+// all private stages after the database has issued a physical-GC claim.
+func (s *BlobStore) RemoveDeleted(blob PublishedBlob) error {
+	if s == nil || blob.validate() != nil {
+		return errors.New("invalid deleted attachment")
+	}
+	base := filepath.Base(blob.StoragePath)
+	expected := filepath.ToSlash(filepath.Join("ready", base))
+	artifactID, found := strings.CutSuffix(base, ".blob")
+	if blob.StoragePath != expected || !found || uuid.Validate(artifactID) != nil {
+		return errors.New("deleted attachment path is unsafe")
+	}
+	if err := s.RemoveStages(artifactID); err != nil {
+		return errors.New("deleted attachment stages cannot be retired")
+	}
+	if err := removePrivateFile(filepath.Join(s.root, filepath.FromSlash(blob.StoragePath)), s.readyDir); err != nil {
+		return errors.New("deleted attachment final cannot be retired")
+	}
+	return nil
+}
+
+// OrphanCandidates returns one deterministic bounded page across both private
+// publication namespaces. A hard namespace ceiling prevents an unbounded
+// directory read; operators must shard or repair a root which exceeds it.
+func (s *BlobStore) OrphanCandidates(after string, cutoff time.Time, limit int) ([]OrphanCandidate, string, error) {
+	if s == nil || (!cutoff.IsZero() && cutoff.Location() == nil) || limit < 1 || limit > 100 || (after != "" && uuid.Validate(after) != nil) {
+		return nil, "", errors.New("invalid attachment orphan scan")
+	}
+	type eligibility struct {
+		seen bool
+		old  bool
+	}
+	states := make(map[string]eligibility)
+	readyNames, err := boundedDirectoryNames(s.readyDir, maxOrphanNamespaceEntries)
+	if err != nil {
+		return nil, "", errors.New("attachment ready namespace cannot be scanned")
+	}
+	for _, name := range readyNames {
+		artifactID, found := strings.CutSuffix(name, ".blob")
+		if !found || uuid.Validate(artifactID) != nil || filepath.Base(name) != name {
+			return nil, "", errors.New("attachment ready namespace is unsafe")
+		}
+		info, err := os.Lstat(filepath.Join(s.readyDir, name))
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 {
+			return nil, "", errors.New("attachment ready namespace is unsafe")
+		}
+		state := states[artifactID]
+		old := !info.ModTime().After(cutoff)
+		state.old = old && (!state.seen || state.old)
+		state.seen = true
+		states[artifactID] = state
+	}
+	stageNames, err := boundedDirectoryNames(s.stagingDir, maxOrphanNamespaceEntries)
+	if err != nil {
+		return nil, "", errors.New("attachment staging namespace cannot be scanned")
+	}
+	for _, artifactID := range stageNames {
+		if uuid.Validate(artifactID) != nil || filepath.Base(artifactID) != artifactID {
+			return nil, "", errors.New("attachment staging namespace is unsafe")
+		}
+		old, err := stageDirectoryOlderThan(filepath.Join(s.stagingDir, artifactID), cutoff)
+		if err != nil {
+			return nil, "", errors.New("attachment staging namespace is unsafe")
+		}
+		state := states[artifactID]
+		state.old = old && (!state.seen || state.old)
+		state.seen = true
+		states[artifactID] = state
+	}
+	ids := make([]string, 0, len(states))
+	for artifactID, state := range states {
+		if state.seen && state.old && artifactID > after {
+			ids = append(ids, artifactID)
+		}
+	}
+	sort.Strings(ids)
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	candidates := make([]OrphanCandidate, len(ids))
+	for index, artifactID := range ids {
+		candidates[index] = OrphanCandidate{ArtifactID: artifactID}
+	}
+	next := ""
+	if len(ids) != 0 {
+		next = ids[len(ids)-1]
+	}
+	return candidates, next, nil
+}
+
+func boundedDirectoryNames(path string, maximum int) ([]string, error) {
+	directory, err := os.Open(path) // #nosec G304 -- verified private directory owned by BlobStore.
+	if err != nil {
+		return nil, err
+	}
+	names, readErr := directory.Readdirnames(maximum + 1)
+	closeErr := directory.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nil, readErr
+	}
+	if closeErr != nil || len(names) > maximum {
+		return nil, errors.New("attachment namespace exceeds scan ceiling")
+	}
+	return names, nil
+}
+
+func stageDirectoryOlderThan(path string, cutoff time.Time) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
+		return false, errors.New("attachment staging directory is unsafe")
+	}
+	old := !info.ModTime().After(cutoff)
+	names, err := boundedDirectoryNames(path, 1024)
+	if err != nil {
+		return false, err
+	}
+	for _, name := range names {
+		if filepath.Base(name) != name || !strings.HasSuffix(name, ".part") {
+			return false, errors.New("attachment staging entry is unsafe")
+		}
+		generation := strings.TrimSuffix(name, ".part")
+		parsedGeneration, parseErr := strconv.ParseInt(generation, 10, 64)
+		if parseErr != nil || parsedGeneration < 1 || strconv.FormatInt(parsedGeneration, 10) != generation {
+			return false, errors.New("attachment staging entry is unsafe")
+		}
+		entry, err := os.Lstat(filepath.Join(path, name))
+		if err != nil || !entry.Mode().IsRegular() || entry.Mode()&os.ModeSymlink != 0 || entry.Mode().Perm() != 0o600 {
+			return false, errors.New("attachment staging entry is unsafe")
+		}
+		old = old && !entry.ModTime().After(cutoff)
+	}
+	return old, nil
 }
 
 // RemoveStages durably removes every claim-specific stage for one artifact.

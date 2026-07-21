@@ -992,6 +992,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = recipientObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 12 {
+		deletionObjectsPresent, err := attachmentDeletionControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL attachment-deletion schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = deletionObjectsPresent
+	}
 	return snapshot, nil
 }
 

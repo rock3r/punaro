@@ -325,6 +325,36 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("trusted-attachment catalog restoration did not recover readiness: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.deletions DROP CONSTRAINT deletions_lifecycle_check; ALTER TABLE attachment.deletions ADD CONSTRAINT deletions_lifecycle_check CHECK (state IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive attachment-deletion lifecycle state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.deletions DROP CONSTRAINT deletions_lifecycle_check; ALTER TABLE attachment.deletions ADD CONSTRAINT deletions_lifecycle_check CHECK ((state = 'tombstoned' AND gc_token IS NULL AND gc_lease_until IS NULL AND deleted_at IS NULL) OR (state = 'gc_claimed' AND gc_token IS NOT NULL AND gc_lease_until IS NOT NULL AND deleted_at IS NULL) OR (state = 'deleted' AND gc_token IS NOT NULL AND gc_lease_until IS NULL AND deleted_at IS NOT NULL))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.deletions_gc_order; CREATE INDEX deletions_gc_order ON attachment.deletions (gc_after,state,artifact_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("attachment-deletion GC index drift state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.deletions_gc_order; CREATE INDEX deletions_gc_order ON attachment.deletions (state,gc_after,artifact_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON attachment.deletions TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("attachment-deletion direct read grant state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON attachment.deletions FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("attachment-deletion catalog restoration did not recover readiness: %v", err)
+	}
 	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.endpoint_principals DROP CONSTRAINT endpoint_principals_credential_generation_check; ALTER TABLE attachment.endpoint_principals ADD CONSTRAINT endpoint_principals_credential_generation_check CHECK (credential_generation >= 1 OR true)`); err != nil {
 		t.Fatal(err)
 	}

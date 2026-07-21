@@ -105,13 +105,16 @@ downloaded. Partial uploads are never downloadable, and filesystem/database
 skew is reconciled explicitly. Trusted-relay release gates will be added with
 its implementation; the preserved v2/v3 gates cannot authorize production.
 
-The current schema-v11 implementation is intentionally dark. Schema v10 proves
+The current schema-v12 implementation is intentionally dark. Schema v10 proves
 bounded reservation, private durable publication, completion reauthorization,
 quota, backup-manifest, and crash-reconciliation behavior. Schema v11 adds
 stable message-recipient snapshots and a generation-fenced, capability-checked,
-fully verified bounded download service. It still mounts no production upload
-or download route and implements no delete operation. Passing those tests does
-not make the private blob directory a supported user interface.
+fully verified bounded download service. Schema v12 adds authorized
+tombstone-first deletion, delayed backup-fenced physical GC, exact-once quota
+release, and bounded restore-skew cleanup. It still mounts no production
+attachment route. Passing those tests does not make the private blob directory
+a supported user interface, and an older restore may resurrect a later
+deletion.
 
 Until then, v3 remains only a separately enabled controlled validation surface.
 Use the established mailbox and Telegram workflows for text-only

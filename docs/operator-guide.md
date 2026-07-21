@@ -597,6 +597,17 @@ conversations fence project merge. Migration 11 still mounts no reservation, upl
 download, or delete route, so it creates no new operator command or public
 surface.
 
+Migration 12 adds the dark destructive lifecycle. Authorized deletion first
+withdraws recipient visibility and the READY backup projection, while retaining
+the immutable blob and charged quota for a 24-hour restore window. Physical GC
+is blocked by an active backup fence and then uses an expiring generation/token
+claim; quota is released only after durable unlink and conditional finalization.
+Corrupt artifacts follow the same delayed path. The bounded restore-skew scan
+requires old filesystem namespaces, authoritative database absence, backup-GC
+permission, and the artifact lock. A state-changing scan restarts from the
+beginning. Restoring older data can resurrect a deletion made after that
+snapshot. Migration 12 still mounts no attachment route or operator command.
+
 ### Operator wrapper and device ingress
 
 `punaro init` is the supported first-install path for the staged PostgreSQL
