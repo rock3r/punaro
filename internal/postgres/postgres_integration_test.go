@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -894,6 +895,28 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if _, err := admin.VerifyMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
 		t.Fatal(err)
 	}
+	type activationEnrollmentRecord struct {
+		ID        string   `json:"id"`
+		PublicKey string   `json:"public_key"`
+		Endpoints []string `json:"endpoints"`
+	}
+	var activationRecords []activationEnrollmentRecord
+	existingMigrated, err := ownerDB.QueryContext(ctx, `SELECT public_key FROM auth.legacy_machines WHERE state='migrated' ORDER BY public_key_digest`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for existingMigrated.Next() {
+		var publicKey []byte
+		if err := existingMigrated.Scan(&publicKey); err != nil {
+			_ = existingMigrated.Close()
+			t.Fatal(err)
+		}
+		index := strconv.Itoa(len(activationRecords))
+		activationRecords = append(activationRecords, activationEnrollmentRecord{ID: "cutover-existing-" + index, PublicKey: base64.RawURLEncoding.EncodeToString(publicKey), Endpoints: []string{"agent/cutover/existing-" + index}})
+	}
+	if err := existingMigrated.Close(); err != nil || existingMigrated.Err() != nil {
+		t.Fatalf("existing migrated inventory err=%v close=%v", existingMigrated.Err(), err)
+	}
 	migratedKey := make([]byte, 32)
 	migratedKey[0] = 73
 	migratedKeyDigest := sha256.Sum256(migratedKey)
@@ -918,10 +941,24 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.legacy_machines(principal_id,public_key,public_key_digest,state) VALUES($1,$2,$3,'retired')`, retiredLegacyID, retiredKey, retiredKeyDigest[:]); err != nil {
 		t.Fatal(err)
 	}
-	activationEnrollment := `[{"id":"cutover-machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(migratedKey) + `","endpoints":["agent/cutover/source-a"]},{"id":"cutover-machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(retiredKey) + `","endpoints":["agent/cutover/source-b"]}]`
+	activationRecords = append(activationRecords,
+		activationEnrollmentRecord{ID: "cutover-machine-a", PublicKey: base64.RawURLEncoding.EncodeToString(migratedKey), Endpoints: []string{"agent/cutover/source-a"}},
+		activationEnrollmentRecord{ID: "cutover-machine-b", PublicKey: base64.RawURLEncoding.EncodeToString(retiredKey), Endpoints: []string{"agent/cutover/source-b"}},
+	)
+	activationEnrollmentJSON, err := json.Marshal(activationRecords)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationEnrollment := string(activationEnrollmentJSON)
 	mismatchedKey := append([]byte(nil), migratedKey...)
 	mismatchedKey[0]++
-	mismatchedEnrollment := `[{"id":"cutover-machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(mismatchedKey) + `","endpoints":["agent/cutover/source-a"]},{"id":"cutover-machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(retiredKey) + `","endpoints":["agent/cutover/source-b"]}]`
+	mismatchedRecords := append([]activationEnrollmentRecord(nil), activationRecords...)
+	mismatchedRecords[len(mismatchedRecords)-2].PublicKey = base64.RawURLEncoding.EncodeToString(mismatchedKey)
+	mismatchedEnrollmentJSON, err := json.Marshal(mismatchedRecords)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mismatchedEnrollment := string(mismatchedEnrollmentJSON)
 	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, mismatchedEnrollment); err == nil {
 		t.Fatal("activation readiness accepted a static enrollment key that did not match migrated inventory")
 	}
