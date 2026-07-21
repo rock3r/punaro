@@ -10,6 +10,30 @@ import (
 	"github.com/rock3r/punaro/internal/relay"
 )
 
+type mailCutoverScannerFunc func(...any) error
+
+func (f mailCutoverScannerFunc) Scan(destinations ...any) error { return f(destinations...) }
+
+func TestScanMailCutoverPreservesManifestText(t *testing.T) {
+	t.Parallel()
+	const manifest = `{"version":1,"source_id":"exact-bytes"}`
+	row := mailCutoverScannerFunc(func(destinations ...any) error {
+		text, ok := destinations[4].(*string)
+		if !ok {
+			t.Fatalf("manifest destination=%T, want *string", destinations[4])
+		}
+		*text = manifest
+		return nil
+	})
+	var epoch MailCutoverEpoch
+	if err := scanMailCutover(row, &epoch); err != nil {
+		t.Fatal(err)
+	}
+	if string(epoch.Manifest) != manifest {
+		t.Fatalf("manifest=%q, want exact text %q", epoch.Manifest, manifest)
+	}
+}
+
 func TestMailCutoverRequestValidation(t *testing.T) {
 	t.Parallel()
 	valid := MailCutoverRequest{

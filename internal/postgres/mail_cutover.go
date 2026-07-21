@@ -162,7 +162,12 @@ const mailCutoverSelect = `SELECT epoch_id::text,source_id::text,target_identity
 type mailCutoverRowScanner interface{ Scan(...any) error }
 
 func scanMailCutover(row mailCutoverRowScanner, epoch *MailCutoverEpoch) error {
-	return row.Scan(&epoch.EpochID, &epoch.SourceID, &epoch.TargetIdentity, &epoch.SourceFingerprint, &epoch.Manifest, &epoch.ManifestSHA256, &epoch.Phase, &epoch.CreatedAt, &epoch.UpdatedAt, &epoch.VerifiedAt, &epoch.ActivatedAt, &epoch.AbortedAt)
+	var manifest string
+	if err := row.Scan(&epoch.EpochID, &epoch.SourceID, &epoch.TargetIdentity, &epoch.SourceFingerprint, &manifest, &epoch.ManifestSHA256, &epoch.Phase, &epoch.CreatedAt, &epoch.UpdatedAt, &epoch.VerifiedAt, &epoch.ActivatedAt, &epoch.AbortedAt); err != nil {
+		return err
+	}
+	epoch.Manifest = json.RawMessage(manifest)
+	return nil
 }
 
 func sameMailCutoverRequest(left, right MailCutoverRequest) bool {
