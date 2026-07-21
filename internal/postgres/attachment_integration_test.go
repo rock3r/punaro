@@ -317,6 +317,15 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, err := app.DeleteAttachment(ctx, guessedDelete); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("guessed attachment delete error=%v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET expires_at=statement_timestamp()-interval '1 second' WHERE lookup_id=$1`, uploaderLookup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DeleteAttachment(ctx, deleteRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expired credential attachment delete error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET expires_at=NULL WHERE lookup_id=$1`, uploaderLookup); err != nil {
+		t.Fatal(err)
+	}
 	deletion, err := app.DeleteAttachment(ctx, deleteRequest)
 	if err != nil || deletion.State != AttachmentTombstoned || deletion.ArtifactID != reservation.ArtifactID || deletion.ProjectID != project.ProjectID || deletion.StoragePath != ready.StoragePath || !deletion.DeletedAt.IsZero() || !deletion.GCAfter.After(time.Now().UTC()) {
 		t.Fatalf("attachment tombstone=%#v err=%v", deletion, err)

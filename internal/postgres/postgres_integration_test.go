@@ -1701,6 +1701,25 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE machine_id='v10-compatible-machine'`); err != nil {
 		t.Fatalf("remove compatible v10 endpoint fixture: %v", err)
 	}
+	const (
+		bridgeCorruptProjectID  = "019b4eb0-798c-7a52-8d29-8560fcbb2090"
+		bridgeCorruptArtifactID = "019b4eb0-798c-7a52-8d29-8560fcbb2091"
+		bridgeCorruptRequestID  = "019b4eb0-798c-7a52-8d29-8560fcbb2092"
+		bridgeCorruptSHA256     = "9797979797979797979797979797979797979797979797979797979797979797"
+	)
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.projects (id,display_name,created_by) VALUES ($1,'v10 corrupt attachment bridge',$2)`, bridgeCorruptProjectID, bridgeOwnerID); err != nil {
+		t.Fatalf("stage v10 corrupt attachment project: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `
+INSERT INTO attachment.uploads (
+    artifact_id,project_id,principal_id,timeline_id,idempotency_key,request_sha256,
+    size_bytes,sha256,display_name,media_type,state,expires_at,ready_at
+)
+SELECT $1,$2,$3,timeline_id,$4,$5,4096,$5,'legacy-corrupt.bin','application/octet-stream',
+       'corrupt',statement_timestamp()+interval '7 days',statement_timestamp()
+FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptProjectID, bridgeOwnerID, bridgeCorruptRequestID, bridgeCorruptSHA256); err != nil {
+		t.Fatalf("stage v10 corrupt attachment: %v", err)
+	}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
@@ -1751,6 +1770,37 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
 		t.Fatalf("v12 migration state=%#v err=%v", state, err)
+	}
+	var (
+		corruptProjectID, corruptOwnerID, corruptPath, corruptSHA256, corruptState string
+		corruptSize, corruptGeneration                                             int64
+		corruptTombstonedAt, corruptGCAfter                                        time.Time
+	)
+	if err := ownerDB.QueryRowContext(ctx, `
+SELECT project_id::text,owner_principal_id::text,storage_path,size_bytes,sha256::text,
+       state,tombstoned_at,gc_after,gc_generation
+FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID).Scan(
+		&corruptProjectID, &corruptOwnerID, &corruptPath, &corruptSize, &corruptSHA256,
+		&corruptState, &corruptTombstonedAt, &corruptGCAfter, &corruptGeneration,
+	); err != nil {
+		t.Fatalf("read v10 corrupt attachment tombstone: %v", err)
+	}
+	if corruptProjectID != bridgeCorruptProjectID || corruptOwnerID != bridgeOwnerID ||
+		corruptPath != "ready/"+bridgeCorruptArtifactID+".blob" || corruptSize != 4096 ||
+		corruptSHA256 != bridgeCorruptSHA256 || corruptState != "tombstoned" || corruptGeneration != 0 ||
+		corruptGCAfter.Sub(corruptTombstonedAt) != 24*time.Hour {
+		t.Fatalf("v10 corrupt attachment tombstone project=%s owner=%s path=%s size=%d sha256=%s state=%s tombstoned_at=%s gc_after=%s generation=%d",
+			corruptProjectID, corruptOwnerID, corruptPath, corruptSize, corruptSHA256, corruptState,
+			corruptTombstonedAt, corruptGCAfter, corruptGeneration)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment tombstone: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.uploads WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.projects WHERE id=$1`, bridgeCorruptProjectID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment project: %v", err)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
 		t.Fatalf("mail cutover rejected exact v12 schema: %v", err)

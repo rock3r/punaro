@@ -15,25 +15,28 @@ WITH objects AS (
            to_regprocedure('attachment.claim_artifact_gc(uuid,interval)') AS claim_oid,
            to_regprocedure('attachment.finalize_artifact_gc(uuid,bigint,uuid)') AS finalize_oid,
            to_regprocedure('attachment.orphan_gc_allowed(uuid)') AS orphan_oid
-), expected_columns(column_name,type_name,type_modifier,required) AS (
+), expected_columns(column_name,type_name,type_modifier,required,default_expression) AS (
     VALUES
-      ('artifact_id','uuid',-1,true),
-      ('project_id','uuid',-1,true),
-      ('owner_principal_id','uuid',-1,true),
-      ('storage_path','text',-1,true),
-      ('size_bytes','bigint',-1,true),
-      ('sha256','character',68,true),
-      ('state','text',-1,true),
-      ('tombstoned_at','timestamp with time zone',-1,true),
-      ('gc_after','timestamp with time zone',-1,true),
-      ('gc_generation','bigint',-1,true),
-      ('gc_token','uuid',-1,false),
-      ('gc_lease_until','timestamp with time zone',-1,false),
-      ('deleted_at','timestamp with time zone',-1,false)
+      ('artifact_id','uuid',-1,true,''),
+      ('project_id','uuid',-1,true,''),
+      ('owner_principal_id','uuid',-1,true,''),
+      ('storage_path','text',-1,true,''),
+      ('size_bytes','bigint',-1,true,''),
+      ('sha256','character',68,true,''),
+      ('state','text',-1,true,''),
+      ('tombstoned_at','timestamp with time zone',-1,true,'statement_timestamp()'),
+      ('gc_after','timestamp with time zone',-1,true,''),
+      ('gc_generation','bigint',-1,true,'0'),
+      ('gc_token','uuid',-1,false,''),
+      ('gc_lease_until','timestamp with time zone',-1,false,''),
+      ('deleted_at','timestamp with time zone',-1,false,'')
 ), actual_columns AS (
     SELECT attribute.attname, attribute.atttypid::regtype::text,
-           attribute.atttypmod, attribute.attnotnull
-    FROM pg_attribute AS attribute, objects
+           attribute.atttypmod, attribute.attnotnull,
+           COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
+    FROM pg_attribute AS attribute CROSS JOIN objects
+    LEFT JOIN pg_attrdef AS default_value
+      ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
     WHERE attribute.attrelid = deletions_oid
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_constraints(constraint_name,constraint_type,column_keys,is_deferrable,is_deferred) AS (
@@ -89,7 +92,7 @@ WITH objects AS (
       AND index_row.indpred IS NULL AND index_row.indexprs IS NULL
 ), expected_routines(oid,body_hash,result_type,returns_set,language_name,volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (tombstone_oid,'b35bc0a6a2bea7243bf9793730389833','record',true,'plpgsql','v'),
+      (tombstone_oid,'4ceb0b4a0f4074865ccb2c1eb9e7511b','record',true,'plpgsql','v'),
       (claim_oid,'f9118b6ca10485fb4b764ee8066d950e','record',true,'plpgsql','v'),
       (finalize_oid,'92180383d2ef021d59470babee7c879a','record',true,'plpgsql','v'),
       (orphan_oid,'c88c556c0242673bd1694025bd414057','boolean',false,'sql','s')

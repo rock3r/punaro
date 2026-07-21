@@ -24,6 +24,28 @@ CREATE TABLE attachment.deletions (
 CREATE INDEX deletions_gc_order
 ON attachment.deletions (state, gc_after, artifact_id);
 
+INSERT INTO attachment.deletions (
+    artifact_id, project_id, owner_principal_id, storage_path,
+    size_bytes, sha256, state, gc_after
+)
+SELECT upload.artifact_id, upload.project_id, upload.principal_id,
+       'ready/' || upload.artifact_id::text || '.blob',
+       upload.size_bytes, upload.sha256, 'tombstoned',
+       statement_timestamp() + interval '24 hours'
+FROM attachment.uploads AS upload
+WHERE upload.state = 'corrupt' AND upload.ready_at IS NOT NULL;
+
+DELETE FROM attachment.recipient_grant_endpoints AS endpoint
+USING attachment.recipient_grants AS recipient, attachment.uploads AS upload
+WHERE endpoint.artifact_id = recipient.artifact_id
+  AND endpoint.recipient_principal_id = recipient.recipient_principal_id
+  AND recipient.artifact_id = upload.artifact_id
+  AND upload.state = 'corrupt';
+DELETE FROM attachment.recipient_grants AS recipient
+USING attachment.uploads AS upload
+WHERE recipient.artifact_id = upload.artifact_id
+  AND upload.state = 'corrupt';
+
 CREATE FUNCTION attachment.tombstone_artifact(
     requested_principal uuid,
     requested_lookup uuid,
@@ -96,6 +118,7 @@ BEGIN
     WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
       AND credential.lookup_id = requested_lookup AND credential.revoked_at IS NULL
       AND credential.generation = requested_generation
+      AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
     FOR SHARE OF principal, credential;
     IF authority_id IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment deletion is not authorized';
