@@ -343,7 +343,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
 		t.Fatalf("pre-cutoff GC claimed=%t err=%v", claimed, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET gc_after=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET tombstoned_at=statement_timestamp()-interval '2 seconds',gc_after=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
 		t.Fatal(err)
 	}
 	var backupFence string
