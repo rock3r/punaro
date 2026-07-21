@@ -153,8 +153,9 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, session 
 	defer client.Close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	revalidate := time.NewTicker(h.sessionRevalidateInterval)
-	defer revalidate.Stop()
+	authenticationExpired := make(chan struct{})
+	revalidationDone := make(chan struct{})
+	go h.revalidateNotificationSession(ctx, cancel, connection, session, authenticationExpired, revalidationDone)
 	go func() {
 		defer cancel()
 		for {
@@ -166,28 +167,54 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, session 
 	for {
 		select {
 		case <-ctx.Done():
+			waitForAuthenticationClose(authenticationExpired, revalidationDone)
 			return
-		case <-revalidate.C:
-			// A check starts halfway through the maximum fence age and receives
-			// only the remaining half as its deadline. A gate/database failure
-			// therefore cannot leave the socket authorized beyond two seconds
-			// after its last successful durable check.
-			checkCtx, checkCancel := context.WithTimeout(ctx, h.sessionRevalidateInterval)
-			err := session.Current(checkCtx)
-			checkCancel()
-			if err != nil {
-				_ = connection.Close(websocket.StatusPolicyViolation, "authentication expired")
-				return
-			}
 		case event := <-client.Events():
 			payload, err := json.Marshal(event)
 			if err != nil {
 				return
 			}
 			if err := connection.Write(ctx, websocket.MessageText, payload); err != nil {
+				waitForAuthenticationClose(authenticationExpired, revalidationDone)
 				return
 			}
 		}
+	}
+}
+
+func (h *handler) revalidateNotificationSession(ctx context.Context, cancel context.CancelFunc, connection *websocket.Conn, session MachineSession, authenticationExpired chan<- struct{}, done chan<- struct{}) {
+	defer close(done)
+	revalidate := time.NewTicker(h.sessionRevalidateInterval)
+	defer revalidate.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-revalidate.C:
+			// A check starts halfway through the maximum fence age and receives
+			// only the remaining half as its deadline. It runs independently of
+			// wake writes, and canceling ctx unblocks a slow/non-reading client.
+			checkCtx, checkCancel := context.WithTimeout(ctx, h.sessionRevalidateInterval)
+			err := session.Current(checkCtx)
+			checkCancel()
+			if err != nil {
+				close(authenticationExpired)
+				cancel()
+				// Cancel first to interrupt any blocked Read/Write, then close the
+				// transport immediately. A close-frame status is not an authority
+				// guarantee and cannot be delivered reliably to a non-reading peer.
+				_ = connection.CloseNow()
+				return
+			}
+		}
+	}
+}
+
+func waitForAuthenticationClose(authenticationExpired <-chan struct{}, revalidationDone <-chan struct{}) {
+	select {
+	case <-authenticationExpired:
+		<-revalidationDone
+	default:
 	}
 }
 

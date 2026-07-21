@@ -146,7 +146,9 @@ auth and the PostgreSQL relay; it does not itself make PostgreSQL writable mail
 authority. A notification WebSocket retains only its non-secret session fence
 and revalidates the legacy gate or the exact device generation and migrated
 mapping every second under a one-second deadline; failure closes the socket,
-and the last successful durable check expires after at most two seconds.
+and the last successful durable check expires after at most two seconds. The
+check loop is independent of wake writes and cancels their context on failure,
+so a slow or non-reading client cannot starve revalidation.
 
 M-5 mounts only `POST /v1/enrollments/redeem` and authenticated
 `GET /v1/device/session`. Redemption requires exact `application/json`, a

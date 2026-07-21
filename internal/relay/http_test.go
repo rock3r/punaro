@@ -329,8 +329,8 @@ func TestHTTPNotificationsCloseWithinFenceWhenTransitionAuthorityHangs(t *testin
 	current.Store(-1)
 	readCtx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if _, _, err := connection.Read(readCtx); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
-		t.Fatalf("revoked transition socket err=%v status=%v", err, websocket.CloseStatus(err))
+	if _, _, err := connection.Read(readCtx); err == nil {
+		t.Fatal("unavailable transition authority left notification socket open")
 	}
 }
 

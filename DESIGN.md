@@ -592,7 +592,8 @@ off by default and requires device auth plus the PostgreSQL relay, so this
 slice does not activate PostgreSQL mail authority or change the SQLite default.
 Long-lived notification sockets retain only a non-secret generation/gate fence,
 not the bearer credential. A check starts every second with a one-second
-deadline, bounding authority after the last successful check to two seconds. Gate
+deadline in a dedicated loop; wake writes cannot delay it, and fence failure
+cancels any blocked write. This bounds authority after the last successful check to two seconds. Gate
 closure, key retirement, credential rotation/revocation, principal disablement,
 mapping removal, timeout, or database failure closes the socket.
 
