@@ -9,6 +9,7 @@ import (
 	"errors"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -384,6 +385,20 @@ FROM attachment.tombstone_artifact($1,$2,$3,$4,$5,$6)`, request.PrincipalID, req
 // matching exclusive lock before publishing its durable fence, so a permitted
 // holder remains backup-exclusive across filesystem unlink and finalization.
 func (d *Database) BeginAttachmentPhysicalGC(ctx context.Context) (func() error, bool, error) {
+	if d == nil || d.attachmentPhysicalGCSlots == nil {
+		return nil, false, errors.New("attachment physical GC is unavailable")
+	}
+	select {
+	case d.attachmentPhysicalGCSlots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	}
+	releaseSlot := true
+	defer func() {
+		if releaseSlot {
+			<-d.attachmentPhysicalGCSlots
+		}
+	}()
 	conn, err := d.db.Conn(ctx)
 	if err != nil {
 		return nil, false, attachmentStoreError(err, "attachment physical GC connection is unavailable")
@@ -393,15 +408,23 @@ func (d *Database) BeginAttachmentPhysicalGC(ctx context.Context) (func() error,
 		_ = conn.Close()
 		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not start")
 	}
+	var closeOnce sync.Once
+	var closeErr error
 	closeFence := func() error {
-		rollbackErr := tx.Rollback()
-		closeErr := conn.Close()
-		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			return rollbackErr
-		}
+		closeOnce.Do(func() {
+			rollbackErr := tx.Rollback()
+			connectionErr := conn.Close()
+			<-d.attachmentPhysicalGCSlots
+			if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				closeErr = rollbackErr
+			} else {
+				closeErr = connectionErr
+			}
+		})
 		return closeErr
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1,$2)`, attachmentGCAdvisoryKeyClass, attachmentGCAdvisoryKeyObject); err != nil {
+	releaseSlot = false
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1::integer,$2::integer)`, attachmentGCAdvisoryKeyClass, attachmentGCAdvisoryKeyObject); err != nil {
 		_ = closeFence()
 		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not be acquired")
 	}

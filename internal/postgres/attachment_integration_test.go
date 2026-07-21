@@ -373,6 +373,12 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if err != nil || !permitted || releasePhysicalGC == nil {
 		t.Fatalf("physical GC fence permitted=%t release=%v err=%v", permitted, releasePhysicalGC != nil, err)
 	}
+	secondGCCtx, cancelSecondGC := context.WithTimeout(ctx, 100*time.Millisecond)
+	if secondRelease, secondPermitted, secondErr := app.BeginAttachmentPhysicalGC(secondGCCtx); !errors.Is(secondErr, context.DeadlineExceeded) || secondPermitted || secondRelease != nil {
+		cancelSecondGC()
+		t.Fatalf("concurrent physical GC holder release=%v permitted=%t err=%v", secondRelease != nil, secondPermitted, secondErr)
+	}
+	cancelSecondGC()
 	type backupAcquireResult struct {
 		token string
 		err   error

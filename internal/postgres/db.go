@@ -22,9 +22,10 @@ type Config struct {
 
 // Database is a least-privilege application connection to the platform substrate.
 type Database struct {
-	db       *sql.DB
-	relayDB  *sql.DB
-	manifest Manifest
+	db                        *sql.DB
+	relayDB                   *sql.DB
+	manifest                  Manifest
+	attachmentPhysicalGCSlots chan struct{}
 }
 
 // InstallationState identifies one installation timeline and its last change.
@@ -58,7 +59,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest()}, nil
+	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest(), attachmentPhysicalGCSlots: make(chan struct{}, 1)}, nil
 }
 
 func open(ctx context.Context, dsn string) (*sql.DB, error) {
