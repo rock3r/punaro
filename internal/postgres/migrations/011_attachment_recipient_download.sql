@@ -73,6 +73,141 @@ CREATE TABLE attachment.recipient_grant_endpoints (
         REFERENCES relay.mail_deliveries(message_id, recipient_endpoint)
 );
 
+-- Schema v10 publication locked an upload before its project, while message
+-- artifact binding locks the project before its uploads. Replace the
+-- publication routine at the v11 boundary so both operations use the same
+-- project -> upload order and cannot deadlock one another.
+CREATE OR REPLACE FUNCTION attachment.publish_upload(
+    requested_principal uuid,
+    requested_artifact uuid,
+    requested_generation bigint,
+    requested_claim_token uuid,
+    requested_storage_path text,
+    requested_size bigint,
+    requested_sha256 text
+)
+RETURNS TABLE (artifact_id uuid, project_id uuid, storage_path text, size_bytes bigint, sha256 text, state text, ready_at timestamptz)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    upload attachment.uploads%ROWTYPE;
+    candidate_project uuid;
+    current_timeline uuid;
+    grant_id uuid;
+    existing_path text;
+    existing_size bigint;
+    existing_sha text;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    SELECT candidate.project_id INTO candidate_project
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact
+      AND candidate.principal_id = requested_principal;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment publication is not authorized';
+    END IF;
+    PERFORM 1 FROM relay.projects
+    WHERE id = candidate_project AND merged_into IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment project is unavailable';
+    END IF;
+    SELECT candidate.* INTO upload
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact FOR UPDATE;
+    IF NOT FOUND OR upload.principal_id <> requested_principal OR upload.project_id <> candidate_project THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment publication is not authorized';
+    END IF;
+    SELECT capability_grant.id INTO grant_id
+    FROM auth.principals AS principal
+    JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+    WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
+      AND capability_grant.revoked_at IS NULL AND capability_grant.capability = 'attachment.upload'
+      AND ((capability_grant.scope = 'project' AND capability_grant.project_id = upload.project_id)
+           OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+    ORDER BY capability_grant.id LIMIT 1 FOR SHARE OF principal, capability_grant;
+    IF grant_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment publication is not authorized';
+    END IF;
+    IF upload.state = 'ready' THEN
+        SELECT ready.storage_path, manifest.size_bytes, manifest.sha256::text
+        INTO existing_path, existing_size, existing_sha
+        FROM attachment.ready_artifacts AS ready
+        JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+        WHERE ready.artifact_id = upload.artifact_id;
+        IF existing_path = requested_storage_path AND existing_size = requested_size AND existing_sha = requested_sha256 THEN
+            RETURN QUERY SELECT upload.artifact_id, upload.project_id, existing_path, existing_size, existing_sha, upload.state, upload.ready_at;
+            RETURN;
+        END IF;
+        RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'immutable attachment publication conflicts with prior result';
+    END IF;
+    SELECT server.timeline_id INTO current_timeline
+    FROM jobs.server_state AS server WHERE server.singleton FOR SHARE;
+    IF upload.state <> 'reserved' OR upload.timeline_id <> current_timeline
+       OR upload.expires_at <= statement_timestamp()
+       OR upload.attempt_generation <> requested_generation
+       OR upload.claim_token IS DISTINCT FROM requested_claim_token
+       OR upload.claim_until <= statement_timestamp()
+       OR upload.size_bytes <> requested_size OR upload.sha256::text <> requested_sha256
+       OR requested_storage_path <> ('ready/' || requested_artifact::text || '.blob') THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment publication claim is stale';
+    END IF;
+    PERFORM 1 FROM attachment.global_quota AS global_quota WHERE global_quota.singleton FOR UPDATE;
+    PERFORM 1 FROM attachment.project_quotas AS project_quota
+    WHERE project_quota.project_id = upload.project_id FOR UPDATE;
+    PERFORM 1 FROM attachment.principal_quotas AS principal_quota
+    WHERE principal_quota.principal_id = upload.principal_id FOR UPDATE;
+
+    INSERT INTO attachment.ready_blob_manifest (storage_path, size_bytes, sha256)
+    VALUES (requested_storage_path, requested_size, requested_sha256);
+    INSERT INTO attachment.ready_artifacts (artifact_id, storage_path)
+    VALUES (requested_artifact, requested_storage_path);
+    UPDATE attachment.uploads
+    SET state = 'ready', claim_token = NULL, claim_until = NULL, ready_at = statement_timestamp()
+    WHERE uploads.artifact_id = requested_artifact;
+    UPDATE attachment.global_quota AS global_quota
+    SET reserved_bytes = global_quota.reserved_bytes - requested_size,
+        used_bytes = global_quota.used_bytes + requested_size,
+        reserved_uploads = global_quota.reserved_uploads - 1,
+        ready_artifacts = global_quota.ready_artifacts + 1
+    WHERE global_quota.singleton AND global_quota.reserved_bytes >= requested_size
+      AND global_quota.reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment global quota is inconsistent';
+    END IF;
+    UPDATE attachment.project_quotas AS project_quota
+    SET reserved_bytes = project_quota.reserved_bytes - requested_size,
+        used_bytes = project_quota.used_bytes + requested_size,
+        reserved_uploads = project_quota.reserved_uploads - 1,
+        ready_artifacts = project_quota.ready_artifacts + 1
+    WHERE project_quota.project_id = upload.project_id
+      AND project_quota.reserved_bytes >= requested_size AND project_quota.reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment project quota is inconsistent';
+    END IF;
+    UPDATE attachment.principal_quotas AS principal_quota
+    SET reserved_bytes = principal_quota.reserved_bytes - requested_size,
+        used_bytes = principal_quota.used_bytes + requested_size,
+        reserved_uploads = principal_quota.reserved_uploads - 1,
+        ready_artifacts = principal_quota.ready_artifacts + 1
+    WHERE principal_quota.principal_id = upload.principal_id
+      AND principal_quota.reserved_bytes >= requested_size AND principal_quota.reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment principal quota is inconsistent';
+    END IF;
+    UPDATE relay.projects SET content_generation = content_generation + 1 WHERE id = upload.project_id;
+    PERFORM jobs.advance_change_sequence();
+    RETURN QUERY
+    SELECT current_upload.artifact_id, current_upload.project_id, ready.storage_path,
+           manifest.size_bytes, manifest.sha256::text, current_upload.state, current_upload.ready_at
+    FROM attachment.uploads AS current_upload
+    JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = current_upload.artifact_id
+    JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+    WHERE current_upload.artifact_id = requested_artifact;
+END
+$function$;
+
 CREATE FUNCTION attachment.device_authority_current(
     requested_principal uuid,
     requested_lookup uuid,

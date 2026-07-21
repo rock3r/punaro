@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
@@ -37,6 +38,71 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 
 	body := []byte("trusted attachment integration body")
 	digest := sha256.Sum256(body)
+	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	lockOrderReservation, err := app.ReserveAttachment(ctx, lockOrderRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockOrderClaim, err := app.ClaimAttachmentUpload(ctx, uploader.ID, lockOrderReservation.ArtifactID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectBlocker, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectBlocker.ExecContext(ctx, `SELECT 1 FROM relay.projects WHERE id=$1 FOR UPDATE`, project.ProjectID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	publishConn, err := app.db.Conn(ctx)
+	if err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	defer func() { _ = publishConn.Close() }()
+	var publishPID int
+	if err := publishConn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&publishPID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	lockOrderResult := make(chan error, 1)
+	go func() {
+		var published bool
+		publishErr := publishConn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`,
+			uploader.ID, lockOrderReservation.ArtifactID, lockOrderClaim.AttemptGeneration, lockOrderClaim.ClaimToken,
+			"ready/"+lockOrderReservation.ArtifactID+".blob", lockOrderReservation.SizeBytes, hex.EncodeToString(lockOrderReservation.SHA256[:])).Scan(&published)
+		if publishErr == nil && !published {
+			publishErr = errors.New("attachment publication returned no row")
+		}
+		lockOrderResult <- publishErr
+	}()
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waitType sql.NullString
+		if err := ownerDB.QueryRowContext(ctx, `SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, publishPID).Scan(&waitType); err != nil {
+			_ = projectBlocker.Rollback()
+			t.Fatal(err)
+		}
+		if waitType.Valid && waitType.String == "Lock" {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			_ = projectBlocker.Rollback()
+			t.Fatal("attachment publication did not block on the project lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `SELECT 1 FROM attachment.uploads WHERE artifact_id=$1 FOR UPDATE NOWAIT`, lockOrderReservation.ArtifactID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatalf("attachment publication locked upload before project: %v", err)
+	}
+	if err := projectBlocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-lockOrderResult; err != nil {
+		t.Fatalf("lock-ordered attachment publication: %v", err)
+	}
 	request := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	reservation, err := app.ReserveAttachment(ctx, request)
 	if err != nil || reservation.State != AttachmentReserved || reservation.ProjectID != project.ProjectID || reservation.SHA256 != digest {
