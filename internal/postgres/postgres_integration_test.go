@@ -1675,7 +1675,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		t.Fatalf("v10 migration state=%#v err=%v", state, err)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
-		t.Fatal("mail cutover accepted v10 while the current v11 schema was pending")
+		t.Fatal("mail cutover accepted v10 while the current v12 schema was pending")
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
@@ -1689,11 +1689,11 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", []string{"agent/v10-compatible"}, time.Now().UTC(), time.Minute); err != nil {
 		_ = v10App.Close()
-		t.Fatalf("v11 binary could not advertise endpoints against compatible v10 schema: %v", err)
+		t.Fatalf("v12 binary could not advertise endpoints against compatible v10 schema: %v", err)
 	}
 	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", nil, time.Now().UTC().Add(time.Second), time.Minute); err != nil {
 		_ = v10App.Close()
-		t.Fatalf("v11 binary could not withdraw endpoints against compatible v10 schema: %v", err)
+		t.Fatalf("v12 binary could not withdraw endpoints against compatible v10 schema: %v", err)
 	}
 	if err := v10App.Close(); err != nil {
 		t.Fatalf("close compatible v10 application: %v", err)
@@ -1704,13 +1704,13 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
-		TargetRelease:           "v0.11.0",
+		TargetRelease:           "v0.12.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
 		SourceSchema:            10,
-		TargetSchema:            11,
+		TargetSchema:            12,
 		SchemaMin:               10,
-		SchemaMax:               11,
+		SchemaMax:               12,
 		RollbackFloor:           10,
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
@@ -1719,11 +1719,11 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
-		t.Fatalf("begin v11 update transaction=%#v err=%v", transaction, err)
+		t.Fatalf("begin v12 update transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
 	if err != nil || transaction.Phase != UpdateWritersStopped {
-		t.Fatalf("stop v11 writers transaction=%#v err=%v", transaction, err)
+		t.Fatalf("stop v12 writers transaction=%#v err=%v", transaction, err)
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
 		t.Fatal(err)
@@ -1738,11 +1738,11 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
 	if err != nil || transaction.Phase != UpdateBackupVerified {
-		t.Fatalf("bind v11 backup transaction=%#v err=%v", transaction, err)
+		t.Fatalf("bind v12 backup transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
 	if err != nil || transaction.Phase != UpdateMigrationStarted {
-		t.Fatalf("start v11 migration transaction=%#v err=%v", transaction, err)
+		t.Fatalf("start v12 migration transaction=%#v err=%v", transaction, err)
 	}
 	authorization = UpdateMigrationAuthorization{
 		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
@@ -1750,15 +1750,15 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
 	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
-		t.Fatalf("v11 migration state=%#v err=%v", state, err)
+		t.Fatalf("v12 migration state=%#v err=%v", state, err)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v11 schema: %v", err)
+		t.Fatalf("mail cutover rejected exact v12 schema: %v", err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
-			t.Fatalf("v11 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+			t.Fatalf("v12 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
