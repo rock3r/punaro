@@ -198,6 +198,11 @@ const (
 	AuditProjectIdentityAttach AuditAction = "project.identity.attach"
 	AuditProjectMergePreview   AuditAction = "project.merge.preview"
 	AuditProjectMerge          AuditAction = "project.merge"
+	AuditMemoryCreate          AuditAction = "memory.create"
+	AuditMemoryUpdate          AuditAction = "memory.update"
+	AuditMemoryArchive         AuditAction = "memory.archive"
+	AuditMemoryRestore         AuditAction = "memory.restore"
+	AuditMemoryDelete          AuditAction = "memory.delete"
 )
 
 // AuditOutcome is a closed content-free result class.
@@ -223,10 +228,11 @@ const (
 	AuditTargetLegacyMachine   AuditTargetKind = "legacy_machine"
 	AuditTargetProjectIdentity AuditTargetKind = "project_identity"
 	AuditTargetProjectMerge    AuditTargetKind = "project_merge"
+	AuditTargetMemoryItem      AuditTargetKind = "memory_item"
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.
@@ -254,7 +260,7 @@ func (e AuditEvent) Validate() error {
 	if _, ok := validAuditActions[e.Action]; !ok {
 		return errors.New("invalid audit classification")
 	}
-	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob && e.TargetKind != AuditTargetEnrollment && e.TargetKind != AuditTargetCredential && e.TargetKind != AuditTargetLegacyMachine && e.TargetKind != AuditTargetProjectIdentity && e.TargetKind != AuditTargetProjectMerge) {
+	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob && e.TargetKind != AuditTargetEnrollment && e.TargetKind != AuditTargetCredential && e.TargetKind != AuditTargetLegacyMachine && e.TargetKind != AuditTargetProjectIdentity && e.TargetKind != AuditTargetProjectMerge && e.TargetKind != AuditTargetMemoryItem) {
 		return errors.New("invalid audit classification")
 	}
 	return nil

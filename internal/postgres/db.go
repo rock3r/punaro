@@ -139,6 +139,19 @@ func (d *Database) TrustedAttachmentRuntimeReady(ctx context.Context) error {
 	return nil
 }
 
+// CanonicalBrainRuntimeReady requires the exact current schema because the
+// additive brain tables remain dark on compatible historical mail schemas.
+func (d *Database) CanonicalBrainRuntimeReady(ctx context.Context) error {
+	state, err := d.SchemaState(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Classification != Compatible || state.Version != d.manifest.MaxSupported || state.Version < 14 {
+		return errors.New("PostgreSQL canonical brain schema is unavailable")
+	}
+	return nil
+}
+
 // InstallationState reads stable installation, timeline, and change metadata.
 func (d *Database) InstallationState(ctx context.Context) (InstallationState, error) {
 	var state InstallationState
@@ -575,14 +588,16 @@ SELECT
         WHERE conrelid = 'audit.events'::regclass AND conname = 'events_action_check'
           AND contype = 'c' AND conkey = ARRAY[5]::smallint[] AND convalidated
           AND (($1 = 3 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text]))')
-            OR ($1 >= 4 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text, ''project.identity.attach''::text, ''project.merge.preview''::text, ''project.merge''::text]))'))
+            OR ($1 BETWEEN 4 AND 13 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text, ''project.identity.attach''::text, ''project.merge.preview''::text, ''project.merge''::text]))')
+            OR ($1 >= 14 AND pg_get_expr(conbin, conrelid) = '(action = ANY (ARRAY[''principal.create''::text, ''project.create''::text, ''grant.create''::text, ''grant.delete''::text, ''job.enqueue''::text, ''job.complete''::text, ''job.retry''::text, ''job.fail''::text, ''owner.bootstrap''::text, ''enrollment.create''::text, ''enrollment.redeem''::text, ''credential.rotate''::text, ''credential.revoke''::text, ''legacy.register''::text, ''legacy.exchange''::text, ''legacy.retire''::text, ''legacy.disable''::text, ''project.identity.attach''::text, ''project.merge.preview''::text, ''project.merge''::text, ''memory.create''::text, ''memory.update''::text, ''memory.archive''::text, ''memory.restore''::text, ''memory.delete''::text]))'))
     )
     AND EXISTS (
         SELECT 1 FROM pg_constraint
         WHERE conrelid = 'audit.events'::regclass AND conname = 'events_target_kind_check'
           AND contype = 'c' AND conkey = ARRAY[7]::smallint[] AND convalidated
           AND (($1 = 3 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text]))')
-            OR ($1 >= 4 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text, ''project_identity''::text, ''project_merge''::text]))'))
+            OR ($1 BETWEEN 4 AND 13 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text, ''project_identity''::text, ''project_merge''::text]))')
+            OR ($1 >= 14 AND pg_get_expr(conbin, conrelid) = '(target_kind = ANY (ARRAY[''principal''::text, ''project''::text, ''grant''::text, ''job''::text, ''enrollment''::text, ''credential''::text, ''legacy_machine''::text, ''project_identity''::text, ''project_merge''::text, ''memory_item''::text]))'))
     )
     AND has_table_privilege('punaro_app', owner_oid, 'SELECT')
     AND NOT has_table_privilege('punaro_app', owner_oid, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
@@ -1013,6 +1028,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL attachment-deletion schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = deletionObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 14 {
+		brainObjectsPresent, err := canonicalBrainControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL canonical brain schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = brainObjectsPresent
 	}
 	return snapshot, nil
 }

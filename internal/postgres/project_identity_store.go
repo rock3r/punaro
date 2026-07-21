@@ -23,6 +23,9 @@ var (
 	// ErrProjectMergeAttachmentState fences project identities until the later
 	// attachment lifecycle defines an explicit, transactional merge behavior.
 	ErrProjectMergeAttachmentState = errors.New("project attachment state blocks merge")
+	// ErrProjectMergeBrainState prevents retiring a project while canonical
+	// memory would remain bound to its now-inaccessible scope.
+	ErrProjectMergeBrainState = errors.New("project memory state blocks merge")
 )
 
 const (
@@ -603,6 +606,19 @@ WHERE consumed_at IS NULL AND expires_at > statement_timestamp()`, actorPrincipa
 
 func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
 	var identityCount, canonicalIdentityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount int
+	var brainLifecyclePresent bool
+	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('brain.memory_items') IS NOT NULL AND to_regclass('brain.scopes') IS NOT NULL`).Scan(&brainLifecyclePresent); err != nil {
+		return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
+	}
+	if brainLifecyclePresent {
+		var hasMemoryLifecycle bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.scopes WHERE project_id=$1)`, sourceID).Scan(&hasMemoryLifecycle); err != nil {
+			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
+		}
+		if hasMemoryLifecycle {
+			return 0, 0, 0, 0, 0, nil, ErrProjectMergeBrainState
+		}
+	}
 	var attachmentLifecyclePresent bool
 	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('attachment.uploads') IS NOT NULL`).Scan(&attachmentLifecyclePresent); err != nil {
 		return 0, 0, 0, 0, 0, nil, errors.New("project attachment state is unavailable")
