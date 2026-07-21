@@ -16,6 +16,7 @@ WITH objects AS (
            to_regclass('attachment.principal_quotas') AS principal_oid,
            to_regclass('attachment.uploads_project_state') AS project_state_index_oid,
            to_regclass('attachment.uploads_reconcile_order') AS reconcile_index_oid,
+           to_regclass('attachment.recipient_grants') AS recipient_grants_oid,
            to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS reserve_oid,
            to_regprocedure('attachment.claim_upload(uuid,uuid,interval)') AS claim_oid,
            to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)') AS publish_oid,
@@ -82,11 +83,19 @@ WITH objects AS (
 ), expected_routines(oid, body_hash, volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
       (reserve_oid,'503c810da6c7090c8bdc306f474c161d','v'::"char"),
-      (claim_oid,'475ac4e1df29cabe6dbcae9e83038891','v'::"char"),
-      (publish_oid,'a309ef5966178bd6fef53435be8c215e','v'::"char"),
+      (claim_oid,CASE WHEN recipient_grants_oid IS NULL
+                      THEN '475ac4e1df29cabe6dbcae9e83038891'
+                      ELSE 'a20da734d30b78d9e6868c27094cd549' END,'v'::"char"),
+      (publish_oid,CASE WHEN recipient_grants_oid IS NULL
+                        THEN 'a309ef5966178bd6fef53435be8c215e'
+                        ELSE 'af7e5394046227aa006c7820fe97d1d8' END,'v'::"char"),
       (begin_reap_oid,'fc58a668e122b22102bd26cee052e213','v'::"char"),
-      (release_oid,'923f1b8e0dfa076623fe41f8f4dd059a','v'::"char"),
-      (corrupt_oid,'c4949387c79f3843bef73ddb408f9db2','v'::"char"),
+      (release_oid,CASE WHEN recipient_grants_oid IS NULL
+                        THEN '923f1b8e0dfa076623fe41f8f4dd059a'
+                        ELSE '2a0a87320eb4124de1f1f65ecd629662' END,'v'::"char"),
+      (corrupt_oid,CASE WHEN recipient_grants_oid IS NULL
+                        THEN 'c4949387c79f3843bef73ddb408f9db2'
+                        ELSE '51e6b83ed153fcce5b53dbddc37056b8' END,'v'::"char"),
       (reconcile_oid,'25df2c05deb346a8df8a86349a00a478','s'::"char"),
       (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char")
     ) AS expected(oid,body_hash,volatility)

@@ -90,11 +90,11 @@ func TestPostgresTransitionAuthorityMapsBothPathsToExactLegacyKey(t *testing.T) 
 	database := &transitionDatabaseDouble{legacyKey: public, credential: "not-secret", device: punaropostgres.AuthenticatedDevice{PrincipalID: "11111111-1111-4111-8111-111111111111", LookupID: "22222222-2222-4222-8222-222222222222", Generation: 1}}
 	authority := postgresTransitionAuthority{database: database}
 	legacyResult, err := authority.AuthorizeTransition(t.Context(), "", public)
-	if err != nil || !bytes.Equal(legacyResult.LegacyPublicKey, public) || legacyResult.Current(t.Context()) != nil {
+	if err != nil || legacyResult.PrincipalID != "11111111-1111-4111-8111-111111111111" || !bytes.Equal(legacyResult.LegacyPublicKey, public) || legacyResult.Current(t.Context()) != nil {
 		t.Fatalf("legacy result=%#v err=%v", legacyResult, err)
 	}
 	deviceResult, err := authority.AuthorizeTransition(t.Context(), database.credential, nil)
-	if err != nil || !bytes.Equal(deviceResult.LegacyPublicKey, public) || deviceResult.Current(t.Context()) != nil {
+	if err != nil || deviceResult.PrincipalID != database.device.PrincipalID || deviceResult.CredentialLookupID != database.device.LookupID || deviceResult.CredentialGeneration != database.device.Generation || !bytes.Equal(deviceResult.LegacyPublicKey, public) || deviceResult.Current(t.Context()) != nil {
 		t.Fatalf("device result=%#v err=%v", deviceResult, err)
 	}
 	database.err = errors.New("revoked")

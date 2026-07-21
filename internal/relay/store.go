@@ -98,22 +98,30 @@ type DeliveryLeasePage struct {
 // AppendInput contains one client retry domain. IdempotencyKey is scoped to
 // SenderMachineID and may only be reused with identical message data.
 type AppendInput struct {
-	ConversationID  string
-	SenderMachineID string
-	FromEndpoint    string
-	Body            string
-	IdempotencyKey  string
-	Now             time.Time
+	ConversationID       string
+	SenderMachineID      string
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	FromEndpoint         string
+	Body                 string
+	ArtifactIDs          []string
+	IdempotencyKey       string
+	Now                  time.Time
 }
 
 // CreateConversationInput identifies one create retry domain. IdempotencyKey
 // is scoped to MachineID and is bound to the creator plus normalized members.
 type CreateConversationInput struct {
-	MachineID       string
-	IdempotencyKey  string
-	CreatorEndpoint string
-	Members         []Member
-	Now             time.Time
+	MachineID            string
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ProjectID            string
+	IdempotencyKey       string
+	CreatorEndpoint      string
+	Members              []Member
+	Now                  time.Time
 }
 
 // Store owns SQLite-backed relay state.
@@ -451,7 +459,7 @@ func (s *Store) CreateConversation(creatorEndpoint string, members []Member, now
 // CreateConversationIdempotent creates a room once for a signed machine retry
 // domain. A repeated key with a different normalized request is a conflict.
 func (s *Store) CreateConversationIdempotent(input CreateConversationInput) (Conversation, error) {
-	if !ValidMachineID(input.MachineID) || !ValidRequestToken(input.IdempotencyKey) {
+	if !ValidMachineID(input.MachineID) || !ValidRequestToken(input.IdempotencyKey) || input.ProjectID != "" {
 		return Conversation{}, fmt.Errorf("machine and idempotency key are required")
 	}
 	return s.createConversation(input)
@@ -566,7 +574,7 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRequestToken(input.IdempotencyKey) {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
 	}
 	if len(input.Body) > maxMessageBodyBytes {
@@ -1016,7 +1024,17 @@ func createConversationHash(creatorEndpoint string, members []Member) string {
 }
 
 func appendHash(input AppendInput) string {
-	digest := sha256.Sum256([]byte(strings.Join([]string{input.ConversationID, input.FromEndpoint, input.Body}, "\x00")))
+	parts := []string{input.ConversationID, input.FromEndpoint, input.Body}
+	if len(input.ArtifactIDs) != 0 {
+		parts = append(parts, input.PrincipalID)
+		parts = append(parts, input.ArtifactIDs...)
+	}
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return hex.EncodeToString(digest[:])
+}
+
+func stableHash(parts ...string) string {
+	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
 }
 

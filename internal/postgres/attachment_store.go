@@ -120,6 +120,36 @@ type AttachmentArtifact struct {
 	ReadyAt     time.Time
 }
 
+// AttachmentDownloadRequest is the generation-fenced principal authority for
+// one recipient-snapshot download authorization.
+type AttachmentDownloadRequest struct {
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ArtifactID           string
+}
+
+// Validate rejects labels and incomplete credential-generation tuples before
+// an artifact lookup can become an existence oracle.
+func (request AttachmentDownloadRequest) Validate() error {
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 || !validOpaqueID(request.ArtifactID) {
+		return errors.New("invalid attachment download request")
+	}
+	return nil
+}
+
+// AttachmentDownload is the exact authorized immutable file declaration.
+type AttachmentDownload struct {
+	ArtifactID  string
+	ProjectID   string
+	StoragePath string
+	SizeBytes   int64
+	SHA256      [sha256.Size]byte
+	DisplayName string
+	MediaType   string
+	ReadyAt     time.Time
+}
+
 // AttachmentPublishRequest binds completion to one database claim and the
 // exact immutable blob proven by the filesystem layer.
 type AttachmentPublishRequest struct {
@@ -245,6 +275,27 @@ FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`, request.PrincipalID, requ
 	return artifact, nil
 }
 
+// AuthorizeAttachmentDownload applies current device, capability, immutable
+// recipient-grant, READY, and manifest checks in one content-free routine.
+func (d *Database) AuthorizeAttachmentDownload(ctx context.Context, request AttachmentDownloadRequest) (AttachmentDownload, error) {
+	if request.Validate() != nil {
+		return AttachmentDownload{}, errors.New("invalid attachment download request")
+	}
+	var download AttachmentDownload
+	var digestText string
+	err := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,display_name,media_type,ready_at
+FROM attachment.authorize_download($1,$2,$3,$4)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ArtifactID).Scan(
+		&download.ArtifactID, &download.ProjectID, &download.StoragePath, &download.SizeBytes,
+		&digestText, &download.DisplayName, &download.MediaType, &download.ReadyAt)
+	if err != nil {
+		return AttachmentDownload{}, attachmentStoreError(err, "attachment download is unavailable")
+	}
+	if !decodeAttachmentDigest(digestText, &download.SHA256) || download.ArtifactID != request.ArtifactID || download.StoragePath != "ready/"+download.ArtifactID+".blob" || download.SizeBytes < 1 || download.SizeBytes > maxAttachmentBytes || !validAttachmentDisplayName(download.DisplayName) || !attachmentMediaTypePattern.MatchString(download.MediaType) {
+		return AttachmentDownload{}, errors.New("attachment download result is malformed")
+	}
+	return download, nil
+}
+
 // BeginAttachmentReap fences an expired or restored-timeline reservation.
 func (d *Database) BeginAttachmentReap(ctx context.Context, artifactID string) (string, bool, error) {
 	if !validOpaqueID(artifactID) {
@@ -350,6 +401,18 @@ func (d *Database) ProjectHasAttachmentRecords(ctx context.Context, principalID,
 	var found bool
 	if err := d.db.QueryRowContext(ctx, `SELECT attachment.project_has_records($1,$2)`, principalID, projectID).Scan(&found); err != nil {
 		return false, attachmentStoreError(err, "attachment project state is unavailable")
+	}
+	if found {
+		return true, nil
+	}
+	var recipientFenceAvailable bool
+	if err := d.db.QueryRowContext(ctx, `SELECT to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)') IS NOT NULL`).Scan(&recipientFenceAvailable); err != nil {
+		return false, errors.New("attachment recipient project state is unavailable")
+	}
+	if recipientFenceAvailable {
+		if err := d.db.QueryRowContext(ctx, `SELECT attachment.project_has_recipient_records($1,$2)`, principalID, projectID).Scan(&found); err != nil {
+			return false, attachmentStoreError(err, "attachment recipient project state is unavailable")
+		}
 	}
 	return found, nil
 }

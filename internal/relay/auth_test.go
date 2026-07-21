@@ -221,7 +221,7 @@ func TestTransitionAuthenticatorMakesLegacyGateAuthoritative(t *testing.T) {
 		if credential != "" || !gateOpen || !bytes.Equal(legacyKey, public) {
 			return TransitionAuthorization{}, ErrForbidden
 		}
-		return TransitionAuthorization{LegacyPublicKey: legacyKey, Current: func(context.Context) error {
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", LegacyPublicKey: legacyKey, Current: func(context.Context) error {
 			if !gateOpen {
 				return ErrForbidden
 			}
@@ -235,7 +235,7 @@ func TestTransitionAuthenticatorMakesLegacyGateAuthoritative(t *testing.T) {
 	signed := signRequest(private, "machine-a", http.MethodPost, "/v1/conversations", []byte(`{"members":[]}`), now, "nonce-open")
 	request := signedHTTPRequest(t, signed)
 	session, err := auth.AuthenticateHTTPSession(request, signed.Body, now)
-	if err != nil || session.MachineID != "machine-a" {
+	if err != nil || session.MachineID != "machine-a" || session.PrincipalID != "11111111-1111-4111-8111-111111111111" {
 		t.Fatalf("open legacy gate session=%#v err=%v", session, err)
 	}
 	gateOpen = false
@@ -258,7 +258,7 @@ func TestTransitionAuthenticatorPreservesExactMachineAuthorityForMigratedCredent
 		if credential != testTransitionToken || legacyKey != nil {
 			return TransitionAuthorization{}, ErrForbidden
 		}
-		return TransitionAuthorization{LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", CredentialLookupID: "22222222-2222-4222-8222-222222222222", CredentialGeneration: 1, LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -268,11 +268,11 @@ func TestTransitionAuthenticatorPreservesExactMachineAuthorityForMigratedCredent
 		t.Fatal(err)
 	}
 	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
-	machineID, err := auth.AuthenticateHTTP(request, nil, time.Now().UTC())
-	if err != nil || machineID != "machine-a" {
-		t.Fatalf("migrated credential machine=%q err=%v", machineID, err)
+	session, err := auth.AuthenticateHTTPSession(request, nil, time.Now().UTC())
+	if err != nil || session.MachineID != "machine-a" || session.PrincipalID != "11111111-1111-4111-8111-111111111111" || session.CredentialLookupID != "22222222-2222-4222-8222-222222222222" || session.CredentialGeneration != 1 {
+		t.Fatalf("migrated credential session=%#v err=%v", session, err)
 	}
-	if !auth.AllowsEndpoint(machineID, "agent/a/session") || !auth.AllowsEndpoint(machineID, "claude/exact") || auth.AllowsEndpoint(machineID, "agent/b/session") || auth.AllowsEndpoint(machineID, "claude/exact-more") {
+	if !auth.AllowsEndpoint(session.MachineID, "agent/a/session") || !auth.AllowsEndpoint(session.MachineID, "claude/exact") || auth.AllowsEndpoint(session.MachineID, "agent/b/session") || auth.AllowsEndpoint(session.MachineID, "claude/exact-more") {
 		t.Fatal("migrated credential did not inherit the exact configured machine authority")
 	}
 }
@@ -286,7 +286,7 @@ func TestTransitionAuthenticatorRejectsAmbiguousLegacyPublicKey(t *testing.T) {
 		{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}},
 		{ID: "machine-b", PublicKey: public, EndpointPrefixes: []string{"agent/b/"}},
 	}, transitionAuthorityFunc(func(context.Context, string, ed25519.PublicKey) (TransitionAuthorization, error) {
-		return TransitionAuthorization{LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+		return TransitionAuthorization{PrincipalID: "11111111-1111-4111-8111-111111111111", LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
 	}))
 	if err == nil {
 		t.Fatal("transition authenticator accepted an ambiguous legacy public key")

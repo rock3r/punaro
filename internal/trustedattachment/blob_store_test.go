@@ -232,6 +232,39 @@ func TestBlobStoreOverlappingStaleAndFreshClaimsCannotTouchEachOthersStages(t *t
 	}
 }
 
+func TestBlobStoreVerifiesCompleteFileBeforeStreaming(t *testing.T) {
+	store, err := OpenBlobStore(privateBlobRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("verified download body")
+	digest := sha256.Sum256(body)
+	blob, err := store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := store.StreamVerified(context.Background(), blob, &output); err != nil || !bytes.Equal(output.Bytes(), body) {
+		t.Fatalf("valid stream output=%q err=%v", output.Bytes(), err)
+	}
+	path := filepath.Join(store.root, filepath.FromSlash(blob.StoragePath))
+	// #nosec G304 -- path is the test's private temporary blob root plus a validated artifact ID.
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("extra")); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := store.StreamVerified(context.Background(), blob, &output); err == nil || output.Len() != 0 {
+		t.Fatalf("corrupt stream emitted %d bytes err=%v", output.Len(), err)
+	}
+}
+
 type gatedReader struct {
 	body    []byte
 	started chan struct{}

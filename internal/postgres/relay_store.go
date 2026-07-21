@@ -39,6 +39,19 @@ func (d *Database) ConsumeRequestNonce(machineID, nonce string, now, expiresAt t
 
 // AdvertiseEndpoints atomically replaces one machine's active attachment set.
 func (d *Database) AdvertiseEndpoints(machineID string, endpoints []string, now time.Time, ttl time.Duration) error {
+	return d.advertiseEndpoints(machineID, relay.PrincipalAuthority{}, endpoints, now, ttl)
+}
+
+// AdvertiseEndpointsForPrincipal publishes endpoint leases and their stable
+// recipient-snapshot principal in one transaction.
+func (d *Database) AdvertiseEndpointsForPrincipal(machineID string, authority relay.PrincipalAuthority, endpoints []string, now time.Time, ttl time.Duration) error {
+	if !validOpaqueID(authority.PrincipalID) || !validOpaqueID(authority.CredentialLookupID) || authority.CredentialGeneration < 1 {
+		return errors.New("invalid endpoint principal")
+	}
+	return d.advertiseEndpoints(machineID, authority, endpoints, now, ttl)
+}
+
+func (d *Database) advertiseEndpoints(machineID string, authority relay.PrincipalAuthority, endpoints []string, now time.Time, ttl time.Duration) error {
 	if !relay.ValidMachineID(machineID) || ttl <= 0 {
 		return errors.New("invalid endpoint lease")
 	}
@@ -98,6 +111,23 @@ func (d *Database) AdvertiseEndpoints(machineID string, endpoints []string, now 
 			return relayDatabaseError(err, "advertise endpoint")
 		}
 	}
+	var principalID, credentialLookupID any
+	var credentialGeneration any
+	if authority.PrincipalID != "" {
+		principalID = authority.PrincipalID
+		credentialLookupID = authority.CredentialLookupID
+		credentialGeneration = authority.CredentialGeneration
+	}
+	var bound int
+	var recipientBindingAvailable bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT to_regprocedure('attachment.bind_endpoint_principals(text,uuid,uuid,bigint,jsonb,timestamp with time zone)') IS NOT NULL`).Scan(&recipientBindingAvailable); err != nil {
+		return relayDatabaseError(err, "inspect endpoint principal binding")
+	}
+	if recipientBindingAvailable {
+		if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_endpoint_principals($1,$2,$3,$4,$5::jsonb,$6)`, machineID, principalID, credentialLookupID, credentialGeneration, string(encodedEndpoints), now.UTC()).Scan(&bound); err != nil || bound != len(orderedEndpoints) {
+			return relayDatabaseError(err, "bind endpoint principals")
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit endpoint advertisement")
 	}
@@ -122,6 +152,9 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 func (d *Database) CreateConversationIdempotent(input relay.CreateConversationInput) (relay.Conversation, error) {
 	if !relay.ValidMachineID(input.MachineID) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.CreatorEndpoint) || len(input.Members) == 0 || len(input.Members) > 256 {
 		return relay.Conversation{}, errors.New("invalid conversation request")
+	}
+	if input.ProjectID != "" && (!validOpaqueID(input.ProjectID) || !validOpaqueID(input.PrincipalID) || !validOpaqueID(input.CredentialLookupID) || input.CredentialGeneration < 1) {
+		return relay.Conversation{}, errors.New("invalid conversation project authority")
 	}
 	seen := make(map[string]struct{}, len(input.Members))
 	creatorAdmin := false
@@ -149,7 +182,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230608))`, input.MachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, errors.New("conversation retry lock is unavailable")
 	}
-	hash := relay.CreateConversationRequestHash(input.CreatorEndpoint, input.Members)
+	hash := relay.CreateConversationRequestHash(input.CreatorEndpoint, input.Members, input.ProjectID)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id::text,request_hash FROM relay.mail_conversation_idempotency WHERE machine_id=$1 AND key=$2`, input.MachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -158,6 +191,12 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		}
 		if existingHash != hash {
 			return relay.Conversation{}, relay.ErrConflict
+		}
+		if input.ProjectID != "" {
+			var canonicalProject string
+			if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_conversation_project($1,$2,$3,$4::uuid,$5,$6::uuid)::text`, input.PrincipalID, input.CredentialLookupID, input.CredentialGeneration, existingID, input.CreatorEndpoint, input.ProjectID).Scan(&canonicalProject); err != nil || !validOpaqueID(canonicalProject) {
+				return relay.Conversation{}, relayDatabaseError(err, "reauthorize conversation project")
+			}
 		}
 		if err := tx.Commit(); err != nil {
 			return relay.Conversation{}, errors.New("conversation retry cannot commit")
@@ -188,6 +227,12 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	for _, member := range input.Members {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, conversation.ID, member.Endpoint, member.Capabilities); err != nil {
 			return relay.Conversation{}, relayDatabaseError(err, "add conversation member")
+		}
+	}
+	if input.ProjectID != "" {
+		var canonicalProject string
+		if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_conversation_project($1,$2,$3,$4::uuid,$5,$6::uuid)::text`, input.PrincipalID, input.CredentialLookupID, input.CredentialGeneration, conversation.ID, input.CreatorEndpoint, input.ProjectID).Scan(&canonicalProject); err != nil || !validOpaqueID(canonicalProject) {
+			return relay.Conversation{}, relayDatabaseError(err, "bind conversation project")
 		}
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_idempotency(machine_id,key,request_hash,conversation_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, input.MachineID, input.IdempotencyKey, hash, conversation.ID, input.Now.UTC()); err != nil {
@@ -235,6 +280,22 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !relay.ValidMessageBody(input.Body) {
 		return relay.Message{}, false, errors.New("message body is not portable UTF-8 text")
 	}
+	if len(input.ArtifactIDs) > 16 {
+		return relay.Message{}, false, errors.New("message attachment list exceeds limit")
+	}
+	seenArtifacts := make(map[string]struct{}, len(input.ArtifactIDs))
+	for _, artifactID := range input.ArtifactIDs {
+		if !validOpaqueID(artifactID) {
+			return relay.Message{}, false, errors.New("invalid message attachment")
+		}
+		if _, duplicate := seenArtifacts[artifactID]; duplicate {
+			return relay.Message{}, false, errors.New("duplicate message attachment")
+		}
+		seenArtifacts[artifactID] = struct{}{}
+	}
+	if len(input.ArtifactIDs) != 0 && (!validOpaqueID(input.PrincipalID) || !validOpaqueID(input.CredentialLookupID) || input.CredentialGeneration < 1) {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
 	if _, err := uuid.Parse(input.ConversationID); err != nil {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
@@ -265,6 +326,16 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		if existingHash != hash {
 			return relay.Message{}, false, relay.ErrConflict
 		}
+		if len(input.ArtifactIDs) != 0 {
+			encodedArtifacts, err := json.Marshal(input.ArtifactIDs)
+			if err != nil {
+				return relay.Message{}, false, errors.New("message attachment list is invalid")
+			}
+			var bound int
+			if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_message_artifacts($1,$2,$3,$4::uuid,$5::jsonb)`, input.PrincipalID, input.CredentialLookupID, input.CredentialGeneration, existingID, string(encodedArtifacts)).Scan(&bound); err != nil || bound != len(input.ArtifactIDs) {
+				return relay.Message{}, false, relayDatabaseError(err, "reauthorize message attachments")
+			}
+		}
 		message, err := postgresMessageByID(tx, existingID)
 		if err != nil {
 			return relay.Message{}, false, err
@@ -289,6 +360,16 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
+	}
+	if len(input.ArtifactIDs) != 0 {
+		encodedArtifacts, err := json.Marshal(input.ArtifactIDs)
+		if err != nil {
+			return relay.Message{}, false, errors.New("message attachment list is invalid")
+		}
+		var bound int
+		if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_message_artifacts($1,$2,$3,$4::uuid,$5::jsonb)`, input.PrincipalID, input.CredentialLookupID, input.CredentialGeneration, message.ID, string(encodedArtifacts)).Scan(&bound); err != nil || bound != len(input.ArtifactIDs) {
+			return relay.Message{}, false, relayDatabaseError(err, "bind message attachments")
+		}
 	}
 	if capabilities&relay.CapReceive != 0 {
 		if err := postgresAdvanceRecipientCursor(tx, input.FromEndpoint, input.ConversationID); err != nil {
@@ -657,6 +738,12 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 func relayDatabaseError(err error, operation string) error {
 	if isMaintenanceError(err) {
 		return relay.ErrMaintenance
+	}
+	if isSQLState(err, "42501") {
+		return relay.ErrForbidden
+	}
+	if isSQLState(err, "23505") {
+		return relay.ErrConflict
 	}
 	return fmt.Errorf("PostgreSQL relay %s failed", operation)
 }

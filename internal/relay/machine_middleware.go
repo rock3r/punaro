@@ -15,8 +15,16 @@ type authenticatedMachineContextKey struct{}
 // MachineAuthenticationMiddleware. It is intentionally absent unless the
 // request passed durable replay-protected signature verification.
 func AuthenticatedMachineID(ctx context.Context) (string, bool) {
-	machineID, found := ctx.Value(authenticatedMachineContextKey{}).(string)
-	return machineID, found && machineID != ""
+	session, found := AuthenticatedMachineSession(ctx)
+	return session.MachineID, found
+}
+
+// AuthenticatedMachineSession returns the exact transport identity and stable
+// database principal established by transition authentication. PrincipalID is
+// empty only for the intentionally principal-unaware static authenticator.
+func AuthenticatedMachineSession(ctx context.Context) (MachineSession, bool) {
+	session, found := ctx.Value(authenticatedMachineContextKey{}).(MachineSession)
+	return session, found && session.MachineID != ""
 }
 
 // NewMachineAuthenticationMiddleware authenticates the exact bounded body of
@@ -46,14 +54,14 @@ func NewMachineAuthenticationMiddleware(auth *Authenticator, maxBodyBytes int64,
 				writeError(w, http.StatusBadRequest, "invalid signed request")
 				return
 			}
-			machineID, err := auth.AuthenticateHTTP(r, body, now().UTC())
+			session, err := auth.AuthenticateHTTPSession(r, body, now().UTC())
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "authentication required")
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(body))
 			r.ContentLength = int64(len(body))
-			r = r.WithContext(context.WithValue(r.Context(), authenticatedMachineContextKey{}, machineID))
+			r = r.WithContext(context.WithValue(r.Context(), authenticatedMachineContextKey{}, session))
 			next.ServeHTTP(w, r)
 		})
 	}, nil

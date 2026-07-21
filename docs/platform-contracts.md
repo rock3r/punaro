@@ -85,6 +85,28 @@ bytes, then releases quota; it withdraws missing or changed READY bytes from the
 backup manifest as corrupt. Active records fence project
 merge until a later lifecycle defines transactional merge behavior.
 
+Schema version 11 adds owner-only endpoint-principal bindings, immutable
+conversation-project bindings, ordered message-artifact references, and stable
+recipient-principal snapshots. Only a current bearer device may create those
+bindings; legacy-signed endpoint advertisement deliberately removes a prior
+principal binding and remains mail-only. Attachment append reauthorizes
+`conversation.send`, requires same-principal READY artifacts in the canonical
+conversation project, and commits the message, delivery snapshot, references,
+and grants atomically. One artifact may initially be referenced by one message.
+Exact retries remain operation-bound and recheck current device and capability
+authority under row locks. Immutable conversation bindings fence source-project
+merge.
+
+The application role still cannot read these tables. Its narrow download
+routine returns an exact server-derived READY declaration only when current
+device generation, current project `attachment.download`, stable recipient
+snapshot, and exact READY manifest all agree. The blob service then verifies a
+private no-follow regular file completely before streaming exactly its declared
+size under cancellation, a 16-stream concurrency ceiling, and a service-owned
+ten-minute maximum lifetime. This schema does not
+mount any attachment HTTP route and does not implement deletion or physical
+garbage collection.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds

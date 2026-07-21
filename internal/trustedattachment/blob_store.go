@@ -201,6 +201,43 @@ func (s *BlobStore) Verify(blob PublishedBlob) error {
 	return nil
 }
 
+// StreamVerified opens the exact no-follow READY file, verifies its complete
+// size and digest before emitting a byte, rewinds that same descriptor, and
+// copies at most the recorded size with context cancellation.
+func (s *BlobStore) StreamVerified(ctx context.Context, blob PublishedBlob, destination io.Writer) error {
+	if s == nil || destination == nil || blob.validate() != nil {
+		return errors.New("invalid attachment download")
+	}
+	base := filepath.Base(blob.StoragePath)
+	expected := filepath.ToSlash(filepath.Join("ready", base))
+	artifactID, found := strings.CutSuffix(base, ".blob")
+	if blob.StoragePath != expected || !found || uuid.Validate(artifactID) != nil {
+		return errors.New("attachment blob path is unsafe")
+	}
+	file, err := openPrivateRead(filepath.Join(s.root, filepath.FromSlash(blob.StoragePath)))
+	if err != nil {
+		return errors.New("attachment blob is missing or corrupt")
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Size() != blob.SizeBytes {
+		return errors.New("attachment blob is missing or corrupt")
+	}
+	hasher := sha256.New()
+	verified, err := copyBoundedContext(ctx, hasher, file, blob.SizeBytes+1)
+	if err != nil || verified != blob.SizeBytes || digest(hasher) != blob.SHA256 {
+		return errors.New("attachment blob is missing or corrupt")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return errors.New("attachment blob is unavailable")
+	}
+	written, err := copyBoundedContext(ctx, destination, file, blob.SizeBytes)
+	if err != nil || written != blob.SizeBytes {
+		return errors.New("attachment download stream failed")
+	}
+	return nil
+}
+
 // RemoveUnpublished durably removes bytes which never obtained a READY
 // database projection. Callers must first prove the reservation is expired or
 // belongs to an obsolete restored timeline; this method grants no authority.
@@ -257,6 +294,9 @@ func copyBoundedContext(ctx context.Context, destination io.Writer, source io.Re
 			}
 			if count != read {
 				return written, io.ErrShortWrite
+			}
+			if err := ctx.Err(); err != nil {
+				return written, err
 			}
 		}
 		if errors.Is(readErr, io.EOF) {

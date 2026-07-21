@@ -580,6 +580,34 @@ to select the READY manifest in the exported database snapshot. No upload,
 download, recipient, sharing, or deletion HTTP route is mounted by this slice;
 those remain later independently reviewed milestones.
 
+Schema v11 adds the next dark slice without mounting a file route. Bearer
+transition sessions carry the authenticated stable principal and credential
+generation into PostgreSQL relay transactions. Endpoint advertisement records
+that principal atomically with the mail lease; legacy-signed advertisement
+clears any prior principal binding and remains mail-only. A project-bound
+conversation requires current `conversation.send` authority. Its message
+append may contain at most 16 ordered opaque artifact IDs and, in the same
+transaction as the immutable message and deliveries, locks and verifies the
+sender's READY artifacts and snapshots the delivered endpoints' stable
+recipient principals. Initial artifacts may be referenced by one message only.
+Endpoint reassignment cannot transfer a historical grant, while credential
+rotation preserves it. An immutable conversation-project binding fences project
+merge so a conversation cannot be stranded on a retired source project.
+
+Download authorization is the conjunction of a current generation-fenced
+device credential, current project-scoped `attachment.download`, the immutable
+recipient snapshot, READY metadata, and the exact manifest. The service holds
+the artifact lock, opens only the server-derived no-follow `0600` regular file,
+verifies its full size and digest before emitting any byte, rewinds the same
+descriptor, and streams exactly the recorded size under cancellation and a
+16-stream concurrency ceiling plus a service-owned ten-minute maximum lifetime.
+In-process and cross-process artifact-lock waits honor cancellation. Guessed
+IDs, revoked authority, absent grants, and
+hidden or corrupt artifacts do not expose which condition failed. There are no
+ranges, public URLs, redirects, URL fetches, or display-name paths. Reservation,
+upload, download, and delete HTTP routes remain unmounted until the native
+client and destructive lifecycle receive their separate reviews.
+
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique
 operation-bound idempotency keys, closed content-free audit events, and a

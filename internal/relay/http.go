@@ -81,6 +81,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	machineID := session.MachineID
+	authority := PrincipalAuthority{PrincipalID: session.PrincipalID, CredentialLookupID: session.CredentialLookupID, CredentialGeneration: session.CredentialGeneration}
 	now := h.now().UTC()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/conversations":
@@ -88,16 +89,16 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/notifications":
 		h.notifications(w, r, session)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
-		h.advertiseEndpoints(w, body, machineID, now)
+		h.advertiseEndpoints(w, body, machineID, authority, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
-		h.createConversation(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
+		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/messages")
 		if conversationID == "" || strings.Contains(conversationID, "/") {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
 		}
-		h.appendMessage(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+		h.appendMessage(w, body, machineID, authority, conversationID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/sender-validation"):
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/sender-validation")
 		if conversationID == "" || strings.Contains(conversationID, "/") {
@@ -222,7 +223,7 @@ func (h *handler) authenticate(r *http.Request, body []byte) (MachineSession, er
 	return h.auth.AuthenticateHTTPSession(r, body, h.now())
 }
 
-func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machineID string, authority PrincipalAuthority, now time.Time) {
 	var request struct {
 		Endpoints []string `json:"endpoints"`
 	}
@@ -236,20 +237,31 @@ func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machine
 			return
 		}
 	}
-	if err := h.store.AdvertiseEndpoints(machineID, request.Endpoints, now, h.endpointLeaseTTL); err != nil {
+	var err error
+	if authority.CredentialLookupID != "" {
+		if principalStore, ok := h.store.(PrincipalEndpointBackend); ok {
+			err = principalStore.AdvertiseEndpointsForPrincipal(machineID, authority, request.Endpoints, now, h.endpointLeaseTTL)
+		} else {
+			err = h.store.AdvertiseEndpoints(machineID, request.Endpoints, now, h.endpointLeaseTTL)
+		}
+	} else {
+		err = h.store.AdvertiseEndpoints(machineID, request.Endpoints, now, h.endpointLeaseTTL)
+	}
+	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lease_until": now.Add(h.endpointLeaseTTL).Format(time.RFC3339Nano)})
 }
 
-func (h *handler) createConversation(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
+func (h *handler) createConversation(w http.ResponseWriter, body []byte, machineID string, authority PrincipalAuthority, now time.Time, idempotencyKey string) {
 	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
 		return
 	}
 	var request struct {
 		CreatorEndpoint string `json:"creator_endpoint"`
+		ProjectID       string `json:"project_id"`
 		Members         []struct {
 			Endpoint     string   `json:"endpoint"`
 			Capabilities []string `json:"capabilities"`
@@ -276,7 +288,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		}
 		members = append(members, Member{Endpoint: member.Endpoint, Capabilities: capabilities})
 	}
-	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
+	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -284,14 +296,15 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	writeJSON(w, http.StatusCreated, conversation)
 }
 
-func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID string, authority PrincipalAuthority, conversationID string, now time.Time, idempotencyKey string) {
 	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
 		return
 	}
 	var request struct {
-		FromEndpoint string `json:"from_endpoint"`
-		Body         string `json:"body"`
+		FromEndpoint string   `json:"from_endpoint"`
+		Body         string   `json:"body"`
+		ArtifactIDs  []string `json:"artifact_ids"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid message request")
@@ -301,7 +314,7 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID, c
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}
-	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, FromEndpoint: request.FromEndpoint, Body: request.Body, IdempotencyKey: idempotencyKey, Now: now})
+	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return

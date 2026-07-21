@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,6 +32,43 @@ type fakeRepository struct {
 	releaseTokens     []string
 	publishMakesReady bool
 	publishHook       func()
+	download          postgres.AttachmentDownload
+	downloadErr       error
+}
+
+type testDownloadWriter struct {
+	io.Writer
+}
+
+func (writer testDownloadWriter) SetWriteDeadline(time.Time) error { return nil }
+
+type blockingDeadlineWriter struct {
+	mu      sync.Mutex
+	last    time.Time
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (writer *blockingDeadlineWriter) Write(value []byte) (int, error) { return len(value), nil }
+
+func (writer *blockingDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && deadline.Before(time.Now().Add(time.Minute)) {
+		select {
+		case writer.entered <- struct{}{}:
+		default:
+		}
+		<-writer.release
+	}
+	writer.mu.Lock()
+	writer.last = deadline
+	writer.mu.Unlock()
+	return nil
+}
+
+func (writer *blockingDeadlineWriter) lastDeadline() time.Time {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.last
 }
 
 func (repository *fakeRepository) ClaimAttachmentUpload(context.Context, string, string, time.Duration) (postgres.AttachmentClaim, error) {
@@ -78,6 +117,140 @@ func (repository *fakeRepository) ReleaseExpiredAttachment(_ context.Context, ar
 	repository.releaseCalls = append(repository.releaseCalls, artifactID)
 	repository.releaseTokens = append(repository.releaseTokens, cleanupToken)
 	return true, nil
+}
+
+func (repository *fakeRepository) AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error) {
+	return repository.download, repository.downloadErr
+}
+
+func TestServiceAuthorizesAndVerifiesBeforeDownloadBytes(t *testing.T) {
+	body := []byte("recipient snapshot body")
+	digest := sha256.Sum256(body)
+	download := postgres.AttachmentDownload{ArtifactID: testArtifactID, ProjectID: "11111111-1111-4111-8111-111111111111", StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "report.txt", MediaType: "text/plain"}
+	repository := &fakeRepository{download: download}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
+	var output bytes.Buffer
+	got, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output})
+	if err != nil || got != download || !bytes.Equal(output.Bytes(), body) {
+		t.Fatalf("download=%#v output=%q err=%v", got, output.Bytes(), err)
+	}
+	repository.downloadErr = postgres.ErrForbidden
+	output.Reset()
+	if _, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output}); !errors.Is(err, postgres.ErrForbidden) || output.Len() != 0 {
+		t.Fatalf("denied download emitted=%d err=%v", output.Len(), err)
+	}
+}
+
+func TestServiceBoundsConcurrentDownloadsBeforeAuthorization(t *testing.T) {
+	repository := &fakeRepository{}
+	service := newTestService(t, repository)
+	for range maxConcurrentDownloads {
+		service.downloadSlots <- struct{}{}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var output bytes.Buffer
+	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
+	if _, err := service.Download(ctx, request, testDownloadWriter{Writer: &output}); !errors.Is(err, context.Canceled) || output.Len() != 0 {
+		t.Fatalf("saturated download emitted=%d err=%v", output.Len(), err)
+	}
+}
+
+func TestServiceDownloadLockWaitHonorsCancellation(t *testing.T) {
+	service := newTestService(t, &fakeRepository{})
+	unlock, err := service.lockArtifact(context.Background(), testArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := service.Download(ctx, postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}, testDownloadWriter{Writer: io.Discard})
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for len(service.downloadSlots) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(service.downloadSlots) != 1 {
+		_ = unlock()
+		t.Fatal("download did not reach the artifact lock")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		_ = unlock()
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled lock wait error=%v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		_ = unlock()
+		<-done
+		t.Fatal("canceled download remained blocked on the in-process artifact lock")
+	}
+}
+
+func TestServiceDownloadDeadlineInterruptsBlockedWrite(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), 128<<10)
+	digest := sha256.Sum256(body)
+	download := postgres.AttachmentDownload{ArtifactID: testArtifactID, ProjectID: "11111111-1111-4111-8111-111111111111", StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "report.bin", MediaType: "application/octet-stream"}
+	service := newTestService(t, &fakeRepository{download: download})
+	service.downloadLifetime = 25 * time.Millisecond
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	destination, blockedPeer := net.Pipe()
+	defer func() { _ = destination.Close() }()
+	defer func() { _ = blockedPeer.Close() }()
+	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
+	started := time.Now()
+	if _, err := service.Download(context.Background(), request, destination); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked download error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("blocked download exceeded cancellation fence: %s", elapsed)
+	}
+	if len(service.downloadSlots) != 0 {
+		t.Fatal("over-lifetime download retained a concurrency slot")
+	}
+}
+
+func TestDownloadDeadlineCleanupJoinsCancellationHelper(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	destination := &blockingDeadlineWriter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	stop, err := armDownloadWriteDeadline(ctx, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-destination.entered:
+	case <-time.After(time.Second):
+		t.Fatal("deadline cancellation helper did not run")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("deadline cleanup returned before its helper")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(destination.release)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("deadline cleanup did not finish after its helper")
+	}
+	if deadline := destination.lastDeadline(); !deadline.IsZero() {
+		t.Fatalf("deadline cleanup left past deadline %s", deadline)
+	}
 }
 
 func TestServicePublishesBytesBeforeConditionalReady(t *testing.T) {

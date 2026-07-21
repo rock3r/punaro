@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -35,6 +38,72 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 
 	body := []byte("trusted attachment integration body")
 	digest := sha256.Sum256(body)
+	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	lockOrderReservation, err := app.ReserveAttachment(ctx, lockOrderRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderReservation.ArtifactID, "claim", func(conn *sql.Conn) error {
+		var claimed bool
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.claim_upload($1,$2,$3::interval)`, uploader.ID, lockOrderReservation.ArtifactID, attachmentInterval(time.Minute)).Scan(&claimed); err != nil {
+			return err
+		}
+		if !claimed {
+			return errors.New("attachment claim returned no row")
+		}
+		return nil
+	})
+	var lockOrderGeneration int64
+	var lockOrderToken string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT attempt_generation,claim_token::text FROM attachment.uploads WHERE artifact_id=$1`, lockOrderReservation.ArtifactID).Scan(&lockOrderGeneration, &lockOrderToken); err != nil {
+		t.Fatal(err)
+	}
+	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderReservation.ArtifactID, "publication", func(conn *sql.Conn) error {
+		var published bool
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`,
+			uploader.ID, lockOrderReservation.ArtifactID, lockOrderGeneration, lockOrderToken,
+			"ready/"+lockOrderReservation.ArtifactID+".blob", lockOrderReservation.SizeBytes, hex.EncodeToString(lockOrderReservation.SHA256[:])).Scan(&published); err != nil {
+			return err
+		}
+		if !published {
+			return errors.New("attachment publication returned no row")
+		}
+		return nil
+	})
+	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderReservation.ArtifactID, "corruption marker", func(conn *sql.Conn) error {
+		var marked bool
+		if err := conn.QueryRowContext(ctx, `SELECT attachment.mark_corrupt($1)`, lockOrderReservation.ArtifactID).Scan(&marked); err != nil {
+			return err
+		}
+		if !marked {
+			return errors.New("attachment corruption marker returned false")
+		}
+		return nil
+	})
+	lockOrderReleaseRequest := lockOrderRequest
+	lockOrderReleaseRequest.IdempotencyKey = "a2000000-0000-4000-8000-000000000009"
+	lockOrderReleaseRequest.DisplayName = "lock-order-release.txt"
+	lockOrderRelease, err := app.ReserveAttachment(ctx, lockOrderReleaseRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, lockOrderRelease.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	cleanupToken, fenced, err := app.BeginAttachmentReap(ctx, lockOrderRelease.ArtifactID)
+	if err != nil || !fenced {
+		t.Fatalf("lock-order reap token=%q fenced=%t err=%v", cleanupToken, fenced, err)
+	}
+	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderRelease.ArtifactID, "expired release", func(conn *sql.Conn) error {
+		var released bool
+		if err := conn.QueryRowContext(ctx, `SELECT attachment.release_expired_upload($1,$2)`, lockOrderRelease.ArtifactID, cleanupToken).Scan(&released); err != nil {
+			return err
+		}
+		if !released {
+			return errors.New("expired attachment release returned false")
+		}
+		return nil
+	})
 	request := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	reservation, err := app.ReserveAttachment(ctx, request)
 	if err != nil || reservation.State != AttachmentReserved || reservation.ProjectID != project.ProjectID || reservation.SHA256 != digest {
@@ -78,6 +147,157 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	if retry, retryErr := app.PublishAttachment(ctx, publish); retryErr != nil || retry != ready {
 		t.Fatalf("READY retry=%#v err=%v", retry, retryErr)
+	}
+
+	uploaderLookup := "a3000000-0000-4000-8000-000000000001"
+	recipientLookup := "a3000000-0000-4000-8000-000000000002"
+	uploaderCredentialDigest := sha256.Sum256([]byte("attachment uploader credential"))
+	recipientCredentialDigest := sha256.Sum256([]byte("attachment recipient credential"))
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES
+($1,$2,'attachment uploader credential',$3),($4,$5,'attachment recipient credential',$6)`, uploaderLookup, uploader.ID, uploaderCredentialDigest[:], recipientLookup, outsider.ID, recipientCredentialDigest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES
+($1,'project',$3,'conversation.send'),($2,'project',$3,'attachment.download')`, uploader.ID, outsider.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	uploaderAuthority := relay.PrincipalAuthority{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1}
+	recipientAuthority := relay.PrincipalAuthority{PrincipalID: outsider.ID, CredentialLookupID: recipientLookup, CredentialGeneration: 1}
+	if err := app.AdvertiseEndpointsForPrincipal("attachment-uploader-machine", uploaderAuthority, []string{"agent/attachment/uploader"}, now, time.Hour); err != nil {
+		t.Fatalf("bind uploader endpoint: %v", err)
+	}
+	if err := app.AdvertiseEndpointsForPrincipal("attachment-recipient-machine", recipientAuthority, []string{"agent/attachment/recipient"}, now, time.Hour); err != nil {
+		t.Fatalf("bind recipient endpoint: %v", err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: "attachment-uploader-machine", PrincipalID: uploader.ID,
+		CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
+		ProjectID: project.ProjectID, IdempotencyKey: "attachment-conversation-create",
+		CreatorEndpoint: "agent/attachment/uploader", Now: now,
+		Members: []relay.Member{
+			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatalf("project conversation: %v", err)
+	}
+	message, duplicateMessage, err := app.AppendMessage(relay.AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
+		PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
+		FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+		ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
+	})
+	if err != nil || duplicateMessage {
+		t.Fatalf("attachment message=%#v duplicate=%t err=%v", message, duplicateMessage, err)
+	}
+	if retried, duplicate, err := app.AppendMessage(relay.AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
+		PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
+		FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+		ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
+	}); err != nil || !duplicate || retried.ID != message.ID {
+		t.Fatalf("attachment message retry=%#v duplicate=%t err=%v", retried, duplicate, err)
+	}
+	revokeSend, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := revokeSend.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability='conversation.send' AND revoked_at IS NULL`, uploader.ID, project.ProjectID); err != nil {
+		_ = revokeSend.Rollback()
+		t.Fatal(err)
+	}
+	retryResult := make(chan error, 1)
+	go func() {
+		_, _, retryErr := app.AppendMessage(relay.AppendInput{
+			ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
+			PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
+			FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+			ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
+		})
+		retryResult <- retryErr
+	}()
+	select {
+	case retryErr := <-retryResult:
+		_ = revokeSend.Rollback()
+		t.Fatalf("attachment retry bypassed uncommitted capability revocation: %v", retryErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := revokeSend.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-retryResult; !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("revoked attachment message retry error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'conversation.send')`, uploader.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	downloadRequest := AttachmentDownloadRequest{PrincipalID: outsider.ID, CredentialLookupID: recipientLookup, CredentialGeneration: 1, ArtifactID: reservation.ArtifactID}
+	if download, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); err != nil || download.ArtifactID != reservation.ArtifactID || download.ProjectID != project.ProjectID || download.StoragePath != ready.StoragePath {
+		t.Fatalf("recipient download=%#v err=%v", download, err)
+	}
+	if err := app.AdvertiseEndpointsForPrincipal("attachment-recipient-machine", uploaderAuthority, []string{"agent/attachment/recipient"}, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatalf("reassign recipient endpoint: %v", err)
+	}
+	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); err != nil {
+		t.Fatalf("endpoint reassignment transferred historical principal grant: %v", err)
+	}
+	if err := app.AdvertiseEndpoints("attachment-recipient-machine", []string{"agent/attachment/recipient"}, now.Add(2*time.Second), time.Hour); err != nil {
+		t.Fatalf("legacy endpoint advertisement: %v", err)
+	}
+	var legacyBindingCount int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM attachment.endpoint_principals WHERE endpoint='agent/attachment/recipient'`).Scan(&legacyBindingCount); err != nil || legacyBindingCount != 0 {
+		t.Fatalf("legacy advertisement retained principal binding count=%d err=%v", legacyBindingCount, err)
+	}
+	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); err != nil {
+		t.Fatalf("legacy endpoint advertisement changed historical principal grant: %v", err)
+	}
+	revokeCredential, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := revokeCredential.ExecContext(ctx, `UPDATE auth.device_credentials SET revoked_at=statement_timestamp() WHERE lookup_id=$1`, recipientLookup); err != nil {
+		_ = revokeCredential.Rollback()
+		t.Fatal(err)
+	}
+	advertiseResult := make(chan error, 1)
+	go func() {
+		advertiseResult <- app.AdvertiseEndpointsForPrincipal("attachment-recipient-machine", recipientAuthority, []string{"agent/attachment/recipient"}, now.Add(3*time.Second), time.Hour)
+	}()
+	select {
+	case advertiseErr := <-advertiseResult:
+		_ = revokeCredential.Rollback()
+		t.Fatalf("endpoint binding bypassed uncommitted credential revocation: %v", advertiseErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := revokeCredential.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-advertiseResult; !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("revoked endpoint binding error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET revoked_at=NULL WHERE lookup_id=$1`, recipientLookup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET generation=2 WHERE lookup_id=$1`, recipientLookup); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("stale credential generation download error=%v", err)
+	}
+	downloadRequest.CredentialGeneration = 2
+	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); err != nil {
+		t.Fatalf("credential rotation lost stable recipient grant: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability='attachment.download' AND revoked_at IS NULL`, outsider.ID, project.ProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AuthorizeAttachmentDownload(ctx, downloadRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked download capability error=%v", err)
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT * FROM attachment.recipient_grants`); err == nil {
+		t.Fatal("application role read attachment recipient grants directly")
 	}
 
 	duplicate := request
@@ -214,8 +434,102 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 
 	// Leave the shared integration database content-free for backup and merge tests.
-	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.ready_artifacts; DELETE FROM attachment.ready_blob_manifest; DELETE FROM attachment.uploads; DELETE FROM attachment.project_quotas; DELETE FROM attachment.principal_quotas; UPDATE attachment.global_quota SET reserved_bytes=0,used_bytes=0,reserved_uploads=0,ready_artifacts=0`); err != nil {
+	cleanupTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
 		t.Fatal(err)
+	}
+	cleanup := []struct {
+		query string
+		args  []any
+	}{
+		{`DELETE FROM attachment.recipient_grant_endpoints WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.recipient_grants WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.message_artifacts WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM attachment.conversation_projects WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM attachment.endpoint_principals WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
+		{`DELETE FROM relay.mail_deliveries WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_messages WHERE id=$1`, []any{message.ID}},
+		{`DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_conversations WHERE id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
+		{`DELETE FROM attachment.ready_artifacts`, nil},
+		{`DELETE FROM attachment.ready_blob_manifest`, nil},
+		{`DELETE FROM attachment.uploads`, nil},
+		{`DELETE FROM attachment.project_quotas`, nil},
+		{`DELETE FROM attachment.principal_quotas`, nil},
+		{`UPDATE attachment.global_quota SET reserved_bytes=0,used_bytes=0,reserved_uploads=0,ready_artifacts=0`, nil},
+	}
+	for _, statement := range cleanup {
+		if _, err := cleanupTx.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			_ = cleanupTx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := cleanupTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertAttachmentProjectBeforeUpload(
+	ctx context.Context,
+	t *testing.T,
+	app *Database,
+	ownerDB *sql.DB,
+	projectID string,
+	artifactID string,
+	operation string,
+	mutate func(*sql.Conn) error,
+) {
+	t.Helper()
+	projectBlocker, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectBlocker.ExecContext(ctx, `SELECT 1 FROM relay.projects WHERE id=$1 FOR UPDATE`, projectID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	mutationConn, err := app.db.Conn(ctx)
+	if err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	defer func() { _ = mutationConn.Close() }()
+	var mutationPID int
+	if err := mutationConn.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&mutationPID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatal(err)
+	}
+	mutationResult := make(chan error, 1)
+	go func() { mutationResult <- mutate(mutationConn) }()
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waitType sql.NullString
+		if err := ownerDB.QueryRowContext(ctx, `SELECT wait_event_type FROM pg_stat_activity WHERE pid=$1`, mutationPID).Scan(&waitType); err != nil {
+			_ = projectBlocker.Rollback()
+			t.Fatal(err)
+		}
+		if waitType.Valid && waitType.String == "Lock" {
+			break
+		}
+		if time.Now().After(waitDeadline) {
+			_ = projectBlocker.Rollback()
+			t.Fatalf("attachment %s did not block on the project lock", operation)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `SELECT 1 FROM attachment.uploads WHERE artifact_id=$1 FOR UPDATE NOWAIT`, artifactID); err != nil {
+		_ = projectBlocker.Rollback()
+		t.Fatalf("attachment %s locked upload before project: %v", operation, err)
+	}
+	if err := projectBlocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-mutationResult; err != nil {
+		t.Fatalf("lock-ordered attachment %s: %v", operation, err)
 	}
 }
 

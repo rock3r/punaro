@@ -238,6 +238,31 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 		t.Fatal(err)
 	}
 	reapTestAttachment(ctx, t, app, mergeFence.ArtifactID)
+	recipientFenceConversation := "99999999-9999-4999-8999-999999999988"
+	recipientFenceTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recipientFenceTx.ExecContext(ctx, `INSERT INTO relay.mail_conversations(id) VALUES ($1)`, recipientFenceConversation); err != nil {
+		_ = recipientFenceTx.Rollback()
+		t.Fatal(err)
+	}
+	if _, err := recipientFenceTx.ExecContext(ctx, `INSERT INTO attachment.conversation_projects(conversation_id,project_id,bound_by) VALUES ($1,$2,$3)`, recipientFenceConversation, source.ProjectID, actor.ID); err != nil {
+		_ = recipientFenceTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := recipientFenceTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.PreviewProjectIdentityMerge(ctx, previewRequest); !errors.Is(err, ErrProjectMergeAttachmentState) {
+		t.Fatalf("recipient-bound project merge preview error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.conversation_projects WHERE conversation_id=$1`, recipientFenceConversation); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_conversations WHERE id=$1`, recipientFenceConversation); err != nil {
+		t.Fatal(err)
+	}
 	preview, err := app.PreviewProjectIdentityMerge(ctx, previewRequest)
 	if err != nil {
 		t.Fatal(err)

@@ -116,7 +116,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testV5UpdateBridgeIntegration(ctx, t, ownerDB, ownerFile)
+	testV5UpdateBridgeIntegration(ctx, t, ownerDB, ownerFile, appFile)
 
 	app, err = OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -324,6 +324,56 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("trusted-attachment catalog restoration did not recover readiness: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.endpoint_principals DROP CONSTRAINT endpoint_principals_credential_generation_check; ALTER TABLE attachment.endpoint_principals ADD CONSTRAINT endpoint_principals_credential_generation_check CHECK (credential_generation >= 1 OR true)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive recipient credential-generation constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.endpoint_principals DROP CONSTRAINT endpoint_principals_credential_generation_check; ALTER TABLE attachment.endpoint_principals ADD CONSTRAINT endpoint_principals_credential_generation_check CHECK (credential_generation >= 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.recipient_grants_principal; CREATE INDEX recipient_grants_principal ON attachment.recipient_grants (artifact_id,recipient_principal_id)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("recipient grant lookup index drift state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX attachment.recipient_grants_principal; CREATE INDEX recipient_grants_principal ON attachment.recipient_grants (recipient_principal_id,artifact_id)`); err != nil {
+		t.Fatal(err)
+	}
+	var downloadDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('attachment.authorize_download(uuid,uuid,bigint,uuid)'::regprocedure)`).Scan(&downloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	driftedDownloadDefinition := strings.Replace(downloadDefinition, "TABLE(artifact_id uuid", "TABLE(wrong_artifact_id uuid", 1)
+	if driftedDownloadDefinition == downloadDefinition {
+		t.Fatal("download function definition did not expose the expected TABLE result signature")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, driftedDownloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) FROM PUBLIC; GRANT EXECUTE ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("attachment download result-signature drift state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, downloadDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) FROM PUBLIC; GRANT EXECUTE ON FUNCTION attachment.authorize_download(uuid,uuid,bigint,uuid) TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("attachment-recipient catalog restoration did not recover readiness: %v", err)
 	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
@@ -1220,7 +1270,7 @@ func testEndpointAdvertisementUsesCanonicalLockOrder(t *testing.T, app *Database
 	}
 }
 
-func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {
+func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile, appFile string) {
 	t.Helper()
 	current := CurrentManifest()
 	v5Manifest := Manifest{MinSupported: 5, MaxSupported: 5, Migrations: append([]Migration(nil), current.Migrations[:5]...)}
@@ -1343,6 +1393,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	v7Manifest := Manifest{MinSupported: 7, MaxSupported: 7, Migrations: append([]Migration(nil), current.Migrations[:7]...)}
 	v8Manifest := Manifest{MinSupported: 8, MaxSupported: 8, Migrations: append([]Migration(nil), current.Migrations[:8]...)}
 	v9Manifest := Manifest{MinSupported: 8, MaxSupported: 9, Migrations: append([]Migration(nil), current.Migrations[:9]...)}
+	v10Manifest := Manifest{MinSupported: 9, MaxSupported: 10, Migrations: append([]Migration(nil), current.Migrations[:10]...)}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
 		SourceRelease:           "v0.7.0",
@@ -1539,8 +1590,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if snapshot, inspectErr := inspect(ctx, ownerDB); inspectErr != nil {
 		t.Fatalf("inspect v9 schema with current manifest: %v", inspectErr)
-	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 9 {
-		t.Fatalf("current manifest rejected exact v9 schema: %#v", state)
+	} else if state := Classify(snapshot, current); state.Classification != UpgradeRequired || state.Version != 9 {
+		t.Fatalf("current manifest did not require the v9 to v10 update: %#v", state)
 	}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2088",
@@ -1556,7 +1607,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9191919191919191919191919191919191919191919191919191919191919191",
 		ComposeSHA256:           "9292929292929292929292929292929292929292929292929292929292929292",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(v10Manifest),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
@@ -1590,16 +1641,94 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v10Manifest); err != nil || state.Classification != Compatible || state.Version != 10 {
 		t.Fatalf("v10 migration state=%#v err=%v", state, err)
 	}
-	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v10 schema: %v", err)
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
+		t.Fatal("mail cutover accepted v10 while the current v11 schema was pending")
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v10 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	v10App, err := OpenApplication(ctx, Config{DSNFile: appFile})
+	if err != nil {
+		t.Fatalf("open current application binary against compatible v10 schema: %v", err)
+	}
+	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", []string{"agent/v10-compatible"}, time.Now().UTC(), time.Minute); err != nil {
+		_ = v10App.Close()
+		t.Fatalf("v11 binary could not advertise endpoints against compatible v10 schema: %v", err)
+	}
+	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", nil, time.Now().UTC().Add(time.Second), time.Minute); err != nil {
+		_ = v10App.Close()
+		t.Fatalf("v11 binary could not withdraw endpoints against compatible v10 schema: %v", err)
+	}
+	if err := v10App.Close(); err != nil {
+		t.Fatalf("close compatible v10 application: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE machine_id='v10-compatible-machine'`); err != nil {
+		t.Fatalf("remove compatible v10 endpoint fixture: %v", err)
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
+		SourceRelease:           "v0.10.0",
+		TargetRelease:           "v0.11.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
+		SourceSchema:            10,
+		TargetSchema:            11,
+		SchemaMin:               10,
+		SchemaMax:               11,
+		RollbackFloor:           10,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
+		ComposeSHA256:           "9595959595959595959595959595959595959595959595959595959595959595",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v11 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v11 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd9771991100",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:abababababababababababababababababababababababababababababababab",
+		ExportedSnapshotID: "00000003-0000001B-6",
+		ManifestSHA256:     "9696969696969696969696969696969696969696969696969696969696969696",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v11 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v11 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		t.Fatalf("v11 migration state=%#v err=%v", state, err)
+	}
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		t.Fatalf("mail cutover rejected exact v11 schema: %v", err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v11 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
@@ -1807,6 +1936,13 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 	}
 	defer func() { _ = db.Close() }()
 	queries := []string{
+		`WITH relations AS (SELECT unnest(ARRAY[to_regclass('attachment.endpoint_principals'),to_regclass('attachment.conversation_projects'),to_regclass('attachment.message_artifacts'),to_regclass('attachment.recipient_grants'),to_regclass('attachment.recipient_grant_endpoints')]) AS oid), routines AS (SELECT unnest(ARRAY[to_regprocedure('attachment.device_authority_current(uuid,uuid,bigint)'),to_regprocedure('attachment.bind_endpoint_principals(text,uuid,uuid,bigint,jsonb,timestamp with time zone)'),to_regprocedure('attachment.bind_conversation_project(uuid,uuid,bigint,uuid,text,uuid)'),to_regprocedure('attachment.bind_message_artifacts(uuid,uuid,bigint,uuid,jsonb)'),to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)'),to_regprocedure('attachment.authorize_download(uuid,uuid,bigint,uuid)')]) AS oid) SELECT format('v11-counts:tables=%s:columns=%s:constraints=%s:fks=%s:indexes=%s:table-acls=%s:routines=%s:routine-acls=%s', (SELECT count(*) FROM pg_class,relations WHERE pg_class.oid=relations.oid), (SELECT count(*) FROM pg_attribute,relations WHERE attrelid=relations.oid AND attnum>0 AND NOT attisdropped), (SELECT count(*) FROM pg_constraint,relations WHERE conrelid=relations.oid AND contype<>'n'), (SELECT count(*) FROM pg_constraint,relations WHERE conrelid=relations.oid AND contype='f'), (SELECT count(*) FROM pg_index,relations WHERE indrelid=relations.oid), (SELECT count(*) FROM pg_class AS relation JOIN relations ON relation.oid=relations.oid CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl), (SELECT count(*) FROM pg_proc,routines WHERE pg_proc.oid=routines.oid), (SELECT count(*) FROM pg_proc JOIN routines ON pg_proc.oid=routines.oid CROSS JOIN LATERAL aclexplode(COALESCE(pg_proc.proacl,acldefault('f',pg_proc.proowner))) AS acl))`,
+		`SELECT format('v11-column:%s:%s:%s:%s:%s', attrelid::regclass::text, attname, atttypid::regtype::text, atttypmod, attnotnull) FROM pg_attribute WHERE attrelid = ANY(ARRAY[to_regclass('attachment.endpoint_principals'),to_regclass('attachment.conversation_projects'),to_regclass('attachment.message_artifacts'),to_regclass('attachment.recipient_grants'),to_regclass('attachment.recipient_grant_endpoints')]) AND attnum>0 AND NOT attisdropped ORDER BY attrelid::regclass::text,attnum`,
+		`SELECT format('v11-constraint:%s:%s:%s:%s:%s:%s:%s:%s:%s', conrelid::regclass::text,conname,contype,conkey::text,NULLIF(confrelid,0)::regclass::text,confkey::text,convalidated,condeferrable,COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint WHERE conrelid = ANY(ARRAY[to_regclass('attachment.endpoint_principals'),to_regclass('attachment.conversation_projects'),to_regclass('attachment.message_artifacts'),to_regclass('attachment.recipient_grants'),to_regclass('attachment.recipient_grant_endpoints')]) AND contype<>'n' ORDER BY conrelid::regclass::text,conname`,
+		`SELECT format('v11-index:%s:%s:%s:%s:%s:%s:%s:%s',indexrelid::regclass::text,indrelid::regclass::text,indkey::text,indisunique,indisprimary,indisvalid,indisready,COALESCE(pg_get_expr(indpred,indrelid),'')) FROM pg_index WHERE indrelid = ANY(ARRAY[to_regclass('attachment.endpoint_principals'),to_regclass('attachment.conversation_projects'),to_regclass('attachment.message_artifacts'),to_regclass('attachment.recipient_grants'),to_regclass('attachment.recipient_grant_endpoints')]) ORDER BY indexrelid::regclass::text`,
+		`SELECT format('v11-routine:%s:%s:%s:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(btrim(proc.prosrc)),language.lanname,proc.provolatile,proc.prosecdef,pg_get_userbyid(proc.proowner),pg_get_function_result(proc.oid),proc.proretset,COALESCE(array_to_string(proc.proconfig,','),'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid = ANY(ARRAY[to_regprocedure('attachment.device_authority_current(uuid,uuid,bigint)'),to_regprocedure('attachment.bind_endpoint_principals(text,uuid,uuid,bigint,jsonb,timestamp with time zone)'),to_regprocedure('attachment.bind_conversation_project(uuid,uuid,bigint,uuid,text,uuid)'),to_regprocedure('attachment.bind_message_artifacts(uuid,uuid,bigint,uuid,jsonb)'),to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)'),to_regprocedure('attachment.authorize_download(uuid,uuid,bigint,uuid)')]) ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('v11-routine-acl:%s:%s:%s:%s',proc.oid::regprocedure::text,COALESCE(grantee.rolname,'PUBLIC'),acl.privilege_type,acl.is_grantable) FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE proc.oid = ANY(ARRAY[to_regprocedure('attachment.device_authority_current(uuid,uuid,bigint)'),to_regprocedure('attachment.bind_endpoint_principals(text,uuid,uuid,bigint,jsonb,timestamp with time zone)'),to_regprocedure('attachment.bind_conversation_project(uuid,uuid,bigint,uuid,text,uuid)'),to_regprocedure('attachment.bind_message_artifacts(uuid,uuid,bigint,uuid,jsonb)'),to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)'),to_regprocedure('attachment.authorize_download(uuid,uuid,bigint,uuid)')]) ORDER BY proc.oid::regprocedure::text,grantee.rolname`,
+		`SELECT format('v11-table-acl:%s:%s:%s:%s:%s',relation.oid::regclass::text,pg_get_userbyid(relation.relowner),COALESCE(grantee.rolname,'PUBLIC'),acl.privilege_type,acl.is_grantable) FROM pg_class AS relation CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE relation.oid = ANY(ARRAY[to_regclass('attachment.endpoint_principals'),to_regclass('attachment.conversation_projects'),to_regclass('attachment.message_artifacts'),to_regclass('attachment.recipient_grants'),to_regclass('attachment.recipient_grant_endpoints')]) ORDER BY relation.oid::regclass::text,grantee.rolname,acl.privilege_type`,
 		`SELECT format('constraint:%s:%s:%s', conrelid::regclass::text, conkey::text, pg_get_expr(conbin, conrelid)) FROM pg_constraint WHERE conrelid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) AND contype = 'c' ORDER BY conrelid::regclass::text, conkey::text`,
 		`SELECT format('key:%s:%s:%s', conrelid::regclass::text, contype, conkey::text) FROM pg_constraint WHERE conrelid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) AND contype IN ('p','u') ORDER BY conrelid::regclass::text, contype, conkey::text`,
 		`SELECT format('column:%s:%s:%s:%s:%s:%s', attrelid::regclass::text, attname, atttypid::regtype::text, atttypmod, attnotnull, COALESCE(pg_get_expr(adbin, adrelid),'')) FROM pg_attribute LEFT JOIN pg_attrdef ON adrelid=attrelid AND adnum=attnum WHERE attrelid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) AND attnum > 0 AND NOT attisdropped ORDER BY attrelid::regclass::text, attnum`,

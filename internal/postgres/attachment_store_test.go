@@ -94,3 +94,29 @@ func TestAttachmentPublishRequestValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestAttachmentDownloadRequestValidation(t *testing.T) {
+	valid := AttachmentDownloadRequest{
+		PrincipalID:          "11111111-1111-4111-8111-111111111111",
+		CredentialLookupID:   "22222222-2222-4222-8222-222222222222",
+		CredentialGeneration: 2,
+		ArtifactID:           "33333333-3333-4333-8333-333333333333",
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(*AttachmentDownloadRequest){
+		"principal":  func(request *AttachmentDownloadRequest) { request.PrincipalID = "friendly" },
+		"lookup":     func(request *AttachmentDownloadRequest) { request.CredentialLookupID = "friendly" },
+		"generation": func(request *AttachmentDownloadRequest) { request.CredentialGeneration = 0 },
+		"artifact":   func(request *AttachmentDownloadRequest) { request.ArtifactID = "friendly" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := valid
+			edit(&request)
+			if err := request.Validate(); err == nil {
+				t.Fatal("invalid download request accepted")
+			}
+		})
+	}
+}

@@ -40,8 +40,12 @@ func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 
 // CreateConversationRequestHash binds a conversation idempotency key to the
 // normalized creator and membership set.
-func CreateConversationRequestHash(creatorEndpoint string, members []Member) string {
-	return createConversationHash(creatorEndpoint, members)
+func CreateConversationRequestHash(creatorEndpoint string, members []Member, projectID ...string) string {
+	digest := createConversationHash(creatorEndpoint, members)
+	if len(projectID) == 0 || projectID[0] == "" {
+		return digest
+	}
+	return stableHash(digest, projectID[0])
 }
 
 // Backend is the complete durable mail boundary shared by the SQLite parity
@@ -60,6 +64,21 @@ type Backend interface {
 	RecipientCursor(machineID, endpoint, conversationID string, now time.Time) (int64, error)
 	RecipientMachines(messageID string, now time.Time) ([]string, error)
 	ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error)
+}
+
+// PrincipalEndpointBackend atomically binds advertised endpoint ownership to
+// the stable authenticated principal used by trusted attachment snapshots.
+// Legacy backends remain mail-only and need not implement it.
+type PrincipalEndpointBackend interface {
+	AdvertiseEndpointsForPrincipal(machineID string, authority PrincipalAuthority, endpoints []string, now time.Time, ttl time.Duration) error
+}
+
+// PrincipalAuthority is the non-secret, generation-fenced result of device
+// credential authentication. It is never populated from request JSON.
+type PrincipalAuthority struct {
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
 }
 
 // NonceStore atomically consumes one signed-request nonce until its expiry.
