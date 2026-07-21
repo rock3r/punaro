@@ -20,7 +20,6 @@ mailbox="$fixture_dir/agent-mailbox"
 mailbox_log="$fixture_dir/mailbox.log"
 guidance_project="$fixture_dir/project"
 mailbox_state="$fixture_dir/custom-mailbox"
-authority="$fixture_dir/authority"
 mkdir -p "$home" "$guidance_project"
 
 cat >"$mailbox" <<'EOF'
@@ -41,20 +40,16 @@ run_install() {
 		--machine-id macbook \
 		--agent-mailbox-bin "$mailbox" \
 		--mailbox-state-dir "$mailbox_state" \
-		--agent-guidance-dir "$guidance_project" \
-		--attachment-authority-public "$authority/public.json" \
-		--attachment-role receiver
+		--agent-guidance-dir "$guidance_project"
 }
 
-HOME="$home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" sh "$repo_dir/scripts/provision-attachment-v3.sh" authority --directory "$authority" >"$fixture_dir/authority.out"
 run_install >"$fixture_dir/first.out"
 
 adapter="$home/.local/bin/punaro-adapter"
-attachment="$home/.local/bin/punaro-attachment"
+attachment="$home/.local/bin/punaro-trusted-attachment"
 config="$home/.config/punaro/adapter.env"
 key="$home/.config/punaro/machine.key"
 enrollment="$home/.config/punaro/enrollment.json"
-attachment_dir="$home/.config/punaro/attachment-v3"
 plist="$home/Library/LaunchAgents/org.punaro.adapter.plist"
 
 file_mode() {
@@ -70,8 +65,6 @@ file_mode() {
 [ -f "$config" ] || { printf '%s\n' 'adapter environment was not installed' >&2; exit 1; }
 [ -f "$key" ] || { printf '%s\n' 'machine key was not installed' >&2; exit 1; }
 [ -f "$enrollment" ] || { printf '%s\n' 'public enrollment record was not retained' >&2; exit 1; }
-[ -f "$attachment_dir/attachment-v3.env" ] || { printf '%s\n' 'attachment environment was not provisioned' >&2; exit 1; }
-[ -f "$attachment_dir/device-enrollment.json" ] || { printf '%s\n' 'attachment enrollment was not retained' >&2; exit 1; }
 [ -f "$guidance_project/AGENTS.md" ] || { printf '%s\n' 'opt-in agent guidance was not installed' >&2; exit 1; }
 if [ "$(uname -s)" = Darwin ]; then
 	[ -f "$plist" ] || { printf '%s\n' 'LaunchAgent was not installed' >&2; exit 1; }
@@ -87,8 +80,6 @@ grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=https://relay.example.test' "$config"
 grep -Fqx 'PUNARO_MACHINE_ID=macbook' "$config"
 grep -Fqx 'PUNARO_ATTACHED_GROUP=group/punaro-attached' "$config"
 grep -Fq '"endpoint_prefixes":["agent/macbook/"]' "$enrollment"
-grep -Fqx 'PUNARO_ATTACHMENT_RELAY_URL=https://relay.example.test' "$attachment_dir/attachment-v3.env"
-grep -Fqx 'PUNARO_ATTACHMENT_RECIPIENT_GENERATION=1' "$attachment_dir/attachment-v3.env"
 grep -Fq 'group create --group group/punaro-attached' "$mailbox_log"
 grep -Fq '"id":"macbook"' "$fixture_dir/first.out"
 if grep -Fq 'PUNARO_CF_ACCESS_CLIENT_SECRET' "$fixture_dir/first.out"; then
@@ -100,22 +91,25 @@ cp "$enrollment" "$fixture_dir/enrollment.before"
 run_install >"$fixture_dir/second.out"
 cmp "$fixture_dir/enrollment.before" "$enrollment"
 
-# A receiver-only attachment enrollment must never be presented as a completed
-# sender setup on a later idempotent run.  The operator needs a new enrollment
-# and authority approval for the broader role.
 set +e
 HOME="$home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
 	sh "$repo_dir/scripts/install-adapter.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id macbook \
 		--agent-mailbox-bin "$mailbox" \
-		--mailbox-state-dir "$mailbox_state" \
-		--attachment-authority-public "$authority/public.json" \
-		--attachment-role both >"$fixture_dir/attachment-upgrade.out" 2>&1
+		--attachment-role receiver >"$fixture_dir/attachment-retired.out" 2>&1
 status=$?
 set -e
-[ "$status" -eq 2 ] || { printf '%s\n' 'receiver attachment setup was silently accepted as sender-capable' >&2; exit 1; }
-grep -Fqx 'existing attachment setup is receiver-only; use a new --attachment-directory for sender or both and approve its new public enrollment' "$fixture_dir/attachment-upgrade.out"
+[ "$status" -eq 2 ] || { printf '%s\n' 'retired attachment-v3 installer option was accepted' >&2; exit 1; }
+grep -Fqx 'unknown option: --attachment-role' "$fixture_dir/attachment-retired.out"
+
+printf '%s\n' legacy >"$home/.local/bin/punaro-attachment"
+set +e
+run_install >"$fixture_dir/legacy-artifact.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'installer accepted an existing retired attachment binary' >&2; exit 1; }
+grep -Fq 'retired attachment artifact exists at' "$fixture_dir/legacy-artifact.out"
 
 default_home="$fixture_dir/default-home"
 mkdir -p "$default_home"

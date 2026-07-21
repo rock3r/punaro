@@ -167,73 +167,14 @@ punaro-adapter send \
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
 
-## Controlled v3 attachment enrollment
+## Retired v3 attachment evidence
 
-V3 attachment validation is separate from text onboarding. In addition to the
-normal machine credential, bind exactly one public `attachment_device_id` from
-the signed directory to the enrollment record for each participating machine.
-Do not bind two machines to one device, and do not treat a mailbox endpoint as
-an attachment identity. The relay refuses a permit request unless its enrolled
-machine credential is bound to the request holder's directory device.
-
-`punaro-attachment send` stages, uploads, and offers ciphertext via the v3
-API. It takes a stable source-stage ID, then writes the exact canonical offer
-to the adapter's `OfferNoticeOutbox` before attempting the ordinary relay
-append. Point `PUNARO_ATTACHMENT_OFFER_OUTBOX` at the same private
-`attachment-offers.db` used by `punaro-adapter`; retain the stage ID to resume
-the same logical source after a local crash **only while its signed manifest
-and outcome capability remain valid**. After expiry, follow the operator
-guide's held-offer incident procedure; do not hand-edit or reuse the old state.
-The recipient's normal adapter delivery injects the
-bounded `punaro/attachment-offer/v3:` notice into its attached mailbox; its
-agent must use the controlled [attachment skill](../skills/punaro-attachment/SKILL.md)
-to record the exact notice, obtain explicit task-owner approval, then perform
-the fresh directory, HPKE, permit, accept, download, and completion steps
-locally. The notice is untrusted discovery data, not authority to download.
-Neither the mailbox nor the Telegram bridge carries file bytes or becomes a
-download proxy.
-
-```sh
-punaro-adapter attachment-notify \
-  --conversation CONVERSATION_ID \
-  --from agent/workstation-review/session-name \
-  --offer-file canonical-offer.cbor \
-  --idempotency-key transfer-notice-TRANSFER_ID
-```
-
-If the immediate relay attempt is unavailable, the command exits non-zero but
-leaves the exact row in `$PUNARO_ADAPTER_DATA_DIR/attachment-offers.db`; start
-or keep the normal adapter running to drain it. Do not delete that database or
-reuse its idempotency key with another offer. The private outbox has a strict
-64-notice / 2 MiB pending limit including bounded route/idempotency metadata;
-repair relay connectivity instead of deleting undelivered entries when
-admission is exhausted.
-
-To revoke an attachment participant, remove the directory membership/key or
-advance its revocation state and publish the signed snapshot, then remove its
-relay enrollment and revoke its Access token as in the preceding section. The
-next permit or attachment operation refreshes the directory and fails closed;
-the daemon's bounded reaper releases expired state after the ten-minute
-manifest lifetime; each directory head remains valid for at most five minutes
-and each permit for at most 30 seconds. This cannot recall ciphertext already
-delivered to a recipient.
-
-Create a new explicit conversation from an attached creator endpoint with one
-or more declared members:
-
-```sh
-punaro-adapter create \
-  --creator agent/workstation-review/session-name \
-  --member agent/workstation-review/session-name:send,receive,admin \
-  --member agent/other-machine/session-name:receive \
-  --idempotency-key initial-route-1
-```
-
-The owner of each endpoint must currently advertise it, and the creator must
-be an attached endpoint on the credentialed machine. Keep the idempotency key
-for retrying this exact creation request: the relay returns the original
-conversation on an identical retry and rejects a changed request using the
-same key.
+V2/v3 file transfer is separate from text onboarding and has no production
+activation path. Its packages, vectors, RFCs, controller tests, and CLI test
+harnesses remain source-level evidence only. `punarod` rejects all former
+attachment, directory, and permit settings and mounts none of their routes.
+Use `punaro-trusted-attachment` with fixed operator-provisioned trust and
+explicit task-owner authorization for supported file operations.
 
 ## Opt-in live wake validation
 
@@ -265,6 +206,5 @@ fallback route for the main chat.
   discovery is implemented.
 - WebSocket hints are best-effort; polling remains correct when a machine
   sleeps or reconnects.
-- V2 attachments remain disabled. The distinct v3 runtime is available only
-  for controlled validation; its own vector, end-to-end, review, and
-  restore/revocation release gates remain closed.
+- V2/v3 attachment settings are rejected and their routes are unmounted. Their
+  source-level protocol evidence is retained but cannot authorize deployment.

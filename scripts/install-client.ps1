@@ -6,9 +6,6 @@ param(
     [string]$MailboxStateDir = (Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'),
     [string]$AttachedGroup = 'group/punaro-attached',
     [string]$AgentGuidanceDir,
-    [string]$AttachmentAuthorityPublic,
-    [ValidateSet('receiver', 'sender', 'both')][string]$AttachmentRole,
-    [string]$AttachmentDirectory,
     [switch]$Enable
 )
 
@@ -102,102 +99,11 @@ function Invoke-Program([string]$Program, [string[]]$Arguments, [string]$Descrip
     return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
 }
 
-function New-Base64UrlId([int]$Bytes) {
-    $raw = New-Object byte[] $Bytes
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($raw)
-    return [Convert]::ToBase64String($raw).TrimEnd('=').Replace('+', '-').Replace('/', '_')
-}
-
-function Assert-Authority([string]$Path) {
-    Get-RegularFile -Path $Path -Label 'attachment authority public record' | Out-Null
-    try { $authority = [System.IO.File]::ReadAllText($Path) | ConvertFrom-Json } catch { Stop-Install 'attachment authority public record is invalid JSON' }
-    if ($authority.version -ne 3) { Stop-Install 'attachment authority public record must be version 3' }
-    foreach ($name in @('audience', 'root_key_id', 'root_public_key')) {
-        if ([string]$authority.$name -notmatch '^[A-Za-z0-9_-]{43}$') { Stop-Install "attachment authority public record has invalid $name" }
-    }
-    return $authority
-}
-
-function Install-AttachmentClient {
-    param(
-        [string]$Directory,
-        [string]$AuthorityPublic,
-        [string]$Role,
-        [string]$Machine,
-        [string]$Relay,
-        [string]$AdapterState,
-        [string]$Bin
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Directory)) { $Directory = Join-Path $configDir 'attachment-v3' }
-    $Directory = Get-FullPath $Directory
-    $environmentFile = Join-Path $Directory 'attachment-v3.env'
-    $enrollmentFile = Join-Path $Directory 'device-enrollment.json'
-    if (Test-Path -LiteralPath $Directory) {
-        Get-RegularFile -Path $environmentFile -Label 'existing attachment environment' | Out-Null
-        Get-RegularFile -Path $enrollmentFile -Label 'existing attachment enrollment' | Out-Null
-        try { $existing = [System.IO.File]::ReadAllText($enrollmentFile) | ConvertFrom-Json } catch { Stop-Install 'existing attachment enrollment is invalid JSON' }
-        $environment = Read-PunaroEnvironment -Path $environmentFile
-        if ($existing.machine_id -ne $Machine -or $environment['PUNARO_ATTACHMENT_RELAY_URL'] -ne $Relay) { Stop-Install 'existing attachment setup belongs to a different machine or relay' }
-        if ($existing.role -ne $Role) {
-            if ($existing.role -eq 'receiver' -and ($Role -eq 'sender' -or $Role -eq 'both')) {
-                Stop-Install 'existing attachment setup is receiver-only; use a new -AttachmentDirectory for sender or both and approve its new public enrollment'
-            }
-            Stop-Install 'existing attachment setup role does not match -AttachmentRole; use a new -AttachmentDirectory and approve its new public enrollment'
-        }
-        return
-    }
-
-    $authority = Assert-Authority -Path $AuthorityPublic
-    Ensure-PrivateDirectory -Path $Directory
-    $directoryBinary = Join-Path $Bin 'punaro-directory.exe'
-    Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-directory') -Output $directoryBinary
-    $signingPublic = Invoke-Program -Program $directoryBinary -Arguments @('keygen', '--algorithm', 'ed25519', '--private-key-file', (Join-Path $Directory 'device-signing.private')) -Description 'attachment signing-key creation' | ConvertFrom-Json
-    $hpkePublic = Invoke-Program -Program $directoryBinary -Arguments @('keygen', '--algorithm', 'x25519', '--private-key-file', (Join-Path $Directory 'device-hpke.private')) -Description 'attachment HPKE-key creation' | ConvertFrom-Json
-    Protect-PunaroPath -Path (Join-Path $Directory 'device-signing.private')
-    Protect-PunaroPath -Path (Join-Path $Directory 'device-hpke.private')
-    $deviceId = New-Base64UrlId 16
-    $device = [ordered]@{ device_id = $deviceId; generation = 1; signing_key_id = (New-Base64UrlId 32); signing_public_key = $signingPublic.public_key; hpke_key_id = (New-Base64UrlId 32); hpke_public_key = $hpkePublic.public_key; revoked = $false }
-    $enrollment = [ordered]@{ version = 3; machine_id = $Machine; role = $Role; attachment_device_id = $deviceId; directory_entry = [ordered]@{ device = $device } }
-    Write-NewPrivateText -Path $enrollmentFile -Text (($enrollment | ConvertTo-Json -Compress -Depth 8) + "`n")
-
-    $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('# Created by Punaro attachment-v3 provisioning. This owner-only file contains paths, not credentials.')
-    $lines.Add("PUNARO_ATTACHMENT_RELAY_URL=$Relay")
-    $lines.Add("PUNARO_ATTACHMENT_DIRECTORY_CHECKPOINT_FILE=$(Join-Path $Directory 'directory-checkpoints.db')")
-    $lines.Add("PUNARO_DIRECTORY_AUDIENCE=$($authority.audience)")
-    $lines.Add("PUNARO_DIRECTORY_ROOT_KEY_ID=$($authority.root_key_id)")
-    $lines.Add("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY=$($authority.root_public_key)")
-    if ($Role -eq 'receiver' -or $Role -eq 'both') {
-        $lines.Add("PUNARO_ATTACHMENT_RECIPIENT_SIGNING_PRIVATE_KEY_FILE=$(Join-Path $Directory 'device-signing.private')")
-        $lines.Add("PUNARO_ATTACHMENT_RECIPIENT_HPKE_PRIVATE_KEY_FILE=$(Join-Path $Directory 'device-hpke.private')")
-        $lines.Add("PUNARO_ATTACHMENT_RECIPIENT_ID=$deviceId")
-        $lines.Add('PUNARO_ATTACHMENT_RECIPIENT_GENERATION=1')
-        $lines.Add("PUNARO_ATTACHMENT_CONTROLLER_JOURNAL=$(Join-Path $Directory 'controller.db')")
-    }
-    if ($Role -eq 'sender' -or $Role -eq 'both') {
-        $dpapiBinary = Join-Path $Bin 'punaro-dpapi.exe'
-        Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-dpapi') -Output $dpapiBinary
-        $hostKeyFile = Join-Path $Directory 'sender-host-key.dpapi'
-        Invoke-Program -Program $dpapiBinary -Arguments @('--file', $hostKeyFile) -Description 'Windows DPAPI sender-key creation' | Out-Null
-        Protect-PunaroPath -Path $hostKeyFile
-        $lines.Add("PUNARO_ATTACHMENT_SENDER_SIGNING_PRIVATE_KEY_FILE=$(Join-Path $Directory 'device-signing.private')")
-        $lines.Add("PUNARO_ATTACHMENT_SENDER_ID=$deviceId")
-        $lines.Add('PUNARO_ATTACHMENT_SENDER_GENERATION=1')
-        $lines.Add("PUNARO_ATTACHMENT_SENDER_JOURNAL=$(Join-Path $Directory 'sender.db')")
-        $lines.Add("PUNARO_ATTACHMENT_ARTIFACT_STORE=$(Join-Path $Directory 'artifacts.db')")
-        $lines.Add("PUNARO_ATTACHMENT_OFFER_OUTBOX=$(Join-Path $AdapterState 'attachment-offers.db')")
-        $lines.Add("PUNARO_ATTACHMENT_HOST_DPAPI_FILE=$hostKeyFile")
-    }
-    Write-NewPrivateText -Path $environmentFile -Text (($lines -join "`n") + "`n")
-}
-
 if ($env:OS -ne 'Windows_NT') { Stop-Install 'Windows client installation must run on Windows' }
 if ($MachineId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Stop-Install 'machine ID must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen' }
 if ($AttachedGroup -notmatch '^group/[A-Za-z0-9._/-]+$') { Stop-Install 'attached group must be a group/ address' }
 try { $relay = [Uri]$RelayUrl } catch { Stop-Install 'relay URL must use https://' }
 if (-not $relay.IsAbsoluteUri -or $relay.Scheme -ne 'https') { Stop-Install 'relay URL must use https://' }
-if (([string]::IsNullOrWhiteSpace($AttachmentAuthorityPublic)) -ne ([string]::IsNullOrWhiteSpace($AttachmentRole))) { Stop-Install 'attachment setup requires both -AttachmentAuthorityPublic and -AttachmentRole' }
 
 $repoDir = Split-Path -Parent $PSScriptRoot
 $root = Join-Path $env:LOCALAPPDATA 'Punaro'
@@ -209,6 +115,16 @@ $keyFile = Join-Path $configDir 'machine.key'
 $enrollmentFile = Join-Path $configDir 'enrollment.json'
 $runner = Join-Path $root 'Run-PunaroAdapter.ps1'
 foreach ($directory in @($root, $binDir, $configDir, $stateDir)) { Ensure-PrivateDirectory -Path $directory }
+foreach ($retiredPath in @(
+    (Join-Path $binDir 'punaro-attachment.exe'),
+    (Join-Path $binDir 'punaro-directory.exe'),
+    (Join-Path $binDir 'punaro-dpapi.exe'),
+    (Join-Path $binDir 'punaro-keychain.exe'),
+    (Join-Path $root 'Run-PunaroAttachment.ps1'),
+    (Join-Path $configDir 'attachment-v3')
+)) {
+    if (Test-Path -LiteralPath $retiredPath) { Stop-Install "retired attachment artifact exists at $retiredPath; archive or remove it explicitly before installing the trusted client" }
+}
 
 try {
     $mailboxCommand = Get-Command $AgentMailboxBin -CommandType Application -ErrorAction Stop
@@ -218,9 +134,9 @@ try {
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
-Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-attachment') -Output (Join-Path $binDir 'punaro-attachment.exe')
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-keygen') -Output (Join-Path $binDir 'punaro-keygen.exe')
-foreach ($name in @('Run-PunaroAdapter.ps1', 'Run-PunaroAttachment.ps1', 'Import-PunaroEnvironment.ps1')) {
+foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {
     $source = Join-Path $repoDir "deploy\windows\$name"
     $destination = Join-Path $root $name
     if (-not (Test-Path -LiteralPath $destination)) { [System.IO.File]::Copy($source, $destination) }
@@ -265,10 +181,6 @@ if ($LASTEXITCODE -ne 0) {
     if ($groupAddresses -notcontains $AttachedGroup) { Stop-Install 'could not create the local Punaro attachment group' }
 }
 
-if (-not [string]::IsNullOrWhiteSpace($AttachmentRole)) {
-    Install-AttachmentClient -Directory $AttachmentDirectory -AuthorityPublic (Get-FullPath $AttachmentAuthorityPublic) -Role $AttachmentRole -Machine $MachineId -Relay $RelayUrl -AdapterState $stateDir -Bin $binDir
-}
-
 $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 try {
     $powerShellCommand = Get-Command 'powershell.exe' -CommandType Application -ErrorAction Stop
@@ -290,4 +202,4 @@ if (-not [string]::IsNullOrWhiteSpace($AgentGuidanceDir)) {
 Write-Output 'Punaro Windows client installed. Approve this public machine enrollment on the relay:'
 Get-Content -LiteralPath $enrollmentFile
 Write-Output 'Next: add this machine''s distinct Access token pair to adapter.env; bind and attach desired aliases; then rerun with -Enable.'
-if (-not [string]::IsNullOrWhiteSpace($AttachmentRole)) { Write-Output 'The public attachment enrollment requires offline authority approval before transfer is possible.' }
+Write-Output 'After device-credential enrollment, use punaro-trusted-attachment.exe with a protected credential file and safe download root.'

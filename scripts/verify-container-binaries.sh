@@ -3,13 +3,20 @@ set -eu
 
 dockerfile=${1:-Dockerfile}
 
-for binary in punaro punarod punaro-migrate punaro-admin punaro-adapter punaro-directory punaro-telegram punaro-attachment; do
+for binary in punaro punarod punaro-migrate punaro-admin punaro-adapter punaro-telegram punaro-trusted-attachment; do
 	if ! grep -Fq -- "-o /out/$binary ./cmd/$binary" "$dockerfile"; then
 		echo "container build does not produce $binary" >&2
 		exit 1
 	fi
 	if ! grep -Fq -- "/out/$binary /usr/local/bin/$binary" "$dockerfile"; then
 		echo "container runtime does not include $binary" >&2
+		exit 1
+	fi
+done
+
+for retired in punaro-directory punaro-attachment; do
+	if grep -Fq -- "/out/$retired" "$dockerfile"; then
+		echo "container runtime still includes retired attachment binary $retired" >&2
 		exit 1
 	fi
 done

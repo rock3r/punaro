@@ -261,7 +261,7 @@ func TestPermitRuntimeMintsPermitOnlyForBoundMachineHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	cfg := config.Config{DataDir: dataDir, PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
+	cfg := legacyAttachmentConfig{DataDir: dataDir, PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
 	handler, closePermit, readiness, err := buildPermitHandler(cfg, store)
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestV3PermitRuntimeMintsOnlyForBoundMachineHolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	cfg := config.Config{DataDir: dataDir, AttachmentV3Enabled: true, AttachmentV3SourceStoreFile: filepath.Join(privateDir, "v3-source.db"), DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
+	cfg := legacyAttachmentConfig{DataDir: dataDir, AttachmentV3Enabled: true, AttachmentV3SourceStoreFile: filepath.Join(privateDir, "v3-source.db"), DirectoryEnabled: true, DirectorySnapshotFile: snapshotPath, DirectoryAudience: head.Audience, DirectoryRootKeyID: head.RootKeyID, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: issuerID, PermitIssuerPrivateKeyFile: issuerPath, PermitMaxLifetimeSeconds: 15, PermitMaxBytes: 1024, PermitMaxChunks: 1, PermitMaxOperations: 1, PermitMaxActive: 4, RelayMachinesJSON: machines}
 	permitHandler, _, closeV3, readiness, err := buildV3AttachmentHandlers(cfg, store)
 	if err != nil {
 		t.Fatal(err)
@@ -453,13 +453,13 @@ func TestPermitIssuerLifetimeRejectsOutOfRangeConfiguration(t *testing.T) {
 	}
 }
 
-func permitHandlerConfig(t *testing.T, privateDir, keyPath string) config.Config {
+func permitHandlerConfig(t *testing.T, privateDir, keyPath string) legacyAttachmentConfig {
 	t.Helper()
 	rootPublic, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return config.Config{DataDir: t.TempDir(), PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: filepath.Join(privateDir, "directory.cbor"), DirectoryAudience: [32]byte{1}, DirectoryRootKeyID: [32]byte{2}, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: [32]byte{3}, PermitIssuerPrivateKeyFile: keyPath, PermitMaxLifetimeSeconds: 30, PermitMaxBytes: 1 << 20, PermitMaxChunks: 4, PermitMaxOperations: 2, PermitMaxActive: 4, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}
+	return legacyAttachmentConfig{DataDir: t.TempDir(), PermitIssuanceEnabled: true, DirectoryEnabled: true, DirectorySnapshotFile: filepath.Join(privateDir, "directory.cbor"), DirectoryAudience: [32]byte{1}, DirectoryRootKeyID: [32]byte{2}, DirectoryRootPublicKey: rootPublic, PermitIssuerKeyID: [32]byte{3}, PermitIssuerPrivateKeyFile: keyPath, PermitMaxLifetimeSeconds: 30, PermitMaxBytes: 1 << 20, PermitMaxChunks: 4, PermitMaxOperations: 2, PermitMaxActive: 4, RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}
 }
 
 func TestBuildDirectoryHandlerRequiresValidPrivateSnapshot(t *testing.T) {
@@ -468,7 +468,7 @@ func TestBuildDirectoryHandlerRequiresValidPrivateSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = closeRelay.Close() })
-	if _, err := buildDirectoryHandler(config.Config{DirectoryEnabled: true, DirectorySnapshotFile: "/does/not/exist", RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}, closeRelay); err == nil {
+	if _, err := buildDirectoryHandler(legacyAttachmentConfig{DirectoryEnabled: true, DirectorySnapshotFile: "/does/not/exist", RelayMachinesJSON: `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`}, closeRelay); err == nil {
 		t.Fatal("missing snapshot source accepted")
 	}
 }
