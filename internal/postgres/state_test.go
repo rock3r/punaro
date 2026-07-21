@@ -66,13 +66,16 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 8 || manifest.MaxSupported != 9 || len(manifest.Migrations) != 9 {
-		t.Fatalf("manifest=%#v, want exact v8-v9 compatibility window", manifest)
+	if manifest.MinSupported != 9 || manifest.MaxSupported != 10 || len(manifest.Migrations) != 10 {
+		t.Fatalf("manifest=%#v, want exact v9-v10 compatibility window", manifest)
 	}
 	for index, migration := range manifest.Migrations {
 		want := int64(index + 1)
-		if want == 9 {
+		switch want {
+		case 9:
 			want = 8
+		case 10:
+			want = 9
 		}
 		if migration.CompatibilityFloor != want {
 			t.Fatalf("migration %d floor=%d, want %d", index+1, migration.CompatibilityFloor, want)
@@ -82,10 +85,10 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 
 func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	manifest := CurrentManifest()
-	if !migrationPending(SchemaState{Classification: Compatible, Version: 8}, manifest) {
-		t.Fatal("compatible v8 schema must still apply the pending v9 migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 9}, manifest) {
+		t.Fatal("compatible v9 schema must still apply the pending v10 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 9}, manifest) {
-		t.Fatal("current v9 schema reported a pending migration")
+	if migrationPending(SchemaState{Classification: Compatible, Version: 10}, manifest) {
+		t.Fatal("current v10 schema reported a pending migration")
 	}
 }

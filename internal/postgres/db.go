@@ -901,7 +901,10 @@ SELECT attachment_namespace_oid IS NOT NULL AND ready_oid IS NOT NULL AND fences
 		AND index.indrelid = fences_oid AND index.indkey::text = '2' AND index.indexprs IS NULL AND pg_get_expr(index.indpred, index.indrelid) = '(released_at IS NULL)'
 		FROM pg_index AS index WHERE index.indexrelid = active_index_oid)
    AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
-   AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'u' AND conkey = ARRAY[3]::smallint[] AND convalidated)
+   AND (
+       ($1 < 10 AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'u' AND conkey = ARRAY[3]::smallint[] AND convalidated))
+       OR ($1 >= 10 AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = ready_oid AND contype = 'u'))
+   )
    AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = fences_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
    AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
 	AND (SELECT count(*) = 1 FROM pg_constraint WHERE conrelid = restores_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
@@ -949,7 +952,7 @@ SELECT attachment_namespace_oid IS NOT NULL AND ready_oid IS NOT NULL AND fences
 	AND NOT has_function_privilege('punaro_app', release_oid, 'EXECUTE')
    AND has_function_privilege('punaro_app', gc_oid, 'EXECUTE')
    AND NOT has_function_privilege('punaro_app', rotate_oid, 'EXECUTE')
-FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_acl, column_safety`).Scan(&backupObjectsPresent); err != nil {
+FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_acl, column_safety`, snapshot.Records[len(snapshot.Records)-1].Version).Scan(&backupObjectsPresent); err != nil {
 			return Snapshot{}, errors.New("PostgreSQL backup schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = backupObjectsPresent
@@ -974,6 +977,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL mail-cutover schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = cutoverObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 10 {
+		attachmentObjectsPresent, err := trustedAttachmentControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL trusted-attachment schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = attachmentObjectsPresent
 	}
 	return snapshot, nil
 }

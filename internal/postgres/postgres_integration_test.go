@@ -291,6 +291,40 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("relay constraint and ACL restoration did not recover readiness: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.uploads DROP CONSTRAINT uploads_size_bytes_check; ALTER TABLE attachment.uploads ADD CONSTRAINT uploads_size_bytes_check CHECK (size_bytes > 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive trusted-attachment size constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.uploads DROP CONSTRAINT uploads_size_bytes_check; ALTER TABLE attachment.uploads ADD CONSTRAINT uploads_size_bytes_check CHECK (size_bytes BETWEEN 1 AND 17179869184)`); err != nil {
+		t.Fatal(err)
+	}
+	var reserveDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'::regprocedure)`).Scan(&reserveDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION attachment.reserve_upload(requested_principal uuid,requested_project uuid,request_key uuid,request_hash bytea,requested_size bigint,requested_sha256 text,requested_display_name text,requested_media_type text,requested_lifetime interval) RETURNS TABLE (artifact_id uuid,project_id uuid,principal_id uuid,timeline_id uuid,size_bytes bigint,sha256 text,display_name text,media_type text,state text,attempt_generation bigint,expires_at timestamptz,ready_at timestamptz) LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT NULL::uuid,NULL::uuid,NULL::uuid,NULL::uuid,1::bigint,repeat(''0'',64),'''',''application/octet-stream'',''reserved'',0::bigint,statement_timestamp(),NULL::timestamptz'`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive trusted-attachment routine state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, reserveDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON attachment.uploads TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("trusted-attachment direct read grant state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON attachment.uploads FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("trusted-attachment catalog restoration did not recover readiness: %v", err)
+	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -325,6 +359,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 		t.Fatal("application role opened host-local administration")
 	}
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
+	testTrustedAttachmentIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)

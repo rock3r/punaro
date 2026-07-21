@@ -391,8 +391,9 @@ Lifecycle:
 3. The client streams bytes over authenticated HTTPS without holding a database
    transaction open.
 4. The server writes to a private staging file and verifies exact size/digest.
-5. Completion fsyncs the file, renames it within the same filesystem to a new
-   immutable final path, and fsyncs the containing directory.
+5. Completion fsyncs the file, atomically publishes a new immutable final path
+   without replacing an existing name on the same filesystem, and fsyncs the
+   containing directory.
 6. A short conditional PostgreSQL transaction reauthorizes the sender and
    publishes `READY` metadata, but the artifact remains unshared. Only `READY`
    artifacts are eligible for download.
@@ -403,7 +404,9 @@ Lifecycle:
 8. A final blob without `READY` metadata is a grace-period orphan. `READY`
    metadata without its blob is `CORRUPT`, never a partial download. The
    reconciler reports and handles both states without inventing cross-store
-   atomicity.
+   atomicity. Before deleting an expired or restored-timeline reservation it
+   commits a durable `REAPING` publication fence; held quota is released only
+   after every claim-specific stage and hidden final is durably removed.
 9. Authorized recipients download through an authenticated bounded stream.
 10. The client verifies the digest and finalizes beneath a configured safe
    download root using atomic no-replace behavior. Interactive approval is

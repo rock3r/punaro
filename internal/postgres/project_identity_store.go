@@ -20,6 +20,9 @@ var (
 	ErrProjectMergeTooLarge = errors.New("project merge exceeds a safe bound")
 	// ErrProjectPreviewCapacity reports that a bounded live-preview quota is full.
 	ErrProjectPreviewCapacity = errors.New("project merge preview capacity is full")
+	// ErrProjectMergeAttachmentState fences project identities until the later
+	// attachment lifecycle defines an explicit, transactional merge behavior.
+	ErrProjectMergeAttachmentState = errors.New("project attachment state blocks merge")
 )
 
 const (
@@ -307,7 +310,7 @@ func (d *Database) PreviewProjectIdentityMerge(ctx context.Context, request Proj
 		if err := checkProjectPreviewCapacity(ctx, tx, request.ActorPrincipalID); err != nil {
 			return IdempotencyOutcome{}, err
 		}
-		identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, newlyAuthorized, err := projectMergeCounts(ctx, tx, source.ID, canonical.ID)
+		identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, newlyAuthorized, err := projectMergeCounts(ctx, tx, request.ActorPrincipalID, source.ID, canonical.ID)
 		if err != nil {
 			return IdempotencyOutcome{}, err
 		}
@@ -438,7 +441,7 @@ FROM relay.project_merge_previews WHERE id = $1 FOR UPDATE`, approval.PreviewID)
 			return ProjectMergeResult{}, ErrForbidden
 		}
 	}
-	identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, _, err := projectMergeCounts(ctx, tx, sourceID, canonicalID)
+	identityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount, _, err := projectMergeCounts(ctx, tx, approval.ActorPrincipalID, sourceID, canonicalID)
 	if err != nil {
 		return ProjectMergeResult{}, err
 	}
@@ -598,8 +601,21 @@ WHERE consumed_at IS NULL AND expires_at > statement_timestamp()`, actorPrincipa
 	return nil
 }
 
-func projectMergeCounts(ctx context.Context, tx *sql.Tx, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
+func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
 	var identityCount, canonicalIdentityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount int
+	var attachmentLifecyclePresent bool
+	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('attachment.uploads') IS NOT NULL`).Scan(&attachmentLifecyclePresent); err != nil {
+		return 0, 0, 0, 0, 0, nil, errors.New("project attachment state is unavailable")
+	}
+	if attachmentLifecyclePresent {
+		var hasAttachmentRecords bool
+		if err := tx.QueryRowContext(ctx, `SELECT attachment.project_has_records($1,$2)`, actorPrincipalID, sourceID).Scan(&hasAttachmentRecords); err != nil {
+			return 0, 0, 0, 0, 0, nil, errors.New("project attachment state is unavailable")
+		}
+		if hasAttachmentRecords {
+			return 0, 0, 0, 0, 0, nil, ErrProjectMergeAttachmentState
+		}
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT
     count(*) FILTER (WHERE project_id = $1), count(*) FILTER (WHERE project_id = $2)
 FROM relay.project_identities WHERE project_id IN ($1, $2)`, sourceID, canonicalID).Scan(&identityCount, &canonicalIdentityCount); err != nil {

@@ -33,15 +33,16 @@ var migrationFiles embed.FS
 const advisoryLockKey int64 = 0x50554e41524f4d31 // "PUNAROM1"
 
 var migrationCompatibilityFloors = map[int64]int64{
-	1: 1,
-	2: 2,
-	3: 3,
-	4: 4,
-	5: 5,
-	6: 6,
-	7: 7,
-	8: 8,
-	9: 8,
+	1:  1,
+	2:  2,
+	3:  3,
+	4:  4,
+	5:  5,
+	6:  6,
+	7:  7,
+	8:  8,
+	9:  8,
+	10: 9,
 }
 
 // CurrentManifest returns the immutable migrations embedded in this binary.

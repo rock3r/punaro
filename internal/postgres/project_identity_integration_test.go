@@ -225,6 +225,19 @@ func testProjectIdentityIntegration(ctx context.Context, t *testing.T, app *Data
 	if _, err := app.PreviewProjectIdentityMerge(ctx, deniedRequest); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("one-sided administrator preview error=%v", err)
 	}
+	grantFixture(actor.ID, source.ProjectID, CapabilityAttachmentUpload)
+	attachmentDigest := sha256.Sum256([]byte("merge fence"))
+	mergeFence, err := app.ReserveAttachment(ctx, AttachmentReservationRequest{PrincipalID: actor.ID, ProjectID: source.ProjectID, IdempotencyKey: "99999999-9999-4999-8999-999999999989", SizeBytes: 11, SHA256: attachmentDigest, DisplayName: "merge-fence.txt", MediaType: "text/plain", Lifetime: 5 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.PreviewProjectIdentityMerge(ctx, previewRequest); !errors.Is(err, ErrProjectMergeAttachmentState) {
+		t.Fatalf("attachment-bearing project merge preview error=%v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.uploads SET expires_at=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, mergeFence.ArtifactID); err != nil {
+		t.Fatal(err)
+	}
+	reapTestAttachment(ctx, t, app, mergeFence.ArtifactID)
 	preview, err := app.PreviewProjectIdentityMerge(ctx, previewRequest)
 	if err != nil {
 		t.Fatal(err)

@@ -562,6 +562,24 @@ published locally with `installation.json` last. A crash can therefore resume
 at prepare, staging, verification, retirement, activation, or publication
 without dual writes or rollback across the seal.
 
+Schema v10 adds the first trusted-relay attachment slice as a dark server-side
+publication authority. An upload is an operation-bound, authorized `RESERVED`
+record with global, project, and principal quota held in one lock order. A
+fresh fenced claim permits one bounded stream into an owner-only staging file;
+exact bytes are hashed, fsynced, published to an opaque no-replace name, and
+directory-synced before a short transaction reauthorizes the principal and
+commits an unshared `READY` projection. Equal digests remain separate artifacts.
+Reconciliation verifies every READY blob and withdraws missing or changed bytes
+from the backup-visible READY projection as `CORRUPT`. Expired or restored-
+timeline reservations first enter a durable `REAPING` publication fence; only
+then are all claim-specific stages and hidden finals removed, and only after
+that deletion commits is held quota released. The application role has only
+narrow function execute authority, active attachment records fence project
+merge, and backup continues
+to select the READY manifest in the exported database snapshot. No upload,
+download, recipient, sharing, or deletion HTTP route is mounted by this slice;
+those remain later independently reviewed milestones.
+
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique
 operation-bound idempotency keys, closed content-free audit events, and a
