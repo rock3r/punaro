@@ -631,8 +631,11 @@ func openMigrationSourceDatabase(path string, readOnly bool) (*sql.DB, error) {
 	}
 	directoryInfo, err := os.Lstat(filepath.Dir(path))
 	if err != nil || !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("relay migration source path must not traverse symlinks")
+		return nil, errors.New("relay migration source parent must be a real directory")
 	}
+	// The later host-local executor supplies this privileged path from Punaro's
+	// private relay data directory; it is not a caller-selected confinement root.
+	// Reject last-hop redirection while allowing platform aliases in ancestors.
 	mode := "rw"
 	if readOnly {
 		mode = "ro"

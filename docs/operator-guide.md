@@ -458,6 +458,9 @@ bounded staging rows and checkpoints, and an application-role mail-write fence
 for an importing or verified epoch. It does not import rows, activate
 PostgreSQL mail authority, retire SQLite, or change the default relay. Those
 irreversible operations remain disabled until the later M-9 executor slice.
+That executor must take the canonical SQLite source path from Punaro's private,
+service-owned relay data directory. The source-path argument is a privileged
+operator boundary, not a filesystem sandbox for untrusted paths.
 PostgreSQL mail work uses a reserved four-connection application-role pool;
 each operation and lock wait is bounded to five seconds so platform work cannot
 consume the mail budget indefinitely.
