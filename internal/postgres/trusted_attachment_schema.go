@@ -81,9 +81,9 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (reserve_oid,'f0f749ecf587b1486083733d42925f0a','v'::"char"),
-      (claim_oid,'d7af4b785bc5fbd4652f3eb909674777','v'::"char"),
-      (publish_oid,'a5d843d3c2ba5d052b5882d944e8b35c','v'::"char"),
+      (reserve_oid,'503c810da6c7090c8bdc306f474c161d','v'::"char"),
+      (claim_oid,'475ac4e1df29cabe6dbcae9e83038891','v'::"char"),
+      (publish_oid,'a309ef5966178bd6fef53435be8c215e','v'::"char"),
       (begin_reap_oid,'fc58a668e122b22102bd26cee052e213','v'::"char"),
       (release_oid,'923f1b8e0dfa076623fe41f8f4dd059a','v'::"char"),
       (corrupt_oid,'c4949387c79f3843bef73ddb408f9db2','v'::"char"),

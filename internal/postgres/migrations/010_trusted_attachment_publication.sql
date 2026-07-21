@@ -214,32 +214,46 @@ BEGIN
            quota.default_principal_bytes, quota.default_principal_uploads
     INTO project_limit_bytes, project_limit_uploads, principal_limit_bytes, principal_limit_uploads
     FROM attachment.global_quota AS quota WHERE quota.singleton FOR UPDATE;
-    IF requested_size > (SELECT max_artifact_bytes FROM attachment.global_quota WHERE singleton) THEN
+    IF requested_size > (SELECT quota.max_artifact_bytes FROM attachment.global_quota AS quota WHERE quota.singleton) THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'attachment exceeds configured artifact limit';
     END IF;
 
     INSERT INTO attachment.project_quotas (project_id, max_bytes, max_active_uploads)
     VALUES (canonical_project, project_limit_bytes, project_limit_uploads)
     ON CONFLICT ON CONSTRAINT project_quotas_pkey DO NOTHING;
-    PERFORM 1 FROM attachment.project_quotas WHERE project_id = canonical_project FOR UPDATE;
+    PERFORM 1 FROM attachment.project_quotas AS project_quota
+    WHERE project_quota.project_id = canonical_project FOR UPDATE;
 
     INSERT INTO attachment.principal_quotas (principal_id, max_bytes, max_active_uploads)
     VALUES (requested_principal, principal_limit_bytes, principal_limit_uploads)
     ON CONFLICT ON CONSTRAINT principal_quotas_pkey DO NOTHING;
-    PERFORM 1 FROM attachment.principal_quotas WHERE principal_id = requested_principal FOR UPDATE;
+    PERFORM 1 FROM attachment.principal_quotas AS principal_quota
+    WHERE principal_quota.principal_id = requested_principal FOR UPDATE;
 
-    UPDATE attachment.global_quota SET reserved_bytes = reserved_bytes + requested_size, reserved_uploads = reserved_uploads + 1
-    WHERE singleton AND reserved_bytes + used_bytes + requested_size <= max_total_bytes AND reserved_uploads + 1 <= max_active_uploads;
+    UPDATE attachment.global_quota AS global_quota
+    SET reserved_bytes = global_quota.reserved_bytes + requested_size,
+        reserved_uploads = global_quota.reserved_uploads + 1
+    WHERE global_quota.singleton
+      AND global_quota.reserved_bytes + global_quota.used_bytes + requested_size <= global_quota.max_total_bytes
+      AND global_quota.reserved_uploads + 1 <= global_quota.max_active_uploads;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '54000', MESSAGE = 'attachment global quota is exhausted';
     END IF;
-    UPDATE attachment.project_quotas SET reserved_bytes = reserved_bytes + requested_size, reserved_uploads = reserved_uploads + 1
-    WHERE project_id = canonical_project AND reserved_bytes + used_bytes + requested_size <= max_bytes AND reserved_uploads + 1 <= max_active_uploads;
+    UPDATE attachment.project_quotas AS project_quota
+    SET reserved_bytes = project_quota.reserved_bytes + requested_size,
+        reserved_uploads = project_quota.reserved_uploads + 1
+    WHERE project_quota.project_id = canonical_project
+      AND project_quota.reserved_bytes + project_quota.used_bytes + requested_size <= project_quota.max_bytes
+      AND project_quota.reserved_uploads + 1 <= project_quota.max_active_uploads;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '54000', MESSAGE = 'attachment project quota is exhausted';
     END IF;
-    UPDATE attachment.principal_quotas SET reserved_bytes = reserved_bytes + requested_size, reserved_uploads = reserved_uploads + 1
-    WHERE principal_id = requested_principal AND reserved_bytes + used_bytes + requested_size <= max_bytes AND reserved_uploads + 1 <= max_active_uploads;
+    UPDATE attachment.principal_quotas AS principal_quota
+    SET reserved_bytes = principal_quota.reserved_bytes + requested_size,
+        reserved_uploads = principal_quota.reserved_uploads + 1
+    WHERE principal_quota.principal_id = requested_principal
+      AND principal_quota.reserved_bytes + principal_quota.used_bytes + requested_size <= principal_quota.max_bytes
+      AND principal_quota.reserved_uploads + 1 <= principal_quota.max_active_uploads;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '54000', MESSAGE = 'attachment principal quota is exhausted';
     END IF;
@@ -299,11 +313,14 @@ BEGIN
     IF requested_lifetime < interval '30 seconds' OR requested_lifetime > interval '10 minutes' THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid attachment upload claim';
     END IF;
-    SELECT * INTO upload FROM attachment.uploads WHERE uploads.artifact_id = requested_artifact FOR UPDATE;
+    SELECT candidate.* INTO upload
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact FOR UPDATE;
     IF NOT FOUND OR upload.principal_id <> requested_principal OR upload.state <> 'reserved' THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment upload claim is not authorized';
     END IF;
-    SELECT timeline_id INTO current_timeline FROM jobs.server_state WHERE singleton FOR SHARE;
+    SELECT server.timeline_id INTO current_timeline
+    FROM jobs.server_state AS server WHERE server.singleton FOR SHARE;
     IF upload.timeline_id <> current_timeline OR upload.expires_at <= statement_timestamp() THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment reservation is stale';
     END IF;
@@ -325,14 +342,14 @@ BEGIN
     IF upload.claim_until IS NOT NULL AND upload.claim_until > statement_timestamp() THEN
         RAISE EXCEPTION USING ERRCODE = '55P03', MESSAGE = 'attachment upload is already claimed';
     END IF;
-    UPDATE attachment.uploads
-    SET attempt_generation = attempt_generation + 1,
+    UPDATE attachment.uploads AS claimed_upload
+    SET attempt_generation = claimed_upload.attempt_generation + 1,
         claim_token = gen_random_uuid(),
-        claim_until = LEAST(statement_timestamp() + requested_lifetime, expires_at)
-    WHERE uploads.artifact_id = requested_artifact
-    RETURNING uploads.artifact_id, uploads.project_id, uploads.principal_id, uploads.timeline_id,
-              uploads.size_bytes, uploads.sha256::text, uploads.state, uploads.attempt_generation,
-              uploads.claim_token, uploads.claim_until, uploads.expires_at
+        claim_until = LEAST(statement_timestamp() + requested_lifetime, claimed_upload.expires_at)
+    WHERE claimed_upload.artifact_id = requested_artifact
+    RETURNING claimed_upload.artifact_id, claimed_upload.project_id, claimed_upload.principal_id, claimed_upload.timeline_id,
+              claimed_upload.size_bytes, claimed_upload.sha256::text, claimed_upload.state, claimed_upload.attempt_generation,
+              claimed_upload.claim_token, claimed_upload.claim_until, claimed_upload.expires_at
     INTO artifact_id, project_id, principal_id, timeline_id, size_bytes, sha256, state,
          attempt_generation, claim_token, claim_until, expires_at;
     RETURN NEXT;
@@ -362,7 +379,9 @@ DECLARE
     existing_sha text;
 BEGIN
     PERFORM jobs.assert_application_mutation();
-    SELECT * INTO upload FROM attachment.uploads WHERE uploads.artifact_id = requested_artifact FOR UPDATE;
+    SELECT candidate.* INTO upload
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact FOR UPDATE;
     IF NOT FOUND OR upload.principal_id <> requested_principal THEN
         RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment publication is not authorized';
     END IF;
@@ -393,7 +412,8 @@ BEGIN
         END IF;
         RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'immutable attachment publication conflicts with prior result';
     END IF;
-    SELECT timeline_id INTO current_timeline FROM jobs.server_state WHERE singleton FOR SHARE;
+    SELECT server.timeline_id INTO current_timeline
+    FROM jobs.server_state AS server WHERE server.singleton FOR SHARE;
     IF upload.state <> 'reserved' OR upload.timeline_id <> current_timeline
        OR upload.expires_at <= statement_timestamp()
        OR upload.attempt_generation <> requested_generation
@@ -403,9 +423,11 @@ BEGIN
        OR requested_storage_path <> ('ready/' || requested_artifact::text || '.blob') THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment publication claim is stale';
     END IF;
-    PERFORM 1 FROM attachment.global_quota WHERE singleton FOR UPDATE;
-    PERFORM 1 FROM attachment.project_quotas WHERE project_id = upload.project_id FOR UPDATE;
-    PERFORM 1 FROM attachment.principal_quotas WHERE principal_id = upload.principal_id FOR UPDATE;
+    PERFORM 1 FROM attachment.global_quota AS global_quota WHERE global_quota.singleton FOR UPDATE;
+    PERFORM 1 FROM attachment.project_quotas AS project_quota
+    WHERE project_quota.project_id = upload.project_id FOR UPDATE;
+    PERFORM 1 FROM attachment.principal_quotas AS principal_quota
+    WHERE principal_quota.principal_id = upload.principal_id FOR UPDATE;
 
     INSERT INTO attachment.ready_blob_manifest (storage_path, size_bytes, sha256)
     VALUES (requested_storage_path, requested_size, requested_sha256);
@@ -414,24 +436,33 @@ BEGIN
     UPDATE attachment.uploads
     SET state = 'ready', claim_token = NULL, claim_until = NULL, ready_at = statement_timestamp()
     WHERE uploads.artifact_id = requested_artifact;
-    UPDATE attachment.global_quota
-    SET reserved_bytes = reserved_bytes - requested_size, used_bytes = used_bytes + requested_size,
-        reserved_uploads = reserved_uploads - 1, ready_artifacts = ready_artifacts + 1
-    WHERE singleton AND reserved_bytes >= requested_size AND reserved_uploads >= 1;
+    UPDATE attachment.global_quota AS global_quota
+    SET reserved_bytes = global_quota.reserved_bytes - requested_size,
+        used_bytes = global_quota.used_bytes + requested_size,
+        reserved_uploads = global_quota.reserved_uploads - 1,
+        ready_artifacts = global_quota.ready_artifacts + 1
+    WHERE global_quota.singleton AND global_quota.reserved_bytes >= requested_size
+      AND global_quota.reserved_uploads >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment global quota is inconsistent';
     END IF;
-    UPDATE attachment.project_quotas
-    SET reserved_bytes = reserved_bytes - requested_size, used_bytes = used_bytes + requested_size,
-        reserved_uploads = reserved_uploads - 1, ready_artifacts = ready_artifacts + 1
-    WHERE project_id = upload.project_id AND reserved_bytes >= requested_size AND reserved_uploads >= 1;
+    UPDATE attachment.project_quotas AS project_quota
+    SET reserved_bytes = project_quota.reserved_bytes - requested_size,
+        used_bytes = project_quota.used_bytes + requested_size,
+        reserved_uploads = project_quota.reserved_uploads - 1,
+        ready_artifacts = project_quota.ready_artifacts + 1
+    WHERE project_quota.project_id = upload.project_id
+      AND project_quota.reserved_bytes >= requested_size AND project_quota.reserved_uploads >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment project quota is inconsistent';
     END IF;
-    UPDATE attachment.principal_quotas
-    SET reserved_bytes = reserved_bytes - requested_size, used_bytes = used_bytes + requested_size,
-        reserved_uploads = reserved_uploads - 1, ready_artifacts = ready_artifacts + 1
-    WHERE principal_id = upload.principal_id AND reserved_bytes >= requested_size AND reserved_uploads >= 1;
+    UPDATE attachment.principal_quotas AS principal_quota
+    SET reserved_bytes = principal_quota.reserved_bytes - requested_size,
+        used_bytes = principal_quota.used_bytes + requested_size,
+        reserved_uploads = principal_quota.reserved_uploads - 1,
+        ready_artifacts = principal_quota.ready_artifacts + 1
+    WHERE principal_quota.principal_id = upload.principal_id
+      AND principal_quota.reserved_bytes >= requested_size AND principal_quota.reserved_uploads >= 1;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment principal quota is inconsistent';
     END IF;
