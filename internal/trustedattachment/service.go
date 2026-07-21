@@ -77,15 +77,20 @@ func (service *Service) Download(ctx context.Context, request postgres.Attachmen
 }
 
 func armDownloadWriteDeadline(ctx context.Context, destination DownloadWriter) (func(), error) {
-	deadline, found := ctx.Deadline()
+	_, found := ctx.Deadline()
 	if !found {
 		return nil, errors.New("trusted attachment download deadline is unavailable")
 	}
-	if err := destination.SetWriteDeadline(deadline); err != nil {
+	// Prove deadline support up front, then let context cancellation apply the
+	// interrupt. Setting the transport to the exact context timestamp can make
+	// a write fail just before the context timer records DeadlineExceeded.
+	if err := destination.SetWriteDeadline(time.Time{}); err != nil {
 		return nil, errors.New("trusted attachment download destination is not interruptible")
 	}
 	stopped := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		select {
 		case <-ctx.Done():
 			_ = destination.SetWriteDeadline(time.Now())
@@ -94,6 +99,7 @@ func armDownloadWriteDeadline(ctx context.Context, destination DownloadWriter) (
 	}()
 	return func() {
 		close(stopped)
+		<-finished
 		_ = destination.SetWriteDeadline(time.Time{})
 	}, nil
 }

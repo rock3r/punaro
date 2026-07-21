@@ -42,6 +42,35 @@ type testDownloadWriter struct {
 
 func (writer testDownloadWriter) SetWriteDeadline(time.Time) error { return nil }
 
+type blockingDeadlineWriter struct {
+	mu      sync.Mutex
+	last    time.Time
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (writer *blockingDeadlineWriter) Write(value []byte) (int, error) { return len(value), nil }
+
+func (writer *blockingDeadlineWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && deadline.Before(time.Now().Add(time.Minute)) {
+		select {
+		case writer.entered <- struct{}{}:
+		default:
+		}
+		<-writer.release
+	}
+	writer.mu.Lock()
+	writer.last = deadline
+	writer.mu.Unlock()
+	return nil
+}
+
+func (writer *blockingDeadlineWriter) lastDeadline() time.Time {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.last
+}
+
 func (repository *fakeRepository) ClaimAttachmentUpload(context.Context, string, string, time.Duration) (postgres.AttachmentClaim, error) {
 	return repository.claim, repository.claimErr
 }
@@ -187,6 +216,40 @@ func TestServiceDownloadDeadlineInterruptsBlockedWrite(t *testing.T) {
 	}
 	if len(service.downloadSlots) != 0 {
 		t.Fatal("over-lifetime download retained a concurrency slot")
+	}
+}
+
+func TestDownloadDeadlineCleanupJoinsCancellationHelper(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	destination := &blockingDeadlineWriter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	stop, err := armDownloadWriteDeadline(ctx, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-destination.entered:
+	case <-time.After(time.Second):
+		t.Fatal("deadline cancellation helper did not run")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("deadline cleanup returned before its helper")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(destination.release)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("deadline cleanup did not finish after its helper")
+	}
+	if deadline := destination.lastDeadline(); !deadline.IsZero() {
+		t.Fatalf("deadline cleanup left past deadline %s", deadline)
 	}
 }
 
