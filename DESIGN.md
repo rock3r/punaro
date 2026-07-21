@@ -39,6 +39,9 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
+PostgreSQL schema 14 also contains the dark canonical Big Brain store. It has
+no production route or client switch yet; the first native memory client is a
+later independently reviewed slice.
 
 ## Goals
 
@@ -228,6 +231,40 @@ WS failure: exponential backoff with full jitter; polling continues
 The opportunistic reconnect is rate-limited (for example, once per 30 seconds),
 single-flight per adapter, and allowed to bypass backoff only once while work
 remains. This prevents a large backlog from creating a reconnect storm.
+
+## Canonical memory model
+
+Canonical memory is project-scoped PostgreSQL authority. Each item has an
+optional logical key unique only inside its opaque project scope, a bounded
+kind and trust classification, reversible active/archive state, and one current
+append-only JSONB revision. Reads expose an opaque ETag derived from the item
+and revision. Update, archive, restore, and hard delete require an exact ETag;
+a stale attempt commits no revision, audit row, change, or idempotency result.
+
+Create and every mutation use the shared operation-bound idempotency contract.
+Durable retry outcomes contain only opaque IDs, closed state, revision, ETag,
+and change sequence—never memory content, a logical key, or a content hash.
+An effective archive or restore state transition appends a revision even when
+the document bytes are unchanged, so an older ETag cannot survive the
+transition. Archive and restore use distinct closed audit actions. Requesting
+the already-current state is a stable no-op that returns the item's current
+timeline sequence rather than the installation watermark; that coordinate is
+zero until the item changes on a newly restored timeline. Create denial for missing,
+retired, and unauthorized projects is likewise non-disclosing.
+Reads report only the current timeline's change sequence; abandoned-timeline
+rows cannot become a live item cursor after restore.
+
+Hard delete requires the separate `memory.purge` capability. One transaction
+records a content-free change, audit event, and durable tombstone, then removes
+the item and every canonical revision. The tombstone retains only opaque scope,
+item, actor, timeline, sequence, and time fields. The application role has no
+direct table privilege on tombstones; only the narrow owner routine writes
+them. Change fetch is bounded,
+timeline-aware, project-authorized before reading, and permits gaps in the
+global sequence without exposing other projects. Until collision-aware scope
+rehoming is implemented, a project with any canonical memory scope or retained
+history fails closed at project-merge preview/approval rather than stranding or
+widening access.
 WebSocket reconnect never alters delivery cursors.
 
 ## Minimal HTTP surface

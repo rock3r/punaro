@@ -130,6 +130,40 @@ URLs, ranges, or public capabilities. The whole surface is absent unless the
 trusted-attachment release switch, PostgreSQL device authentication, and the
 private absolute blob root are configured together.
 
+Schema version 14 adds the dark canonical Big Brain CRUD boundary without
+mounting an HTTP route or changing any client authority. `brain.scopes` binds
+one canonical scope to an opaque active project. Memory items hold only
+identity, bounded metadata, reversible state, and the current revision number;
+append-only revisions hold the bounded JSONB document and its server-computed
+SHA-256. An optional logical key is unique inside one scope, never globally.
+
+`memory.write` authorizes create, update, archive, and restore;
+`memory.read` authorizes full get and change fetch; irreversible deletion
+requires `memory.purge`. Create and item-target denial, a guessed ID, a wrong
+or retired project, and a missing item are non-disclosing. Mutations lock current project and grant
+authority, use the shared principal/operation/request-bound idempotency record,
+and compare an exact opaque ETag. An effective update/archive/restore state
+transition appends a revision, advances project content generation and the
+installation change sequence, and records one content-free, transition-specific audit event and
+feed row in the same transaction. A request for the already-current archive
+state is a stable no-op and reports the item's current-timeline sequence rather
+than unrelated installation activity. The item coordinate is zero until that
+item changes on a newly restored timeline.
+
+Hard delete records a content-free tombstone, audit event, and delete change,
+then removes the item and all canonical revisions through a narrow
+authorization-checking owner routine. Tombstones and feeds have no document,
+logical key, title, summary, or content hash. The application role cannot
+read or insert tombstones directly and cannot update/delete revisions or
+mutate changes; only the owner routine writes tombstones. Item reads and the
+feed report only the current timeline's change sequence. The feed is bounded
+and timeline-aware; authorized project pages may contain global-sequence gaps and
+reject abandoned or future cursors. Live brain records or retained brain
+history fail closed at project
+merge until a later collision-aware rehome contract is implemented. Secret
+guarding, evidence/proposals, lexical search, clients, and embeddings remain
+separate later slices.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds
