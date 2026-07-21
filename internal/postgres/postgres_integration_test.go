@@ -1661,6 +1661,10 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		_ = v10App.Close()
 		t.Fatalf("v11 binary could not advertise endpoints against compatible v10 schema: %v", err)
 	}
+	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", nil, time.Now().UTC().Add(time.Second), time.Minute); err != nil {
+		_ = v10App.Close()
+		t.Fatalf("v11 binary could not withdraw endpoints against compatible v10 schema: %v", err)
+	}
 	if err := v10App.Close(); err != nil {
 		t.Fatalf("close compatible v10 application: %v", err)
 	}
