@@ -81,14 +81,14 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (reserve_oid,'0119bff2f00da1fe9007f10a4ef9843d','v'::"char"),
-      (claim_oid,'d7af4b785bc5fbd4652f3eb909674777','v'::"char"),
-      (publish_oid,'a5d843d3c2ba5d052b5882d944e8b35c','v'::"char"),
-      (begin_reap_oid,'fc58a668e122b22102bd26cee052e213','v'::"char"),
-      (release_oid,'923f1b8e0dfa076623fe41f8f4dd059a','v'::"char"),
-      (corrupt_oid,'c4949387c79f3843bef73ddb408f9db2','v'::"char"),
-      (reconcile_oid,'25df2c05deb346a8df8a86349a00a478','s'::"char"),
-      (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char")
+      (reserve_oid,'9210a0f6d94a617e8023e30910541c50','v'::"char"),
+      (claim_oid,'7f4e9861d348495d534c0f70bfefa082','v'::"char"),
+      (publish_oid,'be6352a1b77df805ed29930022b327b2','v'::"char"),
+      (begin_reap_oid,'e171cdeb13c463775a47fdee023bc0b5','v'::"char"),
+      (release_oid,'0b1d22fa3a8e8f89f005f1c8a38a1dcd','v'::"char"),
+      (corrupt_oid,'65f779bbad05b7faea8bee39d90e60e1','v'::"char"),
+      (reconcile_oid,'f242ee7c450013c2656f9a5db05d62e5','s'::"char"),
+      (project_records_oid,'44e2a10da9c1499dc8940b9470668d71','s'::"char")
     ) AS expected(oid,body_hash,volatility)
 ), routine_safety AS (
     SELECT count(*) = 8
@@ -113,7 +113,7 @@ WITH objects AS (
     FROM pg_class AS relation, objects
     WHERE relation.oid = ANY(ARRAY[uploads_oid,ready_oid,global_oid,project_oid,principal_oid])
 ), table_acl AS (
-    SELECT count(*) = 35 AND bool_and(grantee.rolname = 'punaro_owner' AND NOT acl.is_grantable) AS exact
+    SELECT count(*) = 40 AND bool_and(grantee.rolname = 'punaro_owner' AND NOT acl.is_grantable) AS exact
     FROM pg_class AS relation, objects
     CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
     LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
