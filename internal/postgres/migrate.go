@@ -151,7 +151,7 @@ WHERE update_id=$1::uuid AND phase='migration_started' AND backup_id=$2::uuid
 	if _, err := conn.ExecContext(ctx, `SELECT set_config('punaro.update_id',$1,false)`, authorization.UpdateID); err != nil {
 		return SchemaState{}, errors.New("PostgreSQL update migration session cannot be bound")
 	}
-	return migrateConnExpectedAppRole(ctx, conn, manifest, "punaro_app")
+	return migrateConnExpectedAppRole(ctx, conn, manifest, "punaro_app", true)
 }
 
 func refuseOrdinaryUpgrade(ctx context.Context, db *sql.DB, manifest Manifest) error {
@@ -164,7 +164,8 @@ func refuseOrdinaryUpgrade(ctx context.Context, db *sql.DB, manifest Manifest) e
 	if err != nil {
 		return err
 	}
-	if migrationAuthorizationRequired(Classify(snapshot, manifest)) {
+	state := Classify(snapshot, manifest)
+	if migrationAuthorizationRequired(state) || state.Classification == Compatible && migrationPending(state, manifest) {
 		return errors.New("PostgreSQL upgrade requires the supported update transaction")
 	}
 	return nil
@@ -180,10 +181,10 @@ func migrate(ctx context.Context, db *sql.DB, manifest Manifest) (SchemaState, e
 }
 
 func migrateConn(ctx context.Context, conn *sql.Conn, manifest Manifest) (SchemaState, error) {
-	return migrateConnExpectedAppRole(ctx, conn, manifest, "punaro_app")
+	return migrateConnExpectedAppRole(ctx, conn, manifest, "punaro_app", false)
 }
 
-func migrateConnExpectedAppRole(ctx context.Context, conn *sql.Conn, manifest Manifest, appRole string) (SchemaState, error) {
+func migrateConnExpectedAppRole(ctx context.Context, conn *sql.Conn, manifest Manifest, appRole string, allowExistingUpgrade bool) (SchemaState, error) {
 	if err := manifest.Validate(); err != nil {
 		return SchemaState{}, err
 	}
@@ -204,10 +205,13 @@ func migrateConnExpectedAppRole(ctx context.Context, conn *sql.Conn, manifest Ma
 		return SchemaState{}, err
 	}
 	state := Classify(snapshot, manifest)
-	if state.Classification == Compatible {
+	if (state.Classification == Compatible || state.Classification == UpgradeRequired) && migrationPending(state, manifest) && !allowExistingUpgrade {
+		return state, errors.New("PostgreSQL upgrade requires the supported update transaction")
+	}
+	if state.Classification == Compatible && !migrationPending(state, manifest) {
 		return state, nil
 	}
-	if state.Classification != Pristine && state.Classification != UpgradeRequired {
+	if state.Classification != Pristine && state.Classification != UpgradeRequired && state.Classification != Compatible {
 		return state, contentFreeMigrationError(state.Classification)
 	}
 	if state.Classification == Pristine {
@@ -235,6 +239,10 @@ func migrateConnExpectedAppRole(ctx context.Context, conn *sql.Conn, manifest Ma
 		return final, contentFreeMigrationError(final.Classification)
 	}
 	return final, nil
+}
+
+func migrationPending(state SchemaState, manifest Manifest) bool {
+	return state.Version < manifest.MaxSupported
 }
 
 func migrationAuthorizationRequired(state SchemaState) bool {

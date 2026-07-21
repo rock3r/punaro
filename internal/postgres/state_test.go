@@ -79,3 +79,13 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
+	manifest := CurrentManifest()
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 8}, manifest) {
+		t.Fatal("compatible v8 schema must still apply the pending v9 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 9}, manifest) {
+		t.Fatal("current v9 schema reported a pending migration")
+	}
+}

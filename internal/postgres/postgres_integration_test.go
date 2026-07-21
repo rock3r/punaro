@@ -601,7 +601,7 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		_ = ownerConn.Close()
 		t.Fatalf("missing-role fixture collision=%t err=%v", missingRoleExists, err)
 	}
-	if _, err := migrateConnExpectedAppRole(ctx, ownerConn, CurrentManifest(), missingRole); err == nil {
+	if _, err := migrateConnExpectedAppRole(ctx, ownerConn, CurrentManifest(), missingRole, false); err == nil {
 		_ = ownerConn.Close()
 		t.Fatal("migrator accepted a missing application role")
 	}
@@ -1345,6 +1345,20 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		t.Fatalf("inspect v8 schema with current manifest: %v", inspectErr)
 	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 8 {
 		t.Fatalf("current manifest rejected exact v8 schema: %#v", state)
+	}
+	if _, err := Migrate(ctx, Config{DSNFile: ownerFile}); err == nil || !strings.Contains(err.Error(), "supported update transaction") {
+		t.Fatalf("ordinary migrator accepted compatible-but-pending v9 upgrade: %v", err)
+	}
+	ordinaryConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open ordinary migration engine connection: %v", err)
+	}
+	if state, migrateErr := migrateConnExpectedAppRole(ctx, ordinaryConn, current, "punaro_app", false); migrateErr == nil || !strings.Contains(migrateErr.Error(), "supported update transaction") || state.Classification != Compatible || state.Version != 8 {
+		_ = ordinaryConn.Close()
+		t.Fatalf("ordinary locked migration engine accepted compatible-but-pending v9 upgrade: state=%#v err=%v", state, migrateErr)
+	}
+	if err := ordinaryConn.Close(); err != nil {
+		t.Fatalf("close ordinary migration engine connection: %v", err)
 	}
 
 	request = UpdateRequest{
