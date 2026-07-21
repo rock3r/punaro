@@ -77,6 +77,90 @@ CREATE TABLE attachment.recipient_grant_endpoints (
 -- artifact binding locks the project before its uploads. Replace the
 -- publication routine at the v11 boundary so both operations use the same
 -- project -> upload order and cannot deadlock one another.
+CREATE OR REPLACE FUNCTION attachment.claim_upload(
+    requested_principal uuid,
+    requested_artifact uuid,
+    requested_lifetime interval
+)
+RETURNS TABLE (
+    artifact_id uuid,
+    project_id uuid,
+    principal_id uuid,
+    timeline_id uuid,
+    size_bytes bigint,
+    sha256 text,
+    state text,
+    attempt_generation bigint,
+    claim_token uuid,
+    claim_until timestamptz,
+    expires_at timestamptz
+)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    upload attachment.uploads%ROWTYPE;
+    candidate_project uuid;
+    current_timeline uuid;
+    grant_id uuid;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    IF requested_lifetime < interval '30 seconds' OR requested_lifetime > interval '10 minutes' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid attachment upload claim';
+    END IF;
+    SELECT candidate.project_id INTO candidate_project
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact
+      AND candidate.principal_id = requested_principal
+      AND candidate.state = 'reserved';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment upload claim is not authorized';
+    END IF;
+    PERFORM 1 FROM relay.projects
+    WHERE id = candidate_project AND merged_into IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment project is unavailable';
+    END IF;
+    SELECT candidate.* INTO upload
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact FOR UPDATE;
+    IF NOT FOUND OR upload.principal_id <> requested_principal OR upload.project_id <> candidate_project OR upload.state <> 'reserved' THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment upload claim is not authorized';
+    END IF;
+    SELECT server.timeline_id INTO current_timeline
+    FROM jobs.server_state AS server WHERE server.singleton FOR SHARE;
+    IF upload.timeline_id <> current_timeline OR upload.expires_at <= statement_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment reservation is stale';
+    END IF;
+    SELECT capability_grant.id INTO grant_id
+    FROM auth.principals AS principal
+    JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+    WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
+      AND capability_grant.revoked_at IS NULL AND capability_grant.capability = 'attachment.upload'
+      AND ((capability_grant.scope = 'project' AND capability_grant.project_id = upload.project_id)
+           OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+    ORDER BY capability_grant.id LIMIT 1 FOR SHARE OF principal, capability_grant;
+    IF grant_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment upload claim is not authorized';
+    END IF;
+    IF upload.claim_until IS NOT NULL AND upload.claim_until > statement_timestamp() THEN
+        RAISE EXCEPTION USING ERRCODE = '55P03', MESSAGE = 'attachment upload is already claimed';
+    END IF;
+    UPDATE attachment.uploads AS claimed_upload
+    SET attempt_generation = claimed_upload.attempt_generation + 1,
+        claim_token = gen_random_uuid(),
+        claim_until = LEAST(statement_timestamp() + requested_lifetime, claimed_upload.expires_at)
+    WHERE claimed_upload.artifact_id = requested_artifact
+    RETURNING claimed_upload.artifact_id, claimed_upload.project_id, claimed_upload.principal_id, claimed_upload.timeline_id,
+              claimed_upload.size_bytes, claimed_upload.sha256::text, claimed_upload.state, claimed_upload.attempt_generation,
+              claimed_upload.claim_token, claimed_upload.claim_until, claimed_upload.expires_at
+    INTO artifact_id, project_id, principal_id, timeline_id, size_bytes, sha256, state,
+         attempt_generation, claim_token, claim_until, expires_at;
+    RETURN NEXT;
+END
+$function$;
+
 CREATE OR REPLACE FUNCTION attachment.publish_upload(
     requested_principal uuid,
     requested_artifact uuid,
@@ -205,6 +289,108 @@ BEGIN
     JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = current_upload.artifact_id
     JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
     WHERE current_upload.artifact_id = requested_artifact;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION attachment.release_expired_upload(requested_artifact uuid, requested_cleanup_token uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    upload attachment.uploads%ROWTYPE;
+    candidate_project uuid;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    SELECT candidate.project_id INTO candidate_project
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact
+      AND candidate.state = 'reaping'
+      AND candidate.claim_token IS NOT DISTINCT FROM requested_cleanup_token;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    PERFORM 1 FROM relay.projects
+    WHERE id = candidate_project AND merged_into IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    SELECT candidate.* INTO upload
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact FOR UPDATE;
+    IF NOT FOUND OR upload.project_id <> candidate_project OR upload.state <> 'reaping'
+       OR upload.claim_token IS DISTINCT FROM requested_cleanup_token THEN
+        RETURN false;
+    END IF;
+    PERFORM 1 FROM attachment.global_quota WHERE singleton FOR UPDATE;
+    PERFORM 1 FROM attachment.project_quotas WHERE project_id = upload.project_id FOR UPDATE;
+    PERFORM 1 FROM attachment.principal_quotas WHERE principal_id = upload.principal_id FOR UPDATE;
+    UPDATE attachment.global_quota SET reserved_bytes = reserved_bytes - upload.size_bytes, reserved_uploads = reserved_uploads - 1
+    WHERE singleton AND reserved_bytes >= upload.size_bytes AND reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment global quota is inconsistent';
+    END IF;
+    UPDATE attachment.project_quotas SET reserved_bytes = reserved_bytes - upload.size_bytes, reserved_uploads = reserved_uploads - 1
+    WHERE project_id = upload.project_id AND reserved_bytes >= upload.size_bytes AND reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment project quota is inconsistent';
+    END IF;
+    UPDATE attachment.principal_quotas SET reserved_bytes = reserved_bytes - upload.size_bytes, reserved_uploads = reserved_uploads - 1
+    WHERE principal_id = upload.principal_id AND reserved_bytes >= upload.size_bytes AND reserved_uploads >= 1;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment principal quota is inconsistent';
+    END IF;
+    UPDATE attachment.uploads SET state = 'expired', claim_token = NULL, claim_until = NULL WHERE uploads.artifact_id = requested_artifact;
+    UPDATE relay.projects SET content_generation = content_generation + 1 WHERE id = upload.project_id AND merged_into IS NULL;
+    PERFORM jobs.advance_change_sequence();
+    RETURN true;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION attachment.mark_corrupt(requested_artifact uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    candidate_project uuid;
+    affected_project uuid;
+    affected_path text;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    SELECT candidate.project_id INTO candidate_project
+    FROM attachment.uploads AS candidate
+    WHERE candidate.artifact_id = requested_artifact;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    PERFORM 1 FROM relay.projects
+    WHERE id = candidate_project AND merged_into IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    UPDATE attachment.uploads SET state = 'corrupt'
+    WHERE artifact_id = requested_artifact AND project_id = candidate_project AND state = 'ready'
+    RETURNING project_id INTO affected_project;
+    IF FOUND THEN
+        DELETE FROM attachment.ready_artifacts
+        WHERE artifact_id = requested_artifact
+        RETURNING storage_path INTO affected_path;
+        IF affected_path IS NULL THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment READY projection is inconsistent';
+        END IF;
+        DELETE FROM attachment.ready_blob_manifest WHERE storage_path = affected_path;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'attachment READY manifest is inconsistent';
+        END IF;
+        UPDATE relay.projects SET content_generation = content_generation + 1
+        WHERE id = affected_project AND merged_into IS NULL;
+        PERFORM jobs.advance_change_sequence();
+        RETURN true;
+    END IF;
+    RETURN false;
 END
 $function$;
 
