@@ -132,7 +132,7 @@ WITH objects AS (
       ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_endpoint_check','{3}','(((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512)) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))','((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))'),
       ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_machine_check','{4}','(((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128)) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))','((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))'),
       ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_generation_check','{5}','(ownership_generation >= 1)','(ownership_generation >= 1)')
-), actual_checks AS (
+), actual_checks(relation_name,constraint_name,column_keys,expression) AS (
     SELECT constraint_row.conrelid::regclass::text, constraint_row.conname,
            constraint_row.conkey::text, pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
     FROM pg_constraint AS constraint_row, objects
