@@ -215,18 +215,21 @@ type AttachmentGCClaim struct {
 // AttachmentPublishRequest binds completion to one database claim and the
 // exact immutable blob proven by the filesystem layer.
 type AttachmentPublishRequest struct {
-	PrincipalID       string
-	ArtifactID        string
-	AttemptGeneration int64
-	ClaimToken        string
-	StoragePath       string
-	SizeBytes         int64
-	SHA256            [sha256.Size]byte
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ArtifactID           string
+	AttemptGeneration    int64
+	ClaimToken           string
+	StoragePath          string
+	SizeBytes            int64
+	SHA256               [sha256.Size]byte
 }
 
 // Validate rejects a publication that is not bound to its derived opaque path.
 func (request AttachmentPublishRequest) Validate() error {
-	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.ArtifactID) || !validOpaqueID(request.ClaimToken) ||
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 ||
+		!validOpaqueID(request.ArtifactID) || !validOpaqueID(request.ClaimToken) ||
 		request.AttemptGeneration < 1 || request.SizeBytes < 1 || request.SizeBytes > maxAttachmentBytes ||
 		request.StoragePath != "ready/"+request.ArtifactID+".blob" {
 		return errors.New("invalid attachment publication request")
@@ -326,7 +329,7 @@ func (d *Database) PublishAttachment(ctx context.Context, request AttachmentPubl
 	var artifact AttachmentArtifact
 	var digestText string
 	err := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,state,ready_at
-FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`, request.PrincipalID, request.ArtifactID, request.AttemptGeneration, request.ClaimToken, request.StoragePath, request.SizeBytes, hex.EncodeToString(request.SHA256[:])).Scan(
+FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7,$8,$9)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ArtifactID, request.AttemptGeneration, request.ClaimToken, request.StoragePath, request.SizeBytes, hex.EncodeToString(request.SHA256[:])).Scan(
 		&artifact.ArtifactID, &artifact.ProjectID, &artifact.StoragePath, &artifact.SizeBytes, &digestText, &artifact.State, &artifact.ReadyAt)
 	if err != nil {
 		return AttachmentArtifact{}, attachmentStoreError(err, "attachment publication failed")

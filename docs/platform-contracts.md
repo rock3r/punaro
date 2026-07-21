@@ -108,6 +108,28 @@ ten-minute maximum lifetime. This schema does not
 mount any attachment HTTP route and does not implement deletion or physical
 garbage collection.
 
+Schema version 12 completes the hidden lifecycle with authorized,
+operation-bound tombstones, a 24-hour retained-quota window, backup-excluded
+generation/token GC, and bounded restore-skew orphan reconciliation. Schema
+version 13 adds transaction-atomic device credential reauthorization for READY
+publication. M-12 adds
+the first separately gated network and native-client surface over those exact
+routines:
+
+| Method | Path | Contract |
+| --- | --- | --- |
+| `POST` | `/v1/trusted-attachments` | Strict JSON reservation metadata; the authenticated device supplies the principal and the body supplies project, stable idempotency UUID, exact size/SHA-256, display name, media type, and a 5-60 minute lifetime. |
+| `PUT` | `/v1/trusted-attachments/{artifact}/content` | One exact-length `application/octet-stream` body; the server claims, bounds, verifies, durably publishes, and reauthorizes before READY. |
+| `GET` | `/v1/trusted-attachments/{artifact}` | Current generation-fenced recipient authorization followed by a fully verified bounded stream. Exact size, SHA-256, media type, artifact ID, and base64url display name are response headers established before the first byte. |
+| `DELETE` | `/v1/trusted-attachments/{artifact}` | No body and exactly one `Idempotency-Key`; current authority commits the tombstone, never synchronous unlink. |
+
+Every route requires one bearer device credential over the selected credential
+transport policy. Unknown, unauthorized, stale, and guessed artifacts share a
+non-disclosing result. There are no redirects, caller-provided storage paths,
+URLs, ranges, or public capabilities. The whole surface is absent unless the
+trusted-attachment release switch, PostgreSQL device authentication, and the
+private absolute blob root are configured together.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds

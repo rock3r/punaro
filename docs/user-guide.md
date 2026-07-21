@@ -105,18 +105,23 @@ downloaded. Partial uploads are never downloadable, and filesystem/database
 skew is reconciled explicitly. Trusted-relay release gates will be added with
 its implementation; the preserved v2/v3 gates cannot authorize production.
 
-The current schema-v12 implementation is intentionally dark. Schema v10 proves
+The schema-v13 server lifecycle is complete. Schema v10 proves
 bounded reservation, private durable publication, completion reauthorization,
 quota, backup-manifest, and crash-reconciliation behavior. Schema v11 adds
 stable message-recipient snapshots and a generation-fenced, capability-checked,
 fully verified bounded download service. Schema v12 adds authorized
 tombstone-first deletion, delayed backup-fenced physical GC, exact-once quota
-release, and bounded restore-skew cleanup. It still mounts no production
-attachment route. Passing those tests does not make the private blob directory
-a supported user interface, and an older restore may resurrect a later
-deletion.
+release, and bounded restore-skew cleanup. Schema v13 serializes exact device
+credential authority with READY publication. M-12 exposes that lifecycle only
+through the separately enabled authenticated trusted-relay routes and the
+`punaro-trusted-attachment` native client. The client resumes a stable send by
+repeating the same idempotency key, verifies every received byte before making
+it visible, contains output beneath an already-open safe download root, and
+never replaces an existing name. The private blob directory is never a user
+interface, and an older restore may resurrect a later deletion.
 
-Until then, v3 remains only a separately enabled controlled validation surface.
+Until the separate retirement review lands, v3 remains a separately enabled
+controlled validation surface and is not authorized as the production path.
 Use the established mailbox and Telegram workflows for text-only
 coordination and keep files in an approved storage system. The adapter may use
 payload-free WebSocket wake-up hints to trigger an early poll, but reconnecting

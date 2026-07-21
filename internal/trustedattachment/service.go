@@ -44,6 +44,14 @@ type DownloadWriter interface {
 // verifies the complete immutable file before output, and emits exactly the
 // recorded byte count.
 func (service *Service) Download(ctx context.Context, request postgres.AttachmentDownloadRequest, destination DownloadWriter) (postgres.AttachmentDownload, error) {
+	return service.DownloadPrepared(ctx, request, destination, nil)
+}
+
+// DownloadPrepared invokes prepare with the authorized immutable metadata
+// after every authority and shape check but before the first response byte.
+// Network adapters use this hook to commit exact integrity headers without
+// opening a second authorization race.
+func (service *Service) DownloadPrepared(ctx context.Context, request postgres.AttachmentDownloadRequest, destination DownloadWriter, prepare func(postgres.AttachmentDownload) error) (postgres.AttachmentDownload, error) {
 	if service == nil || destination == nil || request.Validate() != nil {
 		return postgres.AttachmentDownload{}, errors.New("invalid trusted attachment download")
 	}
@@ -71,6 +79,11 @@ func (service *Service) Download(ctx context.Context, request postgres.Attachmen
 	}
 	if download.ArtifactID != request.ArtifactID || download.StoragePath != "ready/"+download.ArtifactID+".blob" {
 		return postgres.AttachmentDownload{}, errors.New("trusted attachment download authority is malformed")
+	}
+	if prepare != nil {
+		if err := prepare(download); err != nil {
+			return postgres.AttachmentDownload{}, err
+		}
 	}
 	if err := service.store.StreamVerified(downloadCtx, PublishedBlob{StoragePath: download.StoragePath, SizeBytes: download.SizeBytes, SHA256: download.SHA256}, destination); err != nil {
 		if downloadCtx.Err() != nil {
@@ -204,7 +217,7 @@ func NewService(repository Repository, store *BlobStore) (*Service, error) {
 
 // Upload consumes one bounded stream under a fresh claim, durably publishes
 // its exact bytes, then conditionally commits READY under current authority.
-func (service *Service) Upload(ctx context.Context, principalID, artifactID string, claimLifetime time.Duration, source io.Reader) (postgres.AttachmentArtifact, error) {
+func (service *Service) Upload(ctx context.Context, device postgres.AuthenticatedDevice, artifactID string, claimLifetime time.Duration, source io.Reader) (postgres.AttachmentArtifact, error) {
 	if service == nil || source == nil {
 		return postgres.AttachmentArtifact{}, errors.New("invalid trusted attachment upload")
 	}
@@ -213,7 +226,7 @@ func (service *Service) Upload(ctx context.Context, principalID, artifactID stri
 		return postgres.AttachmentArtifact{}, err
 	}
 	defer func() { _ = unlock() }()
-	claim, err := service.repository.ClaimAttachmentUpload(ctx, principalID, artifactID, claimLifetime)
+	claim, err := service.repository.ClaimAttachmentUpload(ctx, device.PrincipalID, artifactID, claimLifetime)
 	if err != nil {
 		return postgres.AttachmentArtifact{}, err
 	}
@@ -222,13 +235,15 @@ func (service *Service) Upload(ctx context.Context, principalID, artifactID stri
 		return postgres.AttachmentArtifact{}, err
 	}
 	request := postgres.AttachmentPublishRequest{
-		PrincipalID:       principalID,
-		ArtifactID:        claim.ArtifactID,
-		AttemptGeneration: claim.AttemptGeneration,
-		ClaimToken:        claim.ClaimToken,
-		StoragePath:       blob.StoragePath,
-		SizeBytes:         blob.SizeBytes,
-		SHA256:            blob.SHA256,
+		PrincipalID:          device.PrincipalID,
+		CredentialLookupID:   device.LookupID,
+		CredentialGeneration: device.Generation,
+		ArtifactID:           claim.ArtifactID,
+		AttemptGeneration:    claim.AttemptGeneration,
+		ClaimToken:           claim.ClaimToken,
+		StoragePath:          blob.StoragePath,
+		SizeBytes:            blob.SizeBytes,
+		SHA256:               blob.SHA256,
 	}
 	artifact, err := service.repository.PublishAttachment(ctx, request)
 	if err != nil && ctx.Err() == nil && retryAmbiguousPublication(err) {

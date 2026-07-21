@@ -608,8 +608,53 @@ Corrupt artifacts follow the same delayed path. The bounded restore-skew scan
 requires old filesystem namespaces, authoritative database absence, the
 artifact lock, and the same backup exclusion held through unlink. A
 state-changing scan restarts from the beginning. Restoring older data can
-resurrect a deletion made after that snapshot. Migration 12 still mounts no
-attachment route or operator command.
+resurrect a deletion made after that snapshot.
+
+M-12 adds a separately gated trusted-relay surface without enabling it in the
+generated operator configuration. To exercise a reviewed self-hosted build,
+set both `PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true` and
+`PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=/var/lib/punaro/blobs` alongside the
+existing PostgreSQL device-auth and ingress settings. The blob root must
+already be an absolute clean directory owned by the daemon account with mode
+`0700`. Startup requires the exact current schema v13; merely compatible
+v10-v12 mail schemas cannot mount this opt-in surface. Startup fails before binding if the schema, root, authority, ingress
+policy, or bounded database/filesystem reconciliation is unavailable. A
+periodic fail-closed sweep continues abandoned, corrupt, tombstoned, and orphan
+cleanup; `/readyz` fails while that maintenance cannot complete.
+
+Build the native client with `make trusted-attachment-client`. It reads
+the bearer value only from an absolute protected regular file and never accepts
+it on the command line or prints it. The supported commands are:
+
+```sh
+punaro-trusted-attachment send \
+  --origin https://punaro.example \
+  --credential-file /run/credentials/punaro-device \
+  --project 00000000-0000-4000-8000-000000000001 \
+  --idempotency-key 00000000-0000-4000-8000-000000000002 \
+  --file /absolute/source/report.pdf \
+  --name report.pdf \
+  --media-type application/pdf
+
+punaro-trusted-attachment receive \
+  --origin https://punaro.example \
+  --credential-file /run/credentials/punaro-device \
+  --artifact 00000000-0000-4000-8000-000000000003 \
+  --download-root /absolute/private/downloads
+```
+
+Retry `send` with the same idempotency key and unchanged inputs after a lost
+response; an authoritative READY reservation skips the upload. `receive`
+restarts an interrupted bounded stream, verifies exact size and SHA-256 in a
+private stage, and creates the final root-relative name without replacement.
+Unsafe, traversal-like, or portable reserved display names fall back to
+`attachment-<artifact-id>`. An existing destination is never overwritten.
+Deletion uses `delete` with a fresh stable `--idempotency-key`; it returns after
+the tombstone, before backup-window physical GC.
+
+The v2/v3 production switches and evidence remain unchanged in this slice.
+Their retirement and the generated-operator default transition require the
+separate M-12B review.
 
 ### Operator wrapper and device ingress
 
