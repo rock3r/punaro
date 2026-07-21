@@ -91,7 +91,7 @@ WITH objects AS (
       (claim_oid,CASE WHEN recipient_grants_oid IS NULL
                       THEN '475ac4e1df29cabe6dbcae9e83038891'
                       ELSE 'a20da734d30b78d9e6868c27094cd549' END,'v'::"char"),
-      (publish_oid,CASE WHEN $1 >= 13 THEN '4905cb7ac568b6082882a908d5c10981'
+      (publish_oid,CASE WHEN $1 >= 13 THEN '12001e5ddc00c2e034e166eb4fd80f87'
                         WHEN recipient_grants_oid IS NULL THEN 'a309ef5966178bd6fef53435be8c215e'
                         ELSE 'af7e5394046227aa006c7820fe97d1d8' END,'v'::"char"),
       (begin_reap_oid,'fc58a668e122b22102bd26cee052e213','v'::"char"),
