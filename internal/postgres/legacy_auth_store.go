@@ -179,8 +179,22 @@ func (a *Administration) RetireLegacyMachine(ctx context.Context, actorPrincipal
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
 		return ErrForbidden
 	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+		return errors.New("legacy retirement cannot be serialized with mail cutover")
+	}
+	var cutoverActive bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM relay.mail_cutover_epochs WHERE phase IN ('importing','verified','active'))`).Scan(&cutoverActive); err != nil {
+		return errors.New("legacy retirement cannot inspect mail cutover")
+	}
 	if err := lockLegacyMutations(ctx, tx); err != nil {
 		return err
+	}
+	var state LegacyMachineState
+	if err := tx.QueryRowContext(ctx, `SELECT state FROM auth.legacy_machines WHERE principal_id=$1 FOR UPDATE`, legacyPrincipalID).Scan(&state); err != nil {
+		return ErrNotFound
+	}
+	if cutoverActive && state != LegacyPending {
+		return errors.New("migrated legacy retirement is unavailable during mail cutover")
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE auth.legacy_machines SET state = 'retired', migrated_credential_lookup_id = NULL, changed_at = statement_timestamp() WHERE principal_id = $1 AND state <> 'retired'`, legacyPrincipalID)
 	if err != nil {

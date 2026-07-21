@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -893,7 +894,38 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if _, err := admin.VerifyMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.CheckMailCutoverActivationReadiness(ctx, uuid.NewString(), activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
+	migratedKey := make([]byte, 32)
+	migratedKey[0] = 73
+	migratedKeyDigest := sha256.Sum256(migratedKey)
+	migratedDeviceID, migratedLookupID, migratedLegacyID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	migratedSecretDigest := sha256.Sum256([]byte(migratedLookupID))
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.principals(id,kind,display_name) VALUES($1,'device','cutover migrated device'),($2,'legacy_machine','cutover migrated legacy')`, migratedDeviceID, migratedLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES($1,$2,'cutover migrated device',$3)`, migratedLookupID, migratedDeviceID, migratedSecretDigest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.legacy_machines(principal_id,public_key,public_key_digest,state,migrated_credential_lookup_id) VALUES($1,$2,$3,'migrated',$4)`, migratedLegacyID, migratedKey, migratedKeyDigest[:], migratedLookupID); err != nil {
+		t.Fatal(err)
+	}
+	retiredKey := make([]byte, 32)
+	retiredKey[0] = 74
+	retiredKeyDigest := sha256.Sum256(retiredKey)
+	retiredLegacyID := uuid.NewString()
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.principals(id,kind,display_name) VALUES($1,'legacy_machine','cutover retired legacy')`, retiredLegacyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.legacy_machines(principal_id,public_key,public_key_digest,state) VALUES($1,$2,$3,'retired')`, retiredLegacyID, retiredKey, retiredKeyDigest[:]); err != nil {
+		t.Fatal(err)
+	}
+	activationEnrollment := `[{"id":"cutover-machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(migratedKey) + `","endpoints":["agent/cutover/source-a"]},{"id":"cutover-machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(retiredKey) + `","endpoints":["agent/cutover/source-b"]}]`
+	mismatchedKey := append([]byte(nil), migratedKey...)
+	mismatchedKey[0]++
+	mismatchedEnrollment := `[{"id":"cutover-machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(mismatchedKey) + `","endpoints":["agent/cutover/source-a"]},{"id":"cutover-machine-b","public_key":"` + base64.RawURLEncoding.EncodeToString(retiredKey) + `","endpoints":["agent/cutover/source-b"]}]`
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, mismatchedEnrollment); err == nil {
+		t.Fatal("activation readiness accepted a static enrollment key that did not match migrated inventory")
+	}
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, uuid.NewString(), activationRequest.EpochID, activationRequest.SourceFingerprint, activationEnrollment); err == nil {
 		t.Fatal("non-owner passed activation readiness")
 	}
 	pendingLegacyKey := make([]byte, 32)
@@ -906,7 +938,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.legacy_machines(principal_id,public_key,public_key_digest) VALUES($1,$2,$3)`, pendingLegacyID, pendingLegacyKey, pendingLegacyDigest[:]); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, activationEnrollment); err == nil {
 		t.Fatal("activation readiness accepted a pending legacy machine")
 	}
 	if sourceState, err := relay.InspectMigrationSource(ctx, sourcePath); err != nil || sourceState.Phase != relay.MigrationSourcePrepared {
@@ -915,8 +947,11 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if err := admin.RetireLegacyMachine(ctx, actor, pendingLegacyID); err != nil {
 		t.Fatal(err)
 	}
-	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, activationEnrollment); err != nil {
 		t.Fatalf("resolved activation readiness: %v", err)
+	}
+	if err := admin.RetireLegacyMachine(ctx, actor, migratedLegacyID); err == nil {
+		t.Fatal("migrated legacy mapping was retired after cutover readiness")
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.legacy_auth_state SET enabled=true,changed_at=statement_timestamp() WHERE singleton`); err != nil {
 		t.Fatal(err)
@@ -928,7 +963,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 		_, registerErr := admin.RegisterLegacyMachine(ctx, actor, "cutover readiness race", key)
 		registrationResult <- registerErr
 	}()
-	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
+	if err := admin.CheckMailCutoverActivationReadiness(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, activationEnrollment); err != nil {
 		t.Fatalf("concurrent activation readiness: %v", err)
 	}
 	if err := <-registrationResult; err == nil {

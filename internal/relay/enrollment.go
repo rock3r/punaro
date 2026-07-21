@@ -26,12 +26,20 @@ func (enrollmentValidationTransition) AuthorizeTransition(context.Context, strin
 // ValidateMachineEnrollments proves that raw enrollment JSON is safe for the
 // transition runtime, including non-overlapping authority and unique keys.
 func ValidateMachineEnrollments(raw string) error {
+	_, _, err := machineEnrollmentAuthenticator(raw)
+	return err
+}
+
+func machineEnrollmentAuthenticator(raw string) (*Authenticator, []Machine, error) {
 	machines, err := ParseMachineEnrollments(raw)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	_, err = newAuthenticator(enrollmentValidationStore{}, machines, enrollmentValidationTransition{})
-	return err
+	authenticator, err := newAuthenticator(enrollmentValidationStore{}, machines, enrollmentValidationTransition{})
+	if err != nil {
+		return nil, nil, err
+	}
+	return authenticator, machines, nil
 }
 
 // ParseMachineEnrollments parses the non-secret daemon enrollment setting. It

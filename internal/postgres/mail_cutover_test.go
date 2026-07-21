@@ -123,6 +123,26 @@ func TestMailCutoverMaterializationUsesBinaryResumeOrdering(t *testing.T) {
 	}
 }
 
+func TestMailCutoverEnrollmentKeysExactlyMatchMigratedInventory(t *testing.T) {
+	t.Parallel()
+	keyA := make([]byte, 32)
+	keyA[0] = 1
+	keyB := make([]byte, 32)
+	keyB[0] = 2
+	machines := []relay.Machine{{ID: "machine-a", PublicKey: keyA}, {ID: "machine-b", PublicKey: keyB}}
+	if err := validateMailCutoverEnrollmentKeys(machines, []mailCutoverLegacyKey{{publicKey: keyB, state: LegacyRetired}, {publicKey: keyA, state: LegacyMigrated}}); err != nil {
+		t.Fatalf("matching migrated keys rejected: %v", err)
+	}
+	mismatched := append([]byte(nil), keyB...)
+	mismatched[0] = 3
+	if err := validateMailCutoverEnrollmentKeys(machines, []mailCutoverLegacyKey{{publicKey: keyA, state: LegacyMigrated}, {publicKey: mismatched, state: LegacyRetired}}); err == nil {
+		t.Fatal("mismatched migrated key was accepted")
+	}
+	if err := validateMailCutoverEnrollmentKeys(machines[:1], []mailCutoverLegacyKey{{publicKey: keyA, state: LegacyMigrated}, {publicKey: keyB, state: LegacyMigrated}}); err == nil {
+		t.Fatal("omitted migrated key was accepted")
+	}
+}
+
 func migrationEndpointRow(t *testing.T, endpoint, machine string, generation int64) relay.MigrationSourceRow {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{

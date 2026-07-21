@@ -119,6 +119,46 @@ func InspectMigrationSource(ctx context.Context, path string) (MigrationSourceMa
 	return manifest, nil
 }
 
+// CheckMigrationSourceEnrollmentCoverage proves every existing SQLite endpoint
+// remains claimable by at least one machine in the static PostgreSQL runtime.
+func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollment string) error {
+	authenticator, _, err := machineEnrollmentAuthenticator(enrollment)
+	if err != nil {
+		return errors.New("relay migration enrollment is invalid")
+	}
+	db, err := openMigrationSourceDatabase(path, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return errors.New("relay migration enrollment snapshot cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := inspectMigrationSource(ctx, tx); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT endpoint, machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration endpoints are unavailable")
+	}
+	for rows.Next() {
+		var endpoint, machineID string
+		if err := rows.Scan(&endpoint, &machineID); err != nil || !authenticator.AllowsEndpoint(machineID, endpoint) {
+			_ = rows.Close()
+			return errors.New("relay migration enrollment does not cover every endpoint")
+		}
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("relay migration endpoints are unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("relay migration enrollment snapshot cannot commit")
+	}
+	return nil
+}
+
 // PrepareMigrationSource fences every SQLite relay mutation, advances all
 // carried lease fences, and records the exact post-fence logical fingerprint.
 func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, expectedFingerprint string, now time.Time) (MigrationSourceManifest, error) {

@@ -385,11 +385,17 @@ var mailCutoverMaterializationStatements = []string{
 }
 
 // CheckMailCutoverActivationReadiness proves that the verified destination has
-// no known pending legacy identity before the host irreversibly retires SQLite.
-// ActivateMailCutover repeats this proof while closing the legacy gate in the
-// same transaction as PostgreSQL activation.
-func (a *Administration) CheckMailCutoverActivationReadiness(ctx context.Context, actorPrincipalID, epochID, sourceFingerprint string) error {
-	if !validOpaqueID(actorPrincipalID) || uuid.Validate(epochID) != nil || !mailCutoverDigestPattern.MatchString(sourceFingerprint) {
+// no pending legacy identity, every migrated key remains enrolled, and any
+// additionally enrolled key is a known retired identity whose source mail is
+// being preserved before the host irreversibly retires SQLite.
+// ActivateMailCutover repeats the pending-inventory proof while closing the
+// legacy gate in the same transaction as PostgreSQL activation.
+func (a *Administration) CheckMailCutoverActivationReadiness(ctx context.Context, actorPrincipalID, epochID, sourceFingerprint, enrollment string) error {
+	if !validOpaqueID(actorPrincipalID) || uuid.Validate(epochID) != nil || !mailCutoverDigestPattern.MatchString(sourceFingerprint) || relay.ValidateMachineEnrollments(enrollment) != nil {
+		return errors.New("invalid mail cutover activation readiness check")
+	}
+	machines, err := relay.ParseMachineEnrollments(enrollment)
+	if err != nil {
 		return errors.New("invalid mail cutover activation readiness check")
 	}
 	tx, err := a.db.BeginTx(ctx, nil)
@@ -420,8 +426,56 @@ func (a *Administration) CheckMailCutoverActivationReadiness(ctx context.Context
 	if pending {
 		return errors.New("legacy authentication still has pending machines")
 	}
+	rows, err := tx.QueryContext(ctx, `SELECT public_key,state FROM auth.legacy_machines WHERE state<>'pending' ORDER BY public_key_digest`)
+	if err != nil {
+		return errors.New("legacy inventory is unavailable")
+	}
+	var legacyKeys []mailCutoverLegacyKey
+	for rows.Next() {
+		var publicKey []byte
+		var state LegacyMachineState
+		if err := rows.Scan(&publicKey, &state); err != nil {
+			_ = rows.Close()
+			return errors.New("legacy inventory is malformed")
+		}
+		legacyKeys = append(legacyKeys, mailCutoverLegacyKey{publicKey: publicKey, state: state})
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("legacy inventory is unavailable")
+	}
+	if err := validateMailCutoverEnrollmentKeys(machines, legacyKeys); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("mail cutover activation readiness cannot commit")
+	}
+	return nil
+}
+
+type mailCutoverLegacyKey struct {
+	publicKey []byte
+	state     LegacyMachineState
+}
+
+func validateMailCutoverEnrollmentKeys(machines []relay.Machine, legacyKeys []mailCutoverLegacyKey) error {
+	configured := make(map[string]struct{}, len(machines))
+	for _, machine := range machines {
+		configured[string(machine.PublicKey)] = struct{}{}
+	}
+	known := make(map[string]LegacyMachineState, len(legacyKeys))
+	for _, legacy := range legacyKeys {
+		key := string(legacy.publicKey)
+		known[key] = legacy.state
+		if legacy.state == LegacyMigrated {
+			if _, ok := configured[key]; !ok {
+				return errors.New("static relay enrollment omits migrated legacy inventory")
+			}
+		}
+	}
+	for publicKey := range configured {
+		if _, ok := known[publicKey]; !ok {
+			return errors.New("static relay enrollment contains an unknown legacy key")
+		}
 	}
 	return nil
 }

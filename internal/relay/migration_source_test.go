@@ -215,6 +215,33 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
+func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a", "claude/jbr-reviewer"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	covered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"],"endpoints":["claude/jbr-reviewer"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, covered); err != nil {
+		t.Fatalf("covered enrollment rejected: %v", err)
+	}
+	uncovered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncovered); err == nil {
+		t.Fatal("enrollment missing an exact endpoint was accepted")
+	}
+	reassigned := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]},{"id":"machine-b","public_key":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["claude/"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, reassigned); err == nil {
+		t.Fatal("another machine's authority was accepted for the persisted endpoint owner")
+	}
+}
+
 func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

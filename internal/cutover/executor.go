@@ -27,6 +27,7 @@ var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // Source is the privileged, service-owned SQLite cutover surface.
 type Source interface {
 	Inspect(context.Context) (relay.MigrationSourceManifest, error)
+	CheckEnrollmentCoverage(context.Context, string) error
 	Prepare(context.Context, string, string, string, time.Time) (relay.MigrationSourceManifest, error)
 	ReadBatch(context.Context, string, string, int) (relay.MigrationSourceBatch, error)
 	Abort(context.Context, string, string, string) (relay.MigrationSourceManifest, error)
@@ -43,7 +44,7 @@ type Destination interface {
 	MailCutoverCheckpoint(context.Context, string, string, string) (postgres.MailCutoverCheckpoint, error)
 	StageMailCutoverBatch(context.Context, string, postgres.MailCutoverBatch) (postgres.MailCutoverCheckpoint, error)
 	VerifyMailCutover(context.Context, string, string, string) (postgres.MailCutoverEpoch, error)
-	CheckMailCutoverActivationReadiness(context.Context, string, string, string) error
+	CheckMailCutoverActivationReadiness(context.Context, string, string, string, string) error
 	ActivateMailCutover(context.Context, string, string, string, relay.MigrationSourceManifest) (postgres.MailCutoverEpoch, error)
 	AbortMailCutover(context.Context, string, string, string) error
 }
@@ -58,6 +59,7 @@ type Executor struct {
 	Destination Destination
 	Publish     Publisher
 	BatchSize   int
+	Enrollment  string
 }
 
 // Request is the explicit irreversible execution authorization.
@@ -108,7 +110,7 @@ func (e Executor) DryRun(ctx context.Context) (Plan, error) {
 // PostgreSQL verification, activates PostgreSQL only after retirement, and
 // publishes the runtime marker only after database activation.
 func (e Executor) Execute(ctx context.Context, request Request) (Result, error) {
-	if e.Source == nil || e.Destination == nil || e.Publish == nil || uuid.Validate(request.ActorPrincipalID) != nil || uuid.Validate(request.EpochID) != nil || !digestPattern.MatchString(request.ExpectedSourceFingerprint) || request.Cutoff.IsZero() {
+	if e.Source == nil || e.Destination == nil || e.Publish == nil || e.Enrollment == "" || uuid.Validate(request.ActorPrincipalID) != nil || uuid.Validate(request.EpochID) != nil || !digestPattern.MatchString(request.ExpectedSourceFingerprint) || request.Cutoff.IsZero() {
 		return Result{}, errors.New("mail cutover execution request is invalid")
 	}
 	if err := e.Destination.CheckMailCutoverSchemaReadiness(ctx); err != nil {
@@ -126,6 +128,9 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 	if err != nil {
 		return Result{}, err
 	}
+	if err := e.Source.CheckEnrollmentCoverage(ctx, e.Enrollment); err != nil {
+		return Result{}, err
+	}
 	switch manifest.Phase {
 	case relay.MigrationSourceActive:
 		if manifest.Fingerprint != request.ExpectedSourceFingerprint {
@@ -133,6 +138,9 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 		}
 		manifest, err = e.Source.Prepare(ctx, request.EpochID, target, request.ExpectedSourceFingerprint, request.Cutoff)
 		if err != nil {
+			return Result{}, err
+		}
+		if err := e.Source.CheckEnrollmentCoverage(ctx, e.Enrollment); err != nil {
 			return Result{}, err
 		}
 	case relay.MigrationSourcePrepared, relay.MigrationSourceRetired:
@@ -200,7 +208,7 @@ func (e Executor) Execute(ctx context.Context, request Request) (Result, error) 
 	}
 	if epoch.Phase == postgres.MailCutoverVerified {
 		if manifest.Phase == relay.MigrationSourcePrepared {
-			if err := e.Destination.CheckMailCutoverActivationReadiness(ctx, request.ActorPrincipalID, request.EpochID, prepared.Fingerprint); err != nil {
+			if err := e.Destination.CheckMailCutoverActivationReadiness(ctx, request.ActorPrincipalID, request.EpochID, prepared.Fingerprint, e.Enrollment); err != nil {
 				return Result{}, err
 			}
 			manifest, err = e.Source.Retire(ctx, request.EpochID, target, prepared.Fingerprint)
@@ -328,6 +336,11 @@ type FileSource struct{ Path string }
 // Inspect returns the current durable SQLite source manifest.
 func (s FileSource) Inspect(ctx context.Context) (relay.MigrationSourceManifest, error) {
 	return relay.InspectMigrationSource(ctx, s.Path)
+}
+
+// CheckEnrollmentCoverage proves the persisted runtime can reclaim every source endpoint.
+func (s FileSource) CheckEnrollmentCoverage(ctx context.Context, enrollment string) error {
+	return relay.CheckMigrationSourceEnrollmentCoverage(ctx, s.Path, enrollment)
 }
 
 // Prepare installs the exact SQLite write barrier.

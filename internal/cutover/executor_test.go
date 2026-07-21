@@ -29,12 +29,12 @@ func TestExecutorCrossesBoundariesInOrderAndPublishesLast(t *testing.T) {
 		}
 		return nil
 	}
-	executor := Executor{Source: source, Destination: destination, Publish: publisher, BatchSize: 1}
+	executor := Executor{Source: source, Destination: destination, Publish: publisher, BatchSize: 1, Enrollment: "test-enrollment"}
 	result, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()})
 	if err != nil || result.Phase != postgres.MailCutoverActive || result.SourcePhase != relay.MigrationSourceRetired {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	want := []string{"schema-readiness", "identity", "inspect", "prepare", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints"}
+	want := []string{"schema-readiness", "identity", "inspect", "coverage", "prepare", "coverage", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints"}
 	if len(events) < len(want) || !reflect.DeepEqual(events[:len(want)], want) {
 		t.Fatalf("events=%v want prefix=%v", events, want)
 	}
@@ -52,7 +52,7 @@ func TestExecutorDoesNotSealAfterImportFailureAndRecoversActivePublication(t *te
 	if _, err := (Executor{Source: &fakeSource{manifest: manifest, events: &failedEvents}, Destination: failing, Publish: func(context.Context, operator.MailCutoverPublication) error {
 		failedEvents = append(failedEvents, "publish")
 		return nil
-	}, BatchSize: 1}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()}); err == nil {
+	}, BatchSize: 1, Enrollment: "test-enrollment"}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()}); err == nil {
 		t.Fatal("injected import failure succeeded")
 	}
 	if indexOf(failedEvents, "retire") >= 0 || indexOf(failedEvents, "activate") >= 0 || indexOf(failedEvents, "publish") >= 0 {
@@ -65,12 +65,12 @@ func TestExecutorDoesNotSealAfterImportFailureAndRecoversActivePublication(t *te
 	result, err := (Executor{Source: &fakeSource{manifest: retired, events: &recoveryEvents}, Destination: recoveryDestination, Publish: func(context.Context, operator.MailCutoverPublication) error {
 		recoveryEvents = append(recoveryEvents, "publish")
 		return nil
-	}, BatchSize: 1}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: retired.EpochID, ExpectedSourceFingerprint: retired.ExpectedFingerprint, Cutoff: time.Now().UTC()})
-	if err != nil || result.Phase != postgres.MailCutoverActive || !reflect.DeepEqual(recoveryEvents, []string{"schema-readiness", "identity", "inspect", "begin", "publish"}) {
+	}, BatchSize: 1, Enrollment: "test-enrollment"}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: retired.EpochID, ExpectedSourceFingerprint: retired.ExpectedFingerprint, Cutoff: time.Now().UTC()})
+	if err != nil || result.Phase != postgres.MailCutoverActive || !reflect.DeepEqual(recoveryEvents, []string{"schema-readiness", "identity", "inspect", "coverage", "begin", "publish"}) {
 		t.Fatalf("recovery result=%#v events=%v err=%v", result, recoveryEvents, err)
 	}
 	changedEvents := []string{}
-	if _, err := (Executor{Source: &fakeSource{manifest: retired, events: &changedEvents}, Destination: &fakeDestination{identity: retired.TargetIdentity, phase: postgres.MailCutoverActive, events: &changedEvents}, Publish: func(context.Context, operator.MailCutoverPublication) error { return nil }, BatchSize: 1}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: retired.EpochID, ExpectedSourceFingerprint: strings.Repeat("f", 64), Cutoff: time.Now().UTC()}); err == nil || indexOf(changedEvents, "begin") >= 0 {
+	if _, err := (Executor{Source: &fakeSource{manifest: retired, events: &changedEvents}, Destination: &fakeDestination{identity: retired.TargetIdentity, phase: postgres.MailCutoverActive, events: &changedEvents}, Publish: func(context.Context, operator.MailCutoverPublication) error { return nil }, BatchSize: 1, Enrollment: "test-enrollment"}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: retired.EpochID, ExpectedSourceFingerprint: strings.Repeat("f", 64), Cutoff: time.Now().UTC()}); err == nil || indexOf(changedEvents, "begin") >= 0 {
 		t.Fatalf("changed recovery binding events=%v err=%v", changedEvents, err)
 	}
 }
@@ -82,7 +82,7 @@ func TestExecutorChecksActivationReadinessBeforeRetiringSource(t *testing.T) {
 	readinessErr := errors.New("pending legacy machine")
 	source := &fakeSource{manifest: prepared, events: &events}
 	destination := &fakeDestination{identity: prepared.TargetIdentity, phase: postgres.MailCutoverVerified, events: &events, readinessErr: readinessErr}
-	executor := Executor{Source: source, Destination: destination, Publish: func(context.Context, operator.MailCutoverPublication) error { return nil }}
+	executor := Executor{Source: source, Destination: destination, Publish: func(context.Context, operator.MailCutoverPublication) error { return nil }, Enrollment: "test-enrollment"}
 	_, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: prepared.EpochID, ExpectedSourceFingerprint: prepared.ExpectedFingerprint, Cutoff: time.Now().UTC()})
 	if !errors.Is(err, readinessErr) || source.manifest.Phase != relay.MigrationSourcePrepared || indexOf(events, "activation-readiness") < 0 || indexOf(events, "retire") >= 0 {
 		t.Fatalf("source=%#v events=%v err=%v", source.manifest, events, err)
@@ -108,10 +108,29 @@ func TestExecutorRequiresCurrentDestinationSchemaBeforeInspectingSource(t *testi
 		Source:      &fakeSource{manifest: manifest, events: &events},
 		Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events, schemaReadinessErr: readinessErr},
 		Publish:     func(context.Context, operator.MailCutoverPublication) error { return nil },
+		Enrollment:  "test-enrollment",
 	}
 	_, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()})
 	if !errors.Is(err, readinessErr) || !reflect.DeepEqual(events, []string{"schema-readiness"}) {
 		t.Fatalf("events=%v err=%v", events, err)
+	}
+}
+
+func TestExecutorRefusesUncoveredEnrollmentBeforePreparingSource(t *testing.T) {
+	t.Parallel()
+	manifest := testManifest(relay.MigrationSourceActive)
+	var events []string
+	coverageErr := errors.New("enrollment does not cover source")
+	source := &fakeSource{manifest: manifest, events: &events, coverageErr: coverageErr}
+	executor := Executor{
+		Source:      source,
+		Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events},
+		Publish:     func(context.Context, operator.MailCutoverPublication) error { return nil },
+		Enrollment:  "test-enrollment",
+	}
+	_, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()})
+	if !errors.Is(err, coverageErr) || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect", "coverage"}) || source.manifest.Phase != relay.MigrationSourceActive {
+		t.Fatalf("source=%#v events=%v err=%v", source.manifest, events, err)
 	}
 }
 
@@ -181,13 +200,18 @@ func TestAbortRecoversPreparedSourceWhenDestinationRejectedBeforeEpochInsert(t *
 }
 
 type fakeSource struct {
-	manifest relay.MigrationSourceManifest
-	events   *[]string
+	manifest    relay.MigrationSourceManifest
+	events      *[]string
+	coverageErr error
 }
 
 func (s *fakeSource) Inspect(context.Context) (relay.MigrationSourceManifest, error) {
 	*s.events = append(*s.events, "inspect")
 	return s.manifest, nil
+}
+func (s *fakeSource) CheckEnrollmentCoverage(context.Context, string) error {
+	*s.events = append(*s.events, "coverage")
+	return s.coverageErr
 }
 func (s *fakeSource) Prepare(_ context.Context, epoch, target, expected string, _ time.Time) (relay.MigrationSourceManifest, error) {
 	*s.events = append(*s.events, "prepare")
@@ -275,7 +299,7 @@ func (d *fakeDestination) VerifyMailCutover(_ context.Context, _ string, _ strin
 	d.phase = postgres.MailCutoverVerified
 	return postgres.MailCutoverEpoch{Phase: d.phase}, nil
 }
-func (d *fakeDestination) CheckMailCutoverActivationReadiness(context.Context, string, string, string) error {
+func (d *fakeDestination) CheckMailCutoverActivationReadiness(context.Context, string, string, string, string) error {
 	*d.events = append(*d.events, "activation-readiness")
 	return d.readinessErr
 }

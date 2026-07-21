@@ -156,8 +156,9 @@ fingerprint and PostgreSQL installation identity, prepares SQLite, stages at
 most 128 canonical rows per page, and resumes from owner-only checkpoints.
 Every staged table must reproduce the manifest count and SHA-256 before one
 transaction materializes the canonical relay tables and records `verified`.
-SQLite retirement precedes PostgreSQL activation. Activation refuses any
-pending legacy inventory and closes the global legacy gate in the same owner
+SQLite retirement precedes PostgreSQL activation. Activation refuses pending
+legacy inventory, requires every migrated key in the static relay enrollment,
+and permits only known retired keys in addition before retirement. It closes the gate in the same owner
 transaction that publishes the PostgreSQL authority. The local generated files
 selecting PostgreSQL and credential transition are published afterward with
 `installation.json` last. Abort is possible only before retirement; active

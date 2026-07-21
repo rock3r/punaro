@@ -88,6 +88,7 @@ func executeMailCutover(ctx context.Context, installation operator.Installation,
 	defer func() { _ = admin.Close() }()
 	executor := cutover.Executor{
 		Source: cutover.FileSource{Path: filepath.Join(installation.DataDir, "relay.db")}, Destination: admin, BatchSize: 128,
+		Enrollment: installation.RelayMachinesJSON,
 		Publish: func(_ context.Context, publication operator.MailCutoverPublication) error {
 			_, err := operator.PublishMailCutover(installation.Directory, publication)
 			return err
