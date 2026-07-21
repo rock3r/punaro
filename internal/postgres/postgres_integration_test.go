@@ -1793,15 +1793,6 @@ FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID).Scan(
 			corruptProjectID, corruptOwnerID, corruptPath, corruptSize, corruptSHA256, corruptState,
 			corruptTombstonedAt, corruptGCAfter, corruptGeneration)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
-		t.Fatalf("remove v10 corrupt attachment tombstone: %v", err)
-	}
-	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.uploads WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
-		t.Fatalf("remove v10 corrupt attachment: %v", err)
-	}
-	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.projects WHERE id=$1`, bridgeCorruptProjectID); err != nil {
-		t.Fatalf("remove v10 corrupt attachment project: %v", err)
-	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
 		t.Fatalf("mail cutover rejected exact v12 schema: %v", err)
 	}
@@ -1810,6 +1801,15 @@ FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID).Scan(
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v12 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment tombstone: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.uploads WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.projects WHERE id=$1`, bridgeCorruptProjectID); err != nil {
+		t.Fatalf("remove v10 corrupt attachment project: %v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
 		t.Fatalf("remove v5 bridge transaction fixture: %v", err)
