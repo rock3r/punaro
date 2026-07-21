@@ -1117,8 +1117,16 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	t.Helper()
 	current := CurrentManifest()
 	v5Manifest := Manifest{MinSupported: 5, MaxSupported: 5, Migrations: append([]Migration(nil), current.Migrations[:5]...)}
-	if state, err := migrate(ctx, ownerDB, v5Manifest); err != nil || state.Classification != Compatible || state.Version != 5 {
-		t.Fatalf("v5 staging state=%#v err=%v", state, err)
+	stagingConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open v5 staging connection: %v", err)
+	}
+	stagingState, stagingErr := migrateConnExpectedAppRole(ctx, stagingConn, v5Manifest, "punaro_app", true)
+	if closeErr := stagingConn.Close(); closeErr != nil {
+		t.Fatalf("close v5 staging connection: %v", closeErr)
+	}
+	if stagingErr != nil || stagingState.Classification != Compatible || stagingState.Version != 5 {
+		t.Fatalf("v5 staging state=%#v err=%v", stagingState, stagingErr)
 	}
 	var bridgeOwnerID string
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals (kind,display_name) VALUES ('owner','v5 bridge owner') RETURNING id::text`).Scan(&bridgeOwnerID); err != nil {
