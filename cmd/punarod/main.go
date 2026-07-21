@@ -27,11 +27,18 @@ import (
 	"github.com/rock3r/punaro/internal/ingress"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
+	"github.com/rock3r/punaro/internal/trustedattachment"
+	"github.com/rock3r/punaro/internal/trustedattachmenthttp"
 )
 
 const (
 	attachmentV3ReapInterval = time.Minute
 	attachmentV3ReapBatch    = 64
+	trustedReconcileBatch    = 100
+	trustedReconcileMaxPages = 1000
+	trustedOrphanGrace       = 24 * time.Hour
+	trustedGCClaimLifetime   = time.Minute
+	trustedReconcileInterval = 5 * time.Minute
 )
 
 type platformDatabase interface {
@@ -42,6 +49,13 @@ type platformDatabase interface {
 type deviceDatabase interface {
 	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
 	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
+}
+
+type trustedAttachmentDatabase interface {
+	deviceDatabase
+	trustedattachment.Repository
+	TrustedAttachmentRuntimeReady(context.Context) error
+	ReserveAttachment(context.Context, punaropostgres.AttachmentReservationRequest) (punaropostgres.AttachmentReservation, error)
 }
 
 type credentialTransitionDatabase interface {
@@ -187,11 +201,19 @@ func run(args []string, stderr io.Writer) int {
 	if closeV3 != nil {
 		defer closeV3()
 	}
+	trustedAttachmentHandler, err := buildTrustedAttachmentHandler(cfg, platformDB)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punarod trusted attachment configuration error: %v\n", err)
+		return 2
+	}
+	if trustedAttachmentHandler != nil {
+		defer trustedAttachmentHandler.Close()
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	healthMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if postgresReadiness() != nil || accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) || (v3Readiness != nil && v3Readiness() != nil) {
+		if postgresReadiness() != nil || accessReadiness() != nil || (permitReadiness != nil && permitReadiness() != nil) || (v3Readiness != nil && v3Readiness() != nil) || (trustedAttachmentHandler != nil && trustedAttachmentHandler.Ready() != nil) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
@@ -212,6 +234,10 @@ func run(args []string, stderr io.Writer) int {
 		deviceHandler := devicehttp.New(database, policy)
 		mux.Handle("/v1/enrollments/redeem", deviceHandler)
 		mux.Handle("/v1/device/session", deviceHandler)
+	}
+	if trustedAttachmentHandler != nil {
+		mux.Handle("/v1/trusted-attachments", trustedAttachmentHandler)
+		mux.Handle("/v1/trusted-attachments/", trustedAttachmentHandler)
 	}
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
@@ -271,6 +297,172 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func buildTrustedAttachmentHandler(cfg config.Config, platformDB platformDatabase) (*trustedAttachmentRuntime, error) {
+	if !cfg.TrustedAttachmentsEnabled {
+		return nil, nil
+	}
+	database, ok := platformDB.(trustedAttachmentDatabase)
+	if !ok {
+		return nil, errors.New("PostgreSQL attachment database authority is unavailable")
+	}
+	readinessCtx, readinessCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer readinessCancel()
+	if err := database.TrustedAttachmentRuntimeReady(readinessCtx); err != nil {
+		return nil, errors.New("PostgreSQL trusted attachment schema is unavailable")
+	}
+	store, err := trustedattachment.OpenBlobStore(cfg.TrustedAttachmentBlobDir)
+	if err != nil {
+		return nil, err
+	}
+	service, err := trustedattachment.NewService(database, store)
+	if err != nil {
+		return nil, err
+	}
+	reconcileCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := reconcileTrustedAttachments(reconcileCtx, service); err != nil {
+		return nil, errors.New("trusted attachment startup reconciliation failed")
+	}
+	policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
+	if err := policy.Validate(); err != nil {
+		return nil, errors.New("trusted attachment ingress policy is invalid")
+	}
+	return newTrustedAttachmentRuntime(trustedattachmenthttp.New(database, service, policy), service), nil
+}
+
+type trustedAttachmentRuntime struct {
+	handler http.Handler
+	cancel  context.CancelFunc
+	done    chan struct{}
+	mu      sync.RWMutex
+	err     error
+}
+
+func newTrustedAttachmentRuntime(handler http.Handler, reconciler attachmentReconciler) *trustedAttachmentRuntime {
+	ctx, cancel := context.WithCancel(context.Background())
+	runtime := &trustedAttachmentRuntime{handler: handler, cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(runtime.done)
+		ticker := time.NewTicker(trustedReconcileInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				operationCtx, operationCancel := context.WithTimeout(ctx, trustedReconcileInterval)
+				err := reconcileTrustedAttachments(operationCtx, reconciler)
+				operationCancel()
+				runtime.mu.Lock()
+				runtime.err = err
+				runtime.mu.Unlock()
+			}
+		}
+	}()
+	return runtime
+}
+
+func (runtime *trustedAttachmentRuntime) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if runtime == nil || runtime.handler == nil || runtime.Ready() != nil {
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		response.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = response.Write([]byte("{\"error\":\"attachment service is unavailable\"}\n"))
+		return
+	}
+	runtime.handler.ServeHTTP(response, request)
+}
+
+func (runtime *trustedAttachmentRuntime) Ready() error {
+	if runtime == nil {
+		return errors.New("trusted attachment runtime is unavailable")
+	}
+	runtime.mu.RLock()
+	defer runtime.mu.RUnlock()
+	return runtime.err
+}
+
+func (runtime *trustedAttachmentRuntime) Close() {
+	if runtime == nil || runtime.cancel == nil {
+		return
+	}
+	runtime.cancel()
+	<-runtime.done
+}
+
+type attachmentReconciler interface {
+	ReconcileBatch(context.Context, punaropostgres.AttachmentReconcileCursor, int) (trustedattachment.ReconcileResult, error)
+	GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error)
+	ReconcileOrphanBatch(context.Context, string, int, time.Duration) (trustedattachment.OrphanReconcileResult, error)
+}
+
+func reconcileTrustedAttachments(ctx context.Context, reconciler attachmentReconciler) error {
+	if reconciler == nil {
+		return errors.New("trusted attachment reconciler is unavailable")
+	}
+	cursor := punaropostgres.AttachmentReconcileCursor{}
+	databaseComplete := false
+	for page := 0; page < trustedReconcileMaxPages; page++ {
+		result, err := reconciler.ReconcileBatch(ctx, cursor, trustedReconcileBatch)
+		if err != nil {
+			return err
+		}
+		if result.Changed != 0 {
+			cursor = punaropostgres.AttachmentReconcileCursor{}
+			continue
+		}
+		if result.Scanned < trustedReconcileBatch {
+			databaseComplete = true
+			break
+		}
+		cursor = result.Next
+	}
+	if !databaseComplete {
+		return errors.New("trusted attachment database reconciliation exceeds startup bound")
+	}
+	gcAfter := ""
+	gcComplete := false
+	for page := 0; page < trustedReconcileMaxPages; page++ {
+		result, err := reconciler.GarbageCollectBatch(ctx, gcAfter, trustedReconcileBatch, trustedGCClaimLifetime)
+		if err != nil {
+			return err
+		}
+		if result.Changed != 0 {
+			gcAfter = ""
+			continue
+		}
+		if result.Scanned < trustedReconcileBatch {
+			gcComplete = true
+			break
+		}
+		gcAfter = result.Next
+	}
+	if !gcComplete {
+		return errors.New("trusted attachment deletion garbage collection exceeds startup bound")
+	}
+	after := ""
+	filesystemComplete := false
+	for page := 0; page < trustedReconcileMaxPages; page++ {
+		result, err := reconciler.ReconcileOrphanBatch(ctx, after, trustedReconcileBatch, trustedOrphanGrace)
+		if err != nil {
+			return err
+		}
+		if result.Changed != 0 {
+			after = ""
+			continue
+		}
+		if result.Scanned < trustedReconcileBatch {
+			filesystemComplete = true
+			break
+		}
+		after = result.Next
+	}
+	if !filesystemComplete {
+		return errors.New("trusted attachment filesystem reconciliation exceeds startup bound")
+	}
+	return nil
 }
 
 func configuredServer(address string, handler http.Handler) *http.Server {

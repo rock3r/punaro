@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/postgres"
 )
 
@@ -26,6 +27,7 @@ type Repository interface {
 	ReleaseExpiredAttachment(context.Context, string, string) (bool, error)
 	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
 	DeleteAttachment(context.Context, postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error)
+	AttachmentGCCandidates(context.Context, string, int) ([]string, string, error)
 	BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error)
 	ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error)
 	FinalizeAttachmentGC(context.Context, string, int64, string) (postgres.AttachmentDeletion, bool, error)
@@ -44,6 +46,14 @@ type DownloadWriter interface {
 // verifies the complete immutable file before output, and emits exactly the
 // recorded byte count.
 func (service *Service) Download(ctx context.Context, request postgres.AttachmentDownloadRequest, destination DownloadWriter) (postgres.AttachmentDownload, error) {
+	return service.DownloadPrepared(ctx, request, destination, nil)
+}
+
+// DownloadPrepared invokes prepare with the authorized immutable metadata
+// after every authority and shape check but before the first response byte.
+// Network adapters use this hook to commit exact integrity headers without
+// opening a second authorization race.
+func (service *Service) DownloadPrepared(ctx context.Context, request postgres.AttachmentDownloadRequest, destination DownloadWriter, prepare func(postgres.AttachmentDownload) error) (postgres.AttachmentDownload, error) {
 	if service == nil || destination == nil || request.Validate() != nil {
 		return postgres.AttachmentDownload{}, errors.New("invalid trusted attachment download")
 	}
@@ -71,6 +81,11 @@ func (service *Service) Download(ctx context.Context, request postgres.Attachmen
 	}
 	if download.ArtifactID != request.ArtifactID || download.StoragePath != "ready/"+download.ArtifactID+".blob" {
 		return postgres.AttachmentDownload{}, errors.New("trusted attachment download authority is malformed")
+	}
+	if prepare != nil {
+		if err := prepare(download); err != nil {
+			return postgres.AttachmentDownload{}, err
+		}
 	}
 	if err := service.store.StreamVerified(downloadCtx, PublishedBlob{StoragePath: download.StoragePath, SizeBytes: download.SizeBytes, SHA256: download.SHA256}, destination); err != nil {
 		if downloadCtx.Err() != nil {
@@ -204,7 +219,7 @@ func NewService(repository Repository, store *BlobStore) (*Service, error) {
 
 // Upload consumes one bounded stream under a fresh claim, durably publishes
 // its exact bytes, then conditionally commits READY under current authority.
-func (service *Service) Upload(ctx context.Context, principalID, artifactID string, claimLifetime time.Duration, source io.Reader) (postgres.AttachmentArtifact, error) {
+func (service *Service) Upload(ctx context.Context, device postgres.AuthenticatedDevice, artifactID string, claimLifetime time.Duration, source io.Reader) (postgres.AttachmentArtifact, error) {
 	if service == nil || source == nil {
 		return postgres.AttachmentArtifact{}, errors.New("invalid trusted attachment upload")
 	}
@@ -213,7 +228,7 @@ func (service *Service) Upload(ctx context.Context, principalID, artifactID stri
 		return postgres.AttachmentArtifact{}, err
 	}
 	defer func() { _ = unlock() }()
-	claim, err := service.repository.ClaimAttachmentUpload(ctx, principalID, artifactID, claimLifetime)
+	claim, err := service.repository.ClaimAttachmentUpload(ctx, device.PrincipalID, artifactID, claimLifetime)
 	if err != nil {
 		return postgres.AttachmentArtifact{}, err
 	}
@@ -222,13 +237,15 @@ func (service *Service) Upload(ctx context.Context, principalID, artifactID stri
 		return postgres.AttachmentArtifact{}, err
 	}
 	request := postgres.AttachmentPublishRequest{
-		PrincipalID:       principalID,
-		ArtifactID:        claim.ArtifactID,
-		AttemptGeneration: claim.AttemptGeneration,
-		ClaimToken:        claim.ClaimToken,
-		StoragePath:       blob.StoragePath,
-		SizeBytes:         blob.SizeBytes,
-		SHA256:            blob.SHA256,
+		PrincipalID:          device.PrincipalID,
+		CredentialLookupID:   device.LookupID,
+		CredentialGeneration: device.Generation,
+		ArtifactID:           claim.ArtifactID,
+		AttemptGeneration:    claim.AttemptGeneration,
+		ClaimToken:           claim.ClaimToken,
+		StoragePath:          blob.StoragePath,
+		SizeBytes:            blob.SizeBytes,
+		SHA256:               blob.SHA256,
 	}
 	artifact, err := service.repository.PublishAttachment(ctx, request)
 	if err != nil && ctx.Err() == nil && retryAmbiguousPublication(err) {
@@ -263,6 +280,43 @@ type OrphanReconcileResult struct {
 	Scanned int
 	Changed int
 	Next    string
+}
+
+// GarbageCollectResult describes one bounded, cursor-addressable pass over
+// post-cutoff deletion records. A finalized page restarts from the beginning.
+type GarbageCollectResult struct {
+	Scanned int
+	Changed int
+	Next    string
+}
+
+// GarbageCollectBatch drives durable deletion recovery from database authority
+// so quota finalization still resumes after a crash removed every blob path.
+func (service *Service) GarbageCollectBatch(ctx context.Context, after string, limit int, claimLifetime time.Duration) (GarbageCollectResult, error) {
+	if service == nil || (after != "" && uuid.Validate(after) != nil) || limit < 1 || limit > 100 || claimLifetime < 30*time.Second || claimLifetime > 10*time.Minute {
+		return GarbageCollectResult{}, errors.New("invalid attachment GC batch")
+	}
+	candidates, next, err := service.repository.AttachmentGCCandidates(ctx, after, limit)
+	if err != nil {
+		return GarbageCollectResult{}, err
+	}
+	result := GarbageCollectResult{Scanned: len(candidates), Next: next}
+	for _, artifactID := range candidates {
+		if err := ctx.Err(); err != nil {
+			return GarbageCollectResult{}, err
+		}
+		_, finalized, err := service.GarbageCollect(ctx, artifactID, claimLifetime)
+		if err != nil {
+			return GarbageCollectResult{}, err
+		}
+		if finalized {
+			result.Changed++
+		}
+	}
+	if result.Changed != 0 {
+		result.Next = ""
+	}
+	return result, nil
 }
 
 // ReconcileOrphanBatch removes only UUID namespaces older than grace whose

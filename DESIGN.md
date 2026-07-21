@@ -623,6 +623,30 @@ old UUID namespaces whose database absence and backup permission are rechecked
 under the artifact lock; any state change restarts its cursor. Restoring an
 older snapshot may therefore resurrect data that was deleted later.
 
+The M-12 native-client slice exposes those lifecycle routines through schema
+v13 only behind the separate `PUNARO_TRUSTED_ATTACHMENTS_ENABLED` release switch, PostgreSQL device
+authentication, the selected ingress transport policy, and an absolute private
+blob root. The strict `/v1/trusted-attachments` surface accepts bounded
+reservation metadata, one exact streaming upload, authorized streaming
+download, and operation-bound deletion; redirects, URLs, ranges, caller paths,
+and unauthenticated access are absent. Startup completes bounded database and
+restore-skew reconciliation before mounting the surface, and a fail-closed
+periodic sweep keeps abandoned, corrupt, deleted, and orphan state moving
+through the existing fenced lifecycle.
+Schema v13 binds the exact device credential lookup and generation inside the
+same transaction that authorizes and publishes READY, so revocation and
+completion have one database serialization point.
+
+The native client hashes a regular source before reservation, retries the same
+idempotency identity, and skips re-upload when the authoritative reservation is
+already READY. Downloads receive immutable size, digest, media type, and an
+encoded display name in authenticated response headers. An already-open
+`os.Root` contains a private same-filesystem stage across root renames, verifies
+the exact stream, and creates the visible name with atomic no-replace linking.
+Portable unsafe or reserved display names fall back to the opaque artifact ID.
+The v2/v3 experimental switches remain unchanged until their separately
+reviewed M-12 retirement slice.
+
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique
 operation-bound idempotency keys, closed content-free audit events, and a

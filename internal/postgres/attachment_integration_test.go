@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -21,6 +22,11 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "trusted attachment outsider")
 	if err != nil {
+		t.Fatal(err)
+	}
+	uploaderLookup := "a3000000-0000-4000-8000-000000000001"
+	uploaderCredentialDigest := sha256.Sum256([]byte("attachment uploader credential"))
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES ($1,$2,'attachment uploader credential',$3)`, uploaderLookup, uploader.ID, uploaderCredentialDigest[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,capability) VALUES ($1,'installation','project.create')`, uploader.ID); err != nil {
@@ -38,7 +44,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 
 	body := []byte("trusted attachment integration body")
 	digest := sha256.Sum256(body)
-	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	lockOrderRequest := AttachmentReservationRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000000", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "lock-order.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	lockOrderReservation, err := app.ReserveAttachment(ctx, lockOrderRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -60,8 +66,8 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderReservation.ArtifactID, "publication", func(conn *sql.Conn) error {
 		var published bool
-		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`,
-			uploader.ID, lockOrderReservation.ArtifactID, lockOrderGeneration, lockOrderToken,
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			uploader.ID, uploaderLookup, 1, lockOrderReservation.ArtifactID, lockOrderGeneration, lockOrderToken,
 			"ready/"+lockOrderReservation.ArtifactID+".blob", lockOrderReservation.SizeBytes, hex.EncodeToString(lockOrderReservation.SHA256[:])).Scan(&published); err != nil {
 			return err
 		}
@@ -104,7 +110,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		}
 		return nil
 	})
-	request := AttachmentReservationRequest{PrincipalID: uploader.ID, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
+	request := AttachmentReservationRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ProjectID: project.ProjectID, IdempotencyKey: "a2000000-0000-4000-8000-000000000001", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "evidence.txt", MediaType: "text/plain", Lifetime: 10 * time.Minute}
 	reservation, err := app.ReserveAttachment(ctx, request)
 	if err != nil || reservation.State != AttachmentReserved || reservation.ProjectID != project.ProjectID || reservation.SHA256 != digest {
 		t.Fatalf("reservation=%#v err=%v", reservation, err)
@@ -140,7 +146,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if err != nil || claim.AttemptGeneration != 1 || claim.ClaimToken == "" {
 		t.Fatalf("claim=%#v err=%v", claim, err)
 	}
-	publish := AttachmentPublishRequest{PrincipalID: uploader.ID, ArtifactID: reservation.ArtifactID, AttemptGeneration: claim.AttemptGeneration, ClaimToken: claim.ClaimToken, StoragePath: "ready/" + reservation.ArtifactID + ".blob", SizeBytes: reservation.SizeBytes, SHA256: reservation.SHA256}
+	publish := AttachmentPublishRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ArtifactID: reservation.ArtifactID, AttemptGeneration: claim.AttemptGeneration, ClaimToken: claim.ClaimToken, StoragePath: "ready/" + reservation.ArtifactID + ".blob", SizeBytes: reservation.SizeBytes, SHA256: reservation.SHA256}
 	ready, err := app.PublishAttachment(ctx, publish)
 	if err != nil || ready.State != AttachmentReady || ready.StoragePath != publish.StoragePath {
 		t.Fatalf("ready=%#v err=%v", ready, err)
@@ -149,12 +155,9 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		t.Fatalf("READY retry=%#v err=%v", retry, retryErr)
 	}
 
-	uploaderLookup := "a3000000-0000-4000-8000-000000000001"
 	recipientLookup := "a3000000-0000-4000-8000-000000000002"
-	uploaderCredentialDigest := sha256.Sum256([]byte("attachment uploader credential"))
 	recipientCredentialDigest := sha256.Sum256([]byte("attachment recipient credential"))
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES
-($1,$2,'attachment uploader credential',$3),($4,$5,'attachment recipient credential',$6)`, uploaderLookup, uploader.ID, uploaderCredentialDigest[:], recipientLookup, outsider.ID, recipientCredentialDigest[:]); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES ($1,$2,'attachment recipient credential',$3)`, recipientLookup, outsider.ID, recipientCredentialDigest[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES
@@ -352,8 +355,22 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
 		t.Fatalf("pre-cutoff GC claimed=%t err=%v", claimed, err)
 	}
+	if candidates, next, err := app.AttachmentGCCandidates(ctx, "", 100); err != nil || len(candidates) != 0 || next != "" {
+		t.Fatalf("pre-cutoff GC candidates=%v next=%q err=%v", candidates, next, err)
+	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.deletions SET tombstoned_at=statement_timestamp()-interval '2 seconds',gc_after=statement_timestamp()-interval '1 second' WHERE artifact_id=$1`, reservation.ArtifactID); err != nil {
 		t.Fatal(err)
+	}
+	if candidates, next, err := app.AttachmentGCCandidates(ctx, "", 100); err != nil || len(candidates) != 1 || candidates[0] != reservation.ArtifactID || next != reservation.ArtifactID {
+		t.Fatalf("eligible GC candidates=%v next=%q err=%v", candidates, next, err)
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT * FROM attachment.gc_candidates(NULL,NULL)`); err == nil {
+		t.Fatal("null GC candidate limit was accepted")
+	} else {
+		var postgresError *pgconn.PgError
+		if !errors.As(err, &postgresError) || postgresError.Code != "22023" {
+			t.Fatalf("null GC candidate limit error=%v", err)
+		}
 	}
 	var backupFence string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&backupFence); err != nil {
@@ -459,7 +476,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if err != nil {
 		t.Fatal(err)
 	}
-	duplicateReady, err := app.PublishAttachment(ctx, AttachmentPublishRequest{PrincipalID: uploader.ID, ArtifactID: duplicateReservation.ArtifactID, AttemptGeneration: duplicateClaim.AttemptGeneration, ClaimToken: duplicateClaim.ClaimToken, StoragePath: "ready/" + duplicateReservation.ArtifactID + ".blob", SizeBytes: duplicateReservation.SizeBytes, SHA256: duplicateReservation.SHA256})
+	duplicateReady, err := app.PublishAttachment(ctx, AttachmentPublishRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ArtifactID: duplicateReservation.ArtifactID, AttemptGeneration: duplicateClaim.AttemptGeneration, ClaimToken: duplicateClaim.ClaimToken, StoragePath: "ready/" + duplicateReservation.ArtifactID + ".blob", SizeBytes: duplicateReservation.SizeBytes, SHA256: duplicateReservation.SHA256})
 	if err != nil || duplicateReady.StoragePath == ready.StoragePath || duplicateReady.SHA256 != ready.SHA256 {
 		t.Fatalf("duplicate READY=%#v err=%v", duplicateReady, err)
 	}
@@ -490,7 +507,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability='attachment.upload' AND revoked_at IS NULL`, uploader.ID, project.ProjectID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.PublishAttachment(ctx, AttachmentPublishRequest{PrincipalID: uploader.ID, ArtifactID: revokedReservation.ArtifactID, AttemptGeneration: revokedClaim.AttemptGeneration, ClaimToken: revokedClaim.ClaimToken, StoragePath: "ready/" + revokedReservation.ArtifactID + ".blob", SizeBytes: revokedReservation.SizeBytes, SHA256: revokedReservation.SHA256}); !errors.Is(err, ErrForbidden) {
+	if _, err := app.PublishAttachment(ctx, AttachmentPublishRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ArtifactID: revokedReservation.ArtifactID, AttemptGeneration: revokedClaim.AttemptGeneration, ClaimToken: revokedClaim.ClaimToken, StoragePath: "ready/" + revokedReservation.ArtifactID + ".blob", SizeBytes: revokedReservation.SizeBytes, SHA256: revokedReservation.SHA256}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("revoked completion error=%v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'attachment.upload')`, uploader.ID, project.ProjectID); err != nil {
@@ -570,6 +587,30 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE attachment.global_quota SET max_active_uploads=1024,default_project_uploads=256,default_principal_uploads=64`); err != nil {
 		t.Fatal(err)
+	}
+	credentialRevoked := request
+	credentialRevoked.IdempotencyKey = "a2000000-0000-4000-8000-000000000008"
+	credentialRevoked.DisplayName = "credential-revoked.txt"
+	credentialRevokedReservation, err := app.ReserveAttachment(ctx, credentialRevoked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialRevokedClaim, err := app.ClaimAttachmentUpload(ctx, uploader.ID, credentialRevokedReservation.ArtifactID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET revoked_at=statement_timestamp() WHERE lookup_id=$1`, uploaderLookup); err != nil {
+		t.Fatal(err)
+	}
+	revokedReservationRequest := request
+	revokedReservationRequest.IdempotencyKey = "a2000000-0000-4000-8000-000000000010"
+	revokedReservationRequest.DisplayName = "credential-revoked-reservation.txt"
+	if _, err := app.ReserveAttachment(ctx, revokedReservationRequest); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked credential reservation error=%v", err)
+	}
+	credentialRevokedPublish := AttachmentPublishRequest{PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1, ArtifactID: credentialRevokedReservation.ArtifactID, AttemptGeneration: credentialRevokedClaim.AttemptGeneration, ClaimToken: credentialRevokedClaim.ClaimToken, StoragePath: "ready/" + credentialRevokedReservation.ArtifactID + ".blob", SizeBytes: credentialRevokedReservation.SizeBytes, SHA256: credentialRevokedReservation.SHA256}
+	if _, err := app.PublishAttachment(ctx, credentialRevokedPublish); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked credential completion error=%v", err)
 	}
 
 	candidates, _, err := app.AttachmentReconcileCandidates(ctx, AttachmentReconcileCursor{}, 100)

@@ -5,11 +5,17 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/config"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/trustedattachment"
 )
 
 func TestRunFailsClosedBeforeStartingAttachmentRuntime(t *testing.T) {
@@ -58,6 +64,134 @@ func TestRunRejectsIncompatiblePostgresWithoutStartingServer(t *testing.T) {
 	}
 	if !database.readyCalled || !database.closed || !strings.Contains(stderr.String(), "readiness error") {
 		t.Fatalf("ready=%t closed=%t stderr=%q", database.readyCalled, database.closed, stderr.String())
+	}
+}
+
+func TestBuildTrustedAttachmentHandlerRequiresCompleteDatabaseAuthority(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "blobs")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := buildTrustedAttachmentHandler(config.Config{TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: root, IngressMode: "internet", ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, &refusingPlatformDatabase{})
+	if err == nil || !strings.Contains(err.Error(), "database authority") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+type unavailableTrustedAttachmentDatabase struct {
+	deviceDatabase
+	trustedattachment.Repository
+	readyCalled bool
+}
+
+func (database *unavailableTrustedAttachmentDatabase) Ready(context.Context) error { return nil }
+func (database *unavailableTrustedAttachmentDatabase) Close() error                { return nil }
+func (database *unavailableTrustedAttachmentDatabase) TrustedAttachmentRuntimeReady(context.Context) error {
+	database.readyCalled = true
+	return errors.New("schema 13 is unavailable")
+}
+func (*unavailableTrustedAttachmentDatabase) ReserveAttachment(context.Context, punaropostgres.AttachmentReservationRequest) (punaropostgres.AttachmentReservation, error) {
+	return punaropostgres.AttachmentReservation{}, errors.New("unused")
+}
+
+func TestBuildTrustedAttachmentHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "blobs")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	database := &unavailableTrustedAttachmentDatabase{}
+	_, err := buildTrustedAttachmentHandler(config.Config{TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: root, IngressMode: "internet", ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, database)
+	if err == nil || !database.readyCalled || !strings.Contains(err.Error(), "schema is unavailable") {
+		t.Fatalf("ready=%t error=%v", database.readyCalled, err)
+	}
+}
+
+func TestConfiguredServerKeepsShortGlobalTimeoutsForMailAndDeviceRoutes(t *testing.T) {
+	server := configuredServer("127.0.0.1:8080", http.NotFoundHandler())
+	if server.ReadHeaderTimeout != 5*time.Second || server.ReadTimeout != 15*time.Second || server.WriteTimeout != 15*time.Second || server.IdleTimeout != time.Minute || server.MaxHeaderBytes != 16<<10 {
+		t.Fatalf("server=%#v", server)
+	}
+}
+
+type scriptedAttachmentReconciler struct {
+	mu          sync.Mutex
+	reconcile   []trustedattachment.ReconcileResult
+	gc          []trustedattachment.GarbageCollectResult
+	orphans     []trustedattachment.OrphanReconcileResult
+	reconcileAt int
+	gcAt        int
+	orphanAt    int
+}
+
+func (reconciler *scriptedAttachmentReconciler) ReconcileBatch(context.Context, punaropostgres.AttachmentReconcileCursor, int) (trustedattachment.ReconcileResult, error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	result := reconciler.reconcile[reconciler.reconcileAt]
+	reconciler.reconcileAt++
+	return result, nil
+}
+
+func (reconciler *scriptedAttachmentReconciler) ReconcileOrphanBatch(context.Context, string, int, time.Duration) (trustedattachment.OrphanReconcileResult, error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	result := reconciler.orphans[reconciler.orphanAt]
+	reconciler.orphanAt++
+	return result, nil
+}
+
+func (reconciler *scriptedAttachmentReconciler) GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error) {
+	reconciler.mu.Lock()
+	defer reconciler.mu.Unlock()
+	result := reconciler.gc[reconciler.gcAt]
+	reconciler.gcAt++
+	return result, nil
+}
+
+func TestTrustedAttachmentReconciliationRestartsChangedPagesAndFinishesBothNamespaces(t *testing.T) {
+	reconciler := &scriptedAttachmentReconciler{
+		reconcile: []trustedattachment.ReconcileResult{{Scanned: 100, Changed: 1}, {Scanned: 100, Next: punaropostgres.AttachmentReconcileCursor{ArtifactID: "11111111-1111-4111-8111-111111111111"}}, {Scanned: 2}},
+		gc:        []trustedattachment.GarbageCollectResult{{Scanned: 100, Changed: 1}, {Scanned: 1}},
+		orphans:   []trustedattachment.OrphanReconcileResult{{Scanned: 100, Changed: 1}, {Scanned: 1}},
+	}
+	if err := reconcileTrustedAttachments(context.Background(), reconciler); err != nil {
+		t.Fatal(err)
+	}
+	if reconciler.reconcileAt != 3 || reconciler.gcAt != 2 || reconciler.orphanAt != 2 {
+		t.Fatalf("reconcile calls=%d GC calls=%d orphan calls=%d", reconciler.reconcileAt, reconciler.gcAt, reconciler.orphanAt)
+	}
+}
+
+type changeBoundAttachmentReconciler struct{ stage string }
+
+func (reconciler changeBoundAttachmentReconciler) ReconcileBatch(context.Context, punaropostgres.AttachmentReconcileCursor, int) (trustedattachment.ReconcileResult, error) {
+	if reconciler.stage == "database" {
+		return trustedattachment.ReconcileResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.ReconcileResult{}, nil
+}
+
+func (reconciler changeBoundAttachmentReconciler) GarbageCollectBatch(context.Context, string, int, time.Duration) (trustedattachment.GarbageCollectResult, error) {
+	if reconciler.stage == "deletion" {
+		return trustedattachment.GarbageCollectResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.GarbageCollectResult{}, nil
+}
+
+func (reconciler changeBoundAttachmentReconciler) ReconcileOrphanBatch(context.Context, string, int, time.Duration) (trustedattachment.OrphanReconcileResult, error) {
+	if reconciler.stage == "filesystem" {
+		return trustedattachment.OrphanReconcileResult{Scanned: trustedReconcileBatch, Changed: 1}, nil
+	}
+	return trustedattachment.OrphanReconcileResult{}, nil
+}
+
+func TestTrustedAttachmentReconciliationFailsClosedAfterChangeRestartBound(t *testing.T) {
+	for _, stage := range []string{"database", "deletion", "filesystem"} {
+		t.Run(stage, func(t *testing.T) {
+			err := reconcileTrustedAttachments(context.Background(), changeBoundAttachmentReconciler{stage: stage})
+			if err == nil || !strings.Contains(err.Error(), stage) {
+				t.Fatalf("error=%v, want %s bound", err, stage)
+			}
+		})
 	}
 }
 

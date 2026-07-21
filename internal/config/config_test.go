@@ -254,6 +254,30 @@ func TestLoadRejectsWithheldAttachmentRelay(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresCompleteTrustedAttachmentReleaseSurface(t *testing.T) {
+	t.Setenv("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("trusted attachments were enabled without PostgreSQL device authority")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	if _, err := Load(""); err == nil {
+		t.Fatal("trusted attachments were enabled without a blob root")
+	}
+	t.Setenv("PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR", "relative/blobs")
+	if _, err := Load(""); err == nil {
+		t.Fatal("trusted attachments accepted a relative blob root")
+	}
+	t.Setenv("PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR", "/var/lib/punaro/blobs")
+	cfg, err := Load("")
+	if err != nil || !cfg.TrustedAttachmentsEnabled || cfg.TrustedAttachmentBlobDir != "/var/lib/punaro/blobs" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+}
+
 func TestLoadRequiresIndependentV3AttachmentRuntimeTrustAndPrivateStore(t *testing.T) {
 	t.Setenv("PUNARO_ATTACHMENT_V3_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")

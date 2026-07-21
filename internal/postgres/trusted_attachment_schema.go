@@ -2,10 +2,10 @@ package postgres
 
 import "context"
 
-// trustedAttachmentControlsAvailable verifies the complete schema-v10
+// trustedAttachmentControlsAvailable verifies the complete current schema
 // publication authority. Migration checksums prove provenance; these catalog
 // checks detect post-migration drift in storage, routines, ownership, and ACLs.
-func trustedAttachmentControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func trustedAttachmentControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -18,14 +18,23 @@ WITH objects AS (
            to_regclass('attachment.uploads_reconcile_order') AS reconcile_index_oid,
            to_regclass('attachment.recipient_grants') AS recipient_grants_oid,
            to_regclass('attachment.deletions') AS deletions_oid,
-           to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS reserve_oid,
+           to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)') AS legacy_reserve_oid,
+           CASE WHEN $1 >= 13
+                THEN to_regprocedure('attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval)')
+                ELSE to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)')
+           END AS reserve_oid,
            to_regprocedure('attachment.claim_upload(uuid,uuid,interval)') AS claim_oid,
-           to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)') AS publish_oid,
+           to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)') AS legacy_publish_oid,
+           CASE WHEN $1 >= 13
+                THEN to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text)')
+                ELSE to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)')
+           END AS publish_oid,
            to_regprocedure('attachment.begin_reap_upload(uuid)') AS begin_reap_oid,
            to_regprocedure('attachment.release_expired_upload(uuid,uuid)') AS release_oid,
            to_regprocedure('attachment.mark_corrupt(uuid)') AS corrupt_oid,
            to_regprocedure('attachment.reconcile_candidates(text,timestamp with time zone,uuid,integer)') AS reconcile_oid,
-           to_regprocedure('attachment.project_has_records(uuid,uuid)') AS project_records_oid
+           to_regprocedure('attachment.project_has_records(uuid,uuid)') AS project_records_oid,
+           to_regprocedure('attachment.gc_candidates(uuid,integer)') AS gc_candidates_oid
 ), expected_columns(relation_name, column_name, type_name, type_modifier, required) AS (
     VALUES
       ('attachment.uploads','artifact_id','uuid',-1,true),
@@ -83,12 +92,13 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (reserve_oid,'503c810da6c7090c8bdc306f474c161d','v'::"char"),
+      (reserve_oid,CASE WHEN $1 >= 13 THEN '8653ed9c4bb61d8b175b90022db21aa4'
+                        ELSE '503c810da6c7090c8bdc306f474c161d' END,'v'::"char"),
       (claim_oid,CASE WHEN recipient_grants_oid IS NULL
                       THEN '475ac4e1df29cabe6dbcae9e83038891'
                       ELSE 'a20da734d30b78d9e6868c27094cd549' END,'v'::"char"),
-      (publish_oid,CASE WHEN recipient_grants_oid IS NULL
-                        THEN 'a309ef5966178bd6fef53435be8c215e'
+      (publish_oid,CASE WHEN $1 >= 13 THEN '12001e5ddc00c2e034e166eb4fd80f87'
+                        WHEN recipient_grants_oid IS NULL THEN 'a309ef5966178bd6fef53435be8c215e'
                         ELSE 'af7e5394046227aa006c7820fe97d1d8' END,'v'::"char"),
       (begin_reap_oid,'fc58a668e122b22102bd26cee052e213','v'::"char"),
       (release_oid,CASE WHEN recipient_grants_oid IS NULL
@@ -99,10 +109,11 @@ WITH objects AS (
                         WHEN deletions_oid IS NULL THEN '51e6b83ed153fcce5b53dbddc37056b8'
                         ELSE 'b86070c52d01fb33abe1079d54e099da' END,'v'::"char"),
       (reconcile_oid,'25df2c05deb346a8df8a86349a00a478','s'::"char"),
-      (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char")
+      (project_records_oid,'e7a7735e0d1b78a0766489a90a0b87c7','s'::"char"),
+      (CASE WHEN $1 >= 13 THEN gc_candidates_oid END,'6c9219520a5dc33176663f8967849208','s'::"char")
     ) AS expected(oid,body_hash,volatility)
 ), routine_safety AS (
-    SELECT count(*) = 8
+	SELECT count(*) = CASE WHEN $1 >= 13 THEN 9 ELSE 8 END
        AND bool_and(pg_get_userbyid(proc.proowner) = 'punaro_owner')
        AND bool_and(language.lanname IN ('sql','plpgsql'))
        AND bool_and(proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = expected.volatility)
@@ -112,12 +123,38 @@ WITH objects AS (
     JOIN pg_proc AS proc ON proc.oid = expected.oid
     JOIN pg_language AS language ON language.oid = proc.prolang
 ), routine_acl AS (
-    SELECT count(*) = 16 AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+	SELECT count(*) = CASE WHEN $1 >= 13 THEN 18 ELSE 16 END AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
        AND bool_and(grantee.rolname IN ('punaro_owner','punaro_app')) AS exact
     FROM expected_routines AS expected
     JOIN pg_proc AS proc ON proc.oid = expected.oid
     CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
     LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee
+), legacy_publish_safety AS (
+    SELECT $1 < 13 OR (pg_get_userbyid(proc.proowner) = 'punaro_owner'
+       AND language.lanname = 'plpgsql' AND proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = 'v'
+       AND proc.proconfig = ARRAY['search_path=pg_catalog']::text[]
+       AND md5(btrim(proc.prosrc)) = 'af7e5394046227aa006c7820fe97d1d8'
+       AND (SELECT count(*) = 1
+                  AND bool_and(grantee.rolname = 'punaro_owner')
+                  AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+            FROM aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
+            LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee)) AS exact
+    FROM objects
+    JOIN pg_proc AS proc ON proc.oid = legacy_publish_oid
+    JOIN pg_language AS language ON language.oid = proc.prolang
+), legacy_reserve_safety AS (
+    SELECT $1 < 13 OR (pg_get_userbyid(proc.proowner) = 'punaro_owner'
+       AND language.lanname = 'plpgsql' AND proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = 'v'
+       AND proc.proconfig = ARRAY['search_path=pg_catalog']::text[]
+       AND md5(btrim(proc.prosrc)) = '503c810da6c7090c8bdc306f474c161d'
+       AND (SELECT count(*) = 1
+                  AND bool_and(grantee.rolname = 'punaro_owner')
+                  AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
+            FROM aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
+            LEFT JOIN pg_roles AS grantee ON grantee.oid = acl.grantee)) AS exact
+    FROM objects
+    JOIN pg_proc AS proc ON proc.oid = legacy_reserve_oid
+    JOIN pg_language AS language ON language.oid = proc.prolang
 ), table_safety AS (
     SELECT count(*) = 5 AND bool_and(pg_get_userbyid(relation.relowner) = 'punaro_owner')
        AND bool_and(relation.relkind = 'r' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
@@ -146,9 +183,10 @@ WITH objects AS (
 SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT NULL
    AND project_oid IS NOT NULL AND principal_oid IS NOT NULL
    AND project_state_index_oid IS NOT NULL AND reconcile_index_oid IS NOT NULL
-   AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND publish_oid IS NOT NULL
+   AND legacy_reserve_oid IS NOT NULL AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND legacy_publish_oid IS NOT NULL AND publish_oid IS NOT NULL
    AND begin_reap_oid IS NOT NULL AND release_oid IS NOT NULL AND corrupt_oid IS NOT NULL AND reconcile_oid IS NOT NULL AND project_records_oid IS NOT NULL
-   AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact
+   AND ($1 < 13 OR gc_candidates_oid IS NOT NULL)
+   AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact AND legacy_publish_safety.exact AND legacy_reserve_safety.exact
    AND constraint_safety.exact AND index_safety.exact
 	AND EXISTS (
 	    SELECT 1 FROM pg_constraint
@@ -174,6 +212,6 @@ SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT N
        SELECT 1 FROM expected_routines AS expected
        WHERE NOT has_function_privilege('punaro_app',expected.oid,'EXECUTE')
    )
-FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, index_safety`).Scan(&available)
+FROM objects, table_safety, table_acl, routine_safety, routine_acl, legacy_publish_safety, legacy_reserve_safety, constraint_safety, index_safety`, schemaVersion).Scan(&available)
 	return available, err
 }

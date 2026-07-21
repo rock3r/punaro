@@ -1,10 +1,15 @@
-.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary
+.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
+PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
 
 operator-binary:
 	mkdir -p "$$(dirname "$(PUNARO_OPERATOR_OUTPUT)")"
 	go build -trimpath -o "$(PUNARO_OPERATOR_OUTPUT)" ./cmd/punaro
+
+trusted-attachment-client:
+	mkdir -p "$$(dirname "$(PUNARO_TRUSTED_ATTACHMENT_OUTPUT)")"
+	go build -trimpath -o "$(PUNARO_TRUSTED_ATTACHMENT_OUTPUT)" ./cmd/punaro-trusted-attachment
 
 test:
 	go test -covermode=atomic ./...

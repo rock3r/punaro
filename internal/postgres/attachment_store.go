@@ -60,20 +60,23 @@ const (
 // AttachmentReservationRequest binds authority, immutable metadata, and one
 // operation-specific idempotency key without including attachment bytes.
 type AttachmentReservationRequest struct {
-	PrincipalID    string
-	ProjectID      string
-	IdempotencyKey string
-	SizeBytes      int64
-	SHA256         [sha256.Size]byte
-	DisplayName    string
-	MediaType      string
-	Lifetime       time.Duration
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ProjectID            string
+	IdempotencyKey       string
+	SizeBytes            int64
+	SHA256               [sha256.Size]byte
+	DisplayName          string
+	MediaType            string
+	Lifetime             time.Duration
 }
 
-// Validate enforces the same portable bounds as schema v10 before database
-// access. Display metadata never becomes a filesystem path.
+// Validate enforces the portable metadata bounds and complete current-device
+// authority before database access. Display metadata never becomes a path.
 func (request AttachmentReservationRequest) Validate() error {
-	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.ProjectID) || !validOpaqueID(request.IdempotencyKey) ||
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 ||
+		!validOpaqueID(request.ProjectID) || !validOpaqueID(request.IdempotencyKey) ||
 		request.SizeBytes < 1 || request.SizeBytes > maxAttachmentBytes ||
 		request.Lifetime < minAttachmentReservation || request.Lifetime > maxAttachmentReservation ||
 		!validAttachmentDisplayName(request.DisplayName) || !attachmentMediaTypePattern.MatchString(request.MediaType) {
@@ -212,21 +215,55 @@ type AttachmentGCClaim struct {
 	GCLeaseUntil time.Time
 }
 
+// AttachmentGCCandidates returns one bounded exclusive UUID page of deletion
+// records whose backup safety cutoff has elapsed and whose claim is available.
+func (d *Database) AttachmentGCCandidates(ctx context.Context, after string, limit int) ([]string, string, error) {
+	if (after != "" && !validOpaqueID(after)) || limit < 1 || limit > maxAttachmentReconcileBatch {
+		return nil, "", errors.New("invalid attachment GC candidate request")
+	}
+	var afterValue any
+	if after != "" {
+		afterValue = after
+	}
+	rows, err := d.db.QueryContext(ctx, `SELECT artifact_id::text FROM attachment.gc_candidates($1,$2)`, afterValue, limit)
+	if err != nil {
+		return nil, "", attachmentStoreError(err, "attachment GC candidate query failed")
+	}
+	defer func() { _ = rows.Close() }()
+	candidates := make([]string, 0, limit)
+	next := after
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil || !validOpaqueID(artifactID) || artifactID <= next {
+			return nil, "", errors.New("attachment GC candidate result is malformed")
+		}
+		candidates = append(candidates, artifactID)
+		next = artifactID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", errors.New("attachment GC candidate query failed")
+	}
+	return candidates, next, nil
+}
+
 // AttachmentPublishRequest binds completion to one database claim and the
 // exact immutable blob proven by the filesystem layer.
 type AttachmentPublishRequest struct {
-	PrincipalID       string
-	ArtifactID        string
-	AttemptGeneration int64
-	ClaimToken        string
-	StoragePath       string
-	SizeBytes         int64
-	SHA256            [sha256.Size]byte
+	PrincipalID          string
+	CredentialLookupID   string
+	CredentialGeneration int64
+	ArtifactID           string
+	AttemptGeneration    int64
+	ClaimToken           string
+	StoragePath          string
+	SizeBytes            int64
+	SHA256               [sha256.Size]byte
 }
 
 // Validate rejects a publication that is not bound to its derived opaque path.
 func (request AttachmentPublishRequest) Validate() error {
-	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.ArtifactID) || !validOpaqueID(request.ClaimToken) ||
+	if !validOpaqueID(request.PrincipalID) || !validOpaqueID(request.CredentialLookupID) || request.CredentialGeneration < 1 ||
+		!validOpaqueID(request.ArtifactID) || !validOpaqueID(request.ClaimToken) ||
 		request.AttemptGeneration < 1 || request.SizeBytes < 1 || request.SizeBytes > maxAttachmentBytes ||
 		request.StoragePath != "ready/"+request.ArtifactID+".blob" {
 		return errors.New("invalid attachment publication request")
@@ -290,7 +327,7 @@ func (d *Database) ReserveAttachment(ctx context.Context, request AttachmentRese
 	}
 	requestHash := sha256.Sum256(body)
 	row := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,principal_id::text,timeline_id::text,size_bytes,sha256,display_name,media_type,state,attempt_generation,expires_at,ready_at
-FROM attachment.reserve_upload($1,$2,$3,$4,$5,$6,$7,$8,$9::interval)`, request.PrincipalID, request.ProjectID, request.IdempotencyKey, requestHash[:], request.SizeBytes, hex.EncodeToString(request.SHA256[:]), request.DisplayName, request.MediaType, attachmentInterval(request.Lifetime))
+FROM attachment.reserve_upload($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::interval)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ProjectID, request.IdempotencyKey, requestHash[:], request.SizeBytes, hex.EncodeToString(request.SHA256[:]), request.DisplayName, request.MediaType, attachmentInterval(request.Lifetime))
 	reservation, err := scanAttachmentReservation(row)
 	if err != nil {
 		return AttachmentReservation{}, attachmentStoreError(err, "attachment reservation failed")
@@ -326,7 +363,7 @@ func (d *Database) PublishAttachment(ctx context.Context, request AttachmentPubl
 	var artifact AttachmentArtifact
 	var digestText string
 	err := d.db.QueryRowContext(ctx, `SELECT artifact_id::text,project_id::text,storage_path,size_bytes,sha256,state,ready_at
-FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7)`, request.PrincipalID, request.ArtifactID, request.AttemptGeneration, request.ClaimToken, request.StoragePath, request.SizeBytes, hex.EncodeToString(request.SHA256[:])).Scan(
+FROM attachment.publish_upload($1,$2,$3,$4,$5,$6,$7,$8,$9)`, request.PrincipalID, request.CredentialLookupID, request.CredentialGeneration, request.ArtifactID, request.AttemptGeneration, request.ClaimToken, request.StoragePath, request.SizeBytes, hex.EncodeToString(request.SHA256[:])).Scan(
 		&artifact.ArtifactID, &artifact.ProjectID, &artifact.StoragePath, &artifact.SizeBytes, &digestText, &artifact.State, &artifact.ReadyAt)
 	if err != nil {
 		return AttachmentArtifact{}, attachmentStoreError(err, "attachment publication failed")

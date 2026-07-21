@@ -79,6 +79,7 @@ jobs:
       - run: go test ./internal/attachment/v3 -run '^TestWindows'
       - run: go test ./internal/attachment/v2 -run '^TestWindows'
       - run: go test ./internal/adapter -run '^TestWindows'
+      - run: go test ./internal/trustedattachmentclient -run '^TestWindows'
       - run: go test ./cmd/punaro-attachment -run '^TestWindows'
       - run: go vet ./...
       - run: go build ./...

@@ -1675,7 +1675,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		t.Fatalf("v10 migration state=%#v err=%v", state, err)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
-		t.Fatal("mail cutover accepted v10 while the current v12 schema was pending")
+		t.Fatal("mail cutover accepted v10 while the current v13 schema was pending")
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
@@ -1687,13 +1687,17 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if err != nil {
 		t.Fatalf("open current application binary against compatible v10 schema: %v", err)
 	}
+	if err := v10App.TrustedAttachmentRuntimeReady(ctx); err == nil {
+		_ = v10App.Close()
+		t.Fatal("trusted attachment runtime accepted compatible schema v10")
+	}
 	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", []string{"agent/v10-compatible"}, time.Now().UTC(), time.Minute); err != nil {
 		_ = v10App.Close()
-		t.Fatalf("v12 binary could not advertise endpoints against compatible v10 schema: %v", err)
+		t.Fatalf("v13 binary could not advertise endpoints against compatible v10 schema: %v", err)
 	}
 	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", nil, time.Now().UTC().Add(time.Second), time.Minute); err != nil {
 		_ = v10App.Close()
-		t.Fatalf("v12 binary could not withdraw endpoints against compatible v10 schema: %v", err)
+		t.Fatalf("v13 binary could not withdraw endpoints against compatible v10 schema: %v", err)
 	}
 	if err := v10App.Close(); err != nil {
 		t.Fatalf("close compatible v10 application: %v", err)
@@ -1723,13 +1727,13 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
-		TargetRelease:           "v0.12.0",
+		TargetRelease:           "v0.13.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
 		SourceSchema:            10,
-		TargetSchema:            12,
+		TargetSchema:            13,
 		SchemaMin:               10,
-		SchemaMax:               12,
+		SchemaMax:               13,
 		RollbackFloor:           10,
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
@@ -1738,11 +1742,11 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
-		t.Fatalf("begin v12 update transaction=%#v err=%v", transaction, err)
+		t.Fatalf("begin v13 update transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
 	if err != nil || transaction.Phase != UpdateWritersStopped {
-		t.Fatalf("stop v12 writers transaction=%#v err=%v", transaction, err)
+		t.Fatalf("stop v13 writers transaction=%#v err=%v", transaction, err)
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
 		t.Fatal(err)
@@ -1757,11 +1761,11 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
 	if err != nil || transaction.Phase != UpdateBackupVerified {
-		t.Fatalf("bind v12 backup transaction=%#v err=%v", transaction, err)
+		t.Fatalf("bind v13 backup transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
 	if err != nil || transaction.Phase != UpdateMigrationStarted {
-		t.Fatalf("start v12 migration transaction=%#v err=%v", transaction, err)
+		t.Fatalf("start v13 migration transaction=%#v err=%v", transaction, err)
 	}
 	authorization = UpdateMigrationAuthorization{
 		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
@@ -1769,7 +1773,18 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
 	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
-		t.Fatalf("v12 migration state=%#v err=%v", state, err)
+		t.Fatalf("v13 migration state=%#v err=%v", state, err)
+	}
+	v13App, err := OpenApplication(ctx, Config{DSNFile: appFile})
+	if err != nil {
+		t.Fatalf("open exact v13 application: %v", err)
+	}
+	if err := v13App.TrustedAttachmentRuntimeReady(ctx); err != nil {
+		_ = v13App.Close()
+		t.Fatalf("trusted attachment runtime rejected exact v13 schema: %v", err)
+	}
+	if err := v13App.Close(); err != nil {
+		t.Fatalf("close exact v13 application: %v", err)
 	}
 	var (
 		corruptProjectID, corruptOwnerID, corruptPath, corruptSHA256, corruptState string
@@ -1794,12 +1809,12 @@ FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID).Scan(
 			corruptTombstonedAt, corruptGCAfter, corruptGeneration)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v12 schema: %v", err)
+		t.Fatalf("mail cutover rejected exact v13 schema: %v", err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
-			t.Fatalf("v12 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+			t.Fatalf("v13 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {
@@ -2016,6 +2031,11 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 	}
 	defer func() { _ = db.Close() }()
 	queries := []string{
+		`SELECT format('v13-reserve:%s:%s:%s:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(btrim(proc.prosrc)),language.lanname,proc.provolatile,proc.prosecdef,pg_get_userbyid(proc.proowner),pg_get_function_result(proc.oid),proc.proretset,COALESCE(array_to_string(proc.proconfig,','),'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid=ANY(ARRAY[to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'),to_regprocedure('attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval)')]) ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('v13-reserve-acl:%s:%s:%s:%s',proc.oid::regprocedure::text,COALESCE(grantee.rolname,'PUBLIC'),acl.privilege_type,acl.is_grantable) FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE proc.oid=ANY(ARRAY[to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'),to_regprocedure('attachment.reserve_upload(uuid,uuid,bigint,uuid,uuid,bytea,bigint,text,text,text,interval)')]) ORDER BY proc.oid::regprocedure::text,grantee.rolname`,
+		`SELECT format('v13-publish:%s:%s:%s:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(btrim(proc.prosrc)),language.lanname,proc.provolatile,proc.prosecdef,pg_get_userbyid(proc.proowner),pg_get_function_result(proc.oid),proc.proretset,COALESCE(array_to_string(proc.proconfig,','),'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid=ANY(ARRAY[to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)'),to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text)')]) ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('v13-publish-acl:%s:%s:%s:%s',proc.oid::regprocedure::text,COALESCE(grantee.rolname,'PUBLIC'),acl.privilege_type,acl.is_grantable) FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE proc.oid=ANY(ARRAY[to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)'),to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,bigint,uuid,text,bigint,text)')]) ORDER BY proc.oid::regprocedure::text,grantee.rolname`,
+		`SELECT format('v13-gc-candidates:%s:%s:%s:%s:%s:%s:%s:%s:%s',proc.oid::regprocedure::text,md5(btrim(proc.prosrc)),language.lanname,proc.provolatile,proc.prosecdef,pg_get_userbyid(proc.proowner),pg_get_function_result(proc.oid),proc.proretset,COALESCE(array_to_string(proc.proconfig,','),'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid=to_regprocedure('attachment.gc_candidates(uuid,integer)')`,
 		`WITH relation AS (SELECT to_regclass('attachment.deletions') AS oid), routines AS (SELECT unnest(ARRAY[to_regprocedure('attachment.tombstone_artifact(uuid,uuid,bigint,uuid,uuid,bytea)'),to_regprocedure('attachment.claim_artifact_gc(uuid,interval)'),to_regprocedure('attachment.finalize_artifact_gc(uuid,bigint,uuid)'),to_regprocedure('attachment.orphan_gc_allowed(uuid)')]) AS oid) SELECT format('v12-counts:columns=%s:constraints=%s:indexes=%s:table-acls=%s:routines=%s:routine-acls=%s', (SELECT count(*) FROM pg_attribute,relation WHERE attrelid=relation.oid AND attnum>0 AND NOT attisdropped), (SELECT count(*) FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'), (SELECT count(*) FROM pg_index,relation WHERE indrelid=relation.oid), (SELECT count(*) FROM pg_class AS object JOIN relation ON object.oid=relation.oid CROSS JOIN LATERAL aclexplode(COALESCE(object.relacl,acldefault('r',object.relowner))) AS acl), (SELECT count(*) FROM pg_proc,routines WHERE pg_proc.oid=routines.oid), (SELECT count(*) FROM pg_proc JOIN routines ON pg_proc.oid=routines.oid CROSS JOIN LATERAL aclexplode(COALESCE(pg_proc.proacl,acldefault('f',pg_proc.proowner))) AS acl))`,
 		`SELECT format('v12-column:%s:%s:%s:%s:%s',attname,atttypid::regtype::text,atttypmod,attnotnull,COALESCE(pg_get_expr(adbin,adrelid),'')) FROM pg_attribute LEFT JOIN pg_attrdef ON adrelid=attrelid AND adnum=attnum WHERE attrelid=to_regclass('attachment.deletions') AND attnum>0 AND NOT attisdropped ORDER BY attnum`,
 		`SELECT format('v12-constraint:%s:%s:%s:%s:%s:%s',conname,contype,conkey::text,convalidated,condeferrable,COALESCE(pg_get_expr(conbin,conrelid),'')) FROM pg_constraint WHERE conrelid=to_regclass('attachment.deletions') AND contype<>'n' ORDER BY conname`,

@@ -16,6 +16,10 @@ import (
 	"github.com/rock3r/punaro/internal/postgres"
 )
 
+func testUploadDevice(principalID string) postgres.AuthenticatedDevice {
+	return postgres.AuthenticatedDevice{PrincipalID: principalID, LookupID: "99999999-9999-4999-8999-999999999999", Generation: 3}
+}
+
 type fakeRepository struct {
 	mu                 sync.Mutex
 	claim              postgres.AttachmentClaim
@@ -23,6 +27,7 @@ type fakeRepository struct {
 	publishResult      postgres.AttachmentArtifact
 	publishErrors      []error
 	publishCalls       int
+	publishRequests    []postgres.AttachmentPublishRequest
 	candidates         []postgres.AttachmentReconcileCandidate
 	markCorruptCalls   []string
 	releaseCalls       []string
@@ -43,6 +48,7 @@ type fakeRepository struct {
 	gcFenceActive      int
 	gcFenceReleases    int
 	gcFenceReleaseHook func()
+	gcCandidates       []string
 	gcClaim            postgres.AttachmentGCClaim
 	gcClaimed          bool
 	gcClaimErr         error
@@ -111,9 +117,10 @@ func (repository *fakeRepository) ClaimAttachmentUpload(context.Context, string,
 	return repository.claim, repository.claimErr
 }
 
-func (repository *fakeRepository) PublishAttachment(_ context.Context, _ postgres.AttachmentPublishRequest) (postgres.AttachmentArtifact, error) {
+func (repository *fakeRepository) PublishAttachment(_ context.Context, request postgres.AttachmentPublishRequest) (postgres.AttachmentArtifact, error) {
 	repository.mu.Lock()
 	defer repository.mu.Unlock()
+	repository.publishRequests = append(repository.publishRequests, request)
 	index := repository.publishCalls
 	repository.publishCalls++
 	if index < len(repository.publishErrors) && repository.publishErrors[index] != nil {
@@ -170,6 +177,20 @@ func (repository *fakeRepository) DeleteAttachment(context.Context, postgres.Att
 		}
 	}
 	return repository.deleteResult, repository.deleteErr
+}
+
+func (repository *fakeRepository) AttachmentGCCandidates(_ context.Context, after string, limit int) ([]string, string, error) {
+	start := 0
+	for start < len(repository.gcCandidates) && repository.gcCandidates[start] <= after {
+		start++
+	}
+	end := min(start+limit, len(repository.gcCandidates))
+	candidates := append([]string(nil), repository.gcCandidates[start:end]...)
+	next := after
+	if len(candidates) != 0 {
+		next = candidates[len(candidates)-1]
+	}
+	return candidates, next, nil
 }
 
 func (repository *fakeRepository) BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error) {
@@ -232,6 +253,39 @@ func TestServiceAuthorizesAndVerifiesBeforeDownloadBytes(t *testing.T) {
 	output.Reset()
 	if _, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output}); !errors.Is(err, postgres.ErrForbidden) || output.Len() != 0 {
 		t.Fatalf("denied download emitted=%d err=%v", output.Len(), err)
+	}
+}
+
+func TestServicePreparesAuthorizedDownloadBeforeWritingBytes(t *testing.T) {
+	body := []byte("trusted download")
+	digest := sha256.Sum256(body)
+	download := postgres.AttachmentDownload{ArtifactID: testArtifactID, ProjectID: "11111111-1111-4111-8111-111111111111", StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "report.txt", MediaType: "text/plain"}
+	repository := &fakeRepository{download: download}
+	service := newTestService(t, repository)
+	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
+		t.Fatal(err)
+	}
+	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
+	var output bytes.Buffer
+	prepared := false
+	got, err := service.DownloadPrepared(context.Background(), request, testDownloadWriter{Writer: &output}, func(metadata postgres.AttachmentDownload) error {
+		if output.Len() != 0 {
+			t.Fatal("download bytes were written before metadata preparation")
+		}
+		prepared = true
+		if metadata != download {
+			t.Fatalf("metadata=%#v want=%#v", metadata, download)
+		}
+		return nil
+	})
+	if err != nil || !prepared || got != download || !bytes.Equal(output.Bytes(), body) {
+		t.Fatalf("download=%#v prepared=%t body=%q err=%v", got, prepared, output.Bytes(), err)
+	}
+
+	output.Reset()
+	prepareErr := errors.New("response metadata unavailable")
+	if _, err := service.DownloadPrepared(context.Background(), request, testDownloadWriter{Writer: &output}, func(postgres.AttachmentDownload) error { return prepareErr }); !errors.Is(err, prepareErr) || output.Len() != 0 {
+		t.Fatalf("prepare error=%v body=%q", err, output.Bytes())
 	}
 }
 
@@ -343,6 +397,28 @@ func TestServiceGCUnlinksBeforeTokenFencedFinalization(t *testing.T) {
 	got, finalized, err := service.GarbageCollect(context.Background(), testArtifactID, time.Minute)
 	if err != nil || !finalized || got != deleted || repository.gcFinalizeCalls != 1 {
 		t.Fatalf("GC=%#v finalized=%t calls=%d err=%v", got, finalized, repository.gcFinalizeCalls, err)
+	}
+}
+
+func TestServiceGarbageCollectBatchResumesAfterBlobRemoval(t *testing.T) {
+	body := []byte("already removed before crash")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentGCClaim{AttachmentDeletion: postgres.AttachmentDeletion{
+		ArtifactID: testArtifactID, ProjectID: "44444444-4444-4444-8444-444444444444",
+		StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest,
+		State: postgres.AttachmentGCClaimed, GCGeneration: 4, GCAfter: time.Now().Add(-time.Hour),
+	}, GCToken: "55555555-5555-4555-8555-555555555555", GCLeaseUntil: time.Now().Add(time.Minute)}
+	deleted := claim.AttachmentDeletion
+	deleted.State = postgres.AttachmentDeleted
+	deleted.DeletedAt = time.Now()
+	repository := &fakeRepository{
+		gcCandidates: []string{testArtifactID}, gcClaim: claim, gcClaimed: true,
+		gcFinalizeResult: deleted, gcFinalizeAllowed: true,
+	}
+	service := newTestService(t, repository)
+	result, err := service.GarbageCollectBatch(context.Background(), "", 100, time.Minute)
+	if err != nil || result.Scanned != 1 || result.Changed != 1 || result.Next != "" || repository.gcFinalizeCalls != 1 {
+		t.Fatalf("GC batch=%#v finalize calls=%d err=%v", result, repository.gcFinalizeCalls, err)
 	}
 }
 
@@ -486,12 +562,26 @@ func TestServicePublishesBytesBeforeConditionalReady(t *testing.T) {
 	want := postgres.AttachmentArtifact{ArtifactID: testArtifactID, StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, State: postgres.AttachmentReady}
 	repository := &fakeRepository{claim: claim, publishResult: want}
 	service := newTestService(t, repository)
-	got, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body))
+	got, err := service.Upload(context.Background(), testUploadDevice(claim.PrincipalID), claim.ArtifactID, time.Minute, bytes.NewReader(body))
 	if err != nil || got != want || repository.publishCalls != 1 {
 		t.Fatalf("got=%#v calls=%d err=%v", got, repository.publishCalls, err)
 	}
 	if err := service.store.Verify(PublishedBlob{StoragePath: got.StoragePath, SizeBytes: got.SizeBytes, SHA256: got.SHA256}); err != nil {
 		t.Fatalf("READY preceded durable bytes: %v", err)
+	}
+}
+
+func TestServiceBindsAdmittedDeviceToReadyPublication(t *testing.T) {
+	body := []byte("trusted body")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentClaim{ArtifactID: testArtifactID, PrincipalID: "11111111-1111-4111-8111-111111111111", AttemptGeneration: 2, ClaimToken: "22222222-2222-4222-8222-222222222222", SizeBytes: int64(len(body)), SHA256: digest}
+	want := postgres.AttachmentArtifact{ArtifactID: testArtifactID, StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, State: postgres.AttachmentReady}
+	repository := &fakeRepository{claim: claim, publishResult: want}
+	service := newTestService(t, repository)
+	device := testUploadDevice(claim.PrincipalID)
+	_, err := service.Upload(context.Background(), device, claim.ArtifactID, time.Minute, bytes.NewReader(body))
+	if err != nil || len(repository.publishRequests) != 1 || repository.publishRequests[0].CredentialLookupID != device.LookupID || repository.publishRequests[0].CredentialGeneration != device.Generation {
+		t.Fatalf("requests=%#v err=%v", repository.publishRequests, err)
 	}
 }
 
@@ -502,7 +592,7 @@ func TestServiceRetriesAmbiguousReadyCommitWithExactClaim(t *testing.T) {
 	want := postgres.AttachmentArtifact{ArtifactID: testArtifactID, StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, State: postgres.AttachmentReady}
 	repository := &fakeRepository{claim: claim, publishResult: want, publishErrors: []error{errors.New("ambiguous connection loss")}}
 	service := newTestService(t, repository)
-	got, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body))
+	got, err := service.Upload(context.Background(), testUploadDevice(claim.PrincipalID), claim.ArtifactID, time.Minute, bytes.NewReader(body))
 	if err != nil || got != want || repository.publishCalls != 2 {
 		t.Fatalf("got=%#v calls=%d err=%v", got, repository.publishCalls, err)
 	}
@@ -521,7 +611,7 @@ func TestServiceReturnsReadyArtifactWhenStageCleanupIsDeferred(t *testing.T) {
 			t.Errorf("create deferred-cleanup fixture: %v", err)
 		}
 	}
-	got, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body))
+	got, err := service.Upload(context.Background(), testUploadDevice(claim.PrincipalID), claim.ArtifactID, time.Minute, bytes.NewReader(body))
 	if err != nil || got != want {
 		t.Fatalf("got=%#v err=%v", got, err)
 	}
@@ -546,7 +636,7 @@ func TestServiceLeavesRevokedPublicationHiddenUntilReconciliation(t *testing.T) 
 	claim := postgres.AttachmentClaim{ArtifactID: testArtifactID, PrincipalID: "11111111-1111-4111-8111-111111111111", AttemptGeneration: 2, ClaimToken: "22222222-2222-4222-8222-222222222222", SizeBytes: int64(len(body)), SHA256: digest}
 	repository := &fakeRepository{claim: claim, publishErrors: []error{postgres.ErrForbidden}}
 	service := newTestService(t, repository)
-	if _, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body)); !errors.Is(err, postgres.ErrForbidden) {
+	if _, err := service.Upload(context.Background(), testUploadDevice(claim.PrincipalID), claim.ArtifactID, time.Minute, bytes.NewReader(body)); !errors.Is(err, postgres.ErrForbidden) {
 		t.Fatalf("upload error=%v", err)
 	}
 	hidden := PublishedBlob{StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest}
@@ -610,7 +700,7 @@ func TestServiceSerializesPublicationAgainstReapingFence(t *testing.T) {
 	release := make(chan struct{})
 	uploadDone := make(chan error, 1)
 	go func() {
-		_, uploadErr := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, &gatedReader{body: body, started: started, release: release})
+		_, uploadErr := service.Upload(context.Background(), testUploadDevice(claim.PrincipalID), claim.ArtifactID, time.Minute, &gatedReader{body: body, started: started, release: release})
 		uploadDone <- uploadErr
 	}()
 	<-started

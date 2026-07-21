@@ -24,6 +24,9 @@ attachment gate is intentionally **closed**.
   switches fail closed; v3 has a separate, explicit, machine-authenticated
   validation runtime and remains subject to the v3 gates below.
 - `punarod` has no v2 attachment-operation route mount or WebRTC constructor.
+- The trusted-relay route mount is absent by default and requires its dedicated
+  switch, PostgreSQL device authentication, a valid ingress policy, a private
+  absolute blob root, and successful startup reconciliation.
 - The container context is allow-listed; Compose has no `.env`, port, or network
   and has a read-only root with no Linux capabilities.
 - CI source pins Actions and OCI lint/build inputs to immutable revisions.
@@ -33,7 +36,7 @@ future artifact release must create a completed record from the
 [`release-evidence template`](release-evidence/README.md) before any box is
 checked.
 
-## Trusted-relay attachments (dark foundation; closed)
+## Trusted-relay attachments (gated candidate; closed)
 
 - [ ] Mount authenticated bounded reservation and upload routes only after the
       schema-v10 authority, exact stream, completion reauthorization, quota,
@@ -47,13 +50,15 @@ checked.
 - [ ] Complete adversarial authorization, filesystem, quota-race, backup,
       restore, load, and operations review against the final release candidate.
 
-Schema v12 is not release evidence: schema v11 adds owner-only stable recipient
+Schema v13 and the M-12 native surface are not release evidence: schema v11 adds owner-only stable recipient
 snapshots and an internal authenticated, fully verified bounded download
 service; schema v12 adds authorized tombstone-first deletion, backup-fenced
-token/lease GC, exact-once quota release, and bounded restore-skew cleanup. It
-deliberately exposes no trusted-relay HTTP route. The boxes remain closed until
-the native client, disk-pressure and restore-skew drills, adversarial matrix,
-and release-evidence record are complete.
+token/lease GC, exact-once quota release, and bounded restore-skew cleanup.
+Schema v13 binds current device credential authority to READY publication in
+one transaction. The lifecycle is now reachable only through the separately gated strict HTTP surface and the
+digest-verifying safe-root native client. The boxes remain closed until
+disk-pressure and restore-skew drills, the final adversarial matrix, and a
+release-evidence record are complete.
 
 ## Attachment v2 (superseded; closed)
 

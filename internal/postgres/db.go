@@ -125,6 +125,20 @@ func (d *Database) Ready(ctx context.Context) error {
 	return state.Ready()
 }
 
+// TrustedAttachmentRuntimeReady requires the exact current schema because the
+// opt-in native attachment routes are absent from compatible historical mail
+// schemas.
+func (d *Database) TrustedAttachmentRuntimeReady(ctx context.Context) error {
+	state, err := d.SchemaState(ctx)
+	if err != nil {
+		return err
+	}
+	if state.Classification != Compatible || state.Version != d.manifest.MaxSupported || state.Version < 13 {
+		return errors.New("PostgreSQL trusted attachment schema is unavailable")
+	}
+	return nil
+}
+
 // InstallationState reads stable installation, timeline, and change metadata.
 func (d *Database) InstallationState(ctx context.Context) (InstallationState, error) {
 	var state InstallationState
@@ -980,7 +994,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = cutoverObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 10 {
-		attachmentObjectsPresent, err := trustedAttachmentControlsAvailable(ctx, q)
+		attachmentObjectsPresent, err := trustedAttachmentControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL trusted-attachment schema cannot be inspected")
 		}
