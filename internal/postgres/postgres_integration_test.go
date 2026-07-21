@@ -116,7 +116,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	testV5UpdateBridgeIntegration(ctx, t, ownerDB, ownerFile)
+	testV5UpdateBridgeIntegration(ctx, t, ownerDB, ownerFile, appFile)
 
 	app, err = OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -1270,7 +1270,7 @@ func testEndpointAdvertisementUsesCanonicalLockOrder(t *testing.T, app *Database
 	}
 }
 
-func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile string) {
+func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *sql.DB, ownerFile, appFile string) {
 	t.Helper()
 	current := CurrentManifest()
 	v5Manifest := Manifest{MinSupported: 5, MaxSupported: 5, Migrations: append([]Migration(nil), current.Migrations[:5]...)}
@@ -1652,6 +1652,17 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v10 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
+	}
+	v10App, err := OpenApplication(ctx, Config{DSNFile: appFile})
+	if err != nil {
+		t.Fatalf("open current application binary against compatible v10 schema: %v", err)
+	}
+	if err := v10App.AdvertiseEndpoints("v10-compatible-machine", []string{"agent/v10-compatible"}, time.Now().UTC(), time.Minute); err != nil {
+		_ = v10App.Close()
+		t.Fatalf("v11 binary could not advertise endpoints against compatible v10 schema: %v", err)
+	}
+	if err := v10App.Close(); err != nil {
+		t.Fatalf("close compatible v10 application: %v", err)
 	}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",

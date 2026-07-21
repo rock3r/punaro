@@ -27,15 +27,28 @@ type Repository interface {
 	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
 }
 
+// DownloadWriter is a destination whose blocked writes can be interrupted.
+// HTTP adapters should implement SetWriteDeadline with http.ResponseController;
+// raw transports can provide net.Conn directly.
+type DownloadWriter interface {
+	io.Writer
+	SetWriteDeadline(time.Time) error
+}
+
 // Download authorizes one current recipient principal under the artifact lock,
 // verifies the complete immutable file before output, and emits exactly the
 // recorded byte count.
-func (service *Service) Download(ctx context.Context, request postgres.AttachmentDownloadRequest, destination io.Writer) (postgres.AttachmentDownload, error) {
+func (service *Service) Download(ctx context.Context, request postgres.AttachmentDownloadRequest, destination DownloadWriter) (postgres.AttachmentDownload, error) {
 	if service == nil || destination == nil || request.Validate() != nil {
 		return postgres.AttachmentDownload{}, errors.New("invalid trusted attachment download")
 	}
 	downloadCtx, cancel := context.WithTimeout(ctx, service.downloadLifetime)
 	defer cancel()
+	stopWriteDeadline, err := armDownloadWriteDeadline(downloadCtx, destination)
+	if err != nil {
+		return postgres.AttachmentDownload{}, err
+	}
+	defer stopWriteDeadline()
 	select {
 	case service.downloadSlots <- struct{}{}:
 		defer func() { <-service.downloadSlots }()
@@ -61,6 +74,28 @@ func (service *Service) Download(ctx context.Context, request postgres.Attachmen
 		return postgres.AttachmentDownload{}, err
 	}
 	return download, nil
+}
+
+func armDownloadWriteDeadline(ctx context.Context, destination DownloadWriter) (func(), error) {
+	deadline, found := ctx.Deadline()
+	if !found {
+		return nil, errors.New("trusted attachment download deadline is unavailable")
+	}
+	if err := destination.SetWriteDeadline(deadline); err != nil {
+		return nil, errors.New("trusted attachment download destination is not interruptible")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = destination.SetWriteDeadline(time.Now())
+		case <-stopped:
+		}
+	}()
+	return func() {
+		close(stopped)
+		_ = destination.SetWriteDeadline(time.Time{})
+	}, nil
 }
 
 // Service coordinates database authority with private durable publication.

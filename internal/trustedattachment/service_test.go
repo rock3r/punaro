@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -34,6 +35,12 @@ type fakeRepository struct {
 	download          postgres.AttachmentDownload
 	downloadErr       error
 }
+
+type testDownloadWriter struct {
+	io.Writer
+}
+
+func (writer testDownloadWriter) SetWriteDeadline(time.Time) error { return nil }
 
 func (repository *fakeRepository) ClaimAttachmentUpload(context.Context, string, string, time.Duration) (postgres.AttachmentClaim, error) {
 	return repository.claim, repository.claimErr
@@ -98,13 +105,13 @@ func TestServiceAuthorizesAndVerifiesBeforeDownloadBytes(t *testing.T) {
 	}
 	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
 	var output bytes.Buffer
-	got, err := service.Download(context.Background(), request, &output)
+	got, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output})
 	if err != nil || got != download || !bytes.Equal(output.Bytes(), body) {
 		t.Fatalf("download=%#v output=%q err=%v", got, output.Bytes(), err)
 	}
 	repository.downloadErr = postgres.ErrForbidden
 	output.Reset()
-	if _, err := service.Download(context.Background(), request, &output); !errors.Is(err, postgres.ErrForbidden) || output.Len() != 0 {
+	if _, err := service.Download(context.Background(), request, testDownloadWriter{Writer: &output}); !errors.Is(err, postgres.ErrForbidden) || output.Len() != 0 {
 		t.Fatalf("denied download emitted=%d err=%v", output.Len(), err)
 	}
 }
@@ -119,7 +126,7 @@ func TestServiceBoundsConcurrentDownloadsBeforeAuthorization(t *testing.T) {
 	cancel()
 	var output bytes.Buffer
 	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
-	if _, err := service.Download(ctx, request, &output); !errors.Is(err, context.Canceled) || output.Len() != 0 {
+	if _, err := service.Download(ctx, request, testDownloadWriter{Writer: &output}); !errors.Is(err, context.Canceled) || output.Len() != 0 {
 		t.Fatalf("saturated download emitted=%d err=%v", output.Len(), err)
 	}
 }
@@ -133,7 +140,7 @@ func TestServiceDownloadLockWaitHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := service.Download(ctx, postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}, io.Discard)
+		_, err := service.Download(ctx, postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}, testDownloadWriter{Writer: io.Discard})
 		done <- err
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -158,29 +165,25 @@ func TestServiceDownloadLockWaitHonorsCancellation(t *testing.T) {
 	}
 }
 
-type delayedWriter struct {
-	delay time.Duration
-	bytes.Buffer
-}
-
-func (writer *delayedWriter) Write(value []byte) (int, error) {
-	time.Sleep(writer.delay)
-	return writer.Buffer.Write(value)
-}
-
-func TestServiceDownloadOwnsMaximumLifetime(t *testing.T) {
+func TestServiceDownloadDeadlineInterruptsBlockedWrite(t *testing.T) {
 	body := bytes.Repeat([]byte("x"), 128<<10)
 	digest := sha256.Sum256(body)
 	download := postgres.AttachmentDownload{ArtifactID: testArtifactID, ProjectID: "11111111-1111-4111-8111-111111111111", StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, DisplayName: "report.bin", MediaType: "application/octet-stream"}
 	service := newTestService(t, &fakeRepository{download: download})
-	service.downloadLifetime = 10 * time.Millisecond
+	service.downloadLifetime = 25 * time.Millisecond
 	if _, err := service.store.Publish(context.Background(), UploadClaim{ArtifactID: testArtifactID, AttemptGeneration: 1, SizeBytes: int64(len(body)), SHA256: digest}, bytes.NewReader(body)); err != nil {
 		t.Fatal(err)
 	}
-	writer := &delayedWriter{delay: 25 * time.Millisecond}
+	destination, blockedPeer := net.Pipe()
+	defer func() { _ = destination.Close() }()
+	defer func() { _ = blockedPeer.Close() }()
 	request := postgres.AttachmentDownloadRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", CredentialLookupID: "33333333-3333-4333-8333-333333333333", CredentialGeneration: 1, ArtifactID: testArtifactID}
-	if _, err := service.Download(context.Background(), request, writer); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("over-lifetime download error=%v bytes=%d", err, writer.Len())
+	started := time.Now()
+	if _, err := service.Download(context.Background(), request, destination); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocked download error=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("blocked download exceeded cancellation fence: %s", elapsed)
 	}
 	if len(service.downloadSlots) != 0 {
 		t.Fatal("over-lifetime download retained a concurrency slot")

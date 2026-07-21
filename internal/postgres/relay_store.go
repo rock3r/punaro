@@ -119,8 +119,14 @@ func (d *Database) advertiseEndpoints(machineID string, authority relay.Principa
 		credentialGeneration = authority.CredentialGeneration
 	}
 	var bound int
-	if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_endpoint_principals($1,$2,$3,$4,$5::jsonb,$6)`, machineID, principalID, credentialLookupID, credentialGeneration, string(encodedEndpoints), now.UTC()).Scan(&bound); err != nil || bound != len(orderedEndpoints) {
-		return relayDatabaseError(err, "bind endpoint principals")
+	var recipientBindingAvailable bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT to_regprocedure('attachment.bind_endpoint_principals(text,uuid,uuid,bigint,jsonb,timestamp with time zone)') IS NOT NULL`).Scan(&recipientBindingAvailable); err != nil {
+		return relayDatabaseError(err, "inspect endpoint principal binding")
+	}
+	if recipientBindingAvailable {
+		if err := tx.QueryRowContext(context.Background(), `SELECT attachment.bind_endpoint_principals($1,$2,$3,$4,$5::jsonb,$6)`, machineID, principalID, credentialLookupID, credentialGeneration, string(encodedEndpoints), now.UTC()).Scan(&bound); err != nil || bound != len(orderedEndpoints) {
+			return relayDatabaseError(err, "bind endpoint principals")
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit endpoint advertisement")
