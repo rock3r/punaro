@@ -106,11 +106,11 @@ WITH objects AS (
       AND contype <> 'n'
 ), critical_constraint_shapes(relation_name,constraint_name,constraint_type,column_keys,referenced_relation,referenced_keys) AS (
     VALUES
-      ('attachment.message_artifacts','message_artifacts_artifact_message_key','u','3 1',NULL::text,NULL::text),
-      ('attachment.message_artifacts','message_artifacts_artifact_key','u','3',NULL::text,NULL::text),
-      ('attachment.recipient_grants','recipient_grants_artifact_message_fkey','f','1 3','attachment.message_artifacts','3 1'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_grant_fkey','f','1 2','attachment.recipient_grants','1 2'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_delivery_fkey','f','6 3','relay.mail_deliveries','2 3')
+      ('attachment.message_artifacts','message_artifacts_artifact_message_key','u','{3,1}',NULL::text,NULL::text),
+      ('attachment.message_artifacts','message_artifacts_artifact_key','u','{3}',NULL::text,NULL::text),
+      ('attachment.recipient_grants','recipient_grants_artifact_message_fkey','f','{1,3}','attachment.message_artifacts','{3,1}'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_grant_fkey','f','{1,2}','attachment.recipient_grants','{1,2}'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_delivery_fkey','f','{6,3}','relay.mail_deliveries','{2,3}')
 ), actual_critical_constraint_shapes AS (
     SELECT constraint_row.conrelid::regclass::text, constraint_row.conname,
            constraint_row.contype::text, constraint_row.conkey::text,
@@ -125,13 +125,13 @@ WITH objects AS (
       )
 ), expected_checks(relation_name,constraint_name,column_keys,expression) AS (
     VALUES
-      ('attachment.endpoint_principals','endpoint_principals_machine_id_check','2','((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'),
-      ('attachment.endpoint_principals','endpoint_principals_credential_generation_check','5','(credential_generation >= 1)'),
-      ('attachment.endpoint_principals','endpoint_principals_ownership_generation_check','6','(ownership_generation >= 1)'),
-      ('attachment.message_artifacts','message_artifacts_ordinal_check','2','((ordinal >= 0) AND (ordinal <= 15))'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_endpoint_check','3','((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_machine_check','4','((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_generation_check','5','(ownership_generation >= 1)')
+      ('attachment.endpoint_principals','endpoint_principals_machine_id_check','{2}','((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.endpoint_principals','endpoint_principals_credential_generation_check','{5}','(credential_generation >= 1)'),
+      ('attachment.endpoint_principals','endpoint_principals_ownership_generation_check','{6}','(ownership_generation >= 1)'),
+      ('attachment.message_artifacts','message_artifacts_ordinal_check','{2}','((ordinal >= 0) AND (ordinal <= 15))'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_endpoint_check','{3}','((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_machine_check','{4}','((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_generation_check','{5}','(ownership_generation >= 1)')
 ), actual_checks AS (
     SELECT constraint_row.conrelid::regclass::text, constraint_row.conname,
            constraint_row.conkey::text, pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
