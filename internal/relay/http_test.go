@@ -331,6 +331,8 @@ func TestHTTPNotificationsCloseWithinFenceWhenTransitionAuthorityHangs(t *testin
 	defer cancel()
 	if _, _, err := connection.Read(readCtx); err == nil {
 		t.Fatal("unavailable transition authority left notification socket open")
+	} else if readCtx.Err() != nil {
+		t.Fatalf("notification socket did not close before the test deadline: %v", err)
 	}
 }
 
