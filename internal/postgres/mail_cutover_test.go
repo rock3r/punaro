@@ -96,8 +96,9 @@ func TestMailCutoverBatchValidationAndRollingDigest(t *testing.T) {
 	first := nextMailCutoverDigest(emptyMailCutoverDigest, rows[:1])
 	second := nextMailCutoverDigest(first, rows[1:])
 	combined := nextMailCutoverDigest(emptyMailCutoverDigest, rows)
-	if first == emptyMailCutoverDigest || second == first || combined == second {
-		t.Fatalf("rolling digests first=%s second=%s combined=%s", first, second, combined)
+	empty := nextMailCutoverDigest(emptyMailCutoverDigest, nil)
+	if empty != emptyMailCutoverDigest || first == emptyMailCutoverDigest || second == first || combined == second {
+		t.Fatalf("rolling digests empty=%s first=%s second=%s combined=%s", empty, first, second, combined)
 	}
 	invalid := []MailCutoverBatch{
 		{},

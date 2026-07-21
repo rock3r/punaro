@@ -101,8 +101,11 @@ func (a *Administration) MailCutoverCheckpoint(ctx context.Context, actorPrincip
 func nextMailCutoverDigest(previous string, rows []relay.MigrationSourceRow) string {
 	h := sha256.New()
 	previousBytes, err := hex.DecodeString(previous)
-	if err != nil {
+	if err != nil || len(previousBytes) != sha256.Size {
 		return ""
+	}
+	if len(rows) == 0 {
+		return previous
 	}
 	_, _ = h.Write(previousBytes)
 	for _, row := range rows {
