@@ -384,6 +384,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		{`DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_messages WHERE id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_conversations WHERE id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
