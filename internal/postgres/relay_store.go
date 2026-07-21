@@ -702,7 +702,8 @@ WITH objects AS (
            to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
            to_regclass('relay.mail_request_nonces_expiry') AS nonces_index_oid,
            to_regprocedure('relay.consume_mail_request_nonce(text,text,timestamp with time zone,timestamp with time zone)') AS consume_oid,
-           to_regprocedure('jobs.guard_application_mutation()') AS guard_oid
+           to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
+           to_regprocedure('relay.guard_mail_mutation()') AS cutover_guard_oid
 ), table_ownership AS (
     SELECT count(*)=9 AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
     FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
@@ -847,7 +848,7 @@ WITH objects AS (
     ) AS expected(table_oid, trigger_name)
 ), guards AS (
     SELECT count(*)=9
-       AND bool_and(trg.tgfoid=objects.guard_oid AND trg.tgenabled='O' AND NOT trg.tgisinternal
+       AND bool_and(trg.tgfoid IN (objects.legacy_guard_oid, objects.cutover_guard_oid) AND trg.tgenabled='O' AND NOT trg.tgisinternal
                     AND trg.tgtype=30 AND trg.tgconstraint=0
                     AND NOT trg.tgdeferrable AND NOT trg.tginitdeferred AND trg.tgnargs=0
                     AND trg.tgqual IS NULL AND trg.tgnewtable IS NULL AND trg.tgoldtable IS NULL
@@ -917,7 +918,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
    AND endpoints_index_oid IS NOT NULL AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
-   AND consume_oid IS NOT NULL AND guard_oid IS NOT NULL
+   AND consume_oid IS NOT NULL AND (legacy_guard_oid IS NOT NULL OR cutover_guard_oid IS NOT NULL)
 	   AND table_ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND guards.exact AND function_safety.exact AND index_safety.exact
 	   AND table_acl.exact AND column_acl.exact
 	   AND has_function_privilege('punaro_app',consume_oid,'EXECUTE')

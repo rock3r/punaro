@@ -537,6 +537,18 @@ dirty, old, newer, or incompatible schemas without performing DDL. The normal
 application role is distinct from the schema owner. SQLite remains the active
 and default relay authority until the later fenced mail cutover.
 
+The first mail-cutover slice remains dark and stops before authority transfer.
+SQLite can be inspected read-only into a deterministic logical manifest; its
+prepare barrier expires endpoint ownership, clears consumers and delivery
+leases, advances their generations, and installs a durable write fence that
+also stops already-open older daemons. PostgreSQL schema v8 can durably record
+one owner-authorized import epoch plus bounded staging/checkpoint state and
+fences application-role mail writes while that epoch is importing or verified.
+It has no canonical-row importer or activation transition, so it cannot create
+a dual-authority state. A prepared SQLite source may be reopened only before it
+is permanently retired; retirement and PostgreSQL activation belong to the
+later irreversible executor slice.
+
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique
 operation-bound idempotency keys, closed content-free audit events, and a

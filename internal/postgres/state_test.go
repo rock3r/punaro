@@ -66,8 +66,8 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 7 || manifest.MaxSupported != 7 || len(manifest.Migrations) != 7 {
-		t.Fatalf("manifest=%#v, want exact v7 compatibility window", manifest)
+	if manifest.MinSupported != 8 || manifest.MaxSupported != 8 || len(manifest.Migrations) != 8 {
+		t.Fatalf("manifest=%#v, want exact v8 compatibility window", manifest)
 	}
 	for index, migration := range manifest.Migrations {
 		if migration.CompatibilityFloor != int64(index+1) {
