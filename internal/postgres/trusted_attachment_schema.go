@@ -131,8 +131,6 @@ WITH objects AS (
        AND bool_or(indexrelid = reconcile_index_oid AND indkey::text = '11 16 1' AND indexprs IS NULL AND indpred IS NULL) AS exact
     FROM pg_index, objects
     WHERE indrelid = ANY(ARRAY[uploads_oid,ready_oid,global_oid,project_oid,principal_oid])
-), quota_singleton AS (
-    SELECT count(*) = 1 AND bool_and(singleton) AS exact FROM attachment.global_quota
 )
 SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT NULL
    AND project_oid IS NOT NULL AND principal_oid IS NOT NULL
@@ -140,7 +138,7 @@ SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT N
    AND reserve_oid IS NOT NULL AND claim_oid IS NOT NULL AND publish_oid IS NOT NULL
    AND begin_reap_oid IS NOT NULL AND release_oid IS NOT NULL AND corrupt_oid IS NOT NULL AND reconcile_oid IS NOT NULL AND project_records_oid IS NOT NULL
    AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact
-   AND constraint_safety.exact AND index_safety.exact AND quota_singleton.exact
+   AND constraint_safety.exact AND index_safety.exact
 	AND EXISTS (
 	    SELECT 1 FROM pg_constraint
 	    WHERE conrelid = uploads_oid AND conname = 'uploads_size_bytes_check' AND contype = 'c'
@@ -165,6 +163,6 @@ SELECT uploads_oid IS NOT NULL AND ready_oid IS NOT NULL AND global_oid IS NOT N
        SELECT 1 FROM expected_routines AS expected
        WHERE NOT has_function_privilege('punaro_app',expected.oid,'EXECUTE')
    )
-FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, index_safety, quota_singleton`).Scan(&available)
+FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, index_safety`).Scan(&available)
 	return available, err
 }
