@@ -69,6 +69,7 @@ type MigrationSourceManifest struct {
 	Counts                  MigrationSourceCounts `json:"counts"`
 	TableSHA256             MigrationSourceHashes `json:"table_sha256"`
 	Fingerprint             string                `json:"fingerprint"`
+	ExpectedFingerprint     string                `json:"-"`
 	lastEpochID             string
 	lastTargetIdentity      string
 	lastExpectedFingerprint string
@@ -153,6 +154,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		prepared.lastEpochID = epochID
 		prepared.lastTargetIdentity = targetIdentity
 		prepared.lastExpectedFingerprint = expectedFingerprint
+		prepared.ExpectedFingerprint = expectedFingerprint
 		prepared.lastResultFingerprint = prepared.Fingerprint
 		prepared.lastCutoff = now.UTC().UnixMilli()
 		prepared.lastTransition = "prepared"
@@ -182,7 +184,7 @@ func transitionPreparedMigrationSource(ctx context.Context, path, epochID, targe
 			}
 			return MigrationSourceManifest{}, ErrMigrationSourceRetired
 		}
-		if current.Phase == MigrationSourceActive && target == MigrationSourceActive && current.Fingerprint == fingerprint && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastResultFingerprint == fingerprint && current.lastTransition == "aborted" {
+		if current.Phase == MigrationSourceActive && target == MigrationSourceActive && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastResultFingerprint == fingerprint && current.lastTransition == "aborted" {
 			return current, nil
 		}
 		if current.Phase != MigrationSourcePrepared || current.EpochID != epochID || current.TargetIdentity != targetIdentity || current.Fingerprint != fingerprint {
@@ -258,6 +260,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT source_id,phase,COALESCE(epoch_id,''),COALESCE(target_identity,''),fingerprint,COALESCE(last_epoch_id,''),COALESCE(last_target_identity,''),COALESCE(last_expected_fingerprint,''),COALESCE(last_result_fingerprint,''),COALESCE(last_cutoff,0),COALESCE(last_transition,'') FROM relay_migration_control WHERE singleton=1`).Scan(&manifest.SourceID, &manifest.Phase, &manifest.EpochID, &manifest.TargetIdentity, &storedFingerprint, &manifest.lastEpochID, &manifest.lastTargetIdentity, &manifest.lastExpectedFingerprint, &manifest.lastResultFingerprint, &manifest.lastCutoff, &manifest.lastTransition); err != nil || uuid.Validate(manifest.SourceID) != nil {
 		return MigrationSourceManifest{}, errors.New("relay migration source control is unavailable")
 	}
+	manifest.ExpectedFingerprint = manifest.lastExpectedFingerprint
 	if manifest.Phase != MigrationSourceActive && manifest.Phase != MigrationSourcePrepared && manifest.Phase != MigrationSourceRetired {
 		return MigrationSourceManifest{}, errors.New("relay migration source phase is invalid")
 	}

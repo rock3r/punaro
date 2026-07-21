@@ -82,3 +82,50 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMailCutoverBatchValidationAndRollingDigest(t *testing.T) {
+	t.Parallel()
+	rows := []relay.MigrationSourceRow{
+		migrationEndpointRow(t, "agent/a", "machine-a", 1),
+		migrationEndpointRow(t, "agent/b", "machine-b", 2),
+	}
+	batch := MailCutoverBatch{EpochID: "019f7f07-4b88-7c12-a394-b663274a6555", Table: "mail_endpoints", Rows: rows, Done: true}
+	if err := batch.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	first := nextMailCutoverDigest(emptyMailCutoverDigest, rows[:1])
+	second := nextMailCutoverDigest(first, rows[1:])
+	combined := nextMailCutoverDigest(emptyMailCutoverDigest, rows)
+	if first == emptyMailCutoverDigest || second == first || combined == second {
+		t.Fatalf("rolling digests first=%s second=%s combined=%s", first, second, combined)
+	}
+	invalid := []MailCutoverBatch{
+		{},
+		{EpochID: batch.EpochID, Table: "unknown", Rows: rows},
+		{EpochID: batch.EpochID, Table: batch.Table},
+		{EpochID: batch.EpochID, Table: batch.Table, Rows: []relay.MigrationSourceRow{rows[1], rows[0]}},
+		{EpochID: batch.EpochID, Table: batch.Table, Rows: []relay.MigrationSourceRow{rows[0], rows[0]}},
+	}
+	for index, candidate := range invalid {
+		if err := candidate.Validate(); err == nil {
+			t.Fatalf("invalid batch %d accepted: %#v", index, candidate)
+		}
+	}
+}
+
+func migrationEndpointRow(t *testing.T, endpoint, machine string, generation int64) relay.MigrationSourceRow {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"endpoint": endpoint, "machine_id": machine, "lease_until": int64(1), "ownership_generation": generation,
+		"consumer_id": nil, "consumer_generation": int64(0), "consumer_lease_until": nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	key, err := json.Marshal([]any{endpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relay.MigrationSourceRow{Table: "mail_endpoints", Key: string(key), Payload: payload, SHA256: hex.EncodeToString(digest[:])}
+}

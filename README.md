@@ -58,9 +58,11 @@ make operator-binary
 ```
 
 The host wrapper also provides exported-snapshot `backup`, strict `backup
-verify`, clean-stack `restore --into-new-stack`, and the durable backup-gated
-`update` path; see the operator guide for private-path, PostgreSQL-role,
-rollback, recovery, external-dependency, and restore-drill rules.
+verify`, clean-stack `restore --into-new-stack`, the durable backup-gated
+`update` path, and the explicit one-shot `mail cutover` path. Mail cutover is
+always dry-run first, imports in bounded resumable pages, and requires the
+printed source fingerprint plus an explicit epoch and `--yes`. See the operator
+guide for the pre-seal abort and irreversible recovery boundaries.
 
 ```sh
 cp .env.example .env
@@ -115,7 +117,7 @@ precedence over dotenv values.
 | `PUNARO_TRUSTED_LAN_CIDR` | unset | Private/link-local CIDR containing the concrete LAN bind. Valid only in LAN mode. |
 | `PUNARO_TRUSTED_LAN_HTTP` | `false` | Explicit plaintext credential exception for observed peers inside the validated trusted LAN. Public peers never qualify. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
-| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. `postgres` requires PostgreSQL schema v8 and is for empty-destination parity/qualification before the M-9 one-shot cutover; it never imports or dual-writes SQLite. Credential transition remains separately off by default. |
+| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. Before cutover, `postgres` is limited to empty-destination parity/qualification. The supported one-shot executor publishes `postgres` marker-last only after verified import, SQLite retirement, legacy-gate closure, and PostgreSQL activation. It never dual-writes. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
 | `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
 | `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, root-owned and service-group-readable (`2750` parent, `0640` regular non-symlink) canonical directory snapshot publication file. |

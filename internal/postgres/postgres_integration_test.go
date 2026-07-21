@@ -635,9 +635,9 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 		Version: 1, SourceID: request.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: request.EpochID,
 		TargetIdentity: request.TargetIdentity, Fingerprint: request.SourceFingerprint,
 		TableSHA256: relay.MigrationSourceHashes{
-			Endpoints: strings.Repeat("e", 64), Conversations: strings.Repeat("e", 64), Memberships: strings.Repeat("e", 64),
-			Messages: strings.Repeat("e", 64), Deliveries: strings.Repeat("e", 64), RecipientCursors: strings.Repeat("e", 64),
-			MessageIdempotency: strings.Repeat("e", 64), ConversationIdempotency: strings.Repeat("e", 64), RequestNonces: strings.Repeat("e", 64),
+			Endpoints: emptyMailCutoverDigest, Conversations: emptyMailCutoverDigest, Memberships: emptyMailCutoverDigest,
+			Messages: emptyMailCutoverDigest, Deliveries: emptyMailCutoverDigest, RecipientCursors: emptyMailCutoverDigest,
+			MessageIdempotency: emptyMailCutoverDigest, ConversationIdempotency: emptyMailCutoverDigest, RequestNonces: emptyMailCutoverDigest,
 		},
 	}
 	canonicalManifest, _ := json.Marshal(manifest)
@@ -661,6 +661,27 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	var rejectedEpochs int
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM relay.mail_cutover_epochs`).Scan(&rejectedEpochs); err != nil || rejectedEpochs != 0 {
 		t.Fatalf("rejected cutover created epochs=%d err=%v", rejectedEpochs, err)
+	}
+	tombstoneRequest := request
+	tombstoneRequest.EpochID = "019f7f07-3b88-7c12-a394-b663274a6555"
+	tombstoneManifest := manifest
+	tombstoneManifest.EpochID = tombstoneRequest.EpochID
+	tombstoneCanonical, _ := json.Marshal(tombstoneManifest)
+	tombstoneRequest.Manifest = tombstoneCanonical
+	tombstoneDigest := sha256.Sum256(tombstoneCanonical)
+	tombstoneRequest.ManifestSHA256 = hex.EncodeToString(tombstoneDigest[:])
+	tombstone, err := admin.ReserveMailCutoverAbort(ctx, actor, tombstoneRequest)
+	if err != nil || tombstone.Phase != MailCutoverAborted || !tombstone.AbortedAt.Valid {
+		t.Fatalf("absent abort reservation=%#v err=%v", tombstone, err)
+	}
+	if repeated, err := admin.ReserveMailCutoverAbort(ctx, actor, tombstoneRequest); err != nil || !reflect.DeepEqual(repeated, tombstone) {
+		t.Fatalf("repeated absent abort reservation=%#v err=%v", repeated, err)
+	}
+	if delayed, err := admin.BeginMailCutover(ctx, actor, tombstoneRequest); err != nil || delayed.Phase != MailCutoverAborted {
+		t.Fatalf("delayed begin after abort reservation=%#v err=%v", delayed, err)
+	}
+	if err := admin.AbortMailCutover(ctx, actor, tombstoneRequest.EpochID, tombstoneRequest.SourceFingerprint); err != nil {
+		t.Fatalf("reserved absent abort completion err=%v", err)
 	}
 	writer, err := app.relayPool().BeginTx(ctx, nil)
 	if err != nil {
@@ -707,6 +728,9 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	result := <-beginDone
 	if result.err == nil {
 		t.Fatalf("cutover accepted a target populated by a drained writer: %#v", result.epoch)
+	}
+	if _, err := admin.MailCutoverStatus(ctx, actor, request.EpochID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("rejected pre-insert cutover status err=%v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE endpoint='agent/cutover/draining'`); err != nil {
 		t.Fatal(err)
@@ -759,6 +783,19 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if err := app.ConsumeRequestNonce("cutover-fenced-machine", "cutover-fenced-nonce", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
 		t.Fatalf("application nonce write during cutover err=%v", err)
 	}
+	for _, table := range mailCutoverTables {
+		checkpoint, err := admin.StageMailCutoverBatch(ctx, actor, MailCutoverBatch{EpochID: request.EpochID, Table: table, Done: true})
+		if err != nil || checkpoint.RowCount != 0 || checkpoint.RollingSHA256 != emptyMailCutoverDigest {
+			t.Fatalf("empty cutover checkpoint table=%s checkpoint=%#v err=%v", table, checkpoint, err)
+		}
+	}
+	verified, err := admin.VerifyMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint)
+	if err != nil || verified.Phase != MailCutoverVerified || !verified.VerifiedAt.Valid {
+		t.Fatalf("verified empty cutover=%#v err=%v", verified, err)
+	}
+	if _, err := admin.VerifyMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint); err != nil {
+		t.Fatalf("idempotent cutover verification: %v", err)
+	}
 	if err := admin.AbortMailCutover(ctx, actor, request.EpochID, request.SourceFingerprint); err != nil {
 		t.Fatal(err)
 	}
@@ -794,6 +831,92 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE endpoint='agent/cutover/unfenced'`); err != nil {
 		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(t.TempDir(), "relay.db")
+	source, err := relay.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrationNow := time.Date(2026, time.July, 21, 2, 0, 0, 0, time.UTC)
+	if err := source.AdvertiseEndpoints("cutover-machine-a", []string{"agent/cutover/source-a"}, migrationNow, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.AdvertiseEndpoints("cutover-machine-b", []string{"agent/cutover/source-b"}, migrationNow, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := source.CreateConversationIdempotent(relay.CreateConversationInput{MachineID: "cutover-machine-a", IdempotencyKey: "cutover-conversation", CreatorEndpoint: "agent/cutover/source-a", Now: migrationNow, Members: []relay.Member{{Endpoint: "agent/cutover/source-a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}, {Endpoint: "agent/cutover/source-b", Capabilities: relay.CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, duplicate, err := source.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: "cutover-machine-a", FromEndpoint: "agent/cutover/source-a", Body: "preserved cutover body", IdempotencyKey: "cutover-message", Now: migrationNow})
+	if err != nil || duplicate {
+		t.Fatalf("source message=%#v duplicate=%t err=%v", message, duplicate, err)
+	}
+	if err := source.ConsumeRequestNonce("cutover-machine-a", "cutover-nonce", migrationNow, migrationNow.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	activeSource, err := relay.InspectMigrationSource(ctx, sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationEpoch := "019f7f07-8b88-7c12-a394-b663274a6555"
+	activationManifest, err := relay.PrepareMigrationSource(ctx, sourcePath, activationEpoch, targetIdentity, activeSource.Fingerprint, migrationNow.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationRequest := MailCutoverRequest{EpochID: activationEpoch, SourceID: activationManifest.SourceID, TargetIdentity: targetIdentity, SourceFingerprint: activationManifest.Fingerprint}
+	activationRequest.Manifest, _ = json.Marshal(activationManifest)
+	activationDigest := sha256.Sum256(activationRequest.Manifest)
+	activationRequest.ManifestSHA256 = hex.EncodeToString(activationDigest[:])
+	if _, err := admin.BeginMailCutover(ctx, actor, activationRequest); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range mailCutoverTables {
+		after := ""
+		for {
+			batch, err := relay.ReadMigrationSourceBatch(ctx, sourcePath, table, after, 1)
+			if err != nil {
+				t.Fatalf("source batch table=%s after=%q err=%v", table, after, err)
+			}
+			if _, err := admin.StageMailCutoverBatch(ctx, actor, MailCutoverBatch{EpochID: activationRequest.EpochID, Table: table, AfterKey: after, Rows: batch.Rows, Done: batch.Done}); err != nil {
+				t.Fatalf("activation staging table=%s err=%v", table, err)
+			}
+			if batch.Done {
+				break
+			}
+			after = batch.NextKey
+		}
+	}
+	if _, err := admin.VerifyMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err != nil {
+		t.Fatal(err)
+	}
+	retiredManifest, err := relay.RetirePreparedMigrationSource(ctx, sourcePath, activationRequest.EpochID, targetIdentity, activationRequest.SourceFingerprint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := admin.ActivateMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, retiredManifest)
+	if err != nil || active.Phase != MailCutoverActive || !active.ActivatedAt.Valid {
+		t.Fatalf("active mail cutover=%#v err=%v", active, err)
+	}
+	if repeated, err := admin.ActivateMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, retiredManifest); err != nil || repeated.Phase != MailCutoverActive {
+		t.Fatalf("idempotent activation=%#v err=%v", repeated, err)
+	}
+	if err := admin.AbortMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
+		t.Fatal("active mail cutover was abortable")
+	}
+	if err := app.AdvertiseEndpoints("cutover-active-machine", []string{"agent/cutover/active"}, time.Now().UTC(), time.Minute); err != nil {
+		t.Fatalf("PostgreSQL writes did not reopen after activation: %v", err)
+	}
+	var migratedBody string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT body FROM relay.mail_messages WHERE id=$1`, message.ID).Scan(&migratedBody); err != nil || migratedBody != "preserved cutover body" {
+		t.Fatalf("migrated message body=%q err=%v", migratedBody, err)
+	}
+	var migratedEndpoints, migratedMessages, migratedNonces int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM relay.mail_endpoints),(SELECT count(*) FROM relay.mail_messages),(SELECT count(*) FROM relay.mail_request_nonces)`).Scan(&migratedEndpoints, &migratedMessages, &migratedNonces); err != nil || migratedEndpoints != activationManifest.Counts.Endpoints+1 || migratedMessages != activationManifest.Counts.Messages || migratedNonces != activationManifest.Counts.RequestNonces {
+		t.Fatalf("migrated counts endpoints=%d messages=%d nonces=%d manifest=%#v err=%v", migratedEndpoints, migratedMessages, migratedNonces, activationManifest.Counts, err)
 	}
 }
 

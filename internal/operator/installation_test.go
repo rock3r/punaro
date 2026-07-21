@@ -456,6 +456,116 @@ func TestGeneratedConfigurationUsesDedicatedLoopbackHealthListener(t *testing.T)
 	}
 }
 
+func TestPublishMailCutoverSwitchesRuntimeMarkerLast(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := MailCutoverPublication{
+		Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555",
+		TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64),
+	}
+	published, err := PublishMailCutover(installation.Directory, publication)
+	if err != nil || published.MailCutover == nil || *published.MailCutover != publication {
+		t.Fatalf("published installation=%#v err=%v", published, err)
+	}
+	loaded, err := Load(installation.Directory)
+	if err != nil || loaded.MailCutover == nil || *loaded.MailCutover != publication {
+		t.Fatalf("loaded installation=%#v err=%v", loaded, err)
+	}
+	environment, err := os.ReadFile(EnvFile(installation.Directory)) // #nosec G304 -- generated test installation path.
+	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_STORE=postgres\n") || !strings.Contains(string(environment), "PUNARO_CREDENTIAL_TRANSITION_ENABLED=true\n") {
+		t.Fatalf("cutover environment=%q err=%v", environment, err)
+	}
+	if failures := CheckPaths(loaded); len(failures) != 0 {
+		t.Fatalf("published cutover paths failed: %v", failures)
+	}
+	if repeated, err := PublishMailCutover(installation.Directory, publication); err != nil || repeated.MailCutover == nil || *repeated.MailCutover != publication {
+		t.Fatalf("cutover publication retry=%#v err=%v", repeated, err)
+	}
+	changed := publication
+	changed.SourceFingerprint = strings.Repeat("c", 64)
+	if _, err := PublishMailCutover(installation.Directory, changed); err == nil {
+		t.Fatal("changed cutover publication was accepted")
+	}
+}
+
+func TestPublishMailCutoverRecoversEveryDurableBoundary(t *testing.T) {
+	for _, step := range []string{"staged", "environment", "override", "marker"} {
+		t.Run(step, func(t *testing.T) {
+			options := validInitOptions(t)
+			installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+			injected := errors.New("injected publication crash")
+			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
+				if completed == step {
+					return injected
+				}
+				return nil
+			}); !errors.Is(err, injected) {
+				t.Fatalf("step=%s err=%v", step, err)
+			}
+			if _, err := LoadMailCutoverRecovery(installation.Directory); err != nil {
+				t.Fatalf("step=%s recovery preflight: %v", step, err)
+			}
+			recovered, err := PublishMailCutover(installation.Directory, publication)
+			if err != nil || recovered.MailCutover == nil || *recovered.MailCutover != publication {
+				t.Fatalf("step=%s recovered=%#v err=%v", step, recovered, err)
+			}
+			if failures := CheckPaths(recovered); len(failures) != 0 {
+				t.Fatalf("step=%s failures=%v", step, failures)
+			}
+		})
+	}
+}
+
+func TestPublishMailCutoverRecoveryNeverDropsDurableCandidate(t *testing.T) {
+	for _, step := range []string{"candidate", "stages-cleared", "environment-staged", "override-staged", "staging-synced"} {
+		t.Run(step, func(t *testing.T) {
+			options := validInitOptions(t)
+			installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+			injected := errors.New("injected publication crash")
+			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
+				if completed == "environment" {
+					return injected
+				}
+				return nil
+			}); !errors.Is(err, injected) {
+				t.Fatalf("initial interruption err=%v", err)
+			}
+			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
+				if completed == step {
+					return injected
+				}
+				return nil
+			}); !errors.Is(err, injected) {
+				t.Fatalf("recovery step=%s err=%v", step, err)
+			}
+			if _, err := LoadMailCutoverRecovery(installation.Directory); err != nil {
+				t.Fatalf("step=%s lost durable candidate: %v", step, err)
+			}
+			recovered, err := PublishMailCutover(installation.Directory, publication)
+			if err != nil || recovered.MailCutover == nil || *recovered.MailCutover != publication {
+				t.Fatalf("step=%s recovered=%#v err=%v", step, recovered, err)
+			}
+		})
+	}
+}
+
 func TestInitRejectsInvalidOrAliasingHealthListener(t *testing.T) {
 	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:", "127.0.0.1:http", "127.0.0.1:65536", "127.0.0.1:08080"} {
 		t.Run(address, func(t *testing.T) {

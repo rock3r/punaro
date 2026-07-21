@@ -51,20 +51,21 @@ func ComposeProjectName(installation Installation) (string, error) {
 // Installation is the content-free operator configuration. DSN values remain
 // in separately protected files and are never copied here.
 type Installation struct {
-	Version          int            `json:"version"`
-	Directory        string         `json:"-"`
-	DataDir          string         `json:"data_dir"`
-	BackupDir        string         `json:"backup_dir"`
-	Image            string         `json:"image"`
-	OwnerDSNFile     string         `json:"owner_dsn_file"`
-	AppDSNFile       string         `json:"app_dsn_file"`
-	OwnerPrincipalID string         `json:"owner_principal_id"`
-	OwnerName        string         `json:"owner_name"`
-	RuntimeUID       string         `json:"runtime_uid"`
-	RuntimeGID       string         `json:"runtime_gid"`
-	Ingress          ingress.Policy `json:"ingress"`
-	HealthListenAddr string         `json:"health_listen_addr"`
-	HealthURL        string         `json:"health_url"`
+	Version          int                     `json:"version"`
+	Directory        string                  `json:"-"`
+	DataDir          string                  `json:"data_dir"`
+	BackupDir        string                  `json:"backup_dir"`
+	Image            string                  `json:"image"`
+	OwnerDSNFile     string                  `json:"owner_dsn_file"`
+	AppDSNFile       string                  `json:"app_dsn_file"`
+	OwnerPrincipalID string                  `json:"owner_principal_id"`
+	OwnerName        string                  `json:"owner_name"`
+	RuntimeUID       string                  `json:"runtime_uid"`
+	RuntimeGID       string                  `json:"runtime_gid"`
+	Ingress          ingress.Policy          `json:"ingress"`
+	HealthListenAddr string                  `json:"health_listen_addr"`
+	HealthURL        string                  `json:"health_url"`
+	MailCutover      *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
 
 // InitOptions is the complete explicit input to a first installation.
@@ -309,6 +310,9 @@ func Load(directory string) (Installation, error) {
 	if installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) || !runtimeIdentityMatches(installation) {
 		return Installation{}, errors.New("published installation configuration is corrupt")
 	}
+	if installation.MailCutover != nil && installation.MailCutover.Validate() != nil {
+		return Installation{}, errors.New("published installation mail cutover is invalid")
+	}
 	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
@@ -455,6 +459,10 @@ func localURL(listenAddr string) string {
 }
 
 func daemonEnv(installation Installation) string {
+	relayStore, credentialTransition := "sqlite", "false"
+	if installation.MailCutover != nil {
+		relayStore, credentialTransition = "postgres", "true"
+	}
 	return strings.Join([]string{
 		"PUNARO_IMAGE=" + installation.Image,
 		"PUNARO_HOST_DATA_DIR=" + installation.DataDir,
@@ -464,6 +472,8 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_POSTGRES_ENABLED=true",
 		"PUNARO_POSTGRES_DSN_FILE=" + installation.AppDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
+		"PUNARO_RELAY_STORE=" + relayStore,
+		"PUNARO_CREDENTIAL_TRANSITION_ENABLED=" + credentialTransition,
 		"PUNARO_INGRESS_MODE=" + string(installation.Ingress.Mode),
 		"PUNARO_PUBLIC_URL=" + installation.Ingress.PublicURL,
 		"PUNARO_TRUSTED_LAN_CIDR=" + installation.Ingress.TrustedLAN,
@@ -495,6 +505,8 @@ func composeOverride() string {
       PUNARO_POSTGRES_ENABLED: ${PUNARO_POSTGRES_ENABLED:?required}
       PUNARO_POSTGRES_DSN_FILE: ${PUNARO_POSTGRES_DSN_FILE:?required}
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}
+      PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}
+      PUNARO_CREDENTIAL_TRANSITION_ENABLED: ${PUNARO_CREDENTIAL_TRANSITION_ENABLED:?required}
       PUNARO_INGRESS_MODE: ${PUNARO_INGRESS_MODE:?required}
       PUNARO_PUBLIC_URL: ${PUNARO_PUBLIC_URL:-}
       PUNARO_TRUSTED_LAN_CIDR: ${PUNARO_TRUSTED_LAN_CIDR:-}

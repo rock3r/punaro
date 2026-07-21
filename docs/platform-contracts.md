@@ -150,6 +150,21 @@ and the last successful durable check expires after at most two seconds. The
 check loop is independent of wake writes and cancels their context on failure,
 so a slow or non-reading client cannot starve revalidation.
 
+The M-9 executor is the only supported mail authority switch. A dry-run is
+read-only. Execution binds one caller-chosen epoch to the exact SQLite source
+fingerprint and PostgreSQL installation identity, prepares SQLite, stages at
+most 128 canonical rows per page, and resumes from owner-only checkpoints.
+Every staged table must reproduce the manifest count and SHA-256 before one
+transaction materializes the canonical relay tables and records `verified`.
+SQLite retirement precedes PostgreSQL activation. Activation refuses any
+pending legacy inventory and closes the global legacy gate in the same owner
+transaction that publishes the PostgreSQL authority. The local generated files
+selecting PostgreSQL and credential transition are published afterward with
+`installation.json` last. Abort is possible only before retirement; active
+epochs and retired SQLite sources are permanently non-abortable. A begin that
+failed before epoch insertion is aborted by durably reserving the exact epoch
+as terminal before SQLite reopens, fencing every delayed retry of that begin.
+
 M-5 mounts only `POST /v1/enrollments/redeem` and authenticated
 `GET /v1/device/session`. Redemption requires exact `application/json`, a
 bounded object with four unique string fields, and the store's exact enrollment

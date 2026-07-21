@@ -453,14 +453,12 @@ credential, cache/session generation, and Ed25519 migration-inventory records.
 Migration 6 adds the durable update coordinator, exact recovery evidence, and
 the mutation fence. Migration 7 adds the PostgreSQL mail store, durable
 recipient cursors, replay protection, and relay-table mutation guards.
-Migration 8 adds the dark M-9 cutover substrate: owner-only migration epochs,
+Migration 8 adds the M-9 cutover substrate: owner-only migration epochs,
 bounded staging rows and checkpoints, and an application-role mail-write fence
-for an importing or verified epoch. It does not import rows, activate
-PostgreSQL mail authority, retire SQLite, or change the default relay. Those
-irreversible operations remain disabled until the later M-9 executor slice.
-That executor must take the canonical SQLite source path from Punaro's private,
-service-owned relay data directory. The source-path argument is a privileged
-operator boundary, not a filesystem sandbox for untrusted paths.
+for an importing or verified epoch. The host wrapper's one-shot executor is the
+only supported authority transition. It always reads `relay.db` from Punaro's
+validated private service data directory; there is no caller-selected source
+path.
 PostgreSQL mail work uses a reserved four-connection application-role pool;
 each operation and lock wait is bounded to five seconds so platform work cannot
 consume the mail budget indefinitely.
@@ -473,6 +471,43 @@ attachment routes. Do not point an established installation at an empty
 PostgreSQL relay as a migration shortcut; the verified one-shot mail cutover is
 a separate release gate. Before that cutover, rollback is selecting `sqlite`
 again while retaining both stores unchanged.
+
+### One-shot mail cutover
+
+First stop ordinary operator changes, confirm every intended legacy machine is
+`migrated` or explicitly `retired`, and run the read-only preview:
+
+```sh
+punaro mail cutover --directory /absolute/private/punaro --dry-run
+```
+
+Record the printed `source_fingerprint` and `target_identity`. Choose one UUID
+for the durable epoch, then execute exactly that binding:
+
+```sh
+punaro mail cutover --directory /absolute/private/punaro \
+  --epoch-id 019f7f07-8b88-7c12-a394-b663274a6555 \
+  --expected-source-fingerprint SOURCE_SHA256 --yes
+```
+
+The same command is the crash-recovery command. It resumes the exact prepared
+source, checkpointed staging, verified destination, retired source, active
+database, or marker-last publication. Before source retirement only, abort the
+same epoch explicitly:
+
+```sh
+punaro mail cutover --directory /absolute/private/punaro \
+  --abort --epoch-id 019f7f07-8b88-7c12-a394-b663274a6555 --yes
+```
+
+Abort is itself crash-safe. If PostgreSQL rejected the begin before creating
+the epoch, Punaro first records an exact terminal abort reservation; a delayed
+begin can then only observe that tombstone and cannot recreate an import fence.
+
+After success, run `punaro up --directory /absolute/private/punaro` to recreate
+the daemon from the published PostgreSQL and credential-transition settings.
+Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
+mail, recovery uses a PostgreSQL backup or forward repair.
 
 Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
