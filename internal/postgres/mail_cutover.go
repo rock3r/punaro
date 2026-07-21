@@ -102,6 +102,28 @@ type MailCutoverEpoch struct {
 	AbortedAt   sql.NullTime
 }
 
+// CheckMailCutoverSchemaReadiness requires the exact current schema before the
+// source can be inspected or prepared for an irreversible cutover.
+func (a *Administration) CheckMailCutoverSchemaReadiness(ctx context.Context) error {
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return errors.New("mail cutover schema readiness is unavailable")
+	}
+	defer func() { _ = tx.Rollback() }()
+	snapshot, err := inspect(ctx, tx)
+	if err != nil {
+		return err
+	}
+	state := Classify(snapshot, CurrentManifest())
+	if err := tx.Commit(); err != nil {
+		return errors.New("mail cutover schema readiness is unavailable")
+	}
+	if state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		return errors.New("mail cutover requires the current PostgreSQL schema")
+	}
+	return nil
+}
+
 // BeginMailCutover drains application writers and creates one dark import epoch.
 func (a *Administration) BeginMailCutover(ctx context.Context, actorPrincipalID string, request MailCutoverRequest) (MailCutoverEpoch, error) {
 	if !validOpaqueID(actorPrincipalID) || request.Validate() != nil {
@@ -188,11 +210,60 @@ func (a *Administration) MailCutoverStatus(ctx context.Context, actorPrincipalID
 		return MailCutoverEpoch{}, errors.New("mail cutover status is not authorized")
 	}
 	var epoch MailCutoverEpoch
-	if err := scanMailCutover(tx.QueryRowContext(ctx, mailCutoverSelect+` WHERE epoch_id=$1`, epochID), &epoch); err != nil {
+	if err := scanMailCutover(tx.QueryRowContext(ctx, mailCutoverSelect+` WHERE epoch_id=$1`, epochID), &epoch); errors.Is(err, sql.ErrNoRows) {
+		return MailCutoverEpoch{}, ErrNotFound
+	} else if err != nil {
 		return MailCutoverEpoch{}, errors.New("mail cutover status is unavailable")
 	}
 	if err := tx.Commit(); err != nil {
 		return MailCutoverEpoch{}, errors.New("mail cutover status cannot commit")
+	}
+	return epoch, nil
+}
+
+// ReserveMailCutoverAbort durably tombstones an exact epoch that was rejected
+// before BeginMailCutover inserted it. The tombstone prevents a delayed begin
+// from resurrecting the importing fence after SQLite has been reopened.
+func (a *Administration) ReserveMailCutoverAbort(ctx context.Context, actorPrincipalID string, request MailCutoverRequest) (MailCutoverEpoch, error) {
+	if !validOpaqueID(actorPrincipalID) || request.Validate() != nil {
+		return MailCutoverEpoch{}, errors.New("invalid mail cutover abort reservation")
+	}
+	canonicalManifest, err := canonicalMailCutoverManifest(request)
+	if err != nil {
+		return MailCutoverEpoch{}, errors.New("invalid mail cutover abort reservation")
+	}
+	request.Manifest = canonicalManifest
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MailCutoverEpoch{}, errors.New("mail cutover abort reservation cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
+		return MailCutoverEpoch{}, errors.New("mail cutover abort reservation is not authorized")
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+		return MailCutoverEpoch{}, errors.New("mail cutover abort reservation cannot be serialized")
+	}
+	identity, err := databaseIdentity(ctx, tx)
+	if err != nil || identity != request.TargetIdentity {
+		return MailCutoverEpoch{}, errors.New("mail cutover target identity does not match")
+	}
+	var epoch MailCutoverEpoch
+	err = scanMailCutover(tx.QueryRowContext(ctx, mailCutoverSelect+` WHERE epoch_id=$1`, request.EpochID), &epoch)
+	if err == nil {
+		if !sameMailCutoverRequest(epoch.MailCutoverRequest, request) {
+			return MailCutoverEpoch{}, ErrIdempotencyConflict
+		}
+		if epoch.Phase != MailCutoverAborted {
+			return MailCutoverEpoch{}, errors.New("mail cutover epoch already exists")
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return MailCutoverEpoch{}, errors.New("mail cutover state is unavailable")
+	} else if err := scanMailCutover(tx.QueryRowContext(ctx, `INSERT INTO relay.mail_cutover_epochs(epoch_id,source_id,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,aborted_at) VALUES($1,$2,$3,$4,$5,$6,'aborted',statement_timestamp()) RETURNING epoch_id::text,source_id::text,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,created_at,updated_at,verified_at,activated_at,aborted_at`, request.EpochID, request.SourceID, request.TargetIdentity, request.SourceFingerprint, string(request.Manifest), request.ManifestSHA256), &epoch); err != nil {
+		return MailCutoverEpoch{}, errors.New("mail cutover abort reservation cannot be recorded")
+	}
+	if err := tx.Commit(); err != nil {
+		return MailCutoverEpoch{}, errors.New("mail cutover abort reservation cannot commit")
 	}
 	return epoch, nil
 }
@@ -228,6 +299,12 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 		return errors.New("active mail cutover cannot be aborted")
 	}
 	if phase != MailCutoverAborted {
+		for _, table := range []string{"mail_request_nonces", "mail_conversation_idempotency", "mail_message_idempotency", "mail_recipient_cursors", "mail_deliveries", "mail_messages", "mail_memberships", "mail_conversations", "mail_endpoints"} {
+			// #nosec G202 -- table comes only from the fixed dependency-order allowlist.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM relay.`+table); err != nil {
+				return errors.New("mail cutover cannot be aborted")
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM relay.mail_cutover_staging WHERE epoch_id=$1`, epochID); err != nil {
 			return errors.New("mail cutover cannot be aborted")
 		}
@@ -244,7 +321,7 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 	return nil
 }
 
-func mailCutoverControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func mailCutoverControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -337,7 +414,11 @@ WITH objects AS (
            WHEN 'mail_cutover_epochs_aborted_at_check' THEN pg_get_expr(con.conbin,con.conrelid)='((phase = ''aborted''::text) = (aborted_at IS NOT NULL))'
            WHEN 'mail_cutover_staging_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
            WHEN 'mail_cutover_staging_row_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((octet_length(row_key) >= 1) AND (octet_length(row_key) <= 4096))'
-           WHEN 'mail_cutover_staging_payload_check' THEN pg_get_expr(con.conbin,con.conrelid)='((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 65536))'
+		WHEN 'mail_cutover_staging_payload_check' THEN pg_get_expr(con.conbin,con.conrelid)=CASE
+			WHEN $1 >= 9
+			THEN '((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 262144))'
+			ELSE '((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 65536))'
+		END
            WHEN 'mail_cutover_staging_row_sha256_check' THEN pg_get_expr(con.conbin,con.conrelid)='(row_sha256 ~ ''^[0-9a-f]{64}$''::text)'
            WHEN 'mail_cutover_checkpoints_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
            WHEN 'mail_cutover_checkpoints_last_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((last_key IS NULL) OR ((octet_length(last_key) >= 1) AND (octet_length(last_key) <= 4096)))'
@@ -403,6 +484,6 @@ SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND ob
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
    AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
-FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`).Scan(&available)
+FROM objects,ownership,columns,defaults,constraints,active_index,routine,guards,table_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

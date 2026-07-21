@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -69,6 +70,7 @@ type MigrationSourceManifest struct {
 	Counts                  MigrationSourceCounts `json:"counts"`
 	TableSHA256             MigrationSourceHashes `json:"table_sha256"`
 	Fingerprint             string                `json:"fingerprint"`
+	ExpectedFingerprint     string                `json:"-"`
 	lastEpochID             string
 	lastTargetIdentity      string
 	lastExpectedFingerprint string
@@ -118,6 +120,46 @@ func InspectMigrationSource(ctx context.Context, path string) (MigrationSourceMa
 	return manifest, nil
 }
 
+// CheckMigrationSourceEnrollmentCoverage proves every existing SQLite endpoint
+// remains claimable by at least one machine in the static PostgreSQL runtime.
+func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollment string) error {
+	authenticator, _, err := machineEnrollmentAuthenticator(enrollment)
+	if err != nil {
+		return errors.New("relay migration enrollment is invalid")
+	}
+	db, err := openMigrationSourceDatabase(path, true)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return errors.New("relay migration enrollment snapshot cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := inspectMigrationSource(ctx, tx); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT endpoint, machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
+	if err != nil {
+		return errors.New("relay migration endpoints are unavailable")
+	}
+	for rows.Next() {
+		var endpoint, machineID string
+		if err := rows.Scan(&endpoint, &machineID); err != nil || !authenticator.AllowsEndpoint(machineID, endpoint) {
+			_ = rows.Close()
+			return errors.New("relay migration enrollment does not cover every endpoint")
+		}
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("relay migration endpoints are unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("relay migration enrollment snapshot cannot commit")
+	}
+	return nil
+}
+
 // PrepareMigrationSource fences every SQLite relay mutation, advances all
 // carried lease fences, and records the exact post-fence logical fingerprint.
 func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, expectedFingerprint string, now time.Time) (MigrationSourceManifest, error) {
@@ -153,6 +195,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		prepared.lastEpochID = epochID
 		prepared.lastTargetIdentity = targetIdentity
 		prepared.lastExpectedFingerprint = expectedFingerprint
+		prepared.ExpectedFingerprint = expectedFingerprint
 		prepared.lastResultFingerprint = prepared.Fingerprint
 		prepared.lastCutoff = now.UTC().UnixMilli()
 		prepared.lastTransition = "prepared"
@@ -182,7 +225,7 @@ func transitionPreparedMigrationSource(ctx context.Context, path, epochID, targe
 			}
 			return MigrationSourceManifest{}, ErrMigrationSourceRetired
 		}
-		if current.Phase == MigrationSourceActive && target == MigrationSourceActive && current.Fingerprint == fingerprint && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastResultFingerprint == fingerprint && current.lastTransition == "aborted" {
+		if current.Phase == MigrationSourceActive && target == MigrationSourceActive && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastResultFingerprint == fingerprint && current.lastTransition == "aborted" {
 			return current, nil
 		}
 		if current.Phase != MigrationSourcePrepared || current.EpochID != epochID || current.TargetIdentity != targetIdentity || current.Fingerprint != fingerprint {
@@ -258,6 +301,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT source_id,phase,COALESCE(epoch_id,''),COALESCE(target_identity,''),fingerprint,COALESCE(last_epoch_id,''),COALESCE(last_target_identity,''),COALESCE(last_expected_fingerprint,''),COALESCE(last_result_fingerprint,''),COALESCE(last_cutoff,0),COALESCE(last_transition,'') FROM relay_migration_control WHERE singleton=1`).Scan(&manifest.SourceID, &manifest.Phase, &manifest.EpochID, &manifest.TargetIdentity, &storedFingerprint, &manifest.lastEpochID, &manifest.lastTargetIdentity, &manifest.lastExpectedFingerprint, &manifest.lastResultFingerprint, &manifest.lastCutoff, &manifest.lastTransition); err != nil || uuid.Validate(manifest.SourceID) != nil {
 		return MigrationSourceManifest{}, errors.New("relay migration source control is unavailable")
 	}
+	manifest.ExpectedFingerprint = manifest.lastExpectedFingerprint
 	if manifest.Phase != MigrationSourceActive && manifest.Phase != MigrationSourcePrepared && manifest.Phase != MigrationSourceRetired {
 		return MigrationSourceManifest{}, errors.New("relay migration source phase is invalid")
 	}
@@ -304,7 +348,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 				_ = rows.Close()
 				return MigrationSourceManifest{}, errors.New("relay migration source row is malformed")
 			}
-			for _, value := range values {
+			for index, value := range values {
+				if err := validateMigrationSourceValue(spec.name, columns[index], value); err != nil {
+					_ = rows.Close()
+					return MigrationSourceManifest{}, err
+				}
 				if err := writeMigrationHashValue(tableHash, value); err != nil {
 					_ = rows.Close()
 					return MigrationSourceManifest{}, err
@@ -573,6 +621,32 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 	return nil
 }
 
+func validateMigrationSourceValue(table, column string, value any) error {
+	text, ok := value.(string)
+	if !ok {
+		return nil
+	}
+	var valid bool
+	switch table + "." + column {
+	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
+		valid = ValidEndpoint(text)
+	case "endpoints.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "request_nonces.machine_id":
+		valid = ValidMachineID(text)
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "request_nonces.nonce":
+		valid = ValidRequestToken(text)
+	case "messages.body":
+		valid = ValidMessageBody(text)
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id":
+		valid = uuid.Validate(text) == nil
+	default:
+		return nil
+	}
+	if !valid {
+		return errors.New("relay migration source contains invalid portable text")
+	}
+	return nil
+}
+
 func writeMigrationHashValue(destination hash.Hash, value any) error {
 	var kind byte
 	var body []byte
@@ -584,6 +658,9 @@ func writeMigrationHashValue(destination hash.Hash, value any) error {
 		body = make([]byte, 8)
 		binary.BigEndian.PutUint64(body, uint64(typed)) // #nosec G115 -- two's-complement bits are the canonical signed-int encoding.
 	case string:
+		if !utf8.ValidString(typed) || strings.ContainsRune(typed, 0) {
+			return errors.New("relay migration source contains non-portable text")
+		}
 		kind, body = 2, []byte(typed)
 	case []byte:
 		kind, body = 3, typed

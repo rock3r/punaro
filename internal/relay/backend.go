@@ -8,7 +8,7 @@ import (
 )
 
 func validBoundedText(value string, maxCharacters, maxBytes int) bool {
-	if value == "" || strings.TrimSpace(value) != value || len(value) > maxBytes || utf8.RuneCountInString(value) > maxCharacters {
+	if value == "" || !utf8.ValidString(value) || strings.TrimSpace(value) != value || len(value) > maxBytes || utf8.RuneCountInString(value) > maxCharacters {
 		return false
 	}
 	for _, character := range value {
@@ -28,6 +28,12 @@ func ValidEndpoint(value string) bool { return validBoundedText(value, 512, 2048
 
 // ValidRequestToken bounds nonces, idempotency keys, and consumer identities.
 func ValidRequestToken(value string) bool { return validBoundedText(value, 128, 512) }
+
+// ValidMessageBody reports whether a message has a portable SQLite/PostgreSQL
+// text representation within the durable relay limit.
+func ValidMessageBody(value string) bool {
+	return len(value) <= maxMessageBodyBytes && utf8.ValidString(value) && !strings.ContainsRune(value, 0)
+}
 
 // AppendRequestHash binds a message idempotency key to its immutable request.
 func AppendRequestHash(input AppendInput) string { return appendHash(input) }

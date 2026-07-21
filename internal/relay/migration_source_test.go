@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -92,6 +93,49 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if _, err := PrepareMigrationSource(ctx, path, epochID, targetID, first.Fingerprint, now.Add(2*time.Minute)); err == nil {
 		t.Fatal("changed prepare cutoff was accepted as an exact retry")
 	}
+	firstBatch, err := ReadMigrationSourceBatch(ctx, path, "mail_endpoints", "", 1)
+	if err != nil || len(firstBatch.Rows) != 1 || firstBatch.Done || firstBatch.NextKey == "" {
+		t.Fatalf("first migration batch=%#v err=%v", firstBatch, err)
+	}
+	secondBatch, err := ReadMigrationSourceBatch(ctx, path, "mail_endpoints", firstBatch.NextKey, 1)
+	if err != nil || len(secondBatch.Rows) != 1 || !secondBatch.Done || secondBatch.NextKey == firstBatch.NextKey {
+		t.Fatalf("second migration batch=%#v err=%v", secondBatch, err)
+	}
+	if firstBatch.Rows[0].Table != "mail_endpoints" || firstBatch.Rows[0].Key >= secondBatch.Rows[0].Key || firstBatch.Rows[0].SHA256 == "" {
+		t.Fatalf("noncanonical migration rows first=%#v second=%#v", firstBatch.Rows[0], secondBatch.Rows[0])
+	}
+	endpointHasher, err := NewMigrationTableHasher("mail_endpoints")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range append(firstBatch.Rows, secondBatch.Rows...) {
+		if err := endpointHasher.Add(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	endpointCount, endpointSHA256 := endpointHasher.Evidence()
+	if endpointCount != prepared.Counts.Endpoints || endpointSHA256 != prepared.TableSHA256.Endpoints {
+		t.Fatalf("export evidence count=%d sha=%s manifest=%#v", endpointCount, endpointSHA256, prepared)
+	}
+	deliveryBatch, err := ReadMigrationSourceBatch(ctx, path, "mail_deliveries", "", 10)
+	if err != nil || len(deliveryBatch.Rows) != 1 || !deliveryBatch.Done {
+		t.Fatalf("delivery migration batch=%#v err=%v", deliveryBatch, err)
+	}
+	var delivery map[string]any
+	if err := json.Unmarshal(deliveryBatch.Rows[0].Payload, &delivery); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"lease_machine_id", "lease_token", "ownership_generation", "consumer_generation", "lease_until"} {
+		if delivery[field] != nil {
+			t.Fatalf("prepared delivery retained %s=%v", field, delivery[field])
+		}
+	}
+	if _, err := ReadMigrationSourceBatch(ctx, path, "mail_endpoints", "missing-key", 1); err == nil {
+		t.Fatal("migration batch accepted an unknown resume key")
+	}
+	if _, err := ReadMigrationSourceBatch(ctx, path, "unknown", "", 1); err == nil {
+		t.Fatal("migration batch accepted an unknown table")
+	}
 	if _, err := store.db.ExecContext(ctx, `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('old-daemon','blocked-direct-write',?)`, now.Add(time.Hour).UnixMilli()); err == nil || !strings.Contains(err.Error(), "relay migration source is not writable") {
 		t.Fatalf("persisted mutation trigger err=%v", err)
 	}
@@ -135,8 +179,8 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err := store.ConsumeRequestNonce("machine-a", "post-abort-write", now.Add(2*time.Minute), now.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := AbortPreparedMigrationSource(ctx, path, epochID, targetID, prepared.Fingerprint); err == nil {
-		t.Fatal("stale abort retry accepted a changed active source")
+	if recovered, err := AbortPreparedMigrationSource(ctx, path, epochID, targetID, prepared.Fingerprint); err != nil || recovered.Phase != MigrationSourceActive || recovered.Fingerprint == prepared.Fingerprint {
+		t.Fatalf("post-write abort recovery=%#v err=%v", recovered, err)
 	}
 	active, err = InspectMigrationSource(ctx, path)
 	if err != nil {
@@ -168,6 +212,88 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 			_ = reopened.Close()
 		}
 		t.Fatalf("new writable store after retirement err=%v", err)
+	}
+}
+
+func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a", "claude/jbr-reviewer"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	covered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"],"endpoints":["claude/jbr-reviewer"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, covered); err != nil {
+		t.Fatalf("covered enrollment rejected: %v", err)
+	}
+	uncovered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncovered); err == nil {
+		t.Fatal("enrollment missing an exact endpoint was accepted")
+	}
+	reassigned := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]},{"id":"machine-b","public_key":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["claude/"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, reassigned); err == nil {
+		t.Fatal("another machine's authority was accepted for the persisted endpoint owner")
+	}
+}
+
+func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 21, 10, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "large-create", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Repeat("\x01", maxMessageBodyBytes)
+	if _, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/source/a",
+		Body: body, IdempotencyKey: "large-message", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("append large message duplicate=%t err=%v", duplicate, err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), active.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 1)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("large message batch=%#v err=%v", batch, err)
+	}
+	if len(batch.Rows[0].Payload) <= 65536 || len(batch.Rows[0].Payload) > MaxMigrationSourcePayloadBytes {
+		t.Fatalf("large message payload bytes=%d", len(batch.Rows[0].Payload))
+	}
+	hasher, err := NewMigrationTableHasher("mail_messages")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(batch.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.Messages || digest != prepared.TableSHA256.Messages {
+		t.Fatalf("large message evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
 	}
 }
 
@@ -236,6 +362,55 @@ func TestMigrationSourceRefusesUnexpectedIndex(t *testing.T) {
 	_ = store.Close()
 	if _, err := InspectMigrationSource(context.Background(), path); err == nil {
 		t.Fatal("unexpected source index was accepted")
+	}
+}
+
+func TestMigrationSourceRefusesNonPortableLegacyRequestTokens(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name  string
+		query string
+	}{
+		{name: "invalid UTF-8", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'ff' AS TEXT),1)`},
+		{name: "NUL", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'610062' AS TEXT),1)`},
+		{name: "resume delimiter", query: `INSERT INTO request_nonces(machine_id,nonce,expires_at) VALUES('machine-a',CAST(X'611f62' AS TEXT),1)`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "relay.db")
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.db.ExecContext(context.Background(), test.query); err != nil { // #nosec G202 -- query is a fixed test-only SQL expression.
+				_ = store.Close()
+				t.Fatal(err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := InspectMigrationSource(context.Background(), path); err == nil {
+				t.Fatal("non-portable legacy request token was accepted")
+			}
+		})
+	}
+}
+
+func TestMigrationSourceRefusesDelimiterInLegacyUUIDKey(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO conversations(id,next_sequence,created_at) VALUES(CAST(X'611f62' AS TEXT),0,1)`); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(context.Background(), path); err == nil {
+		t.Fatal("resume delimiter in legacy UUID key was accepted")
 	}
 }
 

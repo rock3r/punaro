@@ -537,17 +537,30 @@ dirty, old, newer, or incompatible schemas without performing DDL. The normal
 application role is distinct from the schema owner. SQLite remains the active
 and default relay authority until the later fenced mail cutover.
 
-The first mail-cutover slice remains dark and stops before authority transfer.
+The first mail-cutover slice was dark and stopped before authority transfer.
 SQLite can be inspected read-only into a deterministic logical manifest; its
 prepare barrier expires endpoint ownership, clears consumers and delivery
 leases, advances their generations, and installs a durable write fence that
 also stops already-open older daemons. PostgreSQL schema v8 can durably record
 one owner-authorized import epoch plus bounded staging/checkpoint state and
 fences application-role mail writes while that epoch is importing or verified.
-It has no canonical-row importer or activation transition, so it cannot create
-a dual-authority state. A prepared SQLite source may be reopened only before it
-is permanently retired; retirement and PostgreSQL activation belong to the
-later irreversible executor slice.
+Schema v9 expands only the staging payload bound to cover worst-case JSON
+escaping for every valid 32 KiB message body while retaining the same ACLs.
+The one-shot executor now consumes that substrate. It exports canonical rows in
+bounded order-preserving pages, durably checkpoints exact idempotent staging,
+streams every table back through the source-manifest hash, and materializes all
+canonical PostgreSQL tables in one verified transaction. Before source
+retirement an explicit abort deletes any materialized destination rows, reopens
+SQLite first, and marks the destination epoch aborted. If PostgreSQL rejected
+before recording the epoch, abort first records an exact terminal tombstone so
+a delayed begin cannot resurrect the import fence, then reopens SQLite.
+Retirement is permanent.
+Only after it succeeds may one owner transaction prove that no intended legacy
+machine remains pending, close the legacy gate, and mark PostgreSQL active.
+The generated environment, Compose input, and installation marker are then
+published locally with `installation.json` last. A crash can therefore resume
+at prepare, staging, verification, retirement, activation, or publication
+without dual writes or rollback across the seal.
 
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique
@@ -596,6 +609,20 @@ deadline in a dedicated loop; wake writes cannot delay it, and fence failure
 cancels any blocked write. This bounds authority after the last successful check to two seconds. Gate
 closure, key retirement, credential rotation/revocation, principal disablement,
 mapping removal, timeout, or database failure closes the socket.
+
+The supported cutover action is `punaro mail cutover`. Its dry-run reads the
+service-owned `relay.db` from the installation data directory and prints the
+source fingerprint, exact counts, and PostgreSQL target identity without a
+mutation. Execution accepts no arbitrary source path and requires a caller
+chosen epoch UUID, the dry-run fingerprint, `--yes`, and a complete validated
+public static relay enrollment on first execution. That enrollment is published
+marker-last before SQLite prepare, remains the canonical endpoint authority
+after cutover, and cannot be changed by a recovery retry. SQLite prepare fences
+old daemons and clears every lease holder while advancing fences. Staging is
+bounded to 128 rows per page and resumes from durable PostgreSQL checkpoints.
+Verification rejects any missing, extra, reordered, malformed, or changed row.
+`--abort` is available only before SQLite retirement; after activation the old
+file is forensic evidence and recovery is PostgreSQL backup or forward repair.
 
 The fourth dark foundation slice gives projects durable, credential-free
 identity claims. Conservative Git normalization strips credentials and only

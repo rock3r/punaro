@@ -2,6 +2,7 @@
 package operator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/listener"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const (
@@ -27,6 +29,7 @@ const (
 	envName                 = "punarod.env"
 	overrideName            = "compose.operator.yaml"
 	defaultHealthListenAddr = "127.0.0.1:8081"
+	maxRelayMachinesBytes   = 32 << 10
 )
 
 // EnvFile returns the generated daemon dotenv path for one installation.
@@ -48,23 +51,48 @@ func ComposeProjectName(installation Installation) (string, error) {
 	return "punaro-" + strings.ReplaceAll(ownerID.String(), "-", ""), nil
 }
 
+func canonicalRelayMachinesJSON(raw string) (string, error) {
+	if len(raw) == 0 || len(raw) > maxRelayMachinesBytes || relay.ValidateMachineEnrollments(raw) != nil {
+		return "", errors.New("relay machine enrollment is invalid")
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, []byte(raw)) != nil || compact.Len() == 0 || strings.ContainsAny(compact.String(), "\r\n") {
+		return "", errors.New("relay machine enrollment is invalid")
+	}
+	canonical := strings.ReplaceAll(compact.String(), "'", `\u0027`)
+	if len(canonical) > maxRelayMachinesBytes {
+		return "", errors.New("relay machine enrollment is invalid")
+	}
+	return canonical, nil
+}
+
+func validateRelayMachinesJSON(raw string) error {
+	canonical, err := canonicalRelayMachinesJSON(raw)
+	if err != nil || canonical != raw {
+		return errors.New("relay machine enrollment is invalid")
+	}
+	return nil
+}
+
 // Installation is the content-free operator configuration. DSN values remain
 // in separately protected files and are never copied here.
 type Installation struct {
-	Version          int            `json:"version"`
-	Directory        string         `json:"-"`
-	DataDir          string         `json:"data_dir"`
-	BackupDir        string         `json:"backup_dir"`
-	Image            string         `json:"image"`
-	OwnerDSNFile     string         `json:"owner_dsn_file"`
-	AppDSNFile       string         `json:"app_dsn_file"`
-	OwnerPrincipalID string         `json:"owner_principal_id"`
-	OwnerName        string         `json:"owner_name"`
-	RuntimeUID       string         `json:"runtime_uid"`
-	RuntimeGID       string         `json:"runtime_gid"`
-	Ingress          ingress.Policy `json:"ingress"`
-	HealthListenAddr string         `json:"health_listen_addr"`
-	HealthURL        string         `json:"health_url"`
+	Version           int                     `json:"version"`
+	Directory         string                  `json:"-"`
+	DataDir           string                  `json:"data_dir"`
+	BackupDir         string                  `json:"backup_dir"`
+	Image             string                  `json:"image"`
+	OwnerDSNFile      string                  `json:"owner_dsn_file"`
+	AppDSNFile        string                  `json:"app_dsn_file"`
+	OwnerPrincipalID  string                  `json:"owner_principal_id"`
+	OwnerName         string                  `json:"owner_name"`
+	RuntimeUID        string                  `json:"runtime_uid"`
+	RuntimeGID        string                  `json:"runtime_gid"`
+	Ingress           ingress.Policy          `json:"ingress"`
+	HealthListenAddr  string                  `json:"health_listen_addr"`
+	HealthURL         string                  `json:"health_url"`
+	RelayMachinesJSON string                  `json:"relay_machines_json,omitempty"`
+	MailCutover       *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
 
 // InitOptions is the complete explicit input to a first installation.
@@ -309,6 +337,14 @@ func Load(directory string) (Installation, error) {
 	if installation.Version != 1 || uuid.Validate(installation.OwnerPrincipalID) != nil || !numericIdentity(installation.RuntimeUID) || !numericIdentity(installation.RuntimeGID) || !runtimeIdentityMatches(installation) {
 		return Installation{}, errors.New("published installation configuration is corrupt")
 	}
+	if installation.MailCutover != nil && (installation.MailCutover.Validate() != nil || installation.RelayMachinesJSON == "") {
+		return Installation{}, errors.New("published installation mail cutover is invalid")
+	}
+	if installation.RelayMachinesJSON != "" {
+		if err := validateRelayMachinesJSON(installation.RelayMachinesJSON); err != nil {
+			return Installation{}, errors.New("published installation relay enrollment is invalid")
+		}
+	}
 	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
@@ -419,22 +455,42 @@ func CheckPaths(installation Installation) []string {
 		failures = append(failures, "daemon-writable data directory overlaps database credentials or operator state")
 	}
 	envPath := EnvFile(installation.Directory)
+	envAvailable, envCurrent, envLegacy := false, false, false
 	if err := requireTrustedProtectedFile(envPath, 64<<10); err != nil {
 		failures = append(failures, "generated daemon environment unavailable or unsafe")
 	} else {
 		// #nosec G304 -- fixed generated file below the explicit validated installation directory.
 		body, err := os.ReadFile(envPath)
-		if err != nil || string(body) != daemonEnv(installation) {
+		envAvailable = err == nil
+		if envAvailable {
+			envCurrent = string(body) == daemonEnv(installation)
+			envLegacy = installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
+		}
+		if !envCurrent && !envLegacy {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 		}
 	}
 	overridePath := OverrideFile(installation.Directory)
+	overrideAvailable, overrideCurrent, overrideLegacy := false, false, false
 	if err := requireTrustedProtectedFile(overridePath, 64<<10); err != nil {
 		failures = append(failures, "generated Compose override unavailable or unsafe")
 	} else {
 		// #nosec G304 -- fixed generated file below the explicit validated installation directory.
 		body, err := os.ReadFile(overridePath)
-		if err != nil || string(body) != composeOverride() {
+		overrideAvailable = err == nil
+		if overrideAvailable {
+			overrideCurrent = string(body) == composeOverride()
+			overrideLegacy = installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
+		}
+		if !overrideCurrent && !overrideLegacy {
+			failures = append(failures, "generated Compose override does not match installation configuration")
+		}
+	}
+	if envAvailable && overrideAvailable && (envLegacy || overrideLegacy) {
+		if envLegacy && !overrideLegacy {
+			failures = append(failures, "generated daemon environment does not match installation configuration")
+		}
+		if overrideLegacy && !envLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
 	}
@@ -455,6 +511,10 @@ func localURL(listenAddr string) string {
 }
 
 func daemonEnv(installation Installation) string {
+	relayStore, relayEnabled, credentialTransition := "sqlite", "false", "false"
+	if installation.MailCutover != nil {
+		relayStore, relayEnabled, credentialTransition = "postgres", "true", "true"
+	}
 	return strings.Join([]string{
 		"PUNARO_IMAGE=" + installation.Image,
 		"PUNARO_HOST_DATA_DIR=" + installation.DataDir,
@@ -464,6 +524,10 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_POSTGRES_ENABLED=true",
 		"PUNARO_POSTGRES_DSN_FILE=" + installation.AppDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
+		"PUNARO_RELAY_ENABLED=" + relayEnabled,
+		"PUNARO_RELAY_MACHINES_JSON='" + installation.RelayMachinesJSON + "'",
+		"PUNARO_RELAY_STORE=" + relayStore,
+		"PUNARO_CREDENTIAL_TRANSITION_ENABLED=" + credentialTransition,
 		"PUNARO_INGRESS_MODE=" + string(installation.Ingress.Mode),
 		"PUNARO_PUBLIC_URL=" + installation.Ingress.PublicURL,
 		"PUNARO_TRUSTED_LAN_CIDR=" + installation.Ingress.TrustedLAN,
@@ -471,6 +535,15 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_RUNTIME_UID=" + installation.RuntimeUID,
 		"PUNARO_RUNTIME_GID=" + installation.RuntimeGID,
 	}, "\n") + "\n"
+}
+
+func legacyDaemonEnv(installation Installation) string {
+	return strings.NewReplacer(
+		"PUNARO_RELAY_ENABLED=false\n", "",
+		"PUNARO_RELAY_MACHINES_JSON=''\n", "",
+		"PUNARO_RELAY_STORE=sqlite\n", "",
+		"PUNARO_CREDENTIAL_TRANSITION_ENABLED=false\n", "",
+	).Replace(daemonEnv(installation))
 }
 
 func composeOverride() string {
@@ -495,6 +568,10 @@ func composeOverride() string {
       PUNARO_POSTGRES_ENABLED: ${PUNARO_POSTGRES_ENABLED:?required}
       PUNARO_POSTGRES_DSN_FILE: ${PUNARO_POSTGRES_DSN_FILE:?required}
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}
+      PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}
+      PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}
+      PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}
+      PUNARO_CREDENTIAL_TRANSITION_ENABLED: ${PUNARO_CREDENTIAL_TRANSITION_ENABLED:?required}
       PUNARO_INGRESS_MODE: ${PUNARO_INGRESS_MODE:?required}
       PUNARO_PUBLIC_URL: ${PUNARO_PUBLIC_URL:-}
       PUNARO_TRUSTED_LAN_CIDR: ${PUNARO_TRUSTED_LAN_CIDR:-}
@@ -508,6 +585,15 @@ func composeOverride() string {
         target: ${PUNARO_POSTGRES_DSN_FILE:?required}
         read_only: true
 `
+}
+
+func legacyComposeOverride() string {
+	return strings.NewReplacer(
+		"      PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}\n", "",
+		"      PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}\n", "",
+		"      PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}\n", "",
+		"      PUNARO_CREDENTIAL_TRANSITION_ENABLED: ${PUNARO_CREDENTIAL_TRANSITION_ENABLED:?required}\n", "",
+	).Replace(composeOverride())
 }
 
 func numericIdentity(value string) bool {

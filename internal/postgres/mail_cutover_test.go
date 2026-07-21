@@ -82,3 +82,93 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMailCutoverBatchValidationAndRollingDigest(t *testing.T) {
+	t.Parallel()
+	rows := []relay.MigrationSourceRow{
+		migrationEndpointRow(t, "agent/a", "machine-a", 1),
+		migrationEndpointRow(t, "agent/b", "machine-b", 2),
+	}
+	batch := MailCutoverBatch{EpochID: "019f7f07-4b88-7c12-a394-b663274a6555", Table: "mail_endpoints", Rows: rows, Done: true}
+	if err := batch.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	first := nextMailCutoverDigest(emptyMailCutoverDigest, rows[:1])
+	second := nextMailCutoverDigest(first, rows[1:])
+	combined := nextMailCutoverDigest(emptyMailCutoverDigest, rows)
+	empty := nextMailCutoverDigest(emptyMailCutoverDigest, nil)
+	if empty != emptyMailCutoverDigest || first == emptyMailCutoverDigest || second == first || combined == second {
+		t.Fatalf("rolling digests empty=%s first=%s second=%s combined=%s", empty, first, second, combined)
+	}
+	invalid := []MailCutoverBatch{
+		{},
+		{EpochID: batch.EpochID, Table: "unknown", Rows: rows},
+		{EpochID: batch.EpochID, Table: batch.Table},
+		{EpochID: batch.EpochID, Table: batch.Table, Rows: []relay.MigrationSourceRow{rows[1], rows[0]}},
+		{EpochID: batch.EpochID, Table: batch.Table, Rows: []relay.MigrationSourceRow{rows[0], rows[0]}},
+	}
+	for index, candidate := range invalid {
+		if err := candidate.Validate(); err == nil {
+			t.Fatalf("invalid batch %d accepted: %#v", index, candidate)
+		}
+	}
+}
+
+func TestMailCutoverMaterializationUsesBinaryResumeOrdering(t *testing.T) {
+	t.Parallel()
+	for index, statement := range mailCutoverMaterializationStatements {
+		if !strings.Contains(statement, `ORDER BY row_key COLLATE "C"`) {
+			t.Fatalf("materialization statement %d lacks binary ordering: %s", index, statement)
+		}
+	}
+}
+
+func TestMailCutoverEnrollmentKeysExactlyMatchMigratedInventory(t *testing.T) {
+	t.Parallel()
+	keyA := make([]byte, 32)
+	keyA[0] = 1
+	keyB := make([]byte, 32)
+	keyB[0] = 2
+	machines := []relay.Machine{{ID: "machine-a", PublicKey: keyA}, {ID: "machine-b", PublicKey: keyB}}
+	if err := validateMailCutoverEnrollmentKeys(machines, []mailCutoverLegacyKey{{publicKey: keyB, state: LegacyRetired}, {publicKey: keyA, state: LegacyMigrated}}); err != nil {
+		t.Fatalf("matching migrated keys rejected: %v", err)
+	}
+	mismatched := append([]byte(nil), keyB...)
+	mismatched[0] = 3
+	if err := validateMailCutoverEnrollmentKeys(machines, []mailCutoverLegacyKey{{publicKey: keyA, state: LegacyMigrated}, {publicKey: mismatched, state: LegacyRetired}}); err == nil {
+		t.Fatal("mismatched migrated key was accepted")
+	}
+	if err := validateMailCutoverEnrollmentKeys(machines[:1], []mailCutoverLegacyKey{{publicKey: keyA, state: LegacyMigrated}, {publicKey: keyB, state: LegacyMigrated}}); err == nil {
+		t.Fatal("omitted migrated key was accepted")
+	}
+}
+
+func TestPostgresAppendRejectsNonPortableBodyBeforeDatabaseAccess(t *testing.T) {
+	t.Parallel()
+	database := &Database{}
+	base := relay.AppendInput{ConversationID: "019f7f07-4b88-7c12-a394-b663274a6555", SenderMachineID: "machine-a", FromEndpoint: "agent/a", IdempotencyKey: "portable-key"}
+	for _, body := range []string{string([]byte{0xff}), "body\x00value"} {
+		input := base
+		input.Body = body
+		if _, _, err := database.AppendMessage(input); err == nil || !strings.Contains(err.Error(), "portable UTF-8") {
+			t.Fatalf("non-portable body %q err=%v", body, err)
+		}
+	}
+}
+
+func migrationEndpointRow(t *testing.T, endpoint, machine string, generation int64) relay.MigrationSourceRow {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"endpoint": endpoint, "machine_id": machine, "lease_until": int64(1), "ownership_generation": generation,
+		"consumer_id": nil, "consumer_generation": int64(0), "consumer_lease_until": nil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(payload)
+	key, err := json.Marshal([]any{endpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relay.MigrationSourceRow{Table: "mail_endpoints", Key: string(key), Payload: payload, SHA256: hex.EncodeToString(digest[:])}
+}
