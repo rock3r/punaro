@@ -45,7 +45,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	}
 	assertAttachmentProjectBeforeUpload(ctx, t, app, ownerDB, project.ProjectID, lockOrderReservation.ArtifactID, "claim", func(conn *sql.Conn) error {
 		var claimed bool
-		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.claim_upload($1,$2,$3)`, uploader.ID, lockOrderReservation.ArtifactID, time.Minute).Scan(&claimed); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) = 1 FROM attachment.claim_upload($1,$2,$3::interval)`, uploader.ID, lockOrderReservation.ArtifactID, attachmentInterval(time.Minute)).Scan(&claimed); err != nil {
 			return err
 		}
 		if !claimed {
