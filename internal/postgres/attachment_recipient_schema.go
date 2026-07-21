@@ -60,12 +60,12 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility, application_execute, result_type, returns_set) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (authority_oid,'2b747828a74bec8059e8d91cdce5fd3e','s'::"char",false,'boolean',false),
-      (endpoint_bind_oid,'c64c9ab67709cfd68977856025101cc4','v'::"char",true,'integer',false),
-      (conversation_bind_oid,'9be80fae35482bb930c6583ed907cbe2','v'::"char",true,'uuid',false),
-      (message_bind_oid,'69e391d03200ec08e286603c9e622683','v'::"char",true,'integer',false),
-      (project_records_oid,'b3068ea4d3e069841d630136a396b69e','v'::"char",true,'boolean',false),
-      (download_oid,'fdce23e16bba8fc36e3629413e54d7cd','s'::"char",true,'record',true)
+      (authority_oid,'d7d7b06d7b82d2a3b94f362e04dea549','s'::"char",false,'boolean',false),
+      (endpoint_bind_oid,'f1155124cc7e9dd23823b86d8285a3a0','v'::"char",true,'integer',false),
+      (conversation_bind_oid,'e3fbcc33f912e09e815a0668f9c940a2','v'::"char",true,'uuid',false),
+      (message_bind_oid,'4fae53b06715a6dddfe87e1178fc9554','v'::"char",true,'integer',false),
+      (project_records_oid,'4fe60fc8c8ddcb2d9f2abe97cf8c195c','v'::"char",true,'boolean',false),
+      (download_oid,'11c4af626ef77090e6957b96f6f11b72','s'::"char",true,'record',true)
     ) AS expected(oid,body_hash,volatility,application_execute,result_type,returns_set)
 ), routine_safety AS (
     SELECT count(*) = 6
@@ -125,12 +125,12 @@ WITH objects AS (
       )
 ), expected_checks(relation_name,constraint_name,column_keys,expression) AS (
     VALUES
-      ('attachment.endpoint_principals','endpoint_principals_machine_id_check','{2}','((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.endpoint_principals','endpoint_principals_machine_id_check','{2}','(((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128)) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'),
       ('attachment.endpoint_principals','endpoint_principals_credential_generation_check','{5}','(credential_generation >= 1)'),
       ('attachment.endpoint_principals','endpoint_principals_ownership_generation_check','{6}','(ownership_generation >= 1)'),
       ('attachment.message_artifacts','message_artifacts_ordinal_check','{2}','((ordinal >= 0) AND (ordinal <= 15))'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_endpoint_check','{3}','((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))'),
-      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_machine_check','{4}','((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_endpoint_check','{3}','(((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512)) AND (octet_length(recipient_endpoint) <= 2048) AND (recipient_endpoint !~ ''[[:cntrl:]]''::text))'),
+      ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_machine_check','{4}','(((char_length(recipient_machine_id) >= 1) AND (char_length(recipient_machine_id) <= 128)) AND (octet_length(recipient_machine_id) <= 512) AND (recipient_machine_id !~ ''[[:cntrl:]]''::text))'),
       ('attachment.recipient_grant_endpoints','recipient_grant_endpoints_generation_check','{5}','(ownership_generation >= 1)')
 ), actual_checks AS (
     SELECT constraint_row.conrelid::regclass::text, constraint_row.conname,
