@@ -85,11 +85,35 @@ func (d *Database) ResolveLegacyMachine(ctx context.Context, publicKey ed25519.P
 FROM auth.legacy_machines AS machine
 JOIN auth.principals AS principal ON principal.id = machine.principal_id
 CROSS JOIN auth.legacy_auth_state AS state
-WHERE machine.public_key_digest = $1 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:]).Scan(&principalID, &enabled)
+WHERE machine.public_key_digest = $1 AND machine.public_key = $2 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:], []byte(publicKey)).Scan(&principalID, &enabled)
 	if err != nil || !enabled {
 		return "", ErrUnauthenticated
 	}
 	return principalID, nil
+}
+
+// ResolveMigratedLegacyPublicKey maps a currently valid device session back to
+// the exact Ed25519 enrollment it replaced. The public key is an opaque join
+// handle into the daemon's static machine configuration; endpoint authority is
+// never copied into PostgreSQL or reconstructed from labels and principal IDs.
+func (d *Database) ResolveMigratedLegacyPublicKey(ctx context.Context, authenticated AuthenticatedDevice) (ed25519.PublicKey, error) {
+	if !validOpaqueID(authenticated.PrincipalID) || !validOpaqueID(authenticated.LookupID) || authenticated.Generation < 1 {
+		return nil, ErrUnauthenticated
+	}
+	var publicKey []byte
+	err := d.db.QueryRowContext(ctx, `SELECT machine.public_key
+FROM auth.legacy_machines AS machine
+JOIN auth.device_credentials AS credential ON credential.lookup_id = machine.migrated_credential_lookup_id
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+WHERE machine.state = 'migrated'
+  AND credential.lookup_id = $1 AND credential.principal_id = $2 AND credential.generation = $3
+  AND credential.revoked_at IS NULL
+  AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+  AND principal.disabled_at IS NULL`, authenticated.LookupID, authenticated.PrincipalID, authenticated.Generation).Scan(&publicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return nil, ErrUnauthenticated
+	}
+	return append(ed25519.PublicKey(nil), publicKey...), nil
 }
 
 // ListLegacyMachines returns bounded content-free migration inventory.

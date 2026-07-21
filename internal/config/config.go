@@ -50,6 +50,7 @@ type Config struct {
 	PostgresEnabled             bool
 	PostgresDSNFile             string
 	DeviceAuthEnabled           bool
+	CredentialTransitionEnabled bool
 	IngressMode                 string
 	PublicURL                   string
 	TrustedLANCIDR              string
@@ -128,6 +129,10 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_DEVICE_AUTH_ENABLED: %w", err)
 	}
+	credentialTransitionEnabled, err := strconv.ParseBool(value("PUNARO_CREDENTIAL_TRANSITION_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_CREDENTIAL_TRANSITION_ENABLED: %w", err)
+	}
 	ingressMode := value("PUNARO_INGRESS_MODE", "")
 	publicURL := value("PUNARO_PUBLIC_URL", "")
 	trustedLANCIDR := value("PUNARO_TRUSTED_LAN_CIDR", "")
@@ -184,6 +189,9 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	if relayStore == "postgres" && (directoryEnabled || permitIssuanceEnabled || attachmentV3Enabled || attachmentsEnabled) {
 		return Config{}, fmt.Errorf("PostgreSQL relay store cannot serve superseded attachment or directory routes")
+	}
+	if credentialTransitionEnabled && (!relayEnabled || relayStore != "postgres" || !postgresEnabled || !deviceAuthEnabled) {
+		return Config{}, fmt.Errorf("credential transition requires enabled PostgreSQL relay and device authentication")
 	}
 	if directoryEnabled && !relayEnabled {
 		return Config{}, fmt.Errorf("directory service requires PUNARO_RELAY_ENABLED")
@@ -255,7 +263,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, AttachmentsEnabled: attachmentsEnabled, AttachmentDeviceKeysJSON: deviceKeys, AttachmentMembershipJSON: membership, AttachmentV3Enabled: attachmentV3Enabled, AttachmentV3SourceStoreFile: attachmentV3SourceStoreFile, DirectoryEnabled: directoryEnabled, DirectorySnapshotFile: directorySnapshotFile, PermitIssuanceEnabled: permitIssuanceEnabled, DirectoryAudience: audience, DirectoryRootKeyID: rootKeyID, DirectoryRootPublicKey: rootPublicKey, PermitIssuerKeyID: issuerKeyID, PermitIssuerPrivateKeyFile: permitIssuerPrivateKeyFile, PermitMaxLifetimeSeconds: maxLifetime, PermitMaxBytes: maxBytes, PermitMaxChunks: maxChunks, PermitMaxOperations: maxOperations, PermitMaxActive: maxActive, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func decodeFixedBase64URL(name, value string, size int) ([32]byte, error) {

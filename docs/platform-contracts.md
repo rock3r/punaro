@@ -131,6 +131,23 @@ server-constrained defaults, and coalesce `last_used_at`; it cannot rotate or
 revoke credentials. Host-local administration uses a direct `punaro_owner`
 connection and is not exposed as an HTTP route.
 
+The M-9 credential transition is a separate, off-by-default relay mode. It
+does not copy endpoint scopes into the auth schema. A replacement credential
+must authenticate as current and resolve through
+`migrated_credential_lookup_id` to the exact registered legacy public key;
+that key selects one non-ambiguous static relay machine enrollment. The device
+therefore receives precisely the old machine ID, endpoint prefixes, exact
+endpoints, and attachment-device binding. Every Ed25519 request in this mode
+also resolves its exact public key through `auth.legacy_auth_state`, so a closed
+gate fails legacy authentication. Database errors, revoked or stale device
+credentials, ordinary unenrolled device credentials, retired mappings, and
+duplicate configured keys all fail closed. Enabling the mode requires device
+auth and the PostgreSQL relay; it does not itself make PostgreSQL writable mail
+authority. A notification WebSocket retains only its non-secret session fence
+and revalidates the legacy gate or the exact device generation and migrated
+mapping every second under a one-second deadline; failure closes the socket,
+and the last successful durable check expires after at most two seconds.
+
 M-5 mounts only `POST /v1/enrollments/redeem` and authenticated
 `GET /v1/device/session`. Redemption requires exact `application/json`, a
 bounded object with four unique string fields, and the store's exact enrollment

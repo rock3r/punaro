@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,8 +17,45 @@ import (
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/config"
+	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 )
+
+type transitionDatabaseDouble struct {
+	legacyKey  ed25519.PublicKey
+	credential string
+	device     punaropostgres.AuthenticatedDevice
+	err        error
+}
+
+func (d *transitionDatabaseDouble) RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error) {
+	return punaropostgres.DeviceCredential{}, errors.New("not used")
+}
+
+func (d *transitionDatabaseDouble) AuthenticateDevice(_ context.Context, credential string) (punaropostgres.AuthenticatedDevice, error) {
+	if d.err != nil || credential != d.credential {
+		return punaropostgres.AuthenticatedDevice{}, punaropostgres.ErrUnauthenticated
+	}
+	return d.device, nil
+}
+
+func (d *transitionDatabaseDouble) DeviceSessionCurrent(_ context.Context, authenticated punaropostgres.AuthenticatedDevice) (bool, error) {
+	return d.err == nil && authenticated == d.device, d.err
+}
+
+func (d *transitionDatabaseDouble) ResolveLegacyMachine(_ context.Context, key ed25519.PublicKey) (string, error) {
+	if d.err != nil || !bytes.Equal(key, d.legacyKey) {
+		return "", punaropostgres.ErrUnauthenticated
+	}
+	return "11111111-1111-4111-8111-111111111111", nil
+}
+
+func (d *transitionDatabaseDouble) ResolveMigratedLegacyPublicKey(_ context.Context, authenticated punaropostgres.AuthenticatedDevice) (ed25519.PublicKey, error) {
+	if d.err != nil || authenticated != d.device {
+		return nil, punaropostgres.ErrUnauthenticated
+	}
+	return append(ed25519.PublicKey(nil), d.legacyKey...), nil
+}
 
 func TestBuildRelayHandlerRejectsInvalidEnrollment(t *testing.T) {
 	_, closeRelay, err := buildRelayHandler(config.Config{DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: `[{"id":"machine-a","public_key":"invalid","endpoint_prefixes":["agent/"]}]`})
@@ -41,6 +79,34 @@ func TestBuildRelayCanSelectPostgresBackendWithoutOpeningSQLite(t *testing.T) {
 	}, backend)
 	if err != nil || handler == nil || sqliteStore != nil {
 		t.Fatalf("handler=%v sqlite=%v err=%v", handler, sqliteStore, err)
+	}
+}
+
+func TestPostgresTransitionAuthorityMapsBothPathsToExactLegacyKey(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := &transitionDatabaseDouble{legacyKey: public, credential: "not-secret", device: punaropostgres.AuthenticatedDevice{PrincipalID: "11111111-1111-4111-8111-111111111111", LookupID: "22222222-2222-4222-8222-222222222222", Generation: 1}}
+	authority := postgresTransitionAuthority{database: database}
+	legacyResult, err := authority.AuthorizeTransition(t.Context(), "", public)
+	if err != nil || !bytes.Equal(legacyResult.LegacyPublicKey, public) || legacyResult.Current(t.Context()) != nil {
+		t.Fatalf("legacy result=%#v err=%v", legacyResult, err)
+	}
+	deviceResult, err := authority.AuthorizeTransition(t.Context(), database.credential, nil)
+	if err != nil || !bytes.Equal(deviceResult.LegacyPublicKey, public) || deviceResult.Current(t.Context()) != nil {
+		t.Fatalf("device result=%#v err=%v", deviceResult, err)
+	}
+	database.err = errors.New("revoked")
+	if err := legacyResult.Current(t.Context()); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("closed legacy session err=%v", err)
+	}
+	if err := deviceResult.Current(t.Context()); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("revoked device session err=%v", err)
+	}
+	database.err = nil
+	if _, err := authority.AuthorizeTransition(t.Context(), "wrong", nil); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("wrong credential err=%v", err)
 	}
 }
 

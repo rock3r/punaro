@@ -1,13 +1,25 @@
 package relay
 
 import (
+	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+type transitionAuthorityFunc func(context.Context, string, ed25519.PublicKey) (TransitionAuthorization, error)
+
+const testTransitionToken = "not-secret"
+
+func (function transitionAuthorityFunc) AuthorizeTransition(ctx context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+	return function(ctx, credential, legacyKey)
+}
 
 type nonceStoreFunc func(string, string, time.Time, time.Time) error
 
@@ -196,6 +208,102 @@ func TestAuthenticatorRejectsExactEndpointOwnedByAnotherMachine(t *testing.T) {
 	}); err == nil {
 		t.Fatal("exact endpoint overlapping another machine namespace was accepted")
 	}
+}
+
+func TestTransitionAuthenticatorMakesLegacyGateAuthoritative(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := nonceStoreFunc(func(string, string, time.Time, time.Time) error { return nil })
+	gateOpen := true
+	auth, err := NewTransitionAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential != "" || !gateOpen || !bytes.Equal(legacyKey, public) {
+			return TransitionAuthorization{}, ErrForbidden
+		}
+		return TransitionAuthorization{LegacyPublicKey: legacyKey, Current: func(context.Context) error {
+			if !gateOpen {
+				return ErrForbidden
+			}
+			return nil
+		}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	signed := signRequest(private, "machine-a", http.MethodPost, "/v1/conversations", []byte(`{"members":[]}`), now, "nonce-open")
+	request := signedHTTPRequest(t, signed)
+	session, err := auth.AuthenticateHTTPSession(request, signed.Body, now)
+	if err != nil || session.MachineID != "machine-a" {
+		t.Fatalf("open legacy gate session=%#v err=%v", session, err)
+	}
+	gateOpen = false
+	if err := session.Current(context.Background()); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("closed legacy gate retained session err=%v", err)
+	}
+	signed = signRequest(private, "machine-a", http.MethodPost, "/v1/conversations", []byte(`{"members":[]}`), now, "nonce-closed")
+	request = signedHTTPRequest(t, signed)
+	if _, err := auth.AuthenticateHTTP(request, signed.Body, now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("closed legacy gate err=%v", err)
+	}
+}
+
+func TestTransitionAuthenticatorPreservesExactMachineAuthorityForMigratedCredential(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewTransitionAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return nil }), []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}, Endpoints: []string{"claude/exact"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential != testTransitionToken || legacyKey != nil {
+			return TransitionAuthorization{}, ErrForbidden
+		}
+		return TransitionAuthorization{LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "http://localhost/v1/conversations", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+testTransitionToken)
+	machineID, err := auth.AuthenticateHTTP(request, nil, time.Now().UTC())
+	if err != nil || machineID != "machine-a" {
+		t.Fatalf("migrated credential machine=%q err=%v", machineID, err)
+	}
+	if !auth.AllowsEndpoint(machineID, "agent/a/session") || !auth.AllowsEndpoint(machineID, "claude/exact") || auth.AllowsEndpoint(machineID, "agent/b/session") || auth.AllowsEndpoint(machineID, "claude/exact-more") {
+		t.Fatal("migrated credential did not inherit the exact configured machine authority")
+	}
+}
+
+func TestTransitionAuthenticatorRejectsAmbiguousLegacyPublicKey(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewTransitionAuthenticator(nonceStoreFunc(func(string, string, time.Time, time.Time) error { return nil }), []Machine{
+		{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: public, EndpointPrefixes: []string{"agent/b/"}},
+	}, transitionAuthorityFunc(func(context.Context, string, ed25519.PublicKey) (TransitionAuthorization, error) {
+		return TransitionAuthorization{LegacyPublicKey: public, Current: func(context.Context) error { return nil }}, nil
+	}))
+	if err == nil {
+		t.Fatal("transition authenticator accepted an ambiguous legacy public key")
+	}
+}
+
+func signedHTTPRequest(t *testing.T, signed SignedRequest) *http.Request {
+	t.Helper()
+	request, err := http.NewRequestWithContext(context.Background(), signed.Method, "http://localhost"+signed.Path, bytes.NewReader(signed.Body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	return request
 }
 
 func signRequest(private ed25519.PrivateKey, machineID, method, path string, body []byte, timestamp time.Time, nonce string) SignedRequest {

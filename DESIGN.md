@@ -575,6 +575,27 @@ pending, migrated, or retired; the global legacy gate cannot close while any
 machine is pending. PostgreSQL remains dark for mail and SQLite routing is
 unchanged.
 
+The dormant M-9 credential-transition bridge does not duplicate relay
+authority in PostgreSQL. A successful proof-bound exchange already records the
+replacement credential lookup against the exact registered legacy public key.
+When the explicit transition switch is enabled, a current, unrevoked device
+credential follows that relationship back to the public key and selects the
+one matching static machine enrollment. The returned machine ID therefore has
+exactly the existing endpoint prefixes, exact endpoints, and attachment-device
+binding. Duplicate configured public keys fail startup. Ordinary device
+credentials, stale generations, retired mappings, and unavailable database
+state fail authentication without revealing which check failed. In the same
+mode every Ed25519 relay request consults the durable legacy gate after
+signature verification and before consuming its nonce; closing the gate blocks
+new legacy requests while migrated credentials remain usable. The switch is
+off by default and requires device auth plus the PostgreSQL relay, so this
+slice does not activate PostgreSQL mail authority or change the SQLite default.
+Long-lived notification sockets retain only a non-secret generation/gate fence,
+not the bearer credential. A check starts every second with a one-second
+deadline, bounding authority after the last successful check to two seconds. Gate
+closure, key retirement, credential rotation/revocation, principal disablement,
+mapping removal, timeout, or database failure closes the socket.
+
 The fourth dark foundation slice gives projects durable, credential-free
 identity claims. Conservative Git normalization strips credentials and only
 collapses well-known equivalent syntax; ambiguous locators fail closed.
