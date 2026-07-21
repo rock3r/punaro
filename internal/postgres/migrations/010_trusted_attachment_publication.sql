@@ -220,12 +220,12 @@ BEGIN
 
     INSERT INTO attachment.project_quotas (project_id, max_bytes, max_active_uploads)
     VALUES (canonical_project, project_limit_bytes, project_limit_uploads)
-    ON CONFLICT (project_id) DO NOTHING;
+    ON CONFLICT ON CONSTRAINT project_quotas_pkey DO NOTHING;
     PERFORM 1 FROM attachment.project_quotas WHERE project_id = canonical_project FOR UPDATE;
 
     INSERT INTO attachment.principal_quotas (principal_id, max_bytes, max_active_uploads)
     VALUES (requested_principal, principal_limit_bytes, principal_limit_uploads)
-    ON CONFLICT (principal_id) DO NOTHING;
+    ON CONFLICT ON CONSTRAINT principal_quotas_pkey DO NOTHING;
     PERFORM 1 FROM attachment.principal_quotas WHERE principal_id = requested_principal FOR UPDATE;
 
     UPDATE attachment.global_quota SET reserved_bytes = reserved_bytes + requested_size, reserved_uploads = reserved_uploads + 1
