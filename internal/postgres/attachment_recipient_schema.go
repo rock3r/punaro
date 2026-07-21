@@ -60,7 +60,7 @@ WITH objects AS (
       AND attribute.attnum > 0 AND NOT attribute.attisdropped
 ), expected_routines(oid, body_hash, volatility, application_execute, result_type, returns_set) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-      (authority_oid,'14fcfa6afd4316e96db4356e12febf11','s'::"char",false,'boolean',false),
+      (authority_oid,'2b747828a74bec8059e8d91cdce5fd3e','s'::"char",false,'boolean',false),
       (endpoint_bind_oid,'c64c9ab67709cfd68977856025101cc4','v'::"char",true,'integer',false),
       (conversation_bind_oid,'9be80fae35482bb930c6583ed907cbe2','v'::"char",true,'uuid',false),
       (message_bind_oid,'69e391d03200ec08e286603c9e622683','v'::"char",true,'integer',false),
