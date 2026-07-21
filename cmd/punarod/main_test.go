@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,14 +21,34 @@ import (
 
 func TestRunFailsClosedBeforeStartingAttachmentRuntime(t *testing.T) {
 	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
-	t.Setenv("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", `{}`)
-	t.Setenv("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", `[]`)
 	var stderr bytes.Buffer
 	if code := run(nil, &stderr); code != 2 {
 		t.Fatalf("run exit code = %d, want 2; stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "runtime is withheld") {
+	if !strings.Contains(stderr.String(), "retired") {
 		t.Fatalf("stderr = %q, want fail-closed explanation", stderr.String())
+	}
+}
+
+func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
+	mux := http.NewServeMux()
+	trusted := &trustedAttachmentRuntime{handler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})}
+	registerProductionRoutes(mux, trusted, nil)
+	for _, path := range []string{"/v2/directory", "/v2/permits", "/v3/permits", "/v3/attachments/example"} {
+		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("retired route %s status=%d", path, response.Code)
+		}
+	}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/trusted-attachments", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("trusted attachment route status=%d", response.Code)
 	}
 }
 

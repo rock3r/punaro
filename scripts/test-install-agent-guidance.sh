@@ -34,4 +34,22 @@ set -e
 [ ! -s "$outside" ] || { printf '%s\n' 'guidance escaped the selected project' >&2; exit 1; }
 grep -Fq 'guidance target is not a regular file:' "$fixture_dir/linked.out"
 
+legacy_project="$fixture_dir/legacy-project"
+mkdir -p "$legacy_project/.agents/skills/punaro-attachment"
+cat >"$legacy_project/AGENTS.md" <<'EOF'
+<!-- punaro-agent-guidance:start -->
+## Punaro coordination
+
+For attachments, use the local controller for a Punaro V3 attachment.
+<!-- punaro-agent-guidance:end -->
+EOF
+printf '%s\n' '# Punaro V3 attachment skill' >"$legacy_project/.agents/skills/punaro-attachment/SKILL.md"
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$legacy_project" >"$fixture_dir/legacy.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'legacy guidance was silently retained or overwritten' >&2; exit 1; }
+grep -Fq 'existing Punaro guidance predates trusted attachments:' "$fixture_dir/legacy.out"
+grep -Fq 'Punaro V3 attachment skill' "$legacy_project/.agents/skills/punaro-attachment/SKILL.md"
+
 printf '%s\n' install_agent_guidance_tests_passed

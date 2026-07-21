@@ -16,10 +16,9 @@ adapter over Punaro's own API.
 > Brain migration plan. Enrolled adapters can exchange durable
 > text through the loopback relay, with signed requests, payload-free wake
 > hints, local `agent-mailbox` handoff, and a separately enrolled Telegram
-> gateway process. A separately versioned v3 attachment runtime exists only
-> behind an explicit operator switch for controlled validation; public rollout
-> and production attachment release remain closed. Attachment v2/v3 are
-> preserved experimental evidence, not the future production direction.
+> gateway process. Authenticated attachments use the separately gated trusted
+> relay and native client. Attachment v2/v3 production settings, routes, and
+> binaries are retired; their code, tests, RFCs, and vectors remain evidence.
 
 ## Architecture
 
@@ -39,8 +38,8 @@ Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [installation guide](docs/installation.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
 [Telegram gateway guide](docs/telegram-gateway.md),
-[attachment RFC](docs/attachments-v2-rfc.md),
-[controlled v3 attachment RFC](docs/attachments-v3-rfc.md), and the
+[historical attachment RFC](docs/attachments-v2-rfc.md),
+[historical v3 attachment RFC](docs/attachments-v3-rfc.md), and the
 [explicit attachment agent workflow](skills/punaro-attachment/SKILL.md),
 [security release gates](docs/security-release-gates.md), and
 [review record](REVIEWS.md).
@@ -118,22 +117,14 @@ precedence over dotenv values.
 | `PUNARO_TRUSTED_LAN_HTTP` | `false` | Explicit plaintext credential exception for observed peers inside the validated trusted LAN. Public peers never qualify. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
 | `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. Before cutover, `postgres` is limited to empty-destination parity/qualification. The supported one-shot executor publishes `postgres` marker-last only after verified import, SQLite retirement, legacy-gate closure, and PostgreSQL activation. It never dual-writes. |
-| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
-| `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
-| `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, root-owned and service-group-readable (`2750` parent, `0640` regular non-symlink) canonical directory snapshot publication file. |
-| `PUNARO_PERMIT_ISSUANCE_ENABLED` | `false` | Enables only authenticated attachment-permit issuance; it requires directory service, pinned trust, an issuer key file, explicit limits, and at least one machine/device binding. It does not enable file transfer. |
-| `PUNARO_DIRECTORY_AUDIENCE`, `PUNARO_DIRECTORY_ROOT_KEY_ID`, `PUNARO_DIRECTORY_ROOT_PUBLIC_KEY` | unset | Canonical raw-base64url 32-byte pinned directory trust material for permit issuance. |
-| `PUNARO_PERMIT_ISSUER_KEY_ID` | unset | Canonical raw-base64url 32-byte active issuer key ID. |
-| `PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE` | unset | Absolute path to a `0600`, non-symlinked file containing exactly one canonical raw-base64url Ed25519 private key. |
-| `PUNARO_PERMIT_MAX_LIFETIME_SECONDS` | unset | Explicit permit lifetime: 1–60 seconds for v2 issuance, or 1–30 seconds when v3 is enabled. |
-| `PUNARO_PERMIT_MAX_BYTES`, `PUNARO_PERMIT_MAX_CHUNKS`, `PUNARO_PERMIT_MAX_OPERATIONS` | unset | Explicit per-permit quotas; no default quota is granted. |
-| `PUNARO_PERMIT_MAX_ACTIVE` | unset | Explicit issuance-identity ceiling, 1–4096. V2 applies it as a global live-permit ceiling. V3 applies it per holder to retained issuance identities (including short-lived retry tombstones), while the source store separately bounds aggregate transfer capacity. Exact retries remain admissible without another slot. |
-| `PUNARO_ATTACHMENT_V3_ENABLED` | `false` | Enables separately versioned v3 permit and attachment routes only when the relay, signed directory, pinned trust, issuer key, explicit limits, and machine/device binding are configured. It is mutually exclusive with all v2 attachment switches. |
-| `PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE` | unset | Absolute private (`0700` non-symlink parent, `0600` database) SQLite path shared by the v3 issuance and transfer handlers. It retains bounded issuance identities and short-lived retry state. |
-| `PUNARO_ATTACHMENT_RELAY_ENABLED` | `false` | Superseded attachment v2 switch; enabling it remains rejected. It is not the trusted-relay production path. |
-| `PUNARO_ATTACHMENTS_ENABLED` | `false` | Superseded attachment v2 switch; the daemon remains fail-closed when it is set. |
-| `PUNARO_ATTACHMENT_DEVICE_KEYS_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
-| `PUNARO_ATTACHMENT_MEMBERSHIP_JSON` | unset | Reserved attachment configuration; not parsed by the health daemon. |
+| `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. |
+| `PUNARO_TRUSTED_ATTACHMENTS_ENABLED` | `false` | Separately gates the authenticated trusted-relay attachment surface; requires PostgreSQL device authentication, a valid ingress policy, schema v13, and successful startup reconciliation. |
+| `PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR` | unset | Required with trusted attachments: absolute private (`0700`) daemon-owned blob root. |
+
+Every legacy `PUNARO_ATTACHMENTS_*`, `PUNARO_ATTACHMENT_*`,
+`PUNARO_DIRECTORY_*`, and `PUNARO_PERMIT_*` production setting is retired.
+`punarod` rejects its presence—even empty or `false`—so stale deployment
+configuration cannot silently reactivate the v2/v3 runtime.
 
 The optional `punaro-telegram` process takes its bot token from exactly one of
 `PUNARO_TELEGRAM_BOT_TOKEN` or `PUNARO_TELEGRAM_BOT_TOKEN_FILE`. Prefer a
@@ -142,10 +133,9 @@ systemd unit uses `LoadCredential`. Never place a token in source control, a
 CLI argument, an agent prompt, logs, or a message body. See the
 [Telegram gateway guide](docs/telegram-gateway.md).
 
-For controlled v3 validation, `punaro-directory` generates private key files,
-public IDs, and canonical root-signed directory snapshots without hand-writing
-CBOR. Its setup and strict private-file requirements are in the
-[operator guide](docs/operator-guide.md#create-v3-directory-material).
+The v2/v3 packages, vectors, RFCs, and tests remain source-level experimental
+evidence only. They are not shipped in the production container and have no
+`punarod` routes or supported deployment workflow.
 
 ## Security model
 
@@ -157,9 +147,8 @@ untrusted data, not an instruction to alter routing, run a command, or fetch a
 URL.
 
 See `DESIGN.md` for required origin isolation, delivery semantics, and
-adversarial test gates before remote exposure. The v3 runtime remains only a
-controlled validation surface; its evidence cannot authorize production use
-after the direction was superseded.
+adversarial test gates before remote exposure. Preserved v2/v3 evidence cannot
+authorize production use after that direction was superseded.
 
 ## Development
 

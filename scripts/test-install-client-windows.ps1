@@ -6,7 +6,6 @@ $paths = @(
     (Join-Path $repoDir 'scripts\install-client.ps1'),
     (Join-Path $repoDir 'scripts\install-agent-guidance.ps1'),
     (Join-Path $repoDir 'deploy\windows\Run-PunaroAdapter.ps1'),
-    (Join-Path $repoDir 'deploy\windows\Run-PunaroAttachment.ps1'),
     (Join-Path $repoDir 'deploy\windows\Import-PunaroEnvironment.ps1')
 )
 foreach ($path in $paths) {
@@ -17,10 +16,13 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'PUNARO_ATTACHMENT_HOST_DPAPI_FILE', 'punaro-dpapi.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
+if (-not $allScripts.Contains('existing Punaro guidance predates trusted attachments')) {
+    throw 'Windows guidance installer does not fail closed on retired guidance'
+}
 if ($allScripts -match 'Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=|\.\s*\$config') {
     throw 'Windows client scripts must not execute configuration or embed Access credentials'
 }
@@ -54,8 +56,11 @@ try {
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed' }
     $root = Join-Path $env:LOCALAPPDATA 'Punaro'
-    foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {
+    foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $root 'bin\punaro-trusted-attachment.exe'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Windows client installer did not create $path" }
+    }
+    foreach ($path in @((Join-Path $root 'bin\punaro-attachment.exe'), (Join-Path $root 'bin\punaro-directory.exe'), (Join-Path $root 'bin\punaro-dpapi.exe'), (Join-Path $root 'Run-PunaroAttachment.ps1'))) {
+        if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
     if ($global:punaroRegisteredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
@@ -77,6 +82,14 @@ exit /b 0
     [System.IO.File]::WriteAllText($mailbox, $existingGroupMailbox, [System.Text.Encoding]::ASCII)
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
+    [System.IO.File]::WriteAllText((Join-Path $root 'bin\punaro-attachment.exe'), 'legacy', [System.Text.Encoding]::ASCII)
+    $legacyBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } catch {
+        if ($_.Exception.Message.Contains('retired attachment artifact exists at')) { $legacyBlocked = $true } else { throw }
+    }
+    if (-not $legacyBlocked) { throw 'Windows client installer accepted an existing retired attachment binary' }
 } finally {
     $env:LOCALAPPDATA = $originalLocalAppData
     if (Test-Path -LiteralPath $fixture) { Remove-Item -LiteralPath $fixture -Recurse -Force }

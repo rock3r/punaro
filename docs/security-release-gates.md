@@ -20,10 +20,9 @@ attachment gate is intentionally **closed**.
 
 ## Current source assertions (not release evidence)
 
-- The source rejects every non-literal-loopback listener. V2 attachment
-  switches fail closed; v3 has a separate, explicit, machine-authenticated
-  validation runtime and remains subject to the v3 gates below.
-- `punarod` has no v2 attachment-operation route mount or WebRTC constructor.
+- The source rejects every non-literal-loopback listener. Every legacy v2/v3,
+  directory, and permit setting fails startup even when empty or `false`.
+- `punarod` has no v2/v3 attachment, directory, or permit route mount.
 - The trusted-relay route mount is absent by default and requires its dedicated
   switch, PostgreSQL device authentication, a valid ingress policy, a private
   absolute blob root, and successful startup reconciliation.

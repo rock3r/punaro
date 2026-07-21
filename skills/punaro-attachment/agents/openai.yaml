@@ -1,4 +1,4 @@
 interface:
-  display_name: "Punaro Attachment Transfer"
-  short_description: "Safely send or receive approved Punaro V3 files"
-  default_prompt: "Use $punaro-attachment to safely send or receive this explicit Punaro V3 attachment."
+  display_name: "Punaro Trusted Attachments"
+  short_description: "Safely operate one approved trusted-relay artifact"
+  default_prompt: "Use $punaro-attachment with the native trusted client for this explicitly authorized artifact operation."

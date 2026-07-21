@@ -32,15 +32,11 @@ binary provides a loopback-only alpha text relay: explicit
 machine enrollment, signed requests, durable append/lease/ack, attached-endpoint
 advertising, and payload-free WebSocket wake hints. A local adapter bridges
 this to `agent-mailbox`. The separately deployable `punaro-telegram` bridge
-adds explicit Telegram topic routing and a restricted Bot API client. V3
-attachments remain a separately provisioned, controlled validation runtime:
-the offline
-root key, relay issuer key, and per-client device keys are distinct, and the
-relay starts v3 only with a current signed directory plus explicit
-machine-to-device bindings. Legacy v2 switches still fail closed. Neither v2
-nor v3 is the future production attachment direction; their code, tests, and
-review evidence remain intact until the trusted-relay replacement passes its
-own release gates and an explicit retirement change is reviewed. The current
+adds explicit Telegram topic routing and a restricted Bot API client.
+Authenticated attachments use the separately gated trusted-relay surface and
+native client. V2/v3 production settings are rejected, their routes are
+unmounted, and their binaries are absent from production packaging. Their
+code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
 
@@ -294,24 +290,24 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 Attachment v2 is preserved experimental evidence, not the accepted production
 direction. It uses a separate encrypted data plane; it never puts file
 bytes, file keys, or recipient redemption material in a normal Punaro message
-or WebSocket hint. The current code includes an unmounted strict HTTP handler;
-`punarod` deliberately refuses to mount it even when attachment configuration
-is present. It remains fail-closed. Its historical RFC and release checklist
+or WebSocket hint. The preserved package includes strict HTTP handlers, but
+`punarod` neither imports nor mounts them and rejects their former
+configuration. Its historical RFC and release checklist
 remain useful validation evidence but cannot authorize production exposure
 under the new direction.
 
-`internal/attachment/v2` currently provides a strict canonical
+`internal/attachment/v2` preserves a strict canonical
 CBOR record core: verified signed manifests, manifest commitments,
 recipient-bound HPKE envelopes, a fresh root-signed device/membership snapshot
 resolver with a durable anti-rollback checkpoint, and a source-artifact helper
 that reserves file-key/content-salt/nonce uniqueness before encryption. The
-published directory snapshot is group-readable by the relay but lives below a
-root-owned configuration hierarchy; privileged installers and publishers never
-create, repair, or write snapshot paths below service-owned state. It has
+experimental directory snapshot was group-readable by its relay harness but
+lived below a root-owned configuration hierarchy; its prototype installers
+and publishers did not write snapshot paths below service-owned state. It has
 canonical permits whose issuer, sender/recipient membership, device
 generations, directory head, epoch, and expiry are all checked against the
 same fresh directory snapshot, plus a private SQLite serial and
-operation-redemption ledger. Permit issuance now starts with a separately
+operation-redemption ledger. The historical permit issuer starts with a separately
 holder-signed, retry-stable request; the issuer verifies that holder and its
 own public key against the same fresh directory, derives the head/epoch rather
 than accepting caller values, clamps every requested limit, and atomically
@@ -320,7 +316,7 @@ operation and runs its SQL state mutation in the same transaction as recording
 the idempotent result. Its handler accepts only the versioned routes and exact
 canonical permit/operation headers, resolves fresh directory authority for
 every request, and derives all commitments from the request. A separately
-gated `/v2/directory` endpoint now serves only complete canonical snapshots to
+gated `/v2/directory` handler was designed to serve only complete canonical snapshots to
 an enrolled, replay-protected machine request; it reads and validates a fresh
 private snapshot file for every request and is covered by the same optional
 Access middleware as the text relay. A separately gated `POST /v2/permits`
@@ -336,10 +332,9 @@ that ceiling.
 The authority provider fetches a complete
 signed snapshot for every attachment request and never falls back to a stale
 accepted view; root pinning and the private checkpoint store remain the only
-sources of directory trust. Attachment operation routes remain unmounted
-because runtime capacity quotas and reaper scheduling, adapter transport
-integration, end-to-end transfer drills, and release evidence are incomplete.
-Where a separately privileged publisher supplies that snapshot, the publication
+sources of directory trust. `punarod` no longer imports or mounts these
+handlers, irrespective of the historical gates.
+Where the experimental privileged publisher supplied that snapshot, the publication
 directory is root-owned and non-writable by the relay (`root:service-group`,
 mode `2750`), and the atomically replaced snapshot is group-readable but
 non-writable (`root:service-group`, mode `0640`). The relay may only belong to
@@ -355,7 +350,7 @@ transfer lifecycle model with one fenced attempt and no transition out of a
 terminal state, plus a private SQLite store that writes its permitted
 transitions in the same transaction as durable permit redemption and refuses
 obsolete table layouts rather than attempting a lossy migration. It is not
-mounted yet. Its strict route parser derives operation bindings only from the
+imported or mounted by `punarod`. Its strict route parser derives operation bindings only from the
 fixed versioned HTTP schema and prevents a permit from crossing into another
 transfer route; sender-only actions are offer/upload/begin, recipient-only
 actions are accept/download/complete, and no current client route accepts a
@@ -370,22 +365,25 @@ commitment-verified ciphertext chunk for that Manifest; a partial source is a
 hard failure, not a pending offer. In
 particular, it does **not** make
 attachments usable, or satisfy the vector/fuzz/review release gates. Callers
-must only construct its verified-manifest input after fresh directory
-verification; the directory-distribution prerequisite now exists, but the
-remaining attachment runtime does not.
+in the preserved tests construct its verified-manifest input only after fresh
+directory verification. This evidence is not a dormant production roadmap.
 
 ## Superseded attachment-transfer v3 controlled runtime
 
 V3 is preserved experimental evidence, not the accepted production direction.
 It is a distinct record, signature, and route namespace that solves the v2
 source-staging bootstrap cycle. It does not reinterpret any v2 manifest,
-permit, operation, or envelope. Its explicit runtime is constructed only when
+permit, operation, or envelope. Its historical runtime required
 all of these are present: a private shared source store, a fresh root-verified
 directory adapter, an authorized issuer key, an independently authenticated
 machine-to-directory-device binding for permit issuance, and the equivalent
-binding for every attachment operation. It mounts `/v3/permits` and the strict
-`/v3/attachments/...` routes together; the runtime owns one SQLite source
+binding for every attachment operation. Its package-level harness mounts
+`/v3/permits` and the strict `/v3/attachments/...` routes together; the runtime owns one SQLite source
 store, so issuance and redemption cannot accidentally use different ledgers.
+
+All behavior described below belongs to the preserved package and CLI test
+harnesses. It is not linked into `punarod`, shipped by production installers,
+or available for operator activation.
 
 The source-init exception is deliberate and narrow. A sender must first obtain
 a holder-signed v3 source-init permit. The issuer journals the exact request
@@ -399,12 +397,12 @@ after tombstone retention. This prevents bootstrap by an arbitrary valid
 issuer signature, request-ID replacement after short permit expiry, and
 retry failure after normal source cleanup.
 
-The local sender command opens a sender-only journal and requires its pinned
+The historical local sender command opens a sender-only journal and requires its pinned
 source identity to match the pre-approved relationship before staging. It
 creates encrypted artifacts only after a local private artifact store has
 reserved file-key, salt, and nonce tuples; the file key is wrapped by the
 machine Keychain, Windows DPAPI CurrentUser boundary, or a private systemd
-credential and is never placed in that journal. Windows deployment uses an
+credential and is never placed in that journal. The prototype Windows harness uses an
 exclusive current-user ACL and an interactive per-user Scheduled Task; it does
 not expose the wrapping key through an environment variable or task argument.
 On Unix, attachment journals, keys, snapshots, and durable stores additionally
@@ -644,8 +642,9 @@ encoded display name in authenticated response headers. An already-open
 `os.Root` contains a private same-filesystem stage across root renames, verifies
 the exact stream, and creates the visible name with atomic no-replace linking.
 Portable unsafe or reserved display names fall back to the opaque artifact ID.
-The v2/v3 experimental switches remain unchanged until their separately
-reviewed M-12 retirement slice.
+The v2/v3 experimental code, RFCs, vectors, and tests remain evidence only.
+Their production switches are rejected, their routes are unmounted, and their
+binaries are absent from the production image.
 
 The second dark foundation slice adds opaque principals/projects, explicit
 selected-project and dynamic all-project capability grants, globally unique

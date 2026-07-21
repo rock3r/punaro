@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,20 +76,85 @@ func TestLoadRejectsPostgresDSNFileWhileDisabled(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsEnabledAttachmentsWithoutEnrollment(t *testing.T) {
-	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
-	if _, err := Load(""); err == nil {
-		t.Fatal("Load succeeded with attachments enabled but no enrollment configuration")
+func TestLoadRejectsRetiredAttachmentProductionConfiguration(t *testing.T) {
+	retired := []string{
+		"PUNARO_ATTACHMENTS_ENABLED",
+		"PUNARO_ATTACHMENT_ARTIFACT_STORE",
+		"PUNARO_ATTACHMENT_CONTROLLER_JOURNAL",
+		"PUNARO_ATTACHMENT_DEVICE_KEYS_JSON",
+		"PUNARO_ATTACHMENT_DIRECTORY_CHECKPOINT_FILE",
+		"PUNARO_ATTACHMENT_HOST_CREDENTIAL_DIRECTORY",
+		"PUNARO_ATTACHMENT_HOST_CREDENTIAL_NAME",
+		"PUNARO_ATTACHMENT_HOST_DPAPI_FILE",
+		"PUNARO_ATTACHMENT_HOST_KEY_ACCOUNT",
+		"PUNARO_ATTACHMENT_HOST_KEY_SERVICE",
+		"PUNARO_ATTACHMENT_MEMBERSHIP_JSON",
+		"PUNARO_ATTACHMENT_OFFER_OUTBOX",
+		"PUNARO_ATTACHMENT_RECIPIENT_GENERATION",
+		"PUNARO_ATTACHMENT_RECIPIENT_HPKE_PRIVATE_KEY_FILE",
+		"PUNARO_ATTACHMENT_RECIPIENT_ID",
+		"PUNARO_ATTACHMENT_RECIPIENT_SIGNING_PRIVATE_KEY_FILE",
+		"PUNARO_ATTACHMENT_RELAY_ENABLED",
+		"PUNARO_ATTACHMENT_RELAY_URL",
+		"PUNARO_ATTACHMENT_SENDER_GENERATION",
+		"PUNARO_ATTACHMENT_SENDER_ID",
+		"PUNARO_ATTACHMENT_SENDER_JOURNAL",
+		"PUNARO_ATTACHMENT_SENDER_SIGNING_PRIVATE_KEY_FILE",
+		"PUNARO_ATTACHMENT_V3_ENABLED",
+		"PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE",
+		"PUNARO_DIRECTORY_AUDIENCE",
+		"PUNARO_DIRECTORY_BINARY",
+		"PUNARO_DIRECTORY_ENABLED",
+		"PUNARO_DIRECTORY_MANIFEST",
+		"PUNARO_DIRECTORY_ROOT_KEY_ID",
+		"PUNARO_DIRECTORY_ROOT_PRIVATE_KEY",
+		"PUNARO_DIRECTORY_ROOT_PUBLIC_KEY",
+		"PUNARO_DIRECTORY_SNAPSHOT_FILE",
+		"PUNARO_PERMIT_ISSUANCE_ENABLED",
+		"PUNARO_PERMIT_ISSUER_KEY_ID",
+		"PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE",
+		"PUNARO_PERMIT_MAX_ACTIVE",
+		"PUNARO_PERMIT_MAX_BYTES",
+		"PUNARO_PERMIT_MAX_CHUNKS",
+		"PUNARO_PERMIT_MAX_LIFETIME_SECONDS",
+		"PUNARO_PERMIT_MAX_OPERATIONS",
+	}
+	for _, name := range retired {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "retired")
+			if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "retired") {
+				t.Fatalf("retired setting error=%v", err)
+			}
+		})
 	}
 }
 
-func TestLoadRejectsNonLoopbackAttachmentListener(t *testing.T) {
-	t.Setenv("PUNARO_ATTACHMENTS_ENABLED", "true")
-	t.Setenv("PUNARO_ATTACHMENT_DEVICE_KEYS_JSON", `{}`)
-	t.Setenv("PUNARO_ATTACHMENT_MEMBERSHIP_JSON", `[]`)
-	t.Setenv("PUNARO_LISTEN_ADDR", "0.0.0.0:8080")
-	if _, err := Load(""); err == nil {
-		t.Fatal("Load accepted non-loopback listener for attachment bearer sessions")
+func TestLoadRejectsEmptyRetiredAttachmentConfiguration(t *testing.T) {
+	t.Setenv("PUNARO_ATTACHMENT_RELAY_URL", "")
+	if _, err := Load(""); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("empty retired setting error = %v", err)
+	}
+}
+
+func TestLoadRejectsRetiredAttachmentConfigurationFromDotEnv(t *testing.T) {
+	const name = "PUNARO_ATTACHMENT_RECIPIENT_ID"
+	previous, present := os.LookupEnv(name)
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if present {
+			_ = os.Setenv(name, previous)
+		} else {
+			_ = os.Unsetenv(name)
+		}
+	})
+	path := filepath.Join(t.TempDir(), "retired.env")
+	if err := os.WriteFile(path, []byte(name+"=\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("dotenv retired setting error = %v", err)
 	}
 }
 
@@ -191,69 +257,6 @@ func TestLoadRequiresMachineEnrollmentWhenRelayIsEnabled(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresAuthenticatedRelayAndPrivateSnapshotForDirectoryService(t *testing.T) {
-	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
-	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
-	if _, err := Load(""); err == nil {
-		t.Fatal("directory service without relay authentication was accepted")
-	}
-	t.Setenv("PUNARO_RELAY_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
-	config, err := Load("")
-	if err != nil || !config.DirectoryEnabled || config.DirectorySnapshotFile == "" {
-		t.Fatalf("config=%#v err=%v", config, err)
-	}
-	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "relative/directory.cbor")
-	if _, err := Load(""); err == nil {
-		t.Fatal("relative directory snapshot path was accepted")
-	}
-}
-
-func TestLoadRequiresCompletePermitIssuanceTrustAndExplicitLimits(t *testing.T) {
-	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
-	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
-	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
-	if _, err := Load(""); err == nil {
-		t.Fatal("permit issuance without pinned trust and issuer configuration was accepted")
-	}
-	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
-	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
-	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
-	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
-	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
-	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
-	cfg, err := Load("")
-	if err != nil || !cfg.PermitIssuanceEnabled || cfg.PermitMaxLifetimeSeconds != 30 || cfg.PermitMaxActive != 8 {
-		t.Fatalf("config=%#v err=%v", cfg, err)
-	}
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "12305")
-	if _, err := Load(""); err == nil {
-		t.Fatal("permit issuance accepted an unbounded active permit ceiling")
-	}
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
-	t.Setenv("PUNARO_ATTACHMENT_RELAY_ENABLED", "true")
-	if _, err := Load(""); err == nil {
-		t.Fatal("withheld attachment relay was accepted")
-	}
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "61")
-	if _, err := Load(""); err == nil {
-		t.Fatal("permit issuance accepted a lifetime over sixty seconds")
-	}
-}
-
-func TestLoadRejectsWithheldAttachmentRelay(t *testing.T) {
-	t.Setenv("PUNARO_ATTACHMENT_RELAY_ENABLED", "true")
-	if _, err := Load(""); err == nil {
-		t.Fatal("withheld attachment relay was accepted")
-	}
-}
-
 func TestLoadRequiresCompleteTrustedAttachmentReleaseSurface(t *testing.T) {
 	t.Setenv("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "true")
 	if _, err := Load(""); err == nil {
@@ -275,69 +278,6 @@ func TestLoadRequiresCompleteTrustedAttachmentReleaseSurface(t *testing.T) {
 	cfg, err := Load("")
 	if err != nil || !cfg.TrustedAttachmentsEnabled || cfg.TrustedAttachmentBlobDir != "/var/lib/punaro/blobs" {
 		t.Fatalf("config=%#v err=%v", cfg, err)
-	}
-}
-
-func TestLoadRequiresIndependentV3AttachmentRuntimeTrustAndPrivateStore(t *testing.T) {
-	t.Setenv("PUNARO_ATTACHMENT_V3_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
-	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
-	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
-	if _, err := Load(""); err == nil {
-		t.Fatal("v3 runtime without explicit permit trust was accepted")
-	}
-	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
-	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
-	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
-	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
-	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
-	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
-	if _, err := Load(""); err == nil {
-		t.Fatal("v3 runtime without private source store was accepted")
-	}
-	t.Setenv("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "relative/source.db")
-	if _, err := Load(""); err == nil {
-		t.Fatal("v3 runtime accepted a relative source store")
-	}
-	t.Setenv("PUNARO_ATTACHMENT_V3_SOURCE_STORE_FILE", "/var/lib/punaro/private/source.db")
-	cfg, err := Load("")
-	if err != nil || !cfg.AttachmentV3Enabled || cfg.AttachmentV3SourceStoreFile == "" || cfg.PermitIssuanceEnabled {
-		t.Fatalf("config=%#v err=%v", cfg, err)
-	}
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "31")
-	if _, err := Load(""); err == nil {
-		t.Fatal("v3 runtime accepted a permit lifetime over thirty seconds")
-	}
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
-	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
-	if _, err := Load(""); err == nil {
-		t.Fatal("v3 runtime was combined with the v2 permit route")
-	}
-}
-
-func TestLoadRejectsMalformedPinnedPermitTrust(t *testing.T) {
-	t.Setenv("PUNARO_PERMIT_ISSUANCE_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_ENABLED", "true")
-	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"attachment_device_id":"AQEBAQEBAQEBAQEBAQEBAQ"}]`)
-	t.Setenv("PUNARO_DIRECTORY_ENABLED", "true")
-	t.Setenv("PUNARO_DIRECTORY_SNAPSHOT_FILE", "/var/lib/punaro/private/directory.cbor")
-	t.Setenv("PUNARO_DIRECTORY_AUDIENCE", "not-base64url")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_KEY_ID", "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI")
-	t.Setenv("PUNARO_DIRECTORY_ROOT_PUBLIC_KEY", "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM")
-	t.Setenv("PUNARO_PERMIT_ISSUER_KEY_ID", "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ")
-	t.Setenv("PUNARO_PERMIT_ISSUER_PRIVATE_KEY_FILE", "/var/lib/punaro/private/permit-issuer.key")
-	t.Setenv("PUNARO_PERMIT_MAX_LIFETIME_SECONDS", "30")
-	t.Setenv("PUNARO_PERMIT_MAX_BYTES", "1048576")
-	t.Setenv("PUNARO_PERMIT_MAX_CHUNKS", "4")
-	t.Setenv("PUNARO_PERMIT_MAX_OPERATIONS", "2")
-	t.Setenv("PUNARO_PERMIT_MAX_ACTIVE", "8")
-	if _, err := Load(""); err == nil {
-		t.Fatal("permit issuance accepted malformed pinned root material")
 	}
 }
 

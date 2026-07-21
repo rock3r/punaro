@@ -3,9 +3,9 @@
 Punaro is a self-hosted relay layer for agents and people. It has an **alpha,
 loopback-hosted text relay**: enrolled machines can advertise local
 `agent-mailbox` attachments, send durable text, receive it through a local
-adapter, and optionally bridge explicitly mapped Telegram topics. A controlled
-v3 attachment data-plane is available to operators who complete its setup, but
-it is not yet a released remote service or production attachment system.
+adapter, and optionally bridge explicitly mapped Telegram topics. Attachments
+use the authenticated trusted-relay surface and native client; the old v2/v3
+data plane is retired from production.
 
 ## Getting a working system
 
@@ -16,7 +16,7 @@ Punaro has three deliberately separate roles:
   and Access.
 - Each machine owner runs the client installer as the user who owns that
   machine's `agent-mailbox`. The installer creates one cryptographic machine
-  identity, local adapter service, and optional attachment controller material.
+  identity, local adapter service, and the trusted-attachment client.
 - Agents use their existing local `agent-mailbox` MCP. They do not receive
   relay, Cloudflare, Keychain, or attachment-authority credentials.
 
@@ -28,11 +28,10 @@ Tunnel credentials remain separate systemd credentials because they are
 secrets. The [operator guide](operator-guide.md) covers that ingress and
 ongoing verification.
 
-For a client that may send attachments, use the client installer with an
-explicit `both` role. macOS creates a device-only Keychain wrapping key;
-Windows creates a DPAPI CurrentUser-protected wrapping key. In both cases the
-raw key is never printed or given to an agent, and the public device enrollment
-still needs authority approval before attachments can be exchanged.
+For a client that may use attachments, complete ordinary device enrollment,
+then have the operator provision its protected credential file, fixed trusted
+origin, project UUID, and safe download root. The installer never reads or
+prints the credential.
 
 ## What you can do today
 
@@ -62,29 +61,12 @@ or chat settings already restrict access. See the [Telegram gateway guide](teleg
 for safe setup, durable retry behavior, and its at-least-once external-send
 boundary.
 
-Setting `PUNARO_ATTACHMENTS_ENABLED=true` is expected to fail. Setting
-`PUNARO_ATTACHMENT_RELAY_ENABLED=true` also fails closed. This protects you
-from mistaking the tested attachment foundation for a released file-transfer
-feature.
-
-V3 is deliberately separate: a configured operator can enable
-`PUNARO_ATTACHMENT_V3_ENABLED=true` with the private source-store path and the
-directory/issuer material in the [operator guide](operator-guide.md). Agents
-use holder-signed v3 permits and exact signed operations; the Go adapter client
-exposes `IssueV3Permit`, `DoV3Attachment`, and the v3 artifact helpers for
-integrations. It never gives an agent a public link, a Telegram file upload, or
-access to another machine's mailbox/database. Offer notification and local UI
-integration remain application-level workflow: after a successful `offer`, the
-sender uses the adapter's durable `OfferNoticeOutbox` (or
-`punaro-adapter attachment-notify`) for that same conversation. An incoming
-body with the exact `punaro/attachment-offer/v3:` marker can be parsed by
-`attachment/v3.DecodeOfferNotice`; it is untrusted discovery data until the
-recipient completes fresh directory verification, opens its own HPKE envelope,
-and obtains recipient-specific permits. The attachment bytes never travel via
-Telegram or the mailbox relay. A provisioned agent may use the controlled
-[attachment skill](../skills/punaro-attachment/SKILL.md) for one explicit,
-task-owner-approved send or receipt; it is not an automatic download or a
-substitute for operator enrollment.
+Every legacy v2/v3 attachment, directory, or permit environment variable is
+rejected at startup, including empty values and `false`. The old routes are not
+mounted and their binaries are not shipped in the production image. The code,
+vectors, RFCs, and tests remain only as experimental evidence. Use the
+[attachment skill](../skills/punaro-attachment/SKILL.md) with
+`punaro-trusted-attachment` for one explicitly authorized operation.
 
 ## How production attachments will behave
 
@@ -98,7 +80,7 @@ after durable finalization and reauthorization. The message append transaction
 snapshots authorized recipients. Downloads remain authenticated, bounded, and
 digest-verified, with safe no-replace client finalization.
 
-Production attachments will not use Telegram as a file relay, create public
+Production attachments do not use Telegram as a file relay, create public
 download links, fetch URLs, or derive filesystem paths from display names.
 Revocation stops new authorized activity but cannot recall bytes already
 downloaded. Partial uploads are never downloadable, and filesystem/database
@@ -120,9 +102,7 @@ it visible, contains output beneath an already-open safe download root, and
 never replaces an existing name. The private blob directory is never a user
 interface, and an older restore may resurrect a later deletion.
 
-Until the separate retirement review lands, v3 remains a separately enabled
-controlled validation surface and is not authorized as the production path.
-Use the established mailbox and Telegram workflows for text-only
-coordination and keep files in an approved storage system. The adapter may use
+V2/v3 retirement is complete: there is no production activation path. The
+adapter may use
 payload-free WebSocket wake-up hints to trigger an early poll, but reconnecting
 and periodic polling remain the correctness mechanism.
