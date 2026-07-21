@@ -604,10 +604,17 @@ func TestMailCutoverRelayConfigurationRepairsExactLegacyTemplates(t *testing.T) 
 	if failures := CheckPaths(installation); !containsFailure(failures, "generated daemon environment does not match installation configuration") {
 		t.Fatalf("tampered current template accepted: %v", failures)
 	}
-	if err := os.WriteFile(EnvFile(installation.Directory), []byte(legacyDaemonEnv(installation)), 0o600); err != nil {
+	legacyEnvironment := legacyDaemonEnv(installation)
+	legacyOverride := legacyComposeOverride()
+	for _, added := range []string{"PUNARO_RELAY_ENABLED", "PUNARO_RELAY_MACHINES_JSON", "PUNARO_RELAY_STORE", "PUNARO_CREDENTIAL_TRANSITION_ENABLED"} {
+		if strings.Contains(legacyEnvironment, added) || strings.Contains(legacyOverride, added) {
+			t.Fatalf("pre-cutover generated configuration unexpectedly contains %s", added)
+		}
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(legacyEnvironment), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(legacyComposeOverride()), 0o600); err != nil {
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(legacyOverride), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {

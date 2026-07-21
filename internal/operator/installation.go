@@ -538,7 +538,12 @@ func daemonEnv(installation Installation) string {
 }
 
 func legacyDaemonEnv(installation Installation) string {
-	return strings.ReplaceAll(daemonEnv(installation), "PUNARO_RELAY_ENABLED=false\nPUNARO_RELAY_MACHINES_JSON=''\n", "")
+	return strings.NewReplacer(
+		"PUNARO_RELAY_ENABLED=false\n", "",
+		"PUNARO_RELAY_MACHINES_JSON=''\n", "",
+		"PUNARO_RELAY_STORE=sqlite\n", "",
+		"PUNARO_CREDENTIAL_TRANSITION_ENABLED=false\n", "",
+	).Replace(daemonEnv(installation))
 }
 
 func composeOverride() string {
@@ -583,7 +588,12 @@ func composeOverride() string {
 }
 
 func legacyComposeOverride() string {
-	return strings.ReplaceAll(composeOverride(), "      PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}\n      PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}\n", "")
+	return strings.NewReplacer(
+		"      PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}\n", "",
+		"      PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}\n", "",
+		"      PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}\n", "",
+		"      PUNARO_CREDENTIAL_TRANSITION_ENABLED: ${PUNARO_CREDENTIAL_TRANSITION_ENABLED:?required}\n", "",
+	).Replace(composeOverride())
 }
 
 func numericIdentity(value string) bool {
