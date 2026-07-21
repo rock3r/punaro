@@ -26,6 +26,7 @@ type Repository interface {
 	ReleaseExpiredAttachment(context.Context, string, string) (bool, error)
 	AuthorizeAttachmentDownload(context.Context, postgres.AttachmentDownloadRequest) (postgres.AttachmentDownload, error)
 	DeleteAttachment(context.Context, postgres.AttachmentDeleteRequest) (postgres.AttachmentDeletion, error)
+	BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error)
 	ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error)
 	FinalizeAttachmentGC(context.Context, string, int64, string) (postgres.AttachmentDeletion, bool, error)
 	AttachmentOrphanGCAllowed(context.Context, string) (bool, error)
@@ -120,6 +121,11 @@ func (service *Service) GarbageCollect(ctx context.Context, artifactID string, c
 }
 
 func (service *Service) garbageCollectLocked(ctx context.Context, artifactID string, claimLifetime time.Duration) (postgres.AttachmentDeletion, bool, error) {
+	releaseFence, permitted, err := service.repository.BeginAttachmentPhysicalGC(ctx)
+	if err != nil || !permitted {
+		return postgres.AttachmentDeletion{}, false, err
+	}
+	defer func() { _ = releaseFence() }()
 	claim, claimed, err := service.repository.ClaimAttachmentGC(ctx, artifactID, claimLifetime)
 	if err != nil || !claimed {
 		return postgres.AttachmentDeletion{}, false, err
@@ -279,11 +285,18 @@ func (service *Service) ReconcileOrphanBatch(ctx context.Context, after string, 
 		if err != nil {
 			return OrphanReconcileResult{}, err
 		}
-		allowed, authorityErr := service.repository.AttachmentOrphanGCAllowed(ctx, candidate.ArtifactID)
-		if authorityErr == nil && allowed {
-			authorityErr = service.store.RemoveUnpublished(candidate.ArtifactID)
-			if authorityErr == nil {
-				result.Changed++
+		releaseFence, permitted, authorityErr := service.repository.BeginAttachmentPhysicalGC(ctx)
+		if authorityErr == nil && permitted {
+			allowed, allowedErr := service.repository.AttachmentOrphanGCAllowed(ctx, candidate.ArtifactID)
+			authorityErr = allowedErr
+			if authorityErr == nil && allowed {
+				authorityErr = service.store.RemoveUnpublished(candidate.ArtifactID)
+				if authorityErr == nil {
+					result.Changed++
+				}
+			}
+			if releaseErr := releaseFence(); authorityErr == nil {
+				authorityErr = releaseErr
 			}
 		}
 		unlockErr := unlock()

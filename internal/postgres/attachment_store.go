@@ -17,14 +17,16 @@ import (
 )
 
 const (
-	maxAttachmentBytes          int64 = 16 << 30
-	minAttachmentReservation          = 5 * time.Minute
-	maxAttachmentReservation          = time.Hour
-	minAttachmentClaim                = 30 * time.Second
-	maxAttachmentClaim                = 10 * time.Minute
-	minAttachmentGCClaim              = 30 * time.Second
-	maxAttachmentGCClaim              = 10 * time.Minute
-	maxAttachmentReconcileBatch       = 100
+	maxAttachmentBytes            int64 = 16 << 30
+	minAttachmentReservation            = 5 * time.Minute
+	maxAttachmentReservation            = time.Hour
+	minAttachmentClaim                  = 30 * time.Second
+	maxAttachmentClaim                  = 10 * time.Minute
+	minAttachmentGCClaim                = 30 * time.Second
+	maxAttachmentGCClaim                = 10 * time.Minute
+	maxAttachmentReconcileBatch         = 100
+	attachmentGCAdvisoryKeyClass        = 1347768658
+	attachmentGCAdvisoryKeyObject       = 1094927683
 )
 
 var attachmentMediaTypePattern = regexp.MustCompile(`^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$`)
@@ -375,6 +377,46 @@ FROM attachment.tombstone_artifact($1,$2,$3,$4,$5,$6)`, request.PrincipalID, req
 		return AttachmentDeletion{}, attachmentStoreError(err, "attachment delete failed")
 	}
 	return deletion, nil
+}
+
+// BeginAttachmentPhysicalGC holds a transaction-scoped shared advisory lock
+// until its release function is called. Backup fence acquisition takes the
+// matching exclusive lock before publishing its durable fence, so a permitted
+// holder remains backup-exclusive across filesystem unlink and finalization.
+func (d *Database) BeginAttachmentPhysicalGC(ctx context.Context) (func() error, bool, error) {
+	conn, err := d.db.Conn(ctx)
+	if err != nil {
+		return nil, false, attachmentStoreError(err, "attachment physical GC connection is unavailable")
+	}
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
+	if err != nil {
+		_ = conn.Close()
+		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not start")
+	}
+	closeFence := func() error {
+		rollbackErr := tx.Rollback()
+		closeErr := conn.Close()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return rollbackErr
+		}
+		return closeErr
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared($1,$2)`, attachmentGCAdvisoryKeyClass, attachmentGCAdvisoryKeyObject); err != nil {
+		_ = closeFence()
+		return nil, false, attachmentStoreError(err, "attachment physical GC fence could not be acquired")
+	}
+	var permitted bool
+	if err := tx.QueryRowContext(ctx, `SELECT jobs.physical_blob_gc_permitted()`).Scan(&permitted); err != nil {
+		_ = closeFence()
+		return nil, false, attachmentStoreError(err, "attachment physical GC permission is unavailable")
+	}
+	if !permitted {
+		if err := closeFence(); err != nil {
+			return nil, false, attachmentStoreError(err, "attachment physical GC fence could not be released")
+		}
+		return nil, false, nil
+	}
+	return closeFence, true, nil
 }
 
 // ClaimAttachmentGC acquires one generation/token/lease fence only after the

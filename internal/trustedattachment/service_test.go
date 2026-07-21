@@ -17,38 +17,43 @@ import (
 )
 
 type fakeRepository struct {
-	mu                sync.Mutex
-	claim             postgres.AttachmentClaim
-	claimErr          error
-	publishResult     postgres.AttachmentArtifact
-	publishErrors     []error
-	publishCalls      int
-	candidates        []postgres.AttachmentReconcileCandidate
-	markCorruptCalls  []string
-	releaseCalls      []string
-	beginToken        string
-	beginAllowed      bool
-	beginCalls        int
-	releaseTokens     []string
-	publishMakesReady bool
-	publishHook       func()
-	download          postgres.AttachmentDownload
-	downloadErr       error
-	deleteResult      postgres.AttachmentDeletion
-	deleteErr         error
-	deleteCalls       int
-	deleteEntered     chan struct{}
-	gcClaim           postgres.AttachmentGCClaim
-	gcClaimed         bool
-	gcClaimErr        error
-	gcFinalizeResult  postgres.AttachmentDeletion
-	gcFinalizeAllowed bool
-	gcFinalizeErr     error
-	gcFinalizeErrors  []error
-	gcFinalizeCalls   int
-	gcFinalizeHook    func()
-	orphanGCAllowed   bool
-	orphanGCErr       error
+	mu                 sync.Mutex
+	claim              postgres.AttachmentClaim
+	claimErr           error
+	publishResult      postgres.AttachmentArtifact
+	publishErrors      []error
+	publishCalls       int
+	candidates         []postgres.AttachmentReconcileCandidate
+	markCorruptCalls   []string
+	releaseCalls       []string
+	beginToken         string
+	beginAllowed       bool
+	beginCalls         int
+	releaseTokens      []string
+	publishMakesReady  bool
+	publishHook        func()
+	download           postgres.AttachmentDownload
+	downloadErr        error
+	deleteResult       postgres.AttachmentDeletion
+	deleteErr          error
+	deleteCalls        int
+	deleteEntered      chan struct{}
+	gcFenceDenied      bool
+	gcFenceErr         error
+	gcFenceActive      int
+	gcFenceReleases    int
+	gcFenceReleaseHook func()
+	gcClaim            postgres.AttachmentGCClaim
+	gcClaimed          bool
+	gcClaimErr         error
+	gcFinalizeResult   postgres.AttachmentDeletion
+	gcFinalizeAllowed  bool
+	gcFinalizeErr      error
+	gcFinalizeErrors   []error
+	gcFinalizeCalls    int
+	gcFinalizeHook     func()
+	orphanGCAllowed    bool
+	orphanGCErr        error
 }
 
 type testDownloadWriter struct {
@@ -165,6 +170,25 @@ func (repository *fakeRepository) DeleteAttachment(context.Context, postgres.Att
 		}
 	}
 	return repository.deleteResult, repository.deleteErr
+}
+
+func (repository *fakeRepository) BeginAttachmentPhysicalGC(context.Context) (func() error, bool, error) {
+	repository.mu.Lock()
+	defer repository.mu.Unlock()
+	if repository.gcFenceErr != nil || repository.gcFenceDenied {
+		return nil, false, repository.gcFenceErr
+	}
+	repository.gcFenceActive++
+	return func() error {
+		repository.mu.Lock()
+		defer repository.mu.Unlock()
+		if repository.gcFenceReleaseHook != nil {
+			repository.gcFenceReleaseHook()
+		}
+		repository.gcFenceActive--
+		repository.gcFenceReleases++
+		return nil
+	}, true, nil
 }
 
 func (repository *fakeRepository) ClaimAttachmentGC(context.Context, string, time.Duration) (postgres.AttachmentGCClaim, bool, error) {
@@ -308,6 +332,10 @@ func TestServiceGCUnlinksBeforeTokenFencedFinalization(t *testing.T) {
 		t.Fatal(err)
 	}
 	repository.gcFinalizeHook = func() {
+		fenceActive := repository.gcFenceActive
+		if fenceActive != 1 {
+			t.Errorf("GC finalization ran without the backup exclusion fence: active=%d", fenceActive)
+		}
 		if err := service.store.Verify(PublishedBlob{StoragePath: claim.StoragePath, SizeBytes: claim.SizeBytes, SHA256: claim.SHA256}); err == nil {
 			t.Error("GC finalized quota before removing bytes")
 		}
@@ -673,6 +701,11 @@ func TestOrphanReconcileRequiresGraceAndDatabaseAbsence(t *testing.T) {
 		t.Fatalf("database-owned bytes were removed: %v", err)
 	}
 	repository.orphanGCAllowed = true
+	repository.gcFenceReleaseHook = func() {
+		if err := service.store.Verify(blob); err == nil {
+			t.Error("orphan backup exclusion fence released before unlink")
+		}
+	}
 	result, err := service.ReconcileOrphanBatch(context.Background(), "", 10, 24*time.Hour)
 	if err != nil || result.Scanned != 1 || result.Changed != 1 || result.Next != "" {
 		t.Fatalf("orphan result=%#v err=%v", result, err)

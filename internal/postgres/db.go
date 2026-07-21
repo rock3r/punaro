@@ -814,7 +814,7 @@ WITH objects AS (
     FROM pg_class, objects WHERE oid = ANY(ARRAY[ready_oid, fences_oid, restores_oid])
 ), routine_expected(oid, body_hash, language_name, volatility, security_definer, result_type) AS (
 	SELECT expected.* FROM objects, LATERAL (VALUES
-		(acquire_oid, 'f6929fb868a6ecf26876141eba7c6225', 'plpgsql', 'v'::"char", true, 'uuid'),
+		(acquire_oid, CASE WHEN $1 < 12 THEN 'f6929fb868a6ecf26876141eba7c6225' ELSE 'a038bbe60ba9b15eb6f308bb9fc9827d' END, 'plpgsql', 'v'::"char", true, 'uuid'),
 		(bind_oid, '7cd70c2bf1e678bf0e9457759ddd69d2', 'sql', 'v'::"char", true, 'boolean'),
 		(renew_oid, '2b86effb929fb20879f101e761d8fb6b', 'plpgsql', 'v'::"char", true, 'boolean'),
 		(cancel_oid, 'bfbe9c5f6f92a230acd0ff519167b60a', 'sql', 'v'::"char", true, 'boolean'),

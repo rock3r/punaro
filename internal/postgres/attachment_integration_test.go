@@ -362,9 +362,46 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute); err != nil || claimed {
 		t.Fatalf("backup-fenced GC claimed=%t err=%v", claimed, err)
 	}
+	if releasePhysicalGC, permitted, err := app.BeginAttachmentPhysicalGC(ctx); err != nil || permitted || releasePhysicalGC != nil {
+		t.Fatalf("backup-fenced physical GC permitted=%t release=%v err=%v", permitted, releasePhysicalGC != nil, err)
+	}
 	var fenceReleased bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.cancel_unbound_backup_gc_fence($1)`, backupFence).Scan(&fenceReleased); err != nil || !fenceReleased {
 		t.Fatalf("release GC test fence=%t err=%v", fenceReleased, err)
+	}
+	releasePhysicalGC, permitted, err := app.BeginAttachmentPhysicalGC(ctx)
+	if err != nil || !permitted || releasePhysicalGC == nil {
+		t.Fatalf("physical GC fence permitted=%t release=%v err=%v", permitted, releasePhysicalGC != nil, err)
+	}
+	type backupAcquireResult struct {
+		token string
+		err   error
+	}
+	backupAcquireDone := make(chan backupAcquireResult, 1)
+	go func() {
+		var token string
+		acquireErr := ownerDB.QueryRowContext(ctx, `SELECT jobs.acquire_backup_gc_fence(interval '5 minutes')::text`).Scan(&token)
+		backupAcquireDone <- backupAcquireResult{token: token, err: acquireErr}
+	}()
+	select {
+	case result := <-backupAcquireDone:
+		t.Fatalf("backup crossed active physical GC fence: token=%s err=%v", result.token, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := releasePhysicalGC(); err != nil {
+		t.Fatalf("release physical GC fence: %v", err)
+	}
+	var acquiredAfterGC backupAcquireResult
+	select {
+	case acquiredAfterGC = <-backupAcquireDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backup did not acquire after physical GC fence release")
+	}
+	if acquiredAfterGC.err != nil || acquiredAfterGC.token == "" {
+		t.Fatalf("backup after physical GC token=%s err=%v", acquiredAfterGC.token, acquiredAfterGC.err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT jobs.cancel_unbound_backup_gc_fence($1)`, acquiredAfterGC.token).Scan(&fenceReleased); err != nil || !fenceReleased {
+		t.Fatalf("release post-GC backup fence=%t err=%v", fenceReleased, err)
 	}
 	gcClaim, claimed, err := app.ClaimAttachmentGC(ctx, reservation.ArtifactID, time.Minute)
 	if err != nil || !claimed || gcClaim.State != AttachmentGCClaimed || gcClaim.GCGeneration != 1 || gcClaim.GCToken == "" {

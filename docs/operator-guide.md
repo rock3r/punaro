@@ -600,13 +600,16 @@ surface.
 Migration 12 adds the dark destructive lifecycle. Authorized deletion first
 withdraws recipient visibility and the READY backup projection, while retaining
 the immutable blob and charged quota for a 24-hour restore window. Physical GC
-is blocked by an active backup fence and then uses an expiring generation/token
-claim; quota is released only after durable unlink and conditional finalization.
+is blocked by an active backup fence and holds shared backup exclusion across
+the expiring generation/token claim, durable unlink, and conditional
+finalization; quota is released only after that unlink. Backup fence acquisition
+waits for every such holder.
 Corrupt artifacts follow the same delayed path. The bounded restore-skew scan
-requires old filesystem namespaces, authoritative database absence, backup-GC
-permission, and the artifact lock. A state-changing scan restarts from the
-beginning. Restoring older data can resurrect a deletion made after that
-snapshot. Migration 12 still mounts no attachment route or operator command.
+requires old filesystem namespaces, authoritative database absence, the
+artifact lock, and the same backup exclusion held through unlink. A
+state-changing scan restarts from the beginning. Restoring older data can
+resurrect a deletion made after that snapshot. Migration 12 still mounts no
+attachment route or operator command.
 
 ### Operator wrapper and device ingress
 

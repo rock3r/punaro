@@ -1,3 +1,40 @@
+CREATE OR REPLACE FUNCTION jobs.acquire_backup_gc_fence(lifetime interval)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    token uuid := gen_random_uuid();
+BEGIN
+    IF lifetime < interval '1 minute' OR lifetime > interval '1 hour' THEN
+        RAISE EXCEPTION 'backup fence lifetime is invalid';
+    END IF;
+    -- Serialize fence publication against every in-flight filesystem GC
+    -- transaction. Once this exclusive transaction lock is granted, no new
+    -- shared GC holder can pass its persisted-fence check before this insert
+    -- commits.
+    PERFORM pg_advisory_xact_lock(1347768658,1094927683);
+    UPDATE jobs.backup_gc_fences
+    SET released_at = statement_timestamp(), verified = false
+    WHERE released_at IS NULL AND expires_at <= statement_timestamp();
+    DELETE FROM jobs.backup_gc_fences
+    WHERE fence_id IN (
+        SELECT fence_id FROM jobs.backup_gc_fences
+        WHERE released_at IS NOT NULL
+        ORDER BY released_at DESC, fence_id DESC
+        OFFSET 1024
+    );
+    INSERT INTO jobs.backup_gc_fences (fence_id, installation_id, timeline_id, expires_at)
+    SELECT token, installation_id, timeline_id, statement_timestamp() + lifetime
+    FROM jobs.server_state WHERE singleton;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'installation state is unavailable';
+    END IF;
+    RETURN token;
+END
+$function$;
+
 CREATE TABLE attachment.deletions (
     artifact_id uuid CONSTRAINT deletions_pkey PRIMARY KEY,
     project_id uuid NOT NULL,
