@@ -317,7 +317,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if _, err := app.DeleteAttachment(ctx, guessedDelete); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("guessed attachment delete error=%v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET expires_at=statement_timestamp()-interval '1 second' WHERE lookup_id=$1`, uploaderLookup); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET created_at=statement_timestamp()-interval '2 seconds',expires_at=statement_timestamp()-interval '1 second' WHERE lookup_id=$1`, uploaderLookup); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.DeleteAttachment(ctx, deleteRequest); !errors.Is(err, ErrForbidden) {
