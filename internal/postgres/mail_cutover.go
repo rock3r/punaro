@@ -102,6 +102,28 @@ type MailCutoverEpoch struct {
 	AbortedAt   sql.NullTime
 }
 
+// CheckMailCutoverSchemaReadiness requires the exact current schema before the
+// source can be inspected or prepared for an irreversible cutover.
+func (a *Administration) CheckMailCutoverSchemaReadiness(ctx context.Context) error {
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return errors.New("mail cutover schema readiness is unavailable")
+	}
+	defer func() { _ = tx.Rollback() }()
+	snapshot, err := inspect(ctx, tx)
+	if err != nil {
+		return err
+	}
+	state := Classify(snapshot, CurrentManifest())
+	if err := tx.Commit(); err != nil {
+		return errors.New("mail cutover schema readiness is unavailable")
+	}
+	if state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		return errors.New("mail cutover requires the current PostgreSQL schema")
+	}
+	return nil
+}
+
 // BeginMailCutover drains application writers and creates one dark import epoch.
 func (a *Administration) BeginMailCutover(ctx context.Context, actorPrincipalID string, request MailCutoverRequest) (MailCutoverEpoch, error) {
 	if !validOpaqueID(actorPrincipalID) || request.Validate() != nil {

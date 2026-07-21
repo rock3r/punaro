@@ -474,7 +474,9 @@ again while retaining both stores unchanged.
 
 ### One-shot mail cutover
 
-First stop ordinary operator changes, confirm every intended legacy machine is
+First complete the supported update through the exact current schema v9; the
+preview and execution both fail closed on runtime-compatible schema v8 before
+inspecting or preparing SQLite. Then stop ordinary operator changes, confirm every intended legacy machine is
 `migrated` or explicitly `retired`, and run the read-only preview:
 
 ```sh

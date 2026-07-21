@@ -35,6 +35,7 @@ type Source interface {
 
 // Destination is the schema-owner PostgreSQL cutover surface.
 type Destination interface {
+	CheckMailCutoverSchemaReadiness(context.Context) error
 	Identity(context.Context) (string, error)
 	BeginMailCutover(context.Context, string, postgres.MailCutoverRequest) (postgres.MailCutoverEpoch, error)
 	MailCutoverStatus(context.Context, string, string) (postgres.MailCutoverEpoch, error)
@@ -89,6 +90,9 @@ func (e Executor) DryRun(ctx context.Context) (Plan, error) {
 	if e.Source == nil || e.Destination == nil {
 		return Plan{}, errors.New("mail cutover executor is incomplete")
 	}
+	if err := e.Destination.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		return Plan{}, err
+	}
 	target, err := e.Destination.Identity(ctx)
 	if err != nil {
 		return Plan{}, errors.New("mail cutover target identity is unavailable")
@@ -106,6 +110,9 @@ func (e Executor) DryRun(ctx context.Context) (Plan, error) {
 func (e Executor) Execute(ctx context.Context, request Request) (Result, error) {
 	if e.Source == nil || e.Destination == nil || e.Publish == nil || uuid.Validate(request.ActorPrincipalID) != nil || uuid.Validate(request.EpochID) != nil || !digestPattern.MatchString(request.ExpectedSourceFingerprint) || request.Cutoff.IsZero() {
 		return Result{}, errors.New("mail cutover execution request is invalid")
+	}
+	if err := e.Destination.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		return Result{}, err
 	}
 	batchSize := e.BatchSize
 	if batchSize < 1 || batchSize > 256 {

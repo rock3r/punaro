@@ -1354,6 +1354,9 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 8 {
 		t.Fatalf("current manifest rejected exact v8 schema: %#v", state)
 	}
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
+		t.Fatal("mail cutover accepted exact v8 schema before migration 009")
+	}
 	if _, err := Migrate(ctx, Config{DSNFile: ownerFile}); err == nil || !strings.Contains(err.Error(), "supported update transaction") {
 		t.Fatalf("ordinary migrator accepted compatible-but-pending v9 upgrade: %v", err)
 	}
@@ -1419,6 +1422,9 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
 		t.Fatalf("v9 migration state=%#v err=%v", state, err)
+	}
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		t.Fatalf("mail cutover rejected exact v9 schema: %v", err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)

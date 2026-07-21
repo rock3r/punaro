@@ -34,7 +34,7 @@ func TestExecutorCrossesBoundariesInOrderAndPublishesLast(t *testing.T) {
 	if err != nil || result.Phase != postgres.MailCutoverActive || result.SourcePhase != relay.MigrationSourceRetired {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	want := []string{"identity", "inspect", "prepare", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints", "checkpoint:mail_conversations"}
+	want := []string{"schema-readiness", "identity", "inspect", "prepare", "begin", "checkpoint:mail_endpoints", "read:mail_endpoints", "stage:mail_endpoints"}
 	if len(events) < len(want) || !reflect.DeepEqual(events[:len(want)], want) {
 		t.Fatalf("events=%v want prefix=%v", events, want)
 	}
@@ -66,7 +66,7 @@ func TestExecutorDoesNotSealAfterImportFailureAndRecoversActivePublication(t *te
 		recoveryEvents = append(recoveryEvents, "publish")
 		return nil
 	}, BatchSize: 1}).Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: retired.EpochID, ExpectedSourceFingerprint: retired.ExpectedFingerprint, Cutoff: time.Now().UTC()})
-	if err != nil || result.Phase != postgres.MailCutoverActive || !reflect.DeepEqual(recoveryEvents, []string{"identity", "inspect", "begin", "publish"}) {
+	if err != nil || result.Phase != postgres.MailCutoverActive || !reflect.DeepEqual(recoveryEvents, []string{"schema-readiness", "identity", "inspect", "begin", "publish"}) {
 		t.Fatalf("recovery result=%#v events=%v err=%v", result, recoveryEvents, err)
 	}
 	changedEvents := []string{}
@@ -94,8 +94,24 @@ func TestDryRunDoesNotMutateEitherAuthority(t *testing.T) {
 	manifest := testManifest(relay.MigrationSourceActive)
 	var events []string
 	plan, err := (Executor{Source: &fakeSource{manifest: manifest, events: &events}, Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events}}).DryRun(context.Background())
-	if err != nil || plan.SourceFingerprint != manifest.Fingerprint || plan.TargetIdentity != manifest.TargetIdentity || !reflect.DeepEqual(events, []string{"identity", "inspect"}) {
+	if err != nil || plan.SourceFingerprint != manifest.Fingerprint || plan.TargetIdentity != manifest.TargetIdentity || !reflect.DeepEqual(events, []string{"schema-readiness", "identity", "inspect"}) {
 		t.Fatalf("plan=%#v events=%v err=%v", plan, events, err)
+	}
+}
+
+func TestExecutorRequiresCurrentDestinationSchemaBeforeInspectingSource(t *testing.T) {
+	t.Parallel()
+	manifest := testManifest(relay.MigrationSourceActive)
+	var events []string
+	readinessErr := errors.New("destination schema is not current")
+	executor := Executor{
+		Source:      &fakeSource{manifest: manifest, events: &events},
+		Destination: &fakeDestination{identity: manifest.TargetIdentity, events: &events, schemaReadinessErr: readinessErr},
+		Publish:     func(context.Context, operator.MailCutoverPublication) error { return nil },
+	}
+	_, err := executor.Execute(context.Background(), Request{ActorPrincipalID: "11111111-1111-4111-8111-111111111111", EpochID: manifest.EpochID, ExpectedSourceFingerprint: manifest.Fingerprint, Cutoff: time.Now().UTC()})
+	if !errors.Is(err, readinessErr) || !reflect.DeepEqual(events, []string{"schema-readiness"}) {
+		t.Fatalf("events=%v err=%v", events, err)
 	}
 }
 
@@ -205,15 +221,20 @@ func (s *fakeSource) Abort(context.Context, string, string, string) (relay.Migra
 }
 
 type fakeDestination struct {
-	identity     string
-	phase        postgres.MailCutoverPhase
-	events       *[]string
-	stageErr     error
-	abortErr     error
-	statusErr    error
-	readinessErr error
+	identity           string
+	phase              postgres.MailCutoverPhase
+	events             *[]string
+	stageErr           error
+	abortErr           error
+	statusErr          error
+	readinessErr       error
+	schemaReadinessErr error
 }
 
+func (d *fakeDestination) CheckMailCutoverSchemaReadiness(context.Context) error {
+	*d.events = append(*d.events, "schema-readiness")
+	return d.schemaReadinessErr
+}
 func (d *fakeDestination) Identity(context.Context) (string, error) {
 	*d.events = append(*d.events, "identity")
 	return d.identity, nil
