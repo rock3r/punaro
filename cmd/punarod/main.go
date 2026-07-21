@@ -44,6 +44,55 @@ type deviceDatabase interface {
 	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
 }
 
+type credentialTransitionDatabase interface {
+	deviceDatabase
+	DeviceSessionCurrent(context.Context, punaropostgres.AuthenticatedDevice) (bool, error)
+	ResolveLegacyMachine(context.Context, ed25519.PublicKey) (string, error)
+	ResolveMigratedLegacyPublicKey(context.Context, punaropostgres.AuthenticatedDevice) (ed25519.PublicKey, error)
+}
+
+type postgresTransitionAuthority struct {
+	database credentialTransitionDatabase
+}
+
+func (a postgresTransitionAuthority) AuthorizeTransition(ctx context.Context, credential string, legacyKey ed25519.PublicKey) (relay.TransitionAuthorization, error) {
+	if a.database == nil || (credential == "") == (len(legacyKey) == 0) {
+		return relay.TransitionAuthorization{}, relay.ErrForbidden
+	}
+	if credential == "" {
+		if _, err := a.database.ResolveLegacyMachine(ctx, legacyKey); err != nil {
+			return relay.TransitionAuthorization{}, relay.ErrForbidden
+		}
+		key := append(ed25519.PublicKey(nil), legacyKey...)
+		return relay.TransitionAuthorization{LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
+			if _, err := a.database.ResolveLegacyMachine(currentCtx, key); err != nil {
+				return relay.ErrForbidden
+			}
+			return nil
+		}}, nil
+	}
+	authenticated, err := a.database.AuthenticateDevice(ctx, credential)
+	if err != nil {
+		return relay.TransitionAuthorization{}, relay.ErrForbidden
+	}
+	publicKey, err := a.database.ResolveMigratedLegacyPublicKey(ctx, authenticated)
+	if err != nil {
+		return relay.TransitionAuthorization{}, relay.ErrForbidden
+	}
+	key := append(ed25519.PublicKey(nil), publicKey...)
+	return relay.TransitionAuthorization{LegacyPublicKey: key, Current: func(currentCtx context.Context) error {
+		current, err := a.database.DeviceSessionCurrent(currentCtx, authenticated)
+		if err != nil || !current {
+			return relay.ErrForbidden
+		}
+		resolved, err := a.database.ResolveMigratedLegacyPublicKey(currentCtx, authenticated)
+		if err != nil || !bytes.Equal(resolved, key) {
+			return relay.ErrForbidden
+		}
+		return nil
+	}}, nil
+}
+
 var openPlatformDatabase = func(ctx context.Context, cfg punaropostgres.Config) (platformDatabase, error) {
 	return punaropostgres.OpenApplication(ctx, cfg)
 }
@@ -636,7 +685,19 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		backend = store
 	}
-	authenticator, err := relay.NewAuthenticator(backend, machines)
+	var authenticator *relay.Authenticator
+	if cfg.CredentialTransitionEnabled {
+		transitionDatabase, ok := backend.(credentialTransitionDatabase)
+		if !ok {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, errors.New("credential transition store is unavailable")
+		}
+		authenticator, err = relay.NewTransitionAuthenticator(backend, machines, postgresTransitionAuthority{database: transitionDatabase})
+	} else {
+		authenticator, err = relay.NewAuthenticator(backend, machines)
+	}
 	if err != nil {
 		if store != nil {
 			_ = store.Close()

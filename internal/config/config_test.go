@@ -329,6 +329,29 @@ func TestLoadAcceptsExplicitRelayMachineEnrollment(t *testing.T) {
 	}
 }
 
+func TestLoadCredentialTransitionIsOffByDefaultAndRequiresCompletePostgresRuntime(t *testing.T) {
+	config, err := Load("")
+	if err != nil || config.CredentialTransitionEnabled {
+		t.Fatalf("default config=%#v err=%v", config, err)
+	}
+	t.Setenv("PUNARO_CREDENTIAL_TRANSITION_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("credential transition was enabled without its PostgreSQL relay dependencies")
+	}
+	t.Setenv("PUNARO_RELAY_ENABLED", "true")
+	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
+	t.Setenv("PUNARO_RELAY_STORE", "postgres")
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "proxy")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example.test")
+	config, err = Load("")
+	if err != nil || !config.CredentialTransitionEnabled {
+		t.Fatalf("complete transition config=%#v err=%v", config, err)
+	}
+}
+
 func TestLoadRejectsPartialCloudflareAccessVerifierConfiguration(t *testing.T) {
 	t.Setenv("PUNARO_ACCESS_ISSUER", "https://team.cloudflareaccess.com")
 	t.Setenv("PUNARO_ACCESS_AUDIENCE", "")

@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -287,6 +288,20 @@ WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupI
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyAuthenticated, err := app.AuthenticateDevice(ctx, legacyCredential.Encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPublicKey, err := app.ResolveMigratedLegacyPublicKey(ctx, legacyAuthenticated)
+	if err != nil || !bytes.Equal(resolvedPublicKey, legacyPublic) {
+		t.Fatalf("migrated legacy public key=%x err=%v", resolvedPublicKey, err)
+	}
+	if _, err := app.ResolveMigratedLegacyPublicKey(ctx, AuthenticatedDevice{PrincipalID: legacyAuthenticated.PrincipalID, LookupID: legacyAuthenticated.LookupID, Generation: legacyAuthenticated.Generation + 1}); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("forged migrated generation error=%v", err)
+	}
+	if _, err := app.ResolveMigratedLegacyPublicKey(ctx, authenticated); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("ordinary device acquired legacy relay authority error=%v", err)
+	}
 	legacyRetry, err := app.RedeemLegacyEnrollment(ctx, proof, legacyRedeem)
 	if err != nil || legacyRetry.Encoded != legacyCredential.Encoded || legacyRetry.LookupID != legacyCredential.LookupID {
 		t.Fatalf("exact legacy exchange retry=%#v err=%v", legacyRetry, err)
@@ -345,5 +360,8 @@ WHERE id = $1`, legacyPending.ID, uuid.NewString(), owner.ID, credential.LookupI
 	}
 	if _, err := app.AuthenticateDevice(ctx, legacyCredential.Encoded); err != nil {
 		t.Fatalf("new device credential failed after legacy disable: %v", err)
+	}
+	if resolvedPublicKey, err := app.ResolveMigratedLegacyPublicKey(ctx, legacyAuthenticated); err != nil || !bytes.Equal(resolvedPublicKey, legacyPublic) {
+		t.Fatalf("migrated relay authority failed after legacy disable: key=%x err=%v", resolvedPublicKey, err)
 	}
 }

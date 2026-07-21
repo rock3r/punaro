@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -279,6 +280,59 @@ func TestHTTPNotificationsAuthenticatesAndEmitsOnlyWakeMetadata(t *testing.T) {
 	}
 	if string(data) != `{"type":"wake","topic_id":"conversation-1","sequence":9}` {
 		t.Fatalf("wake payload=%s", data)
+	}
+}
+
+func TestHTTPNotificationsCloseWithinFenceWhenTransitionAuthorityHangs(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var current atomic.Int32
+	current.Store(1)
+	auth, err := NewTransitionAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}}, transitionAuthorityFunc(func(_ context.Context, credential string, legacyKey ed25519.PublicKey) (TransitionAuthorization, error) {
+		if credential != testTransitionToken || legacyKey != nil {
+			return TransitionAuthorization{}, ErrForbidden
+		}
+		return TransitionAuthorization{LegacyPublicKey: public, Current: func(ctx context.Context) error {
+			switch current.Load() {
+			case 1:
+				return nil
+			case -1:
+				<-ctx.Done()
+				return ctx.Err()
+			default:
+				return ErrForbidden
+			}
+		}}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(NewHandler(store, auth, HandlerOptions{SessionRevalidateInterval: 10 * time.Millisecond}))
+	defer server.Close()
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+testTransitionToken)
+	connection, response, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/notifications", &websocket.DialOptions{HTTPHeader: headers})
+	if response != nil && response.Body != nil {
+		defer func() { _ = response.Body.Close() }()
+	}
+	if err != nil {
+		t.Fatalf("dial notifications status=%v err=%v", response, err)
+	}
+	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "done") }()
+	current.Store(-1)
+	readCtx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if _, _, err := connection.Read(readCtx); err == nil {
+		t.Fatal("unavailable transition authority left notification socket open")
+	} else if readCtx.Err() != nil {
+		t.Fatalf("notification socket did not close before the test deadline: %v", err)
 	}
 }
 

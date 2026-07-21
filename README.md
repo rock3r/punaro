@@ -109,12 +109,13 @@ precedence over dotenv values.
 | `PUNARO_POSTGRES_ENABLED` | `false` | Opts into the PostgreSQL platform substrate. Ordinary startup only checks compatibility and never migrates. |
 | `PUNARO_POSTGRES_DSN_FILE` | unset | Required with PostgreSQL enabled: absolute path to a private application-role DSN file. The application role has no DDL authority. |
 | `PUNARO_DEVICE_AUTH_ENABLED` | `false` | Mounts bounded enrollment redemption and device-session authentication; requires PostgreSQL and a complete ingress policy. |
+| `PUNARO_CREDENTIAL_TRANSITION_ENABLED` | `false` | Dormant M-9 bridge. Requires device auth and the PostgreSQL relay. Legacy Ed25519 requests must pass the durable global gate; a migrated device bearer resolves through its proof-bound exchange to the exact static machine enrollment and inherits no additional endpoint authority. |
 | `PUNARO_INGRESS_MODE` | unset | Required with device auth: `lan`, `proxy`, or `internet`. Proxy and Internet origins bind loopback and require `PUNARO_PUBLIC_URL=https://...`. |
 | `PUNARO_PUBLIC_URL` | unset | Canonical HTTPS public URL for proxy/Internet mode. It does not make forwarded headers trustworthy. |
 | `PUNARO_TRUSTED_LAN_CIDR` | unset | Private/link-local CIDR containing the concrete LAN bind. Valid only in LAN mode. |
 | `PUNARO_TRUSTED_LAN_HTTP` | `false` | Explicit plaintext credential exception for observed peers inside the validated trusted LAN. Public peers never qualify. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
-| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. `postgres` requires PostgreSQL schema v8 and is for empty-destination parity/qualification before the M-9 one-shot cutover; it never imports or dual-writes SQLite. |
+| `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. `postgres` requires PostgreSQL schema v8 and is for empty-destination parity/qualification before the M-9 one-shot cutover; it never imports or dual-writes SQLite. Credential transition remains separately off by default. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. An issuer-capable machine additionally has canonical raw-base64url `attachment_device_id` (16 bytes), bound to exactly one directory device. |
 | `PUNARO_DIRECTORY_ENABLED` | `false` | Serves a current complete signed directory snapshot to authenticated enrolled machines; requires the relay. |
 | `PUNARO_DIRECTORY_SNAPSHOT_FILE` | unset | Absolute, root-owned and service-group-readable (`2750` parent, `0640` regular non-symlink) canonical directory snapshot publication file. |

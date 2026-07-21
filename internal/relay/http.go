@@ -14,18 +14,23 @@ import (
 	"github.com/coder/websocket"
 )
 
-const maxRequestBodyBytes = 64 << 10
+const (
+	maxRequestBodyBytes              = 64 << 10
+	maximumSessionFenceAge           = 2 * time.Second
+	defaultSessionRevalidateInterval = maximumSessionFenceAge / 2
+)
 
 // HandlerOptions make lease timing explicit and injectable for tests.
 type HandlerOptions struct {
-	Now              func() time.Time
-	EndpointLeaseTTL time.Duration
-	DeliveryLeaseTTL time.Duration
-	Notifier         *Notifier
+	Now                       func() time.Time
+	EndpointLeaseTTL          time.Duration
+	DeliveryLeaseTTL          time.Duration
+	Notifier                  *Notifier
+	SessionRevalidateInterval time.Duration
 }
 
-// NewHandler returns the authenticated relay API. It intentionally does not
-// mount WebSockets or attachment routes; those have separate release gates.
+// NewHandler returns the authenticated relay API, including the wake-metadata
+// notification WebSocket. Attachment routes remain separate release gates.
 func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http.Handler {
 	if options.Now == nil {
 		options.Now = time.Now
@@ -39,17 +44,21 @@ func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http
 	if options.Notifier == nil {
 		options.Notifier = NewNotifier()
 	}
-	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL}
+	if options.SessionRevalidateInterval <= 0 || options.SessionRevalidateInterval > maximumSessionFenceAge/2 {
+		options.SessionRevalidateInterval = defaultSessionRevalidateInterval
+	}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval}
 	return http.HandlerFunc(h.serveHTTP)
 }
 
 type handler struct {
-	store            Backend
-	auth             *Authenticator
-	notifier         *Notifier
-	now              func() time.Time
-	endpointLeaseTTL time.Duration
-	deliveryLeaseTTL time.Duration
+	store                     Backend
+	auth                      *Authenticator
+	notifier                  *Notifier
+	now                       func() time.Time
+	endpointLeaseTTL          time.Duration
+	deliveryLeaseTTL          time.Duration
+	sessionRevalidateInterval time.Duration
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +71,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "request body is too large")
 		return
 	}
-	machineID, err := h.authenticate(r, body)
+	session, err := h.authenticate(r, body)
 	if err != nil {
 		if errors.Is(err, ErrMaintenance) {
 			writeStoreError(w, err)
@@ -71,12 +80,13 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
+	machineID := session.MachineID
 	now := h.now().UTC()
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/conversations":
 		h.listConversations(w, machineID, now)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/notifications":
-		h.notifications(w, r, machineID)
+		h.notifications(w, r, session)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
 		h.advertiseEndpoints(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
@@ -133,16 +143,19 @@ func (h *handler) listConversations(w http.ResponseWriter, machineID string, now
 	writeJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
 }
 
-func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineID string) {
+func (h *handler) notifications(w http.ResponseWriter, r *http.Request, session MachineSession) {
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
-	client := h.notifier.Register(machineID)
+	client := h.notifier.Register(session.MachineID)
 	defer client.Close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	authenticationExpired := make(chan struct{})
+	revalidationDone := make(chan struct{})
+	go h.revalidateNotificationSession(ctx, cancel, connection, session, authenticationExpired, revalidationDone)
 	go func() {
 		defer cancel()
 		for {
@@ -154,6 +167,7 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineI
 	for {
 		select {
 		case <-ctx.Done():
+			waitForAuthenticationClose(authenticationExpired, revalidationDone)
 			return
 		case event := <-client.Events():
 			payload, err := json.Marshal(event)
@@ -161,14 +175,51 @@ func (h *handler) notifications(w http.ResponseWriter, r *http.Request, machineI
 				return
 			}
 			if err := connection.Write(ctx, websocket.MessageText, payload); err != nil {
+				waitForAuthenticationClose(authenticationExpired, revalidationDone)
 				return
 			}
 		}
 	}
 }
 
-func (h *handler) authenticate(r *http.Request, body []byte) (string, error) {
-	return h.auth.AuthenticateHTTP(r, body, h.now())
+func (h *handler) revalidateNotificationSession(ctx context.Context, cancel context.CancelFunc, connection *websocket.Conn, session MachineSession, authenticationExpired chan<- struct{}, done chan<- struct{}) {
+	defer close(done)
+	revalidate := time.NewTicker(h.sessionRevalidateInterval)
+	defer revalidate.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-revalidate.C:
+			// A check starts halfway through the maximum fence age and receives
+			// only the remaining half as its deadline. It runs independently of
+			// wake writes, and canceling ctx unblocks a slow/non-reading client.
+			checkCtx, checkCancel := context.WithTimeout(ctx, h.sessionRevalidateInterval)
+			err := session.Current(checkCtx)
+			checkCancel()
+			if err != nil {
+				close(authenticationExpired)
+				cancel()
+				// Cancel first to interrupt any blocked Read/Write, then close the
+				// transport immediately. A close-frame status is not an authority
+				// guarantee and cannot be delivered reliably to a non-reading peer.
+				_ = connection.CloseNow()
+				return
+			}
+		}
+	}
+}
+
+func waitForAuthenticationClose(authenticationExpired <-chan struct{}, revalidationDone <-chan struct{}) {
+	select {
+	case <-authenticationExpired:
+		<-revalidationDone
+	default:
+	}
+}
+
+func (h *handler) authenticate(r *http.Request, body []byte) (MachineSession, error) {
+	return h.auth.AuthenticateHTTPSession(r, body, h.now())
 }
 
 func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
