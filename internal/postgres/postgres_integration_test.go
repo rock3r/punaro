@@ -291,6 +291,40 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("relay constraint and ACL restoration did not recover readiness: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.uploads DROP CONSTRAINT uploads_size_bytes_check; ALTER TABLE attachment.uploads ADD CONSTRAINT uploads_size_bytes_check CHECK (size_bytes > 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive trusted-attachment size constraint state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE attachment.uploads DROP CONSTRAINT uploads_size_bytes_check; ALTER TABLE attachment.uploads ADD CONSTRAINT uploads_size_bytes_check CHECK (size_bytes BETWEEN 1 AND 17179869184)`); err != nil {
+		t.Fatal(err)
+	}
+	var reserveDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'::regprocedure)`).Scan(&reserveDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION attachment.reserve_upload(requested_principal uuid,requested_project uuid,request_key uuid,request_hash bytea,requested_size bigint,requested_sha256 text,requested_display_name text,requested_media_type text,requested_lifetime interval) RETURNS TABLE (artifact_id uuid,project_id uuid,principal_id uuid,timeline_id uuid,size_bytes bigint,sha256 text,display_name text,media_type text,state text,attempt_generation bigint,expires_at timestamptz,ready_at timestamptz) LANGUAGE sql SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT NULL::uuid,NULL::uuid,NULL::uuid,NULL::uuid,1::bigint,repeat(''0'',64),'''',''application/octet-stream'',''reserved'',0::bigint,statement_timestamp(),NULL::timestamptz'`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive trusted-attachment routine state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, reserveDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON attachment.uploads TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, driftErr := app.SchemaState(ctx); driftErr != nil || drifted.Classification != Incompatible {
+		t.Fatalf("trusted-attachment direct read grant state=%#v err=%v", drifted, driftErr)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON attachment.uploads FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("trusted-attachment catalog restoration did not recover readiness: %v", err)
+	}
 	before, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -325,6 +359,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 		t.Fatal("application role opened host-local administration")
 	}
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
+	testTrustedAttachmentIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
@@ -1307,6 +1342,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	v7Manifest := Manifest{MinSupported: 7, MaxSupported: 7, Migrations: append([]Migration(nil), current.Migrations[:7]...)}
 	v8Manifest := Manifest{MinSupported: 8, MaxSupported: 8, Migrations: append([]Migration(nil), current.Migrations[:8]...)}
+	v9Manifest := Manifest{MinSupported: 8, MaxSupported: 9, Migrations: append([]Migration(nil), current.Migrations[:9]...)}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2085",
 		SourceRelease:           "v0.7.0",
@@ -1423,8 +1459,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	}
 	if snapshot, inspectErr := inspect(ctx, ownerDB); inspectErr != nil {
 		t.Fatalf("inspect v8 schema with current manifest: %v", inspectErr)
-	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 8 {
-		t.Fatalf("current manifest rejected exact v8 schema: %#v", state)
+	} else if state := Classify(snapshot, current); state.Classification != UpgradeRequired || state.Version != 8 {
+		t.Fatalf("current manifest did not require the v8 to v9 bridge: %#v", state)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err == nil {
 		t.Fatal("mail cutover accepted exact v8 schema before migration 009")
@@ -1436,7 +1472,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if err != nil {
 		t.Fatalf("open ordinary migration engine connection: %v", err)
 	}
-	if state, migrateErr := migrateConnExpectedAppRole(ctx, ordinaryConn, current, "punaro_app", false); migrateErr == nil || !strings.Contains(migrateErr.Error(), "supported update transaction") || state.Classification != Compatible || state.Version != 8 {
+	if state, migrateErr := migrateConnExpectedAppRole(ctx, ordinaryConn, current, "punaro_app", false); migrateErr == nil || !strings.Contains(migrateErr.Error(), "supported update transaction") || state.Classification != UpgradeRequired || state.Version != 8 {
 		_ = ordinaryConn.Close()
 		t.Fatalf("ordinary locked migration engine accepted compatible-but-pending v9 upgrade: state=%#v err=%v", state, migrateErr)
 	}
@@ -1446,8 +1482,8 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2087",
-		SourceRelease:           "v0.9.0",
-		TargetRelease:           "v0.10.0",
+		SourceRelease:           "v0.8.0",
+		TargetRelease:           "v0.9.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		SourceSchema:            8,
@@ -1458,7 +1494,7 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "7878787878787878787878787878787878787878787878787878787878787878",
 		ComposeSHA256:           "8989898989898989898989898989898989898989898989898989898989898989",
-		MigrationManifestSHA256: MigrationManifestSHA256(),
+		MigrationManifestSHA256: migrationManifestSHA256(v9Manifest),
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
@@ -1492,16 +1528,78 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
-	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+	if state, err := migrateUpdateManifest(ctx, Config{DSNFile: ownerFile}, authorization, v9Manifest); err != nil || state.Classification != Compatible || state.Version != 9 {
 		t.Fatalf("v9 migration state=%#v err=%v", state, err)
-	}
-	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v9 schema: %v", err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
 			t.Fatalf("v9 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+		}
+	}
+	if snapshot, inspectErr := inspect(ctx, ownerDB); inspectErr != nil {
+		t.Fatalf("inspect v9 schema with current manifest: %v", inspectErr)
+	} else if state := Classify(snapshot, current); state.Classification != Compatible || state.Version != 9 {
+		t.Fatalf("current manifest rejected exact v9 schema: %#v", state)
+	}
+	request = UpdateRequest{
+		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2088",
+		SourceRelease:           "v0.9.0",
+		TargetRelease:           "v0.10.0",
+		SourceImage:             "ghcr.io/rock3r/punaro@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		TargetImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		SourceSchema:            9,
+		TargetSchema:            10,
+		SchemaMin:               9,
+		SchemaMax:               10,
+		RollbackFloor:           9,
+		PostgresMajor:           postgresMajor,
+		ReleaseSHA256:           "9191919191919191919191919191919191919191919191919191919191919191",
+		ComposeSHA256:           "9292929292929292929292929292929292929292929292929292929292929292",
+		MigrationManifestSHA256: MigrationManifestSHA256(),
+	}
+	transaction, err = admin.BeginUpdate(ctx, request)
+	if err != nil || transaction.Phase != UpdateFenced {
+		t.Fatalf("begin v10 update transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
+	if err != nil || transaction.Phase != UpdateWritersStopped {
+		t.Fatalf("stop v10 writers transaction=%#v err=%v", transaction, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
+		t.Fatal(err)
+	}
+	marker = &UpdateBackupMarker{
+		UpdateID: request.UpdateID, BackupID: "019b4eb0-5317-79a6-a0de-fd97719910ff",
+		InstallationID: state.InstallationID, TimelineID: state.TimelineID, ChangeSequence: state.ChangeSequence,
+		SourceSchema: request.SourceSchema, TargetRelease: request.TargetRelease,
+		TargetImageDigest:  "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		ExportedSnapshotID: "00000003-0000001B-5",
+		ManifestSHA256:     "9393939393939393939393939393939393939393939393939393939393939393",
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
+	if err != nil || transaction.Phase != UpdateBackupVerified {
+		t.Fatalf("bind v10 backup transaction=%#v err=%v", transaction, err)
+	}
+	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
+	if err != nil || transaction.Phase != UpdateMigrationStarted {
+		t.Fatalf("start v10 migration transaction=%#v err=%v", transaction, err)
+	}
+	authorization = UpdateMigrationAuthorization{
+		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
+		TargetImage: request.TargetImage, TargetSchema: request.TargetSchema,
+		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
+	}
+	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
+		t.Fatalf("v10 migration state=%#v err=%v", state, err)
+	}
+	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
+		t.Fatalf("mail cutover rejected exact v10 schema: %v", err)
+	}
+	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
+		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
+		if err != nil || transaction.Phase != phases[1] {
+			t.Fatalf("v10 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM jobs.update_transactions`); err != nil {
@@ -1716,6 +1814,10 @@ func m6CatalogDiagnostic(ctx context.Context, ownerDSN string) string {
 		`SELECT format('routine-acl:%s:%s:%s:%s', proc.oid::regprocedure::text, COALESCE(grantee.rolname,'PUBLIC'), acl.privilege_type, acl.is_grantable) FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE proc.oid = ANY(ARRAY[to_regprocedure('jobs.acquire_backup_gc_fence(interval)'),to_regprocedure('jobs.bind_backup_snapshot(uuid,text)'),to_regprocedure('jobs.renew_backup_gc_fence(uuid,text,interval)'),to_regprocedure('jobs.cancel_unbound_backup_gc_fence(uuid)'),to_regprocedure('jobs.release_backup_gc_fence(uuid,text,boolean)'),to_regprocedure('jobs.physical_blob_gc_permitted()'),to_regprocedure('jobs.rotate_restored_timeline(uuid,uuid,uuid,bigint)')]) ORDER BY proc.oid::regprocedure::text, grantee.rolname`,
 		`SELECT format('table-acl:%s:%s:%s:%s:%s', relation.oid::regclass::text, pg_get_userbyid(relation.relowner), COALESCE(grantee.rolname,'PUBLIC'), acl.privilege_type, acl.is_grantable) FROM pg_class AS relation CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee WHERE relation.oid = ANY(ARRAY[to_regclass('attachment.ready_blob_manifest'),to_regclass('jobs.backup_gc_fences'),to_regclass('jobs.restore_events')]) ORDER BY relation.oid::regclass::text, grantee.rolname, acl.privilege_type`,
 		`SELECT format('index:%s:%s:%s:%s:%s', indexrelid::regclass::text, indrelid::regclass::text, indkey::text, indisunique, pg_get_expr(indpred,indrelid)) FROM pg_index WHERE indexrelid=to_regclass('jobs.backup_gc_fences_active')`,
+		`WITH relations AS (SELECT unnest(ARRAY[to_regclass('attachment.uploads'),to_regclass('attachment.ready_artifacts'),to_regclass('attachment.global_quota'),to_regclass('attachment.project_quotas'),to_regclass('attachment.principal_quotas')]) AS oid), routines AS (SELECT unnest(ARRAY[to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'),to_regprocedure('attachment.claim_upload(uuid,uuid,interval)'),to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)'),to_regprocedure('attachment.begin_reap_upload(uuid)'),to_regprocedure('attachment.release_expired_upload(uuid,uuid)'),to_regprocedure('attachment.mark_corrupt(uuid)'),to_regprocedure('attachment.reconcile_candidates(text,timestamp with time zone,uuid,integer)'),to_regprocedure('attachment.project_has_records(uuid,uuid)')]) AS oid) SELECT format('v10-counts:tables=%s:columns=%s:constraints=%s:fks=%s:indexes=%s:table-acls=%s:routines=%s:routine-acls=%s', (SELECT count(*) FROM pg_class,relations WHERE pg_class.oid=relations.oid), (SELECT count(*) FROM pg_attribute,relations WHERE attrelid=relations.oid AND attnum>0 AND NOT attisdropped), (SELECT count(*) FROM pg_constraint,relations WHERE conrelid=relations.oid), (SELECT count(*) FROM pg_constraint,relations WHERE conrelid=relations.oid AND contype='f'), (SELECT count(*) FROM pg_index,relations WHERE indrelid=relations.oid), (SELECT count(*) FROM pg_class AS relation JOIN relations ON relation.oid=relations.oid CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl), (SELECT count(*) FROM pg_proc,routines WHERE pg_proc.oid=routines.oid), (SELECT count(*) FROM pg_proc JOIN routines ON pg_proc.oid=routines.oid CROSS JOIN LATERAL aclexplode(COALESCE(pg_proc.proacl,acldefault('f',pg_proc.proowner))) AS acl))`,
+		`SELECT format('v10-routine:%s:%s:%s:%s:%s:%s', proc.oid::regprocedure::text, md5(btrim(proc.prosrc)), language.lanname, proc.provolatile, proc.prosecdef, COALESCE(array_to_string(proc.proconfig,','),'')) FROM pg_proc AS proc JOIN pg_language AS language ON language.oid=proc.prolang WHERE proc.oid = ANY(ARRAY[to_regprocedure('attachment.reserve_upload(uuid,uuid,uuid,bytea,bigint,text,text,text,interval)'),to_regprocedure('attachment.claim_upload(uuid,uuid,interval)'),to_regprocedure('attachment.publish_upload(uuid,uuid,bigint,uuid,text,bigint,text)'),to_regprocedure('attachment.begin_reap_upload(uuid)'),to_regprocedure('attachment.release_expired_upload(uuid,uuid)'),to_regprocedure('attachment.mark_corrupt(uuid)'),to_regprocedure('attachment.reconcile_candidates(text,timestamp with time zone,uuid,integer)'),to_regprocedure('attachment.project_has_records(uuid,uuid)')]) ORDER BY proc.oid::regprocedure::text`,
+		`SELECT format('v10-critical:%s:%s:%s', conrelid::regclass::text, conname, pg_get_expr(conbin,conrelid)) FROM pg_constraint WHERE conrelid=to_regclass('attachment.uploads') AND conname IN ('uploads_size_bytes_check','uploads_state_check') ORDER BY conname`,
+		`SELECT format('v10-index:%s:%s:%s:%s:%s', indexrelid::regclass::text, indrelid::regclass::text, indkey::text, indisvalid, indisready) FROM pg_index WHERE indexrelid IN (to_regclass('attachment.uploads_project_state'),to_regclass('attachment.uploads_reconcile_order')) ORDER BY indexrelid::regclass::text`,
 	}
 	var diagnostic strings.Builder
 	for _, query := range queries {

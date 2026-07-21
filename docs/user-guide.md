@@ -105,6 +105,12 @@ downloaded. Partial uploads are never downloadable, and filesystem/database
 skew is reconciled explicitly. Trusted-relay release gates will be added with
 its implementation; the preserved v2/v3 gates cannot authorize production.
 
+The current schema-v10 implementation is intentionally dark. It proves bounded
+reservation, private durable publication, completion reauthorization, quota,
+backup-manifest, and crash-reconciliation behavior, but it mounts no production
+upload or download route and creates no recipient access. Passing those tests
+does not make the private blob directory a supported user interface.
+
 Until then, v3 remains only a separately enabled controlled validation surface.
 Use the established mailbox and Telegram workflows for text-only
 coordination and keep files in an approved storage system. The adapter may use

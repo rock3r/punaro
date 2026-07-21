@@ -33,6 +33,23 @@ future artifact release must create a completed record from the
 [`release-evidence template`](release-evidence/README.md) before any box is
 checked.
 
+## Trusted-relay attachments (dark foundation; closed)
+
+- [ ] Mount authenticated bounded reservation and upload routes only after the
+      schema-v10 authority, exact stream, completion reauthorization, quota,
+      idempotency, and crash matrix have independent review evidence.
+- [ ] Implement recipient snapshots and authenticated bounded download without
+      public URLs, cross-scope existence oracles, or display-name paths.
+- [ ] Implement tombstone-first delete and bounded GC across the backup/restore
+      fence, including disk-pressure and restore-skew drills.
+- [ ] Implement native sender recovery, digest verification, and atomic
+      no-replace finalization beneath a configured safe download root.
+- [ ] Complete adversarial authorization, filesystem, quota-race, backup,
+      restore, load, and operations review against the final release candidate.
+
+Schema v10 is not release evidence: it deliberately exposes no trusted-relay
+HTTP route, no recipient grant, no download, and no deletion operation.
+
 ## Attachment v2 (superseded; closed)
 
 - [ ] Implement the versioned RFC's canonical CBOR maps, algorithm identifiers,

@@ -70,6 +70,21 @@ implementation it replaces where parity is required. Transactions stay inside
 one store when possible; cross-domain atomic operations are explicit service
 methods whose interface documents the shared transaction boundary.
 
+Schema version 10 implements only the dark trusted-attachment reservation and
+publication half of this boundary. The application role cannot read or mutate
+its lifecycle and quota tables directly. Narrow security-definer routines bind
+reservation idempotency, current `attachment.upload` authority, timeline,
+global-project-principal quota order, claim generation/token, and conditional
+READY publication. READY remains unshared: this version defines no recipient,
+download, share, or delete authority. Blob storage uses only server-derived
+UUID paths under verified `0700` directories and `0600` regular files; an
+existing final is adopted only after exact size and digest verification and is
+never replaced. Claim generations have distinct stage names. Reconciliation
+uses a database `REAPING` state to fence publication before removing all hidden
+bytes, then releases quota; it withdraws missing or changed READY bytes from the
+backup manifest as corrupt. Active records fence project
+merge until a later lifecycle defines transactional merge behavior.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds

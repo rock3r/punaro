@@ -570,7 +570,18 @@ cutover and do not silently change current SQLite routing.
 Migration 4 adds project identities, aliases, generation-bound merge previews,
 and bounded reconciliation records. Migration 5 adds the backup GC-fence,
 READY-blob manifest, restore-history, and timeline-rotation substrate. It does
-not change relay authority.
+not change relay authority. Migration 10 adds dark trusted-attachment
+reservation, quota, claim, READY publication, and reconciliation state. It
+does not mount an attachment route and is not authorization to expose the blob
+volume. The private blob root is `$PUNARO_DATA_DIR/blobs`; it and its `staging`,
+`ready`, and cross-process `locks` children must remain private, with staging
+and ready on one filesystem, owned by the daemon account, and mode `0700`.
+Blob and lock files are mode `0600`. Backup copies only database-READY
+manifest entries; staging files, filesystem-only orphan finals, and known
+`CORRUPT` artifacts are excluded.
+The later route-mounting milestone must run the bounded reconciler after restore
+and before accepting uploads so abandoned-timeline reservations are removed
+before their quota is released; schema v10 exposes no operator upload command.
 
 ### Operator wrapper and device ingress
 
