@@ -1668,6 +1668,9 @@ func testV5UpdateBridgeIntegration(ctx context.Context, t *testing.T, ownerDB *s
 	if err := v10App.Close(); err != nil {
 		t.Fatalf("close compatible v10 application: %v", err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE machine_id='v10-compatible-machine'`); err != nil {
+		t.Fatalf("remove compatible v10 endpoint fixture: %v", err)
+	}
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
