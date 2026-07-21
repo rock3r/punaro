@@ -79,7 +79,9 @@ func (service *Service) Upload(ctx context.Context, principalID, artifactID stri
 		return postgres.AttachmentArtifact{}, errors.New("trusted attachment READY result does not match durable blob")
 	}
 	if err := service.store.RemoveStages(claim.ArtifactID); err != nil {
-		return postgres.AttachmentArtifact{}, errors.New("trusted attachment READY staging cleanup failed")
+		// READY is already committed and durable. Reconciliation retries stage
+		// retirement; callers must still receive the authoritative artifact.
+		return artifact, nil
 	}
 	return artifact, nil
 }

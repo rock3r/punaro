@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +29,7 @@ type fakeRepository struct {
 	beginCalls        int
 	releaseTokens     []string
 	publishMakesReady bool
+	publishHook       func()
 }
 
 func (repository *fakeRepository) ClaimAttachmentUpload(context.Context, string, string, time.Duration) (postgres.AttachmentClaim, error) {
@@ -43,6 +46,9 @@ func (repository *fakeRepository) PublishAttachment(_ context.Context, _ postgre
 	}
 	if repository.publishMakesReady {
 		repository.beginAllowed = false
+	}
+	if repository.publishHook != nil {
+		repository.publishHook()
 	}
 	return repository.publishResult, nil
 }
@@ -100,6 +106,38 @@ func TestServiceRetriesAmbiguousReadyCommitWithExactClaim(t *testing.T) {
 	got, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body))
 	if err != nil || got != want || repository.publishCalls != 2 {
 		t.Fatalf("got=%#v calls=%d err=%v", got, repository.publishCalls, err)
+	}
+}
+
+func TestServiceReturnsReadyArtifactWhenStageCleanupIsDeferred(t *testing.T) {
+	body := []byte("trusted body")
+	digest := sha256.Sum256(body)
+	claim := postgres.AttachmentClaim{ArtifactID: testArtifactID, PrincipalID: "11111111-1111-4111-8111-111111111111", AttemptGeneration: 2, ClaimToken: "22222222-2222-4222-8222-222222222222", SizeBytes: int64(len(body)), SHA256: digest}
+	want := postgres.AttachmentArtifact{ArtifactID: testArtifactID, StoragePath: "ready/" + testArtifactID + ".blob", SizeBytes: int64(len(body)), SHA256: digest, State: postgres.AttachmentReady}
+	repository := &fakeRepository{claim: claim, publishResult: want}
+	service := newTestService(t, repository)
+	unsafeStage := filepath.Join(service.store.stagingDir, claim.ArtifactID, "unexpected")
+	repository.publishHook = func() {
+		if err := os.WriteFile(unsafeStage, []byte("defer cleanup"), 0o600); err != nil {
+			t.Errorf("create deferred-cleanup fixture: %v", err)
+		}
+	}
+	got, err := service.Upload(context.Background(), claim.PrincipalID, claim.ArtifactID, time.Minute, bytes.NewReader(body))
+	if err != nil || got != want {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+	if _, err := os.Stat(unsafeStage); err != nil {
+		t.Fatalf("post-commit cleanup was not deferred: %v", err)
+	}
+	if err := os.Remove(unsafeStage); err != nil {
+		t.Fatal(err)
+	}
+	repository.candidates = []postgres.AttachmentReconcileCandidate{{ArtifactID: claim.ArtifactID, State: postgres.AttachmentReady, StoragePath: want.StoragePath, SizeBytes: want.SizeBytes, SHA256: want.SHA256}}
+	if _, err := service.ReconcileBatch(context.Background(), postgres.AttachmentReconcileCursor{}, 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(unsafeStage)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reconciliation did not retire deferred stages: %v", err)
 	}
 }
 
