@@ -228,7 +228,13 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 		return errors.New("active mail cutover cannot be aborted")
 	}
 	if phase != MailCutoverAborted {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM relay.mail_cutover_staging WHERE epoch_id=$1; DELETE FROM relay.mail_cutover_checkpoints WHERE epoch_id=$1; UPDATE relay.mail_cutover_epochs SET phase='aborted',updated_at=statement_timestamp(),verified_at=NULL,aborted_at=statement_timestamp() WHERE epoch_id=$1`, epochID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM relay.mail_cutover_staging WHERE epoch_id=$1`, epochID); err != nil {
+			return errors.New("mail cutover cannot be aborted")
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM relay.mail_cutover_checkpoints WHERE epoch_id=$1`, epochID); err != nil {
+			return errors.New("mail cutover cannot be aborted")
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE relay.mail_cutover_epochs SET phase='aborted',updated_at=statement_timestamp(),verified_at=NULL,aborted_at=statement_timestamp() WHERE epoch_id=$1`, epochID); err != nil {
 			return errors.New("mail cutover cannot be aborted")
 		}
 	}
