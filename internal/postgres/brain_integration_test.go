@@ -1128,8 +1128,8 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	}
 	var metadataLeaked bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT
-EXISTS (SELECT 1 FROM audit.events WHERE project_id=$1 AND to_jsonb(audit.events)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
-OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE to_jsonb(relay.idempotency_records)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
+EXISTS (SELECT 1 FROM audit.events AS event WHERE event.project_id=$1 AND to_jsonb(event)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
+OR EXISTS (SELECT 1 FROM relay.idempotency_records AS idempotency WHERE to_jsonb(idempotency)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
 OR EXISTS (SELECT 1 FROM brain.memory_changes AS change JOIN brain.scopes AS scope ON scope.id=change.scope_id WHERE scope.project_id=$1 AND to_jsonb(change)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
 OR EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine JOIN brain.memory_items AS item ON item.id=quarantine.item_id JOIN brain.scopes AS scope ON scope.id=item.scope_id WHERE scope.project_id=$1 AND to_jsonb(quarantine)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))`, projectID).Scan(&metadataLeaked); err != nil || metadataLeaked {
 		t.Fatalf("quarantine metadata leaked content=%v err=%v", metadataLeaked, err)
