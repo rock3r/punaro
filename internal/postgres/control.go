@@ -178,31 +178,33 @@ type AuditAction string
 
 // Supported content-free audit actions.
 const (
-	AuditPrincipalCreate       AuditAction = "principal.create"
-	AuditProjectCreate         AuditAction = "project.create"
-	AuditGrantCreate           AuditAction = "grant.create"
-	AuditGrantDelete           AuditAction = "grant.delete"
-	AuditJobEnqueue            AuditAction = "job.enqueue"
-	AuditJobComplete           AuditAction = "job.complete"
-	AuditJobRetry              AuditAction = "job.retry"
-	AuditJobFail               AuditAction = "job.fail"
-	AuditOwnerBootstrap        AuditAction = "owner.bootstrap"
-	AuditEnrollmentCreate      AuditAction = "enrollment.create"
-	AuditEnrollmentRedeem      AuditAction = "enrollment.redeem"
-	AuditCredentialRotate      AuditAction = "credential.rotate" // #nosec G101 -- content-free audit action, not a credential.
-	AuditCredentialRevoke      AuditAction = "credential.revoke" // #nosec G101 -- content-free audit action, not a credential.
-	AuditLegacyRegister        AuditAction = "legacy.register"
-	AuditLegacyExchange        AuditAction = "legacy.exchange"
-	AuditLegacyRetire          AuditAction = "legacy.retire"
-	AuditLegacyDisable         AuditAction = "legacy.disable"
-	AuditProjectIdentityAttach AuditAction = "project.identity.attach"
-	AuditProjectMergePreview   AuditAction = "project.merge.preview"
-	AuditProjectMerge          AuditAction = "project.merge"
-	AuditMemoryCreate          AuditAction = "memory.create"
-	AuditMemoryUpdate          AuditAction = "memory.update"
-	AuditMemoryArchive         AuditAction = "memory.archive"
-	AuditMemoryRestore         AuditAction = "memory.restore"
-	AuditMemoryDelete          AuditAction = "memory.delete"
+	AuditPrincipalCreate             AuditAction = "principal.create"
+	AuditProjectCreate               AuditAction = "project.create"
+	AuditGrantCreate                 AuditAction = "grant.create"
+	AuditGrantDelete                 AuditAction = "grant.delete"
+	AuditJobEnqueue                  AuditAction = "job.enqueue"
+	AuditJobComplete                 AuditAction = "job.complete"
+	AuditJobRetry                    AuditAction = "job.retry"
+	AuditJobFail                     AuditAction = "job.fail"
+	AuditOwnerBootstrap              AuditAction = "owner.bootstrap"
+	AuditEnrollmentCreate            AuditAction = "enrollment.create"
+	AuditEnrollmentRedeem            AuditAction = "enrollment.redeem"
+	AuditCredentialRotate            AuditAction = "credential.rotate" // #nosec G101 -- content-free audit action, not a credential.
+	AuditCredentialRevoke            AuditAction = "credential.revoke" // #nosec G101 -- content-free audit action, not a credential.
+	AuditLegacyRegister              AuditAction = "legacy.register"
+	AuditLegacyExchange              AuditAction = "legacy.exchange"
+	AuditLegacyRetire                AuditAction = "legacy.retire"
+	AuditLegacyDisable               AuditAction = "legacy.disable"
+	AuditProjectIdentityAttach       AuditAction = "project.identity.attach"
+	AuditProjectMergePreview         AuditAction = "project.merge.preview"
+	AuditProjectMerge                AuditAction = "project.merge"
+	AuditMemoryCreate                AuditAction = "memory.create"
+	AuditMemoryUpdate                AuditAction = "memory.update"
+	AuditMemoryArchive               AuditAction = "memory.archive"
+	AuditMemoryRestore               AuditAction = "memory.restore"
+	AuditMemoryDelete                AuditAction = "memory.delete"
+	AuditMemorySecretExceptionCreate AuditAction = "memory.secret_exception.create"
+	AuditMemorySecretExceptionRevoke AuditAction = "memory.secret_exception.revoke"
 )
 
 // AuditOutcome is a closed content-free result class.
@@ -232,7 +234,7 @@ const (
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.

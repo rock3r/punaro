@@ -7,7 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/rock3r/punaro/internal/secretguard"
 )
 
 func testCanonicalBrainSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -159,6 +163,38 @@ AS $function$ BEGIN RETURN; END $function$`); err != nil {
 	}
 }
 
+func testSecretGuardSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	for _, drift := range []struct {
+		name, apply, restore string
+	}{
+		{"guard state owner", `ALTER TABLE brain.secret_guard_state OWNER TO punaro_app`, `ALTER TABLE brain.secret_guard_state OWNER TO punaro_owner; REVOKE ALL ON brain.secret_guard_state FROM punaro_app; GRANT SELECT ON brain.secret_guard_state TO punaro_app`},
+		{"rule digest", `UPDATE brain.secret_guard_state SET rule_digest=decode(repeat('00',32),'hex') WHERE singleton`, `UPDATE brain.secret_guard_state SET rule_digest=decode('39fb102e3a58faf1e5b7d0045caed1c2110da2f622102c088aeef16f775dfa22','hex') WHERE singleton`},
+		{"extra delete", `GRANT DELETE ON brain.secret_exceptions TO punaro_app`, `REVOKE DELETE ON brain.secret_exceptions FROM punaro_app`},
+		{"extra column update", `GRANT UPDATE (rule_id) ON brain.secret_exceptions TO punaro_app`, `REVOKE UPDATE (rule_id) ON brain.secret_exceptions FROM punaro_app`},
+		{"public select", `GRANT SELECT ON brain.secret_exceptions TO PUBLIC`, `REVOKE SELECT ON brain.secret_exceptions FROM PUBLIC`},
+		{"grant option", `GRANT SELECT ON brain.secret_guard_state TO punaro_app WITH GRANT OPTION`, `REVOKE GRANT OPTION FOR SELECT ON brain.secret_guard_state FROM punaro_app`},
+		{"disabled fence", `ALTER TABLE brain.secret_exceptions DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.secret_exceptions ENABLE TRIGGER application_mutation_fence`},
+		{"row security", `ALTER TABLE brain.secret_exceptions ENABLE ROW LEVEL SECURITY`, `ALTER TABLE brain.secret_exceptions DISABLE ROW LEVEL SECURITY`},
+		{"project FK update action", `ALTER TABLE brain.secret_exceptions DROP CONSTRAINT secret_exceptions_project_id_fkey; ALTER TABLE brain.secret_exceptions ADD CONSTRAINT secret_exceptions_project_id_fkey FOREIGN KEY (project_id) REFERENCES relay.projects(id) ON UPDATE CASCADE`, `ALTER TABLE brain.secret_exceptions DROP CONSTRAINT secret_exceptions_project_id_fkey; ALTER TABLE brain.secret_exceptions ADD CONSTRAINT secret_exceptions_project_id_fkey FOREIGN KEY (project_id) REFERENCES relay.projects(id)`},
+	} {
+		t.Run(drift.name, func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err == nil {
+				t.Fatal("readiness accepted secret-guard drift")
+			}
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatalf("restore secret-guard drift: %v", err)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover: %v", err)
+			}
+		})
+	}
+}
+
 func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
 	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "memory actor")
@@ -191,10 +227,12 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 		{actor.ID, projectID, CapabilityMemoryRead},
 		{actor.ID, projectID, CapabilityMemoryWrite},
 		{actor.ID, projectID, CapabilityMemoryPurge},
+		{actor.ID, projectID, CapabilityMemoryAdminister},
 		{reader.ID, projectID, CapabilityMemoryRead},
 		{reader.ID, projectID, CapabilityMemoryWrite},
 		{actor.ID, otherProjectID, CapabilityMemoryRead},
 		{actor.ID, otherProjectID, CapabilityMemoryWrite},
+		{actor.ID, otherProjectID, CapabilityMemoryAdminister},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, grant.project, grant.capability); err != nil {
 			t.Fatal(err)
@@ -210,6 +248,213 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	start, err := app.InstallationState(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	secretDocument := json.RawMessage(`{"token":"resolved-value-123"}`)
+	secretCreate := MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID,
+		IdempotencyKey: "15151515-1515-4515-8515-151515151501",
+		Kind:           "preference", Trust: "curated", Document: secretDocument,
+	}
+	beforeSecretRejection := readSecretGuardEffects(ctx, t, ownerDB)
+	_, err = app.CreateMemory(ctx, secretCreate)
+	var rejection MemorySecretRejection
+	if !errors.As(err, &rejection) || rejection.Finding.RuleID != secretguard.RuleSensitiveField || rejection.Finding.FieldPath != "/token" || strings.Contains(err.Error(), "resolved-value-123") {
+		t.Fatalf("secret create rejection=%#v err=%v", rejection, err)
+	}
+	sensitiveFinding := rejection.Finding
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("rejected secret create effects before=%#v after=%#v", beforeSecretRejection, after)
+	}
+	otherProjectException, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: otherProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151513",
+		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
+	})
+	if err != nil || !otherProjectException.Active {
+		t.Fatalf("approve other-project exception: %v", err)
+	}
+	var exceptionOnlyProjectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects (display_name,created_by) VALUES ('exception-only brain project',$1) RETURNING id::text`, actor.ID).Scan(&exceptionOnlyProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, exceptionOnlyProjectID, CapabilityMemoryAdminister); err != nil {
+		t.Fatal(err)
+	}
+	retainedException, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: exceptionOnlyProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151517",
+		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
+	})
+	if err != nil || !retainedException.Active {
+		t.Fatalf("approve exception-only project exception=%#v err=%v", retainedException, err)
+	}
+	var exceptionOnlyHasScope bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.scopes WHERE project_id=$1)`, exceptionOnlyProjectID).Scan(&exceptionOnlyHasScope); err != nil || exceptionOnlyHasScope {
+		t.Fatalf("exception-only project scope=%v err=%v", exceptionOnlyHasScope, err)
+	}
+	assertExceptionMergeFence := func(state string) {
+		t.Helper()
+		mergeTx, beginErr := beginMutation(ctx, app.db)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer func() { _ = mergeTx.Rollback() }()
+		if _, _, _, _, _, _, mergeErr := projectMergeCounts(ctx, mergeTx, actor.ID, exceptionOnlyProjectID, projectID); !errors.Is(mergeErr, ErrProjectMergeBrainState) {
+			t.Fatalf("%s exception-only merge fence error=%v", state, mergeErr)
+		}
+	}
+	assertExceptionMergeFence("active")
+	retainedException, err = app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
+		PrincipalID: actor.ID, ProjectID: exceptionOnlyProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151518", ExceptionID: retainedException.ExceptionID,
+	})
+	if err != nil || retainedException.Active {
+		t.Fatalf("revoke exception-only project exception=%#v err=%v", retainedException, err)
+	}
+	assertExceptionMergeFence("revoked")
+	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151514"
+	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
+	if _, err := app.CreateMemory(ctx, secretCreate); !errors.As(err, &rejection) {
+		t.Fatalf("other-project exception allowed secret: %v", err)
+	}
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("other-project rejected effects before=%#v after=%#v", beforeSecretRejection, after)
+	}
+	wrongPath := sensitiveFinding
+	wrongPath.FieldPath = "/other"
+	if _, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "15151515-1515-4515-8515-151515151502",
+		RuleID: wrongPath.RuleID, FieldPath: wrongPath.FieldPath, RuleVersion: wrongPath.RuleVersion, Fingerprint: wrongPath.Fingerprint,
+	}); err != nil {
+		t.Fatalf("approve wrong-path exception: %v", err)
+	}
+	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151503"
+	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
+	if _, err := app.CreateMemory(ctx, secretCreate); !errors.As(err, &rejection) {
+		t.Fatalf("wrong-path exception allowed secret: %v", err)
+	}
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("wrong-path rejected effects before=%#v after=%#v", beforeSecretRejection, after)
+	}
+	if _, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: outsider.ID, ProjectID: projectID, IdempotencyKey: "15151515-1515-4515-8515-151515151507",
+		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized exception approval error=%v", err)
+	}
+	raceFindings, err := secretguard.ScanDocument([]byte(`{"password":"concurrent-value"}`))
+	if err != nil || len(raceFindings) != 1 {
+		t.Fatalf("concurrent exception finding=%#v err=%v", raceFindings, err)
+	}
+	type exceptionResult struct {
+		result MemorySecretExceptionResult
+		err    error
+	}
+	exceptionResults := make(chan exceptionResult, 2)
+	for _, key := range []string{"15151515-1515-4515-8515-151515151509", "15151515-1515-4515-8515-151515151510"} {
+		go func() {
+			result, approveErr := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+				PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: key,
+				RuleID: raceFindings[0].RuleID, FieldPath: raceFindings[0].FieldPath, RuleVersion: raceFindings[0].RuleVersion, Fingerprint: raceFindings[0].Fingerprint,
+			})
+			exceptionResults <- exceptionResult{result, approveErr}
+		}()
+	}
+	firstException, secondException := <-exceptionResults, <-exceptionResults
+	if firstException.err != nil || secondException.err != nil || firstException.result != secondException.result || !firstException.result.Active {
+		t.Fatalf("concurrent exception approvals=%#v/%#v", firstException, secondException)
+	}
+	multiDocument := json.RawMessage(`{"value":"-----BEGIN PRIVATE KEY-----\nmaterial\nghp_abcdefghijklmnopqrstuvwxyzABCDEFGHIJ"}`)
+	multiFindings, err := secretguard.ScanDocument(multiDocument)
+	if err != nil || len(multiFindings) != 2 {
+		t.Fatalf("multi-rule finding=%#v err=%v", multiFindings, err)
+	}
+	if _, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "15151515-1515-4515-8515-151515151511",
+		RuleID: multiFindings[0].RuleID, FieldPath: multiFindings[0].FieldPath, RuleVersion: multiFindings[0].RuleVersion, Fingerprint: multiFindings[0].Fingerprint,
+	}); err != nil {
+		t.Fatalf("approve first multi-rule finding: %v", err)
+	}
+	multiCreate := secretCreate
+	multiCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151512"
+	multiCreate.Document = multiDocument
+	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
+	if _, err := app.CreateMemory(ctx, multiCreate); !errors.As(err, &rejection) || rejection.Finding.RuleID != secretguard.RuleBearerToken {
+		t.Fatalf("excepted first rule hid second finding: rejection=%#v err=%v", rejection, err)
+	}
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("multi-rule rejected effects before=%#v after=%#v", beforeSecretRejection, after)
+	}
+	exception, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "15151515-1515-4515-8515-151515151504",
+		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
+	})
+	if err != nil || !exception.Active {
+		t.Fatalf("approve exact exception=%#v err=%v", exception, err)
+	}
+	otherProjectCreate := secretCreate
+	otherProjectCreate.ProjectID = otherProjectID
+	otherProjectCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151505"
+	if _, err := app.CreateMemory(ctx, otherProjectCreate); err != nil {
+		t.Fatalf("exact exception did not allow create: %v", err)
+	}
+	guardTx, err := app.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guardMemoryDocument(ctx, guardTx, projectID, secretDocument); err != nil {
+		_ = guardTx.Rollback()
+		t.Fatalf("lock exact exception for writer transaction: %v", err)
+	}
+	revokeDone := make(chan exceptionResult, 1)
+	go func() {
+		result, revokeErr := app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "15151515-1515-4515-8515-151515151506", ExceptionID: exception.ExceptionID,
+		})
+		revokeDone <- exceptionResult{result: result, err: revokeErr}
+	}()
+	waitDeadline := time.Now().Add(2 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT revoked_at IS NULL FROM brain.secret_exceptions%FOR UPDATE')`).Scan(&waiting); err != nil {
+			_ = guardTx.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case result := <-revokeDone:
+			_ = guardTx.Rollback()
+			t.Fatalf("revocation escaped the in-flight writer exception lock: %#v", result)
+		default:
+		}
+		if time.Now().After(waitDeadline) {
+			_ = guardTx.Rollback()
+			t.Fatal("revocation did not wait for the in-flight writer exception lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := guardTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var revoked MemorySecretExceptionResult
+	select {
+	case result := <-revokeDone:
+		revoked, err = result.result, result.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("revocation did not finish after the writer transaction committed")
+	}
+	if err != nil || revoked.Active || revoked.ExceptionID != exception.ExceptionID {
+		t.Fatalf("revoke exception=%#v err=%v", revoked, err)
+	}
+	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151515"
+	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
+	if _, err := app.CreateMemory(ctx, secretCreate); !errors.As(err, &rejection) {
+		t.Fatalf("revoked exception allowed later publication: %v", err)
+	}
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("post-revoke rejection effects before=%#v after=%#v", beforeSecretRejection, after)
 	}
 	create := MemoryCreateRequest{
 		PrincipalID: actor.ID, ProjectID: projectID,
@@ -238,6 +483,18 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	created := first.result
 	if created.Revision != 1 || created.State != MemoryActive || created.ETag == "" {
 		t.Fatalf("created memory=%#v", created)
+	}
+	secretUpdate := MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "15151515-1515-4515-8515-151515151508", ExpectedETag: created.ETag,
+		LogicalKey: create.LogicalKey, Kind: create.Kind, Trust: create.Trust, Document: secretDocument,
+	}
+	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
+	if _, err := app.UpdateMemory(ctx, secretUpdate); !errors.As(err, &rejection) {
+		t.Fatalf("secret update rejection=%v", err)
+	}
+	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
+		t.Fatalf("rejected secret update effects before=%#v after=%#v", beforeSecretRejection, after)
 	}
 	if retry, err := app.CreateMemory(ctx, create); err != nil || retry != created {
 		t.Fatalf("exact create retry=%#v err=%v", retry, err)
@@ -675,4 +932,31 @@ func assertBrainEffects(ctx context.Context, t *testing.T, ownerDB *sql.DB, item
 	if got := readBrainEffects(ctx, t, ownerDB, itemID, idempotencyKey, projectID); got != want {
 		t.Fatalf("memory failure changed state: got=%#v want=%#v", got, want)
 	}
+}
+
+type secretGuardEffects struct {
+	items, revisions, changes, audits, idempotency, jobs, scopes int
+	changeSequence, contentGeneration                            int64
+}
+
+func readSecretGuardEffects(ctx context.Context, t *testing.T, ownerDB *sql.DB) secretGuardEffects {
+	t.Helper()
+	var effects secretGuardEffects
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+  (SELECT count(*) FROM brain.memory_items),
+  (SELECT count(*) FROM brain.memory_revisions),
+  (SELECT count(*) FROM brain.memory_changes),
+  (SELECT count(*) FROM audit.events),
+  (SELECT count(*) FROM relay.idempotency_records),
+  (SELECT count(*) FROM jobs.outbox),
+  (SELECT count(*) FROM brain.scopes),
+  (SELECT change_sequence FROM jobs.server_state WHERE singleton),
+  (SELECT sum(content_generation) FROM relay.projects)`).Scan(
+		&effects.items, &effects.revisions, &effects.changes, &effects.audits,
+		&effects.idempotency, &effects.jobs, &effects.scopes,
+		&effects.changeSequence, &effects.contentGeneration,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return effects
 }
