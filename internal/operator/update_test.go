@@ -94,6 +94,35 @@ func TestStageUpdateIsPrivateDurableAndDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestStageUpdateAcceptsAndModernizesExactPreMemoryAPIConfiguration(t *testing.T) {
+	request := installedUpdateRequest(t)
+	installation, err := Load(request.Directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EnvFile(request.Directory), []byte(preMemoryAPIDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(request.Directory), []byte(preMemoryAPIComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); len(failures) != 0 {
+		t.Fatalf("pre-memory-API update source rejected: %v", failures)
+	}
+	published, err := PublishUpdate(request)
+	if err != nil || published.MemoryAPIEnabled || published.Image != request.TargetImage {
+		t.Fatalf("published=%#v err=%v", published, err)
+	}
+	environment, err := os.ReadFile(EnvFile(request.Directory))
+	if err != nil || !strings.Contains(string(environment), "PUNARO_MEMORY_API_ENABLED=false\n") {
+		t.Fatalf("modernized environment=%q err=%v", environment, err)
+	}
+	override, err := os.ReadFile(OverrideFile(request.Directory))
+	if err != nil || string(override) != composeOverride() || len(CheckPaths(published)) != 0 {
+		t.Fatalf("modernized override=%q failures=%v err=%v", override, CheckPaths(published), err)
+	}
+}
+
 func TestResumeUpdateStageNeverCreatesMissingAuthority(t *testing.T) {
 	request := installedUpdateRequest(t)
 	if _, err := ResumeUpdateStage(request); !errors.Is(err, ErrUpdateStageNotFound) {

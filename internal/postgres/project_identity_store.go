@@ -62,9 +62,9 @@ type ProjectIdentityAttachment struct {
 
 // ProjectIdentityResolution returns only an identity visible to the caller.
 type ProjectIdentityResolution struct {
-	IdentityID string
-	ProjectID  string
-	Kind       ProjectIdentityKind
+	IdentityID string              `json:"identity_id"`
+	ProjectID  string              `json:"project_id"`
+	Kind       ProjectIdentityKind `json:"kind"`
 }
 
 // ProjectMergePreviewRequest identifies the local project and claimed locator.

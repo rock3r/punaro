@@ -32,10 +32,13 @@ func TestRunFailsClosedBeforeStartingAttachmentRuntime(t *testing.T) {
 
 func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
 	mux := http.NewServeMux()
+	memory := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusAccepted)
+	})
 	trusted := &trustedAttachmentRuntime{handler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusNoContent)
 	})}
-	registerProductionRoutes(mux, trusted, nil)
+	registerProductionRoutes(mux, memory, trusted, nil)
 	for _, path := range []string{"/v2/directory", "/v2/permits", "/v3/permits", "/v3/attachments/example"} {
 		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
@@ -49,6 +52,72 @@ func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("trusted attachment route status=%d", response.Code)
+	}
+	request = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/projects/resolve", nil)
+	response = httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("memory route status=%d", response.Code)
+	}
+}
+
+func TestBuildMemoryHandlerIsDarkByDefaultAndRequiresCompleteAuthority(t *testing.T) {
+	handler, err := buildMemoryHandler(config.Config{}, &refusingPlatformDatabase{})
+	if err != nil || handler != nil {
+		t.Fatalf("disabled handler=%v err=%v", handler, err)
+	}
+	_, err = buildMemoryHandler(config.Config{MemoryAPIEnabled: true, IngressMode: "internet", ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, &refusingPlatformDatabase{})
+	if err == nil || !strings.Contains(err.Error(), "memory database authority") {
+		t.Fatalf("enabled incomplete authority error=%v", err)
+	}
+}
+
+type unavailableMemoryDatabase struct {
+	deviceDatabase
+	readyCalled bool
+}
+
+func (*unavailableMemoryDatabase) Ready(context.Context) error { return nil }
+func (*unavailableMemoryDatabase) Close() error                { return nil }
+func (database *unavailableMemoryDatabase) CanonicalBrainRuntimeReady(context.Context) error {
+	database.readyCalled = true
+	return errors.New("schema 14 is unavailable")
+}
+func (*unavailableMemoryDatabase) ResolveProjectIdentity(context.Context, string, punaropostgres.ProjectIdentityKind, string) (punaropostgres.ProjectIdentityResolution, error) {
+	return punaropostgres.ProjectIdentityResolution{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) GetMemory(context.Context, string, string, string) (punaropostgres.MemoryItem, error) {
+	return punaropostgres.MemoryItem{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) GetMemoryProposal(context.Context, string, string, string) (punaropostgres.MemoryProposal, error) {
+	return punaropostgres.MemoryProposal{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) SearchMemory(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemorySearchPage, error) {
+	return punaropostgres.MemorySearchPage{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) BuildMemoryPromptBrief(context.Context, punaropostgres.MemoryPromptBriefRequest) (punaropostgres.MemoryPromptBrief, error) {
+	return punaropostgres.MemoryPromptBrief{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) FetchMemoryChanges(context.Context, punaropostgres.MemoryChangeRequest) (punaropostgres.MemoryChangePage, error) {
+	return punaropostgres.MemoryChangePage{}, errors.New("unused")
+}
+
+func TestBuildMemoryHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
+	database := &unavailableMemoryDatabase{}
+	_, err := buildMemoryHandler(config.Config{MemoryAPIEnabled: true, IngressMode: "internet", ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, database)
+	if err == nil || !database.readyCalled || !strings.Contains(err.Error(), "schema is unavailable") {
+		t.Fatalf("ready=%t error=%v", database.readyCalled, err)
+	}
+}
+
+func TestProductionRoutesKeepMemoryAPIDarkWhenHandlerIsAbsent(t *testing.T) {
+	mux := http.NewServeMux()
+	registerProductionRoutes(mux, nil, nil, nil)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/projects/resolve", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("dark memory route status=%d", response.Code)
 	}
 }
 

@@ -66,8 +66,16 @@ authority or truth. The response is fixed to versioned section budgets and a
 16,384-rune/64-KiB rendered ceiling, reports lexical-only semantic status, and
 binds future client caches to the same-snapshot installation, timeline, change,
 project-content, and project-ACL generations. It never returns bodies, source
-coordinates, or control-plane arguments. The first native memory client remains
-a later independently reviewed slice.
+coordinates, or control-plane arguments. The dark native read API is separately
+gated by `PUNARO_MEMORY_API_ENABLED`. It authenticates one device bearer under
+the existing ingress policy and exposes project resolution, full authorized
+get, proposal get, bounded search/brief, and timeline-aware change fetch on
+project-scoped v1 routes. The server binds the principal, uses strict bounded
+inputs and content-free failures, and keeps unauthorized resources
+indistinguishable from missing. An explicit null change cursor starts at the
+current installation/timeline origin; subsequent cursors fail on restore or
+future coordinates. Mutations and the native local client remain later
+independently reviewed slices.
 
 ## Goals
 

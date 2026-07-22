@@ -239,15 +239,22 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 			return Installation{}, errors.New("mail cutover recovery file is unavailable")
 		}
 		body, err := os.ReadFile(file.path) // #nosec G304 -- validated fixed generated path.
-		legacyOld := ""
-		if base.MailCutover == nil && base.RelayMachinesJSON == "" {
+		legacyOld, preMemoryAPIOld := "", ""
+		if !base.MemoryAPIEnabled {
+			if file.path == EnvFile(directory) {
+				preMemoryAPIOld = preMemoryAPIDaemonEnv(base)
+			} else {
+				preMemoryAPIOld = preMemoryAPIComposeOverride()
+			}
+		}
+		if !base.MemoryAPIEnabled && base.MailCutover == nil && base.RelayMachinesJSON == "" {
 			if file.path == EnvFile(directory) {
 				legacyOld = legacyDaemonEnv(base)
 			} else {
 				legacyOld = legacyComposeOverride()
 			}
 		}
-		if err != nil || string(body) != file.old && string(body) != file.intended && string(body) != legacyOld {
+		if err != nil || string(body) != file.old && string(body) != file.intended && string(body) != preMemoryAPIOld && string(body) != legacyOld {
 			return Installation{}, errors.New("mail cutover recovery file does not match either durable state")
 		}
 	}

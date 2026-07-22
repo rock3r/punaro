@@ -623,6 +623,28 @@ writes reopen. Keep the abandoned stack stopped. Raw `docker compose up`, raw
 `punarod`, and direct `punaro-migrate` invocation never clear or bypass a live
 fence.
 
+### Dark native memory read API
+
+M-17A adds an opt-in server read surface without enabling a native client or
+memory mutations. New installations persist the supported choice with
+`punaro init --memory-api`; without that flag the generated environment records
+`PUNARO_MEMORY_API_ENABLED=false`. The generated Compose override passes the
+persisted setting, so later `up`, update, resume, and restore operations do not
+depend on ambient shell state. Startup fails before binding if the enabled
+platform database does not provide the complete memory read authority. Existing
+installations remain dark until a later supported configuration command is
+delivered; do not hand-edit their generated environment or installation marker.
+
+The mounted v1 surface provides strict authenticated project resolution,
+authorized memory/proposal get, bounded lexical search and prompt brief, and a
+timeline-aware content-free change feed. Every response is `Cache-Control:
+no-store`; the server never accepts a principal ID from the caller. A first
+change request uses `"cursor": null`; clients must retain the returned
+installation/timeline/sequence cursor and discard it on the typed restore or
+future-cursor conflict. There is intentionally no offline writable brain,
+mutation route, CLI/MCP binary, semantic retrieval, or Compose Pi integration
+in this slice.
+
 ## Operations and incident response
 
 If a credential or machine is suspected compromised, stop the local service,

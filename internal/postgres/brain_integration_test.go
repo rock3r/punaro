@@ -1753,6 +1753,9 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects (display_name,created_by,merged_into,merged_at) VALUES ('retired brain project',$1,$2,statement_timestamp()) RETURNING id::text`, actor.ID, projectID).Scan(&retiredProjectID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2)`, retiredProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
 	for _, grant := range []struct {
 		principal  string
 		project    string
@@ -2065,6 +2068,13 @@ WHERE usename='punaro_app' AND wait_event_type='Lock'
 	if _, err := app.GetMemory(ctx, reader.ID, otherProjectID, created.ItemID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-project get error=%v", err)
 	}
+	aliasedItem, err := app.GetMemory(ctx, reader.ID, retiredProjectID, created.ItemID)
+	if err != nil || aliasedItem.ProjectID != projectID || aliasedItem.ItemID != created.ItemID {
+		t.Fatalf("permanent project alias get=%#v err=%v", aliasedItem, err)
+	}
+	if _, err := app.GetMemory(ctx, outsider.ID, retiredProjectID, created.ItemID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("project alias conferred authority: %v", err)
+	}
 	testMemorySecretQuarantine(ctx, t, app, ownerDB, actor.ID, reader.ID, outsider.ID)
 	for name, deniedCreate := range map[string]MemoryCreateRequest{
 		"unauthorized": {
@@ -2268,6 +2278,10 @@ SELECT id,scope_id,$2,$3,$4 FROM brain.memory_items WHERE id=$1`, created.ItemID
 		t.Fatalf("application role read memory tombstones directly: count=%d", appTombstoneCount)
 	}
 
+	initialPage, err := app.FetchMemoryChanges(ctx, MemoryChangeRequest{PrincipalID: reader.ID, ProjectID: projectID, Limit: 2})
+	if err != nil || len(initialPage.Changes) != 2 || initialPage.Cursor.InstallationID != start.InstallationID || initialPage.Cursor.TimelineID != start.TimelineID {
+		t.Fatalf("initial memory change page=%#v err=%v", initialPage, err)
+	}
 	page, err := app.FetchMemoryChanges(ctx, MemoryChangeRequest{PrincipalID: reader.ID, ProjectID: projectID, Cursor: start, Limit: 2})
 	if err != nil || len(page.Changes) != 2 || !page.More || page.Changes[0].Type != MemoryChangeCreate || page.Changes[1].Type != MemoryChangeUpdate {
 		t.Fatalf("first memory change page=%#v err=%v", page, err)

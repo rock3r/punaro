@@ -39,7 +39,7 @@ func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	protectedFile(t, ownerDSN)
 	protectedFile(t, appDSN)
 	options := RestoreOptions{
-		Source:       Installation{Version: 1, Image: testImage, OwnerPrincipalID: "11111111-1111-4111-8111-111111111111", OwnerName: "Primary operator", Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, HealthListenAddr: "127.0.0.1:8081", HealthURL: "http://127.0.0.1:8081"},
+		Source:       Installation{Version: 1, Image: testImage, OwnerPrincipalID: "11111111-1111-4111-8111-111111111111", OwnerName: "Primary operator", Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, HealthListenAddr: "127.0.0.1:8081", HealthURL: "http://127.0.0.1:8081", MemoryAPIEnabled: true},
 		Directory:    filepath.Join(root, "restored-installation"),
 		DataDir:      filepath.Join(root, "restored-data"),
 		BackupDir:    backupDir,
@@ -63,7 +63,7 @@ func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if loaded.OwnerPrincipalID != options.Source.OwnerPrincipalID || loaded.DataDir != options.DataDir || loaded.RuntimeUID == "" || loaded.RuntimeGID == "" {
+	if loaded.OwnerPrincipalID != options.Source.OwnerPrincipalID || loaded.DataDir != options.DataDir || loaded.RuntimeUID == "" || loaded.RuntimeGID == "" || !loaded.MemoryAPIEnabled {
 		t.Fatalf("unexpected restored installation: %#v", loaded)
 	}
 }
