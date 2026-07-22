@@ -9,6 +9,7 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
     SELECT to_regclass('brain.memory_items') AS items_oid,
            to_regclass('brain.memory_sources') AS sources_oid,
            to_regclass('brain.memory_edges') AS edges_oid,
+           to_regclass('brain.memory_sources_exact_source_key') AS source_exact_index_oid,
            to_regclass('brain.memory_sources_live_resource') AS source_index_oid,
            to_regclass('brain.memory_edges_target_revision') AS edge_index_oid,
            to_regprocedure('brain.authorize_evidence_source(uuid,text,uuid,uuid,bigint)') AS authorize_oid,
@@ -47,28 +48,27 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
     SELECT count(*)=2 AND bool_and(relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity
         AND NOT relation.relforcerowsecurity AND pg_get_userbyid(relation.relowner)='punaro_owner') AS exact
     FROM pg_class AS relation,objects WHERE relation.oid=ANY(ARRAY[sources_oid,edges_oid])
-), expected_relational_constraints(relation_name,constraint_name,constraint_type,column_keys,referenced_relation,referenced_keys,update_action,delete_action,match_type,nulls_not_distinct) AS (
+), expected_relational_constraints(relation_name,constraint_name,constraint_type,column_keys,referenced_relation,referenced_keys,update_action,delete_action,match_type) AS (
     VALUES
-      ('brain.memory_sources','memory_sources_pkey','p','{1}','','','','','',false),
-      ('brain.memory_sources','memory_sources_source_project_id_fkey','f','{7}','relay.projects','{1}','a','a','s',false),
-      ('brain.memory_sources','memory_sources_created_by_fkey','f','{11}','auth.principals','{1}','a','a','s',false),
-      ('brain.memory_sources','memory_sources_revision_fkey','f','{2,3}','brain.memory_revisions','{1,2}','a','c','s',false),
-      ('brain.memory_sources','memory_sources_item_revision_ordinal_key','u','{2,3,4}','','','','','',false),
-      ('brain.memory_sources','memory_sources_exact_source_key','u','{2,3,5,6,7,8,9,10}','','','','','',true),
-      ('brain.memory_edges','memory_edges_pkey','p','{1}','','','','','',false),
-      ('brain.memory_edges','memory_edges_created_by_fkey','f','{8}','auth.principals','{1}','a','a','s',false),
-      ('brain.memory_edges','memory_edges_from_revision_fkey','f','{2,3}','brain.memory_revisions','{1,2}','a','c','s',false),
-      ('brain.memory_edges','memory_edges_to_revision_fkey','f','{6,7}','brain.memory_revisions','{1,2}','a','c','s',false),
-      ('brain.memory_edges','memory_edges_exact_key','u','{2,3,5,6,7}','','','','','',false),
-      ('brain.memory_edges','memory_edges_item_revision_ordinal_key','u','{2,3,4}','','','','','',false)
+      ('brain.memory_sources','memory_sources_pkey','p','{1}','','','','',''),
+      ('brain.memory_sources','memory_sources_source_project_id_fkey','f','{7}','relay.projects','{1}','a','a','s'),
+      ('brain.memory_sources','memory_sources_created_by_fkey','f','{11}','auth.principals','{1}','a','a','s'),
+      ('brain.memory_sources','memory_sources_revision_fkey','f','{2,3}','brain.memory_revisions','{1,2}','a','c','s'),
+      ('brain.memory_sources','memory_sources_item_revision_ordinal_key','u','{2,3,4}','','','','',''),
+      ('brain.memory_sources','memory_sources_exact_source_key','u','{2,3,5,6,7,8,9,10}','','','','',''),
+      ('brain.memory_edges','memory_edges_pkey','p','{1}','','','','',''),
+      ('brain.memory_edges','memory_edges_created_by_fkey','f','{8}','auth.principals','{1}','a','a','s'),
+      ('brain.memory_edges','memory_edges_from_revision_fkey','f','{2,3}','brain.memory_revisions','{1,2}','a','c','s'),
+      ('brain.memory_edges','memory_edges_to_revision_fkey','f','{6,7}','brain.memory_revisions','{1,2}','a','c','s'),
+      ('brain.memory_edges','memory_edges_exact_key','u','{2,3,5,6,7}','','','','',''),
+      ('brain.memory_edges','memory_edges_item_revision_ordinal_key','u','{2,3,4}','','','','','')
 ), actual_relational_constraints AS (
     SELECT constraint_row.conrelid::regclass::text,constraint_row.conname,constraint_row.contype::text,constraint_row.conkey::text,
            CASE WHEN constraint_row.contype='f' THEN constraint_row.confrelid::regclass::text ELSE '' END,
            CASE WHEN constraint_row.contype='f' THEN constraint_row.confkey::text ELSE '' END,
            CASE WHEN constraint_row.contype='f' THEN constraint_row.confupdtype::text ELSE '' END,
            CASE WHEN constraint_row.contype='f' THEN constraint_row.confdeltype::text ELSE '' END,
-           CASE WHEN constraint_row.contype='f' THEN constraint_row.confmatchtype::text ELSE '' END,
-           constraint_row.connullsnotdistinct
+           CASE WHEN constraint_row.contype='f' THEN constraint_row.confmatchtype::text ELSE '' END
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=ANY(ARRAY[sources_oid,edges_oid]) AND constraint_row.contype IN ('p','u','f')
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
@@ -144,7 +144,8 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
     LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects WHERE routine.oid=ANY(ARRAY[authorize_oid,lock_oid])
 )
 SELECT items_oid IS NOT NULL AND sources_oid IS NOT NULL AND edges_oid IS NOT NULL
-   AND source_index_oid IS NOT NULL AND edge_index_oid IS NOT NULL AND authorize_oid IS NOT NULL AND lock_oid IS NOT NULL AND fence_oid IS NOT NULL
+   AND source_exact_index_oid IS NOT NULL AND source_index_oid IS NOT NULL AND edge_index_oid IS NOT NULL
+   AND authorize_oid IS NOT NULL AND lock_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact AND fence_safety.exact
    AND routine_safety.exact AND routine_acl.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
@@ -163,6 +164,8 @@ SELECT items_oid IS NOT NULL AND sources_oid IS NOT NULL AND edges_oid IS NOT NU
        AND pg_get_expr(conbin,conrelid)='(layer = ANY (ARRAY[''curated''::text, ''evidence''::text]))')
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=sources_oid AND conname='memory_sources_shape_check' AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=edges_oid AND conname='memory_edges_not_self_check' AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=source_exact_index_oid AND indrelid=sources_oid AND indisunique
+       AND indisvalid AND indisready AND indnullsnotdistinct AND indkey='2 3 5 6 7 8 9 10'::int2vector AND indexprs IS NULL AND indpred IS NULL)
    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=source_index_oid AND indrelid=sources_oid AND NOT indisunique
        AND indisvalid AND indisready AND indkey='7 6 8 9'::int2vector AND indexprs IS NULL AND pg_get_expr(indpred,indrelid)='(mode = ''live''::text)')
    AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=edge_index_oid AND indrelid=edges_oid AND NOT indisunique
