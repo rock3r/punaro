@@ -41,10 +41,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	command := args[0]
-	if !validFlags(command, args[1:]) {
-		usage(stderr)
-		return 2
-	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
@@ -60,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	kind := flags.String("kind", "", "project identity kind")
 	locator := flags.String("locator", "", "project identity locator")
 	cursorFile := flags.String("cursor-file", "", "optional absolute JSON cursor file")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *origin == "" || !filepath.IsAbs(*credentialFile) {
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !validFlags(command, args[1:], flags) || *origin == "" || !filepath.IsAbs(*credentialFile) {
 		return 2
 	}
 	if !validCommand(command, *project, *item, *proposal, *key, *etag, *input, *query, *kind, *locator, *cursorFile, *limit) {
@@ -98,7 +94,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 		result, err = remote.Changes(ctx, *project, cursor, *limit)
 	case "create", "propose":
 		var body json.RawMessage
-		body, err = readInput(*input, 1<<20)
+		limit := int64(1 << 20)
+		if command == "create" {
+			limit = 264 << 10
+		}
+		body, err = readInput(*input, limit)
 		if err != nil {
 			break
 		}
@@ -139,26 +139,51 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-func validFlags(command string, args []string) bool {
+func validFlags(command string, args []string, flags *flag.FlagSet) bool {
 	allowed := map[string]bool{"origin": true, "credential-file": true}
 	for _, name := range commandFlags(command) {
 		allowed[name] = true
 	}
-	seen := make(map[string]bool, len(args)/2)
-	for _, argument := range args {
-		if !strings.HasPrefix(argument, "-") {
-			continue
-		}
-		name := strings.TrimLeft(argument, "-")
-		if index := strings.IndexByte(name, '='); index >= 0 {
-			name = name[:index]
-		}
-		if name == "" || !allowed[name] || seen[name] {
-			return false
+	seen := make(map[string]bool)
+	valid := true
+	flags.Visit(func(parsed *flag.Flag) {
+		name := parsed.Name
+		if !allowed[name] || seen[name] {
+			valid = false
+			return
 		}
 		seen[name] = true
+	})
+	if !valid {
+		return false
+	}
+	duplicates := make(map[string]bool, len(seen))
+	for i := 0; i < len(args); i++ {
+		name, hasValue := flagName(args[i])
+		if name == "" {
+			continue
+		}
+		if duplicates[name] {
+			return false
+		}
+		duplicates[name] = true
+		if !hasValue {
+			i++
+		}
 	}
 	return true
+}
+
+func flagName(argument string) (string, bool) {
+	if !strings.HasPrefix(argument, "-") || argument == "-" || argument == "--" {
+		return "", false
+	}
+	name := strings.TrimLeft(argument, "-")
+	hasValue := false
+	if index := strings.IndexByte(name, '='); index >= 0 {
+		name, hasValue = name[:index], true
+	}
+	return name, hasValue
 }
 
 func commandFlags(command string) []string {

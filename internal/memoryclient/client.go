@@ -311,9 +311,6 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, heade
 	if response.StatusCode != wantStatus {
 		return Result{}, classifyResponse(response)
 	}
-	if response.StatusCode >= 300 && response.StatusCode < 400 {
-		return Result{}, &RequestError{StatusCode: response.StatusCode}
-	}
 	if !exactJSON(response.Header) || !hasNoStore(response.Header) {
 		return Result{}, errors.New("memory response headers are malformed")
 	}

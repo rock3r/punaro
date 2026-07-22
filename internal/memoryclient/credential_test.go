@@ -121,5 +121,12 @@ func secureTempDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	directory, err = filepath.EvalSymlinks(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !privateCredentialPath(filepath.Join(directory, "credential")) {
+		t.Fatal("temporary credential directory has unsafe ancestry")
+	}
 	return directory
 }

@@ -149,6 +149,49 @@ func TestRunRejectsIrrelevantAndDuplicateFlags(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsFlagLikeValuesWithEquals(t *testing.T) {
+	credential := filepath.Join(t.TempDir(), "credential")
+	previousLoader, previousFactory := loadCredential, newMemoryClient
+	t.Cleanup(func() { loadCredential, newMemoryClient = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClient = func(string, string) (client, error) { return fake, nil }
+
+	var stdout, stderr strings.Builder
+	args := []string{"search", "--origin", "https://punaro.test", "--credential-file", credential, "--project", cliProject, "--query=-starts-with-dash", "--limit", "5"}
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if fake.op != "search" || len(fake.args) != 3 || fake.args[1] != "-starts-with-dash" {
+		t.Fatalf("op=%q args=%v", fake.op, fake.args)
+	}
+}
+
+func TestRunBoundsCreateInputBelowProposalLimit(t *testing.T) {
+	directory := resolvedTempDir(t)
+	input := filepath.Join(directory, "input.json")
+	largeJSON := []byte(`{"value":"` + strings.Repeat("a", 264<<10) + `"}`)
+	if err := os.WriteFile(input, largeJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	credential := filepath.Join(directory, "credential")
+	previousLoader, previousFactory := loadCredential, newMemoryClient
+	t.Cleanup(func() { loadCredential, newMemoryClient = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClient = func(string, string) (client, error) { return fake, nil }
+
+	base := []string{"--origin", "https://punaro.test", "--credential-file", credential, "--project", cliProject, "--idempotency-key", cliKey, "--input", input}
+	var stdout, stderr strings.Builder
+	if code := run(append([]string{"create"}, base...), &stdout, &stderr); code != 1 || fake.op != "" || stderr.String() != "punaro-memory: request failed\n" {
+		t.Fatalf("create code=%d op=%q stderr=%q", code, fake.op, stderr.String())
+	}
+	stderr.Reset()
+	if code := run(append([]string{"propose"}, base...), &stdout, &stderr); code != 0 || fake.op != "propose" {
+		t.Fatalf("propose code=%d op=%q stderr=%q", code, fake.op, stderr.String())
+	}
+}
+
 func TestReadInputRejectsSymlinkAndOversize(t *testing.T) {
 	directory := resolvedTempDir(t)
 	target := filepath.Join(directory, "target.json")
