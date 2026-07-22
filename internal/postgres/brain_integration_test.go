@@ -327,7 +327,10 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal-only merge source',$1) RETURNING id::text`, actor.ID).Scan(&proposalOnlyProjectID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_identities(project_id,kind,normalized_locator,created_by) VALUES ($1,'operator_alias','proposal-only-merge-source',$2); INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($3,'project',$1,$4),($2,'project',$1,$5)`, proposalOnlyProjectID, actor.ID, reader.ID, CapabilityMemoryPropose, CapabilityMemoryAdminister); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_identities(project_id,kind,normalized_locator,created_by) VALUES ($1,'operator_alias','proposal-only-merge-source',$2)`, proposalOnlyProjectID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($2,'project',$1,$3),($4,'project',$1,$5)`, proposalOnlyProjectID, actor.ID, CapabilityMemoryAdminister, reader.ID, CapabilityMemoryPropose); err != nil {
 		t.Fatal(err)
 	}
 	proposalOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
@@ -359,7 +362,10 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 		t.Fatalf("rejected proposal-only scope permanently blocked project merge: %v", mergeErr)
 	}
 	_ = mergeTx.Rollback()
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2); UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, proposalOnlyProjectID, projectID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2)`, proposalOnlyProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, proposalOnlyProjectID, projectID); err != nil {
 		t.Fatal(err)
 	}
 	mergedHistory, err := app.GetMemoryProposal(ctx, actor.ID, proposalOnlyProjectID, proposalOnly.ProposalID)
