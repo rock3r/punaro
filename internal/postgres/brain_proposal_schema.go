@@ -103,7 +103,13 @@ WITH objects AS (
       ('brain.memory_proposal_evidence','memory_proposal_evidence_revision_check','(revision >= 1)'),
       ('brain.memory_proposal_results','memory_proposal_results_revision_check','(revision >= 1)')
 ), actual_checks AS (
-    SELECT constraint_row.conrelid::regclass::text,constraint_row.conname,pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
+    SELECT constraint_row.conrelid::regclass::text,constraint_row.conname,
+           CASE
+             WHEN constraint_row.conname='memory_proposal_steps_logical_key_check'
+              AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='((logical_key IS NULL) OR ((char_length(logical_key) >= 1) AND (char_length(logical_key) <= 128) AND (octet_length(logical_key) <= 512) AND (logical_key !~ ''[[:cntrl:]]''::text)))'
+             THEN '((logical_key IS NULL) OR (((char_length(logical_key) >= 1) AND (char_length(logical_key) <= 128)) AND (octet_length(logical_key) <= 512) AND (logical_key !~ ''[[:cntrl:]]''::text)))'
+             ELSE pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
+           END
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND constraint_row.contype='c'
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred

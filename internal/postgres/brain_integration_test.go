@@ -229,6 +229,18 @@ func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T,
 			}
 		})
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE brain.memory_proposal_steps DROP CONSTRAINT memory_proposal_steps_logical_key_check; ALTER TABLE brain.memory_proposal_steps ADD CONSTRAINT memory_proposal_steps_logical_key_check CHECK (logical_key IS NULL OR (char_length(logical_key) >= 1 AND char_length(logical_key) <= 128 AND octet_length(logical_key) <= 512 AND logical_key !~ '[[:cntrl:]]'))`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness rejected dump/restore-normalized proposal logical-key constraint: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE brain.memory_proposal_steps DROP CONSTRAINT memory_proposal_steps_logical_key_check; ALTER TABLE brain.memory_proposal_steps ADD CONSTRAINT memory_proposal_steps_logical_key_check CHECK (logical_key IS NULL OR (char_length(logical_key) BETWEEN 1 AND 128 AND octet_length(logical_key) <= 512 AND logical_key !~ '[[:cntrl:]]'))`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after proposal logical-key constraint restoration: %v", err)
+	}
 	var guardDefinition string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('brain.guard_memory_proposal_update()'::regprocedure)`).Scan(&guardDefinition); err != nil {
 		t.Fatal(err)
@@ -364,7 +376,8 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 		t.Fatalf("approval idempotent retry=%#v err=%v", approvalRetry, err)
 	}
 	item, err := app.GetMemory(ctx, actor.ID, projectID, target.ItemID)
-	if err != nil || string(item.Document) != `{"status":"approved"}` {
+	var approvedDocument map[string]any
+	if err != nil || json.Unmarshal(item.Document, &approvedDocument) != nil || approvedDocument["status"] != "approved" {
 		t.Fatalf("approved memory=%#v err=%v", item, err)
 	}
 	approvedProposal, err := app.GetMemoryProposal(ctx, actor.ID, projectID, created.ProposalID)
