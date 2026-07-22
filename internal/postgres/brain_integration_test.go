@@ -272,6 +272,43 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err != nil || !otherProjectException.Active {
 		t.Fatalf("approve other-project exception: %v", err)
 	}
+	var exceptionOnlyProjectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects (display_name,created_by) VALUES ('exception-only brain project',$1) RETURNING id::text`, actor.ID).Scan(&exceptionOnlyProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, exceptionOnlyProjectID, CapabilityMemoryAdminister); err != nil {
+		t.Fatal(err)
+	}
+	retainedException, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: exceptionOnlyProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151517",
+		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
+	})
+	if err != nil || !retainedException.Active {
+		t.Fatalf("approve exception-only project exception=%#v err=%v", retainedException, err)
+	}
+	var exceptionOnlyHasScope bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.scopes WHERE project_id=$1)`, exceptionOnlyProjectID).Scan(&exceptionOnlyHasScope); err != nil || exceptionOnlyHasScope {
+		t.Fatalf("exception-only project scope=%v err=%v", exceptionOnlyHasScope, err)
+	}
+	assertExceptionMergeFence := func(state string) {
+		t.Helper()
+		mergeTx, beginErr := beginMutation(ctx, app.db)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		defer func() { _ = mergeTx.Rollback() }()
+		if _, _, _, _, _, _, mergeErr := projectMergeCounts(ctx, mergeTx, actor.ID, exceptionOnlyProjectID, projectID); !errors.Is(mergeErr, ErrProjectMergeBrainState) {
+			t.Fatalf("%s exception-only merge fence error=%v", state, mergeErr)
+		}
+	}
+	assertExceptionMergeFence("active")
+	retainedException, err = app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
+		PrincipalID: actor.ID, ProjectID: exceptionOnlyProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151518", ExceptionID: retainedException.ExceptionID,
+	})
+	if err != nil || retainedException.Active {
+		t.Fatalf("revoke exception-only project exception=%#v err=%v", retainedException, err)
+	}
+	assertExceptionMergeFence("revoked")
 	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151514"
 	beforeSecretRejection = readSecretGuardEffects(ctx, t, ownerDB)
 	if _, err := app.CreateMemory(ctx, secretCreate); !errors.As(err, &rejection) {

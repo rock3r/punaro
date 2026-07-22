@@ -606,16 +606,27 @@ WHERE consumed_at IS NULL AND expires_at > statement_timestamp()`, actorPrincipa
 
 func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
 	var identityCount, canonicalIdentityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount int
-	var brainLifecyclePresent bool
-	if err := tx.QueryRowContext(ctx, `SELECT to_regclass('brain.memory_items') IS NOT NULL AND to_regclass('brain.scopes') IS NOT NULL`).Scan(&brainLifecyclePresent); err != nil {
+	var memoryScopesPresent, secretExceptionsPresent bool
+	if err := tx.QueryRowContext(ctx, `SELECT
+    to_regclass('brain.scopes') IS NOT NULL,
+    to_regclass('brain.secret_exceptions') IS NOT NULL`).Scan(&memoryScopesPresent, &secretExceptionsPresent); err != nil {
 		return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
 	}
-	if brainLifecyclePresent {
+	if memoryScopesPresent {
 		var hasMemoryLifecycle bool
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.scopes WHERE project_id=$1)`, sourceID).Scan(&hasMemoryLifecycle); err != nil {
 			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
 		}
 		if hasMemoryLifecycle {
+			return 0, 0, 0, 0, 0, nil, ErrProjectMergeBrainState
+		}
+	}
+	if secretExceptionsPresent {
+		var hasSecretExceptionHistory bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.secret_exceptions WHERE project_id=$1)`, sourceID).Scan(&hasSecretExceptionHistory); err != nil {
+			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
+		}
+		if hasSecretExceptionHistory {
 			return 0, 0, 0, 0, 0, nil, ErrProjectMergeBrainState
 		}
 	}
