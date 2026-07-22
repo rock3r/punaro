@@ -457,7 +457,7 @@ func CheckPaths(installation Installation) []string {
 		failures = append(failures, "daemon-writable data directory overlaps database credentials or operator state")
 	}
 	envPath := EnvFile(installation.Directory)
-	envAvailable, envCurrent, envLegacy := false, false, false
+	envAvailable, envCurrent, envPreMemoryAPI, envLegacy := false, false, false, false
 	if err := requireTrustedProtectedFile(envPath, 64<<10); err != nil {
 		failures = append(failures, "generated daemon environment unavailable or unsafe")
 	} else {
@@ -466,14 +466,15 @@ func CheckPaths(installation Installation) []string {
 		envAvailable = err == nil
 		if envAvailable {
 			envCurrent = string(body) == daemonEnv(installation)
-			envLegacy = installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
+			envPreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
+			envLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
 		}
-		if !envCurrent && !envLegacy {
+		if !envCurrent && !envPreMemoryAPI && !envLegacy {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 		}
 	}
 	overridePath := OverrideFile(installation.Directory)
-	overrideAvailable, overrideCurrent, overrideLegacy := false, false, false
+	overrideAvailable, overrideCurrent, overridePreMemoryAPI, overrideLegacy := false, false, false, false
 	if err := requireTrustedProtectedFile(overridePath, 64<<10); err != nil {
 		failures = append(failures, "generated Compose override unavailable or unsafe")
 	} else {
@@ -482,17 +483,17 @@ func CheckPaths(installation Installation) []string {
 		overrideAvailable = err == nil
 		if overrideAvailable {
 			overrideCurrent = string(body) == composeOverride()
-			overrideLegacy = installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
+			overridePreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
+			overrideLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
 		}
-		if !overrideCurrent && !overrideLegacy {
+		if !overrideCurrent && !overridePreMemoryAPI && !overrideLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
 	}
-	if envAvailable && overrideAvailable && (envLegacy || overrideLegacy) {
-		if envLegacy && !overrideLegacy {
+	if envAvailable && overrideAvailable {
+		sameGeneration := envCurrent && overrideCurrent || envPreMemoryAPI && overridePreMemoryAPI || envLegacy && overrideLegacy
+		if !sameGeneration && (envCurrent || envPreMemoryAPI || envLegacy) && (overrideCurrent || overridePreMemoryAPI || overrideLegacy) {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
-		}
-		if overrideLegacy && !envLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
 	}
@@ -546,7 +547,11 @@ func legacyDaemonEnv(installation Installation) string {
 		"PUNARO_RELAY_MACHINES_JSON=''\n", "",
 		"PUNARO_RELAY_STORE=sqlite\n", "",
 		"PUNARO_CREDENTIAL_TRANSITION_ENABLED=false\n", "",
-	).Replace(daemonEnv(installation))
+	).Replace(preMemoryAPIDaemonEnv(installation))
+}
+
+func preMemoryAPIDaemonEnv(installation Installation) string {
+	return strings.Replace(daemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t\n", installation.MemoryAPIEnabled), "", 1)
 }
 
 func composeOverride() string {
@@ -597,7 +602,11 @@ func legacyComposeOverride() string {
 		"      PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}\n", "",
 		"      PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}\n", "",
 		"      PUNARO_CREDENTIAL_TRANSITION_ENABLED: ${PUNARO_CREDENTIAL_TRANSITION_ENABLED:?required}\n", "",
-	).Replace(composeOverride())
+	).Replace(preMemoryAPIComposeOverride())
+}
+
+func preMemoryAPIComposeOverride() string {
+	return strings.Replace(composeOverride(), "      PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}\n", "", 1)
 }
 
 func numericIdentity(value string) bool {
