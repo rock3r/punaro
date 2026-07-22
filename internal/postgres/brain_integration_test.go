@@ -334,7 +334,7 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 		t.Fatal(err)
 	}
 	proposalOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
-		PrincipalID: reader.ID, ProjectID: proposalOnlyProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181860", Action: MemoryProposalCreate,
+		PrincipalID: reader.ID, ProjectID: proposalOnlyProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181862", Action: MemoryProposalCreate,
 		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.only", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"pending":true}`)}},
 	})
 	if err != nil || proposalOnly.State != MemoryProposalPending {
@@ -349,7 +349,7 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 		t.Fatalf("pending proposal did not block project merge: %v", mergeErr)
 	}
 	_ = mergeTx.Rollback()
-	proposalOnly, err = app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: actor.ID, ProjectID: proposalOnlyProjectID, ProposalID: proposalOnly.ProposalID, IdempotencyKey: "18181818-1818-4818-8818-181818181861", ExpectedETag: proposalOnly.ETag})
+	proposalOnly, err = app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: actor.ID, ProjectID: proposalOnlyProjectID, ProposalID: proposalOnly.ProposalID, IdempotencyKey: "18181818-1818-4818-8818-181818181863", ExpectedETag: proposalOnly.ETag})
 	if err != nil || proposalOnly.State != MemoryProposalRejected {
 		t.Fatalf("reject proposal-only merge source proposal=%#v err=%v", proposalOnly, err)
 	}
