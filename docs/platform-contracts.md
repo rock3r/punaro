@@ -229,6 +229,16 @@ documents; a larger corpus requires the separately backed-up, bounded backfill
 slice. Large version-18 corpora remain deliberately upgrade-blocked until that
 slice exists; the ordinary migration will not proceed.
 
+Schema version 20 adds explicitly ephemeral evidence. Evidence creation may
+attach one expiry timestamp, stored separately from canonical memory items so
+only evidence can be marked ephemeral. Expiry does not delete source history;
+an authorized `memory.administer` maintenance pass archives at most 64 due
+evidence records in one mutation transaction, copies revision-bound provenance
+forward, emits ordinary content-free archive audit events, and covers scopes
+behind permanent project lookup aliases under the same bounded pass. Ordinary
+evidence reads require the item to remain active, so expired evidence leaves
+prompt/search paths without destructive cleanup.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns
