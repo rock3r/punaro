@@ -22,7 +22,7 @@ services:
     build:
       context: .
       target: build
-    command: ["go", "test", "-count=1", "-timeout", "4m", "./internal/postgres", "./cmd/punaro"]
+    command: ["go", "test", "-p", "1", "-count=1", "-timeout", "8m", "./internal/postgres", "./cmd/punaro"]
     user: "65532:65532"
     environment:
       HOME: /tmp

@@ -39,7 +39,7 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
-PostgreSQL schema 18 also contains the dark canonical Big Brain store and its
+PostgreSQL schema 19 also contains the dark canonical Big Brain store and its
 operator-approved proposal authority. A writer can stage one immutable,
 bounded create, update, archive, merge, or split proposal; an administrator
 can approve or reject its exact pending ETag. Approval locks every referenced
@@ -49,7 +49,15 @@ one transaction. The pending ETag binds the complete ordered payload, database
 guards reject later child-row appends, and immutable result rows retain the
 proposal-to-canonical-revision provenance after approval. Rejection changes no
 canonical memory. The store has no
-production route or client switch yet; the first native memory client is a
+production route or client switch yet. Schema 19 adds a synchronous derived
+lexical vector and a two-connection search pool. `memory.search` is checked
+before a current-revision-only query; archived and quarantined items are
+excluded, exact key/title matches precede weighted title/summary/keywords/body
+rank, and only bounded title/summary metadata is returned under a two-second
+SQL deadline. Full documents still require `memory.read`. Existing databases
+above either 100,000 revisions or 256 MiB of stored canonical documents refuse
+the blocking migration. They remain upgrade-blocked pending a later explicit,
+backed-up, bounded-backfill slice. The first native memory client remains a
 later independently reviewed slice.
 
 ## Goals

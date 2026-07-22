@@ -1,6 +1,9 @@
 package postgres
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifySchemaState(t *testing.T) {
 	manifest := Manifest{
@@ -66,8 +69,8 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 18 || len(manifest.Migrations) != 18 {
-		t.Fatalf("manifest=%#v, want exact v10-v18 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 19 || len(manifest.Migrations) != 19 {
+		t.Fatalf("manifest=%#v, want exact v10-v19 compatibility window", manifest)
 	}
 	for index, migration := range manifest.Migrations {
 		want := int64(index + 1)
@@ -80,11 +83,26 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18:
+		case 14, 15, 16, 17, 18, 19:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
 			t.Fatalf("migration %d floor=%d, want %d", index+1, migration.CompatibilityFloor, want)
+		}
+	}
+}
+
+func TestMemoryLexicalMigrationRefusesUnboundedInlineRewrite(t *testing.T) {
+	migration := CurrentManifest().Migrations[18]
+	for _, required := range []string{
+		"FOR document_bytes IN",
+		"octet_length(document::text)",
+		"existing_revisions > 100000",
+		"existing_document_bytes > 268435456",
+		"ERRCODE = '54000'",
+	} {
+		if !strings.Contains(migration.SQL, required) {
+			t.Fatalf("lexical migration missing inline-rewrite ceiling %q", required)
 		}
 	}
 }
@@ -118,7 +136,10 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 17}, manifest) {
 		t.Fatal("compatible v17 schema must still apply the pending v18 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 18}, manifest) {
-		t.Fatal("current v18 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 18}, manifest) {
+		t.Fatal("compatible v18 schema must still apply the pending v19 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 19}, manifest) {
+		t.Fatal("current v19 schema reported a pending migration")
 	}
 }

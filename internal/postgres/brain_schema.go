@@ -18,7 +18,9 @@ WITH objects AS (
 	           to_regclass('brain.memory_quarantines') AS quarantines_oid,
            to_regclass('brain.memory_items_scope_logical_key') AS logical_key_index_oid,
            to_regclass('brain.memory_items_scope_state') AS state_index_oid,
-           to_regclass('brain.memory_changes_scope_cursor') AS cursor_index_oid,
+	           to_regclass('brain.memory_changes_scope_cursor') AS cursor_index_oid,
+	           to_regclass('brain.memory_revisions_search_vector') AS search_vector_index_oid,
+	           to_regclass('brain.memory_revisions_search_title') AS search_title_index_oid,
            to_regprocedure('brain.purge_memory(uuid,uuid,uuid,bigint)') AS purge_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS fence_oid
 ), expected_columns(relation_name,column_name,type_name,required,default_expression) AS (
@@ -66,7 +68,7 @@ WITH objects AS (
       ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum,
          objects
 	WHERE attribute.attrelid = ANY(ARRAY[scopes_oid,items_oid,revisions_oid,changes_oid,tombstones_oid])
-      AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attname <> 'layer'
+	  AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attname NOT IN ('layer','search_title','search_vector')
 ), table_safety AS (
 	SELECT count(*) = 5
        AND bool_and(pg_get_userbyid(relation.relowner) = 'punaro_owner')
@@ -146,6 +148,8 @@ WITH objects AS (
 	SELECT count(*) = 9 AND bool_and(index_row.indisvalid AND index_row.indisready) AS exact
     FROM pg_index AS index_row, objects
 	WHERE index_row.indrelid = ANY(ARRAY[scopes_oid,items_oid,revisions_oid,changes_oid,tombstones_oid])
+	  AND index_row.indexrelid IS DISTINCT FROM search_vector_index_oid
+	  AND index_row.indexrelid IS DISTINCT FROM search_title_index_oid
 ), fence_safety AS (
 	SELECT count(*) = 5 AND bool_and(trigger_row.tgenabled = 'O' AND trigger_row.tgfoid = fence_oid AND trigger_row.tgtype = 62) AS exact
     FROM pg_trigger AS trigger_row, objects

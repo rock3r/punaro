@@ -24,6 +24,7 @@ type Config struct {
 type Database struct {
 	db                        *sql.DB
 	relayDB                   *sql.DB
+	brainDB                   *sql.DB
 	manifest                  Manifest
 	attachmentPhysicalGCSlots chan struct{}
 }
@@ -59,7 +60,19 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Database{db: db, relayDB: relayDB, manifest: CurrentManifest(), attachmentPhysicalGCSlots: make(chan struct{}, 1)}, nil
+	brainDB, err := openPool(ctx, dsn, 2, 1)
+	if err != nil {
+		_ = relayDB.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	if err := verifyApplicationRole(ctx, brainDB); err != nil {
+		_ = brainDB.Close()
+		_ = relayDB.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	return &Database{db: db, relayDB: relayDB, brainDB: brainDB, manifest: CurrentManifest(), attachmentPhysicalGCSlots: make(chan struct{}, 1)}, nil
 }
 
 func open(ctx context.Context, dsn string) (*sql.DB, error) {
@@ -82,12 +95,15 @@ func openPool(ctx context.Context, dsn string, maximumOpen, maximumIdle int) (*s
 	return db, nil
 }
 
-// Close releases both the general application and reserved relay pools.
+// Close releases the general application and reserved relay/brain pools.
 func (d *Database) Close() error {
 	if d.relayDB == nil {
 		return d.db.Close()
 	}
-	return errors.Join(d.relayDB.Close(), d.db.Close())
+	if d.brainDB == nil {
+		return errors.Join(d.relayDB.Close(), d.db.Close())
+	}
+	return errors.Join(d.brainDB.Close(), d.relayDB.Close(), d.db.Close())
 }
 
 // SchemaState inspects schema history, required objects, and role safety atomically.
@@ -1068,6 +1084,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL memory proposal schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = proposalObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 19 {
+		lexicalObjectsPresent, err := memoryLexicalControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory lexical schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = lexicalObjectsPresent
 	}
 	return snapshot, nil
 }
