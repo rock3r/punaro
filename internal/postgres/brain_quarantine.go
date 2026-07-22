@@ -280,7 +280,7 @@ func (d *Database) ReviewMemorySecretQuarantine(ctx context.Context, principalID
 	var review MemorySecretQuarantine
 	var logicalKey sql.NullString
 	var document, contentHash, fingerprint []byte
-	err = tx.QueryRowContext(ctx, `SELECT item.id::text,scope.id::text,scope.project_id::text,item.logical_key,item.kind,item.state,item.trust,
+	err = tx.QueryRowContext(ctx, `SELECT item.id::text,scope.id::text,scope.project_id::text,item.logical_key,item.kind,item.state,item.trust,item.layer,
 item.current_revision,revision.document::text,revision.content_sha256,revision.author_principal_id::text,item.created_at,revision.created_at,
 COALESCE((SELECT max(change.change_sequence) FROM brain.memory_changes AS change WHERE change.scope_id=scope.id AND change.item_id=item.id AND change.revision=item.current_revision AND change.timeline_id=(SELECT timeline_id FROM jobs.server_state WHERE singleton)),0),
 quarantine.rule_version,quarantine.rule_id,quarantine.field_path,quarantine.value_fingerprint,quarantine.quarantined_at
@@ -288,7 +288,7 @@ FROM brain.memory_items AS item JOIN brain.scopes AS scope ON scope.id=item.scop
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 JOIN brain.memory_quarantines AS quarantine ON quarantine.item_id=item.id AND quarantine.released_at IS NULL
 WHERE item.id=$1 AND scope.project_id=$2`, itemID, canonicalProjectID).Scan(
-		&review.Item.ItemID, &review.Item.ScopeID, &review.Item.ProjectID, &logicalKey, &review.Item.Kind, &review.Item.State, &review.Item.Trust,
+		&review.Item.ItemID, &review.Item.ScopeID, &review.Item.ProjectID, &logicalKey, &review.Item.Kind, &review.Item.State, &review.Item.Trust, &review.Item.Layer,
 		&review.Item.Revision, &document, &contentHash, &review.Item.AuthorID, &review.Item.CreatedAt, &review.Item.RevisionAt, &review.Item.ChangeSequence,
 		&review.Finding.RuleVersion, &review.Finding.RuleID, &review.Finding.FieldPath, &fingerprint, &review.QuarantinedAt)
 	if errors.Is(err, sql.ErrNoRows) {

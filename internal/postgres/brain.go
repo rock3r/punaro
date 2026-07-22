@@ -92,6 +92,7 @@ type MemoryItem struct {
 	Kind           string          `json:"kind"`
 	State          MemoryState     `json:"state"`
 	Trust          string          `json:"trust"`
+	Layer          MemoryLayer     `json:"layer"`
 	Revision       int64           `json:"revision"`
 	ETag           string          `json:"etag"`
 	Document       json.RawMessage `json:"document"`
@@ -117,6 +118,8 @@ type MemoryChangeType string
 const (
 	// MemoryChangeCreate records creation.
 	MemoryChangeCreate MemoryChangeType = "create"
+	// MemoryChangeEvidenceCreate records explicit evidence and its revision-bound provenance.
+	MemoryChangeEvidenceCreate MemoryChangeType = "evidence_create"
 	// MemoryChangeUpdate records canonical content or metadata replacement.
 	MemoryChangeUpdate MemoryChangeType = "update"
 	// MemoryChangeArchive records a transition to archived state.

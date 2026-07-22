@@ -66,7 +66,7 @@ WITH objects AS (
       ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum,
          objects
 	WHERE attribute.attrelid = ANY(ARRAY[scopes_oid,items_oid,revisions_oid,changes_oid,tombstones_oid])
-      AND attribute.attnum > 0 AND NOT attribute.attisdropped
+      AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attname <> 'layer'
 ), table_safety AS (
 	SELECT count(*) = 5
        AND bool_and(pg_get_userbyid(relation.relowner) = 'punaro_owner')
@@ -114,6 +114,12 @@ WITH objects AS (
 	       constraint_row.condeferrable, constraint_row.condeferred,
 	           CASE WHEN constraint_row.contype='c' THEN
 	         CASE
+	           WHEN constraint_row.conname='memory_revisions_operation_check'
+	             AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='(operation = ANY (ARRAY[''create''::text, ''evidence_create''::text, ''update''::text, ''archive''::text, ''restore''::text]))'
+	           THEN '(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text]))'
+	           WHEN constraint_row.conname='memory_changes_operation_check'
+	             AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='(operation = ANY (ARRAY[''create''::text, ''evidence_create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text, ''quarantine''::text, ''quarantine_release''::text]))'
+	           THEN '(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text, ''quarantine''::text, ''quarantine_release''::text]))'
 	           WHEN constraint_row.conname='memory_changes_operation_check' AND quarantines_oid IS NULL
 	             AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text]))'
 	           THEN '(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text, ''quarantine''::text, ''quarantine_release''::text]))'
@@ -125,6 +131,7 @@ WITH objects AS (
 	       ELSE '' END
 	FROM pg_constraint AS constraint_row, objects
 	WHERE constraint_row.conrelid = ANY(ARRAY[scopes_oid,items_oid,revisions_oid,changes_oid,tombstones_oid])
+	  AND constraint_row.conname <> 'memory_items_layer_check'
 	  AND constraint_row.contype <> 'n' AND constraint_row.convalidated
 ), constraint_safety AS (
 	SELECT count(*) = 30 AND bool_and(constraint_row.convalidated)
@@ -133,6 +140,7 @@ WITH objects AS (
 	   AND count(*) FILTER (WHERE constraint_row.contype='f' AND constraint_row.confupdtype='a' AND constraint_row.confmatchtype='s') = 10 AS exact
     FROM pg_constraint AS constraint_row, objects
 	WHERE constraint_row.conrelid = ANY(ARRAY[scopes_oid,items_oid,revisions_oid,changes_oid,tombstones_oid])
+	  AND constraint_row.conname <> 'memory_items_layer_check'
       AND constraint_row.contype <> 'n'
 ), index_safety AS (
 	SELECT count(*) = 9 AND bool_and(index_row.indisvalid AND index_row.indisready) AS exact
