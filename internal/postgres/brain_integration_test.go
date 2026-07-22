@@ -909,6 +909,19 @@ OR EXISTS (SELECT 1 FROM brain.memory_changes AS change WHERE change.item_id=$1 
 OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND result::text LIKE '%bounded source fact%')`, created.ItemID).Scan(&metadataLeaked); err != nil || metadataLeaked {
 		t.Fatalf("evidence metadata leaked content=%v err=%v", metadataLeaked, err)
 	}
+	for _, cleanup := range []struct {
+		name, query, argument string
+	}{
+		{"recipient grants", `DELETE FROM attachment.recipient_grants WHERE artifact_id=$1`, artifactID},
+		{"message artifact", `DELETE FROM attachment.message_artifacts WHERE artifact_id=$1`, artifactID},
+		{"ready artifact", `DELETE FROM attachment.ready_artifacts WHERE artifact_id=$1`, artifactID},
+		{"upload", `DELETE FROM attachment.uploads WHERE artifact_id=$1`, artifactID},
+		{"ready manifest", `DELETE FROM attachment.ready_blob_manifest WHERE storage_path=$1`, storagePath},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, cleanup.query, cleanup.argument); err != nil {
+			t.Fatalf("clean up evidence %s: %v", cleanup.name, err)
+		}
+	}
 }
 
 func testSecretGuardSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
