@@ -330,7 +330,7 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_identities(project_id,kind,normalized_locator,created_by) VALUES ($1,'operator_alias','proposal-only-merge-source',$2)`, proposalOnlyProjectID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($2,'project',$1,$3),($4,'project',$1,$5)`, proposalOnlyProjectID, actor.ID, CapabilityMemoryAdminister, reader.ID, CapabilityMemoryPropose); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($2,'project',$1,$4),($2,'project',$1,$5),($2,'project',$3,$5),($6,'project',$1,$7)`, proposalOnlyProjectID, actor.ID, projectID, CapabilityMemoryAdminister, CapabilityProjectAdminister, reader.ID, CapabilityMemoryPropose); err != nil {
 		t.Fatal(err)
 	}
 	proposalOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
