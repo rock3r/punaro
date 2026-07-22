@@ -917,9 +917,25 @@ OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND resu
 		{"ready artifact", `DELETE FROM attachment.ready_artifacts WHERE artifact_id=$1`, artifactID},
 		{"upload", `DELETE FROM attachment.uploads WHERE artifact_id=$1`, artifactID},
 		{"ready manifest", `DELETE FROM attachment.ready_blob_manifest WHERE storage_path=$1`, storagePath},
+		{"mail delivery", `DELETE FROM relay.mail_deliveries WHERE message_id=$1`, messageID},
+		{"mail message idempotency", `DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, messageID},
+		{"conversation project", `DELETE FROM attachment.conversation_projects WHERE conversation_id=$1`, conversationID},
+		{"mail message", `DELETE FROM relay.mail_messages WHERE id=$1`, messageID},
+		{"mail recipient cursor", `DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, conversationID},
+		{"mail membership", `DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, conversationID},
+		{"mail conversation idempotency", `DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, conversationID},
+		{"mail conversation", `DELETE FROM relay.mail_conversations WHERE id=$1`, conversationID},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, cleanup.query, cleanup.argument); err != nil {
 			t.Fatalf("clean up evidence %s: %v", cleanup.name, err)
+		}
+	}
+	for _, endpoint := range []string{actorEndpoint, readerEndpoint} {
+		if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.endpoint_principals WHERE endpoint=$1`, endpoint); err != nil {
+			t.Fatalf("clean up evidence endpoint principal: %v", err)
+		}
+		if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint); err != nil {
+			t.Fatalf("clean up evidence mail endpoint: %v", err)
 		}
 	}
 }
