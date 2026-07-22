@@ -68,6 +68,8 @@ var (
 	ErrStaleMemoryProposal = errors.New("memory proposal is stale")
 	// ErrMemoryProposalCapacity reports a hard live or retained proposal quota.
 	ErrMemoryProposalCapacity = errors.New("memory proposal capacity is full")
+	// ErrMemoryProposalAlreadySatisfied rejects a staged state transition that is already true.
+	ErrMemoryProposalAlreadySatisfied = errors.New("memory proposal state transition is already satisfied")
 )
 
 // MemoryProposalStepInput is a typed create, update, or archive primitive.

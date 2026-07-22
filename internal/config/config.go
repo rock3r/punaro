@@ -31,6 +31,7 @@ type Config struct {
 	PostgresDSNFile             string
 	DeviceAuthEnabled           bool
 	MemoryAPIEnabled            bool
+	MemoryMutationsEnabled      bool
 	TrustedAttachmentsEnabled   bool
 	TrustedAttachmentBlobDir    string
 	CredentialTransitionEnabled bool
@@ -89,6 +90,10 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_MEMORY_API_ENABLED: %w", err)
 	}
+	memoryMutationsEnabled, err := strconv.ParseBool(value("PUNARO_MEMORY_MUTATIONS_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_MEMORY_MUTATIONS_ENABLED: %w", err)
+	}
 	trustedAttachmentsEnabled, err := strconv.ParseBool(value("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_TRUSTED_ATTACHMENTS_ENABLED: %w", err)
@@ -140,6 +145,9 @@ func Load(explicitEnvFile string) (Config, error) {
 	if memoryAPIEnabled && (!postgresEnabled || !deviceAuthEnabled) {
 		return Config{}, fmt.Errorf("memory API requires PostgreSQL device authentication")
 	}
+	if memoryMutationsEnabled && !memoryAPIEnabled {
+		return Config{}, fmt.Errorf("memory mutations require PUNARO_MEMORY_API_ENABLED")
+	}
 	if relayEnabled && relayMachines == "" {
 		return Config{}, fmt.Errorf("enabled relay requires PUNARO_RELAY_MACHINES_JSON")
 	}
@@ -164,7 +172,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func rejectRetiredAttachmentConfiguration() error {

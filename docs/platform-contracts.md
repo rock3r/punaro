@@ -268,7 +268,7 @@ prompt-brief, and change-fetch routes. Callers cannot select a principal,
 origin, route, credential, destination, source path, URL fetch, secret
 resolution, or other control-plane argument through memory input.
 
-All JSON is strict, duplicate-free, unknown-field rejecting, and limited to
+Read JSON is strict, duplicate-free, unknown-field rejecting, and limited to
 4 KiB. Handler concurrency is capped at 32 and each complete authentication and
 store operation has a five-second deadline; the lexical/brief store retains its
 stricter two-second SQL deadline. Responses are `no-store`. Full documents
@@ -281,9 +281,33 @@ authority beyond the caller's grant on the canonical project. Cursor
 timeline/future conflicts are typed but content-free. A null cursor means the
 current installation and timeline at sequence zero, enabling a first bounded
 enumeration; every returned cursor then pins installation, timeline, and
-sequence so restore cannot create silent divergence. Mutation routes, local
-credential/project state, retry/cache behavior, MCP, semantic retrieval, and
-Compose Pi remain absent.
+sequence so restore cannot create silent divergence.
+
+The separately persisted `PUNARO_MEMORY_MUTATIONS_ENABLED` opt-in requires the
+read API and mounts the following no-schema routes:
+
+| Method | Route | Contract |
+| --- | --- | --- |
+| `POST` | `/v1/projects/{project}/memories` | Exact `Idempotency-Key`; strict create object; 201 content-free mutation result. |
+| `PUT` | `/v1/projects/{project}/memories/{item}` | Idempotency key plus strong memory `If-Match`; strict replacement object. |
+| `POST` | `/v1/projects/{project}/memories/{item}/state` | Idempotency key plus memory `If-Match`; exact `{archived:boolean}`. |
+| `DELETE` | `/v1/projects/{project}/memories/{item}` | Idempotency key plus memory `If-Match`; no body. Requires separate purge authority. |
+| `POST` | `/v1/projects/{project}/memory-proposals` | Idempotency key; strict bounded action, steps, and evidence; 201 content-free proposal result. |
+| `POST` | `/v1/projects/{project}/memory-proposals/{proposal}/approve` | Idempotency key plus strong proposal `If-Match`; no body. |
+| `POST` | `/v1/projects/{project}/memory-proposals/{proposal}/reject` | Idempotency key plus strong proposal `If-Match`; no body. |
+
+Create and update bodies are capped at 264 KiB, proposal creation at 1 MiB,
+and state at 4 KiB. Nested JSON is also duplicate- and unknown-field rejecting;
+canonical documents remain objects with the store's 256 KiB and depth bounds.
+Non-purge success responses carry the result ETag as both JSON and the HTTP
+`ETag` header; the purge tombstone result has neither ETag nor state.
+Missing/denied targets remain 404; stale CAS, idempotency, logical-key,
+and immutable-item conflicts are closed 409 categories; secret rejection is a
+content-free 422 category; proposal capacity is 429; transient failures are
+503. Mutation project IDs are never canonicalized through a retired alias:
+permanent aliases exist only for compatible reads. Local credential/project
+state, retry/cache behavior, MCP, semantic retrieval, and Compose Pi remain
+absent.
 
 ### Implemented dark control-plane primitives
 

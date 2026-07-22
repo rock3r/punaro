@@ -645,6 +645,26 @@ future-cursor conflict. There is intentionally no offline writable brain,
 mutation route, CLI/MCP binary, semantic retrieval, or Compose Pi integration
 in this slice.
 
+### Dark native memory mutations
+
+M-17B keeps every existing read-API installation read-only on upgrade. A new
+installation must explicitly pass both `punaro init --memory-api` and
+`--memory-mutations`; the persisted environment then records
+`PUNARO_MEMORY_MUTATIONS_ENABLED=true`. The mutation flag cannot be enabled
+without the read flag. Resume, update, and restore preserve the choice, while
+historical installation files that predate the mutation setting are accepted
+only as mutation-disabled generations. Do not hand-edit generated files.
+
+The enabled surface adds canonical create/update/archive/restore/purge and
+proposal create/approve/reject. Every operation needs a fresh canonical UUID
+`Idempotency-Key`; updates, state changes, purge, and proposal decisions also
+need the exact strong ETag returned by the preceding read or mutation in
+`If-Match`. Retired project aliases are readable compatibility coordinates but
+are deliberately rejected for every mutation. Purge requires its distinct
+capability and is irreversible. Secret-shaped documents are rejected without
+echoing the value or fingerprint. There is still no native client, MCP adapter,
+semantic retrieval, offline queue, or Compose Pi integration.
+
 ## Operations and incident response
 
 If a credential or machine is suspected compromised, stop the local service,
