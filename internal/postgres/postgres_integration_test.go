@@ -443,6 +443,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testCanonicalBrainSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testSecretGuardSchemaDriftIntegration(ctx, t, app, ownerDB)
+	testMemoryQuarantineSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testCanonicalBrainIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
@@ -548,8 +549,8 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 		{name: "permissive credential expiry constraint", apply: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_check CHECK (expires_at IS NULL OR expires_at > created_at OR true)`, restore: `ALTER TABLE auth.device_credentials DROP CONSTRAINT device_credentials_check; ALTER TABLE auth.device_credentials ADD CONSTRAINT device_credentials_check CHECK (expires_at IS NULL OR expires_at > created_at)`},
 		{name: "principal auth generation constraint", apply: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check`, restore: `ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0)`},
 		{name: "permissive principal auth generation constraint", apply: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check; ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0 OR true)`, restore: `ALTER TABLE auth.principals DROP CONSTRAINT principals_auth_generation_check; ALTER TABLE auth.principals ADD CONSTRAINT principals_auth_generation_check CHECK (auth_generation >= 0)`},
-		{name: "audit action value set", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke', 'unexpected'))`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke'))`},
-		{name: "permissive audit action constraint", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke') OR true)`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke'))`},
+		{name: "audit action value set", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke', 'memory.secret_rescan', 'memory.quarantine', 'memory.quarantine_release', 'unexpected'))`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke', 'memory.secret_rescan', 'memory.quarantine', 'memory.quarantine_release'))`},
+		{name: "permissive audit action constraint", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke', 'memory.secret_rescan', 'memory.quarantine', 'memory.quarantine_release') OR true)`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_action_check; ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN ('principal.create', 'project.create', 'grant.create', 'grant.delete', 'job.enqueue', 'job.complete', 'job.retry', 'job.fail', 'owner.bootstrap', 'enrollment.create', 'enrollment.redeem', 'credential.rotate', 'credential.revoke', 'legacy.register', 'legacy.exchange', 'legacy.retire', 'legacy.disable', 'project.identity.attach', 'project.merge.preview', 'project.merge', 'memory.create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete', 'memory.secret_exception.create', 'memory.secret_exception.revoke', 'memory.secret_rescan', 'memory.quarantine', 'memory.quarantine_release'))`},
 		{name: "audit target value set", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine', 'project_identity', 'project_merge', 'memory_item', 'unexpected'))`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine', 'project_identity', 'project_merge', 'memory_item'))`},
 		{name: "permissive audit target constraint", apply: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine', 'project_identity', 'project_merge', 'memory_item') OR true)`, restore: `ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check; ALTER TABLE audit.events ADD CONSTRAINT events_target_kind_check CHECK (target_kind IN ('principal', 'project', 'grant', 'job', 'enrollment', 'credential', 'legacy_machine', 'project_identity', 'project_merge', 'memory_item'))`},
 		{name: "legacy machine state value set", apply: `ALTER TABLE auth.legacy_machines DROP CONSTRAINT legacy_machines_state_check; ALTER TABLE auth.legacy_machines ADD CONSTRAINT legacy_machines_state_check CHECK (state IN ('pending', 'migrated', 'retired', 'unexpected'))`, restore: `ALTER TABLE auth.legacy_machines DROP CONSTRAINT legacy_machines_state_check; ALTER TABLE auth.legacy_machines ADD CONSTRAINT legacy_machines_state_check CHECK (state IN ('pending', 'migrated', 'retired'))`},
@@ -1731,13 +1732,13 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
-		TargetRelease:           "v0.15.0",
+		TargetRelease:           "v0.16.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
 		SourceSchema:            10,
-		TargetSchema:            15,
+		TargetSchema:            16,
 		SchemaMin:               10,
-		SchemaMax:               15,
+		SchemaMax:               16,
 		RollbackFloor:           10,
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
@@ -1769,7 +1770,7 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
 	if err != nil || transaction.Phase != UpdateMigrationStarted {
-		t.Fatalf("start v14 migration transaction=%#v err=%v", transaction, err)
+		t.Fatalf("start current migration transaction=%#v err=%v", transaction, err)
 	}
 	authorization = UpdateMigrationAuthorization{
 		UpdateID: request.UpdateID, BackupID: marker.BackupID, TargetRelease: request.TargetRelease,
@@ -1777,22 +1778,22 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 		ExportedSnapshotID: marker.ExportedSnapshotID, ManifestSHA256: marker.ManifestSHA256,
 	}
 	if state, err := MigrateUpdate(ctx, Config{DSNFile: ownerFile}, authorization); err != nil || state.Classification != Compatible || state.Version != CurrentManifest().MaxSupported {
-		t.Fatalf("v14 migration state=%#v err=%v", state, err)
+		t.Fatalf("current migration state=%#v err=%v", state, err)
 	}
-	v14App, err := OpenApplication(ctx, Config{DSNFile: appFile})
+	currentApp, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
-		t.Fatalf("open exact v14 application: %v", err)
+		t.Fatalf("open exact current application: %v", err)
 	}
-	if err := v14App.TrustedAttachmentRuntimeReady(ctx); err != nil {
-		_ = v14App.Close()
-		t.Fatalf("trusted attachment runtime rejected exact v14 schema: %v", err)
+	if err := currentApp.TrustedAttachmentRuntimeReady(ctx); err != nil {
+		_ = currentApp.Close()
+		t.Fatalf("trusted attachment runtime rejected exact current schema: %v", err)
 	}
-	if err := v14App.CanonicalBrainRuntimeReady(ctx); err != nil {
-		_ = v14App.Close()
-		t.Fatalf("canonical brain runtime rejected exact v14 schema: %v", err)
+	if err := currentApp.CanonicalBrainRuntimeReady(ctx); err != nil {
+		_ = currentApp.Close()
+		t.Fatalf("canonical brain runtime rejected exact current schema: %v", err)
 	}
-	if err := v14App.Close(); err != nil {
-		t.Fatalf("close exact v14 application: %v", err)
+	if err := currentApp.Close(); err != nil {
+		t.Fatalf("close exact current application: %v", err)
 	}
 	var (
 		corruptProjectID, corruptOwnerID, corruptPath, corruptSHA256, corruptState string
@@ -1817,12 +1818,12 @@ FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID).Scan(
 			corruptTombstonedAt, corruptGCAfter, corruptGeneration)
 	}
 	if err := admin.CheckMailCutoverSchemaReadiness(ctx); err != nil {
-		t.Fatalf("mail cutover rejected exact v14 schema: %v", err)
+		t.Fatalf("mail cutover rejected exact current schema: %v", err)
 	}
 	for _, phases := range [][2]UpdatePhase{{UpdateMigrationStarted, UpdateMigrated}, {UpdateMigrated, UpdateCandidateReady}, {UpdateCandidateReady, UpdateDoctorPassed}, {UpdateDoctorPassed, UpdateConfigPublished}, {UpdateConfigPublished, UpdateCommitted}} {
 		transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, phases[0], phases[1], nil)
 		if err != nil || transaction.Phase != phases[1] {
-			t.Fatalf("v14 phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
+			t.Fatalf("current phase %s -> %s transaction=%#v err=%v", phases[0], phases[1], transaction, err)
 		}
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.deletions WHERE artifact_id=$1`, bridgeCorruptArtifactID); err != nil {

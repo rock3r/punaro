@@ -181,7 +181,15 @@ SHA-256 value fingerprint. There is no wildcard, free-form pattern, or
 write-request override. Exception operations are idempotent and audited without
 content. Readiness verifies the exact stored rule identity, table shape,
 ownership, mutation fences, index, and bidirectional table/column ACL sets.
-Schema version 16 adds rule-update rescans and operator quarantine review.
+Schema version 16 adds bounded rule/exception-generation rescans and retained
+operator quarantine review. New guarded revisions record exact scan coverage.
+Existing or stale revisions are processed in idempotent project batches; active
+quarantine suppresses ordinary reads and is a mandatory exclusion for later
+search, prompt, embedding, and consolidation consumers. Archive/restore keeps
+the item quarantined. Only an explicit `memory.administer` review can read the
+canonical quarantined document, and only a clean guarded update or a rescan
+satisfied by exact exceptions releases it. Results, changes, audit events, and
+stored quarantine coordinates do not contain the suspected value.
 
 ### Implemented dark control-plane primitives
 

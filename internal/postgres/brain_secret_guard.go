@@ -103,6 +103,9 @@ WHERE project_id=$1 AND rule_version=$2 AND rule_id=$3 AND field_path=$4 AND val
 			return IdempotencyOutcome{}, errors.New("memory secret exception could not be stored")
 		}
 		if inserted {
+			if err := advanceMemorySecretExceptionGeneration(ctx, tx, project.ID); err != nil {
+				return IdempotencyOutcome{}, err
+			}
 			if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: request.PrincipalID, ProjectID: project.ID, Action: AuditMemorySecretExceptionCreate, Outcome: AuditSucceeded, TargetKind: AuditTargetProject, TargetID: project.ID}); err != nil {
 				return IdempotencyOutcome{}, err
 			}
@@ -151,6 +154,9 @@ func (d *Database) RevokeMemorySecretException(ctx context.Context, request Memo
 			if _, err := tx.ExecContext(ctx, `UPDATE brain.secret_exceptions SET revoked_at=statement_timestamp() WHERE id=$1 AND revoked_at IS NULL`, request.ExceptionID); err != nil {
 				return IdempotencyOutcome{}, errors.New("memory secret exception could not be revoked")
 			}
+			if err := advanceMemorySecretExceptionGeneration(ctx, tx, project.ID); err != nil {
+				return IdempotencyOutcome{}, err
+			}
 			if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: request.PrincipalID, ProjectID: project.ID, Action: AuditMemorySecretExceptionRevoke, Outcome: AuditSucceeded, TargetKind: AuditTargetProject, TargetID: project.ID}); err != nil {
 				return IdempotencyOutcome{}, err
 			}
@@ -167,24 +173,50 @@ func (d *Database) RevokeMemorySecretException(ctx context.Context, request Memo
 }
 
 func guardMemoryDocument(ctx context.Context, tx *sql.Tx, projectID string, document []byte) error {
-	if err := requireSecretGuardIdentity(ctx, tx); err != nil {
+	finding, err := firstUnexceptedMemorySecretFinding(ctx, tx, projectID, document)
+	if err != nil {
 		return err
+	}
+	if finding != nil {
+		return secretguard.RejectionError{Finding: *finding}
+	}
+	return nil
+}
+
+func firstUnexceptedMemorySecretFinding(ctx context.Context, q queryer, projectID string, document []byte) (*secretguard.Finding, error) {
+	if err := requireSecretGuardIdentity(ctx, q); err != nil {
+		return nil, err
 	}
 	findings, err := secretguard.ScanDocument(document)
 	if err != nil {
-		return errors.New("memory secret guard could not scan document")
+		return nil, errors.New("memory secret guard could not scan document")
 	}
 	for _, finding := range findings {
 		var exceptionID string
-		err := tx.QueryRowContext(ctx, `SELECT id::text FROM brain.secret_exceptions
+		err := q.QueryRowContext(ctx, `SELECT id::text FROM brain.secret_exceptions
 WHERE project_id=$1 AND rule_version=$2 AND rule_id=$3 AND field_path=$4 AND value_fingerprint=$5 AND revoked_at IS NULL
 FOR SHARE`, projectID, finding.RuleVersion, finding.RuleID, finding.FieldPath, finding.Fingerprint[:]).Scan(&exceptionID)
 		if errors.Is(err, sql.ErrNoRows) {
-			return secretguard.RejectionError{Finding: finding}
+			findingCopy := finding
+			return &findingCopy, nil
 		}
 		if err != nil || !validOpaqueID(exceptionID) {
-			return errors.New("memory secret guard is unavailable")
+			return nil, errors.New("memory secret guard is unavailable")
 		}
+	}
+	return nil, nil
+}
+
+func advanceMemorySecretExceptionGeneration(ctx context.Context, tx *sql.Tx, projectID string) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO brain.secret_project_state (project_id) VALUES ($1) ON CONFLICT (project_id) DO NOTHING`, projectID); err != nil {
+		return errors.New("memory secret project state is unavailable")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE brain.secret_project_state SET exception_generation=exception_generation+1,updated_at=statement_timestamp() WHERE project_id=$1`, projectID)
+	if err != nil {
+		return errors.New("memory secret project generation could not advance")
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return errors.New("memory secret project generation is unavailable")
 	}
 	return nil
 }

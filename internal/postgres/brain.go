@@ -125,6 +125,10 @@ const (
 	MemoryChangeRestore MemoryChangeType = "restore"
 	// MemoryChangeDelete records irreversible canonical-content purge.
 	MemoryChangeDelete MemoryChangeType = "delete"
+	// MemoryChangeQuarantine records automatic-retrieval suppression.
+	MemoryChangeQuarantine MemoryChangeType = "quarantine"
+	// MemoryChangeQuarantineRelease records restored automatic visibility.
+	MemoryChangeQuarantineRelease MemoryChangeType = "quarantine_release"
 )
 
 // MemoryChange contains no canonical content or logical key.
