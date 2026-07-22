@@ -182,7 +182,7 @@ LIMIT $3`, projectID, request.Query, request.Limit+1, maxMemorySearchTitleRunes,
 		result.ETag = memoryETag(result.ItemID, result.Revision)
 		if len(page.Results) == request.Limit {
 			page.More = true
-			break
+			continue
 		}
 		page.Results = append(page.Results, result)
 	}
