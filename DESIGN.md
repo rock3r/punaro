@@ -283,8 +283,24 @@ project/rule-version/rule/path/fingerprint tuple through an idempotent,
 content-free operation. The database stores no rejected value and readiness
 binds the stored rule version/digest to the exact compiled scanner. Future
 proposal approval, import, consolidation, and attachment-text ingestion must
-call this same guard before publication or enqueue. Bounded rescan and
-quarantine follow in schema version 16.
+call this same guard before publication or enqueue.
+
+Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
+Every current revision carries scan coverage bound to its revision, the compiled
+rule identity, and a per-project exact-exception generation. Exception changes
+advance that generation under the same project lock rather than rewriting an
+unbounded corpus. Each rescan batch selects only stale coverage, is idempotent,
+and commits scan, quarantine, content-free change, audit, and cursor state
+atomically.
+
+An active quarantine is item-level, so archive/restore cannot make a suspected
+record visible. Ordinary retrieval treats it like a missing record; later
+search, prompt, embedding, and consolidation queries must apply the same active
+quarantine exclusion. `memory.administer` has a separate explicit review read
+that returns the canonical document and exact content-free finding coordinates.
+A clean guarded update or a rescan satisfied by narrow exact exceptions releases
+the quarantine; there is no wildcard or model override. Quarantine history is
+retained until the canonical item is explicitly purged.
 
 ## Minimal HTTP surface
 

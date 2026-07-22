@@ -205,6 +205,9 @@ const (
 	AuditMemoryDelete                AuditAction = "memory.delete"
 	AuditMemorySecretExceptionCreate AuditAction = "memory.secret_exception.create"
 	AuditMemorySecretExceptionRevoke AuditAction = "memory.secret_exception.revoke"
+	AuditMemorySecretRescan          AuditAction = "memory.secret_rescan"
+	AuditMemoryQuarantine            AuditAction = "memory.quarantine"
+	AuditMemoryQuarantineRelease     AuditAction = "memory.quarantine_release"
 )
 
 // AuditOutcome is a closed content-free result class.
@@ -234,7 +237,7 @@ const (
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {}, AuditMemorySecretRescan: {}, AuditMemoryQuarantine: {}, AuditMemoryQuarantineRelease: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.

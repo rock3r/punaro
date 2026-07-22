@@ -95,6 +95,9 @@ VALUES ($1,$2,'active',$3,$4,1,$5) RETURNING id::text`, scopeID, request.Kind, r
 		if err := insertMemoryRevision(ctx, tx, itemID, 1, request.Document, request.PrincipalID, MemoryChangeCreate); err != nil {
 			return IdempotencyOutcome{}, err
 		}
+		if err := recordMemorySecretScan(ctx, tx, project.ID, itemID, 1, request.PrincipalID, "clear"); err != nil {
+			return IdempotencyOutcome{}, err
+		}
 		state, err := commitMemoryChange(ctx, tx, control, request.PrincipalID, project.ID, scopeID, itemID, 1, MemoryChangeCreate, AuditMemoryCreate)
 		if err != nil {
 			return IdempotencyOutcome{}, err
@@ -139,7 +142,8 @@ func (d *Database) GetMemory(ctx context.Context, principalID, projectID, itemID
 FROM brain.memory_items AS item
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
-WHERE item.id=$1 AND scope.project_id=$2`, itemID, canonicalProjectID).Scan(
+WHERE item.id=$1 AND scope.project_id=$2
+  AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)`, itemID, canonicalProjectID).Scan(
 		&item.ItemID, &item.ScopeID, &item.ProjectID, &logicalKey, &item.Kind, &item.State, &item.Trust,
 		&item.Revision, &document, &contentHash, &item.AuthorID, &item.CreatedAt, &item.RevisionAt, &item.ChangeSequence)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -188,6 +192,18 @@ func (d *Database) UpdateMemory(ctx context.Context, raw MemoryUpdateRequest) (M
 		}
 		if err != nil {
 			return MemoryMutationResult{}, errors.New("memory item could not be updated")
+		}
+		released, err := releaseActiveMemoryQuarantine(ctx, tx, request.PrincipalID, request.ItemID)
+		if err != nil {
+			return MemoryMutationResult{}, err
+		}
+		if released {
+			if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: request.PrincipalID, ProjectID: locked.ProjectID, Action: AuditMemoryQuarantineRelease, Outcome: AuditSucceeded, TargetKind: AuditTargetMemoryItem, TargetID: request.ItemID}); err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
+		if err := recordMemorySecretScan(ctx, tx, locked.ProjectID, request.ItemID, next, request.PrincipalID, "clear"); err != nil {
+			return MemoryMutationResult{}, err
 		}
 		state, err := commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, MemoryChangeUpdate, AuditMemoryUpdate)
 		if err != nil {

@@ -195,6 +195,37 @@ func testSecretGuardSchemaDriftIntegration(ctx context.Context, t *testing.T, ap
 	}
 }
 
+func testMemoryQuarantineSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	for _, drift := range []struct {
+		name, apply, restore string
+	}{
+		{"extra delete", `GRANT DELETE ON brain.memory_quarantines TO punaro_app`, `REVOKE DELETE ON brain.memory_quarantines FROM punaro_app`},
+		{"disabled fence", `ALTER TABLE brain.memory_secret_scans DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_secret_scans ENABLE TRIGGER application_mutation_fence`},
+		{"missing history index", `DROP INDEX brain.memory_quarantines_item_history`, `CREATE INDEX memory_quarantines_item_history ON brain.memory_quarantines (item_id, quarantined_at, id)`},
+		{"unexpected column", `ALTER TABLE brain.secret_project_state ADD COLUMN unsafe text`, `ALTER TABLE brain.secret_project_state DROP COLUMN unsafe`},
+		{"row security", `ALTER TABLE brain.memory_quarantines ENABLE ROW LEVEL SECURITY`, `ALTER TABLE brain.memory_quarantines DISABLE ROW LEVEL SECURITY`},
+		{"scan primary key", `ALTER TABLE brain.memory_secret_scans DROP CONSTRAINT memory_secret_scans_pkey; ALTER TABLE brain.memory_secret_scans ADD CONSTRAINT memory_secret_scans_pkey UNIQUE (item_id,revision)`, `ALTER TABLE brain.memory_secret_scans DROP CONSTRAINT memory_secret_scans_pkey; ALTER TABLE brain.memory_secret_scans ADD CONSTRAINT memory_secret_scans_pkey PRIMARY KEY (item_id)`},
+		{"released principal FK action", `ALTER TABLE brain.memory_quarantines DROP CONSTRAINT memory_quarantines_released_by_fkey; ALTER TABLE brain.memory_quarantines ADD CONSTRAINT memory_quarantines_released_by_fkey FOREIGN KEY (released_by) REFERENCES auth.principals(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_quarantines DROP CONSTRAINT memory_quarantines_released_by_fkey; ALTER TABLE brain.memory_quarantines ADD CONSTRAINT memory_quarantines_released_by_fkey FOREIGN KEY (released_by) REFERENCES auth.principals(id)`},
+		{"permissive scan generation", `ALTER TABLE brain.memory_secret_scans DROP CONSTRAINT memory_secret_scans_generation_check; ALTER TABLE brain.memory_secret_scans ADD CONSTRAINT memory_secret_scans_generation_check CHECK (exception_generation >= 0 OR true)`, `ALTER TABLE brain.memory_secret_scans DROP CONSTRAINT memory_secret_scans_generation_check; ALTER TABLE brain.memory_secret_scans ADD CONSTRAINT memory_secret_scans_generation_check CHECK (exception_generation >= 0)`},
+	} {
+		t.Run(drift.name, func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err == nil {
+				t.Fatal("readiness accepted memory-quarantine drift")
+			}
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatalf("restore memory-quarantine drift: %v", err)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover: %v", err)
+			}
+		})
+	}
+}
+
 func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
 	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "memory actor")
@@ -531,6 +562,7 @@ WHERE usename='punaro_app' AND wait_event_type='Lock'
 	if _, err := app.GetMemory(ctx, reader.ID, otherProjectID, created.ItemID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-project get error=%v", err)
 	}
+	testMemorySecretQuarantine(ctx, t, app, ownerDB, actor.ID, reader.ID, outsider.ID)
 	for name, deniedCreate := range map[string]MemoryCreateRequest{
 		"unauthorized": {
 			PrincipalID: outsider.ID, ProjectID: projectID, IdempotencyKey: "14141414-1414-4414-8414-141414141421",
@@ -903,6 +935,197 @@ WHERE principal_id=$1 AND project_id=$2 AND capability='memory.purge' AND revoke
 	}
 }
 
+func testMemorySecretQuarantine(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, actorID, readerID, outsiderID string) {
+	t.Helper()
+	var projectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects (display_name,created_by) VALUES ('quarantine brain project',$1) RETURNING id::text`, actorID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	for _, grant := range []struct {
+		principal  string
+		capability Capability
+	}{
+		{actorID, CapabilityMemoryRead},
+		{actorID, CapabilityMemoryWrite},
+		{actorID, CapabilityMemoryAdminister},
+		{readerID, CapabilityMemoryRead},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, projectID, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	created, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161601",
+		LogicalKey: "legacy.secret", Kind: "preference", Trust: "curated", Document: json.RawMessage(`{"title":"legacy safe value"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161610",
+		LogicalKey: "legacy.second", Kind: "preference", Trust: "curated", Document: json.RawMessage(`{"title":"second legacy safe value"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDocument := `{"token":"resolved-legacy-value-123"}`
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions
+SET document=$2::jsonb,content_sha256=digest(($2::jsonb)::text,'sha256')
+WHERE item_id=$1 AND revision=1`, created.ItemID, legacyDocument); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM brain.memory_secret_scans WHERE item_id=$1`, created.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	secondLegacyDocument := `{"password":"second-legacy-value-456"}`
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions
+SET document=$2::jsonb,content_sha256=digest(($2::jsonb)::text,'sha256')
+WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM brain.memory_secret_scans WHERE item_id=$1`, second.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=decode(repeat('00',32),'hex') WHERE item_id=$1 AND revision=1`, second.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161615", Limit: 2,
+	}); err == nil || strings.Contains(err.Error(), "second-legacy") {
+		t.Fatalf("corrupt-candidate rescan error=%v", err)
+	}
+	var failedBatchEffects int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+  (SELECT count(*) FROM brain.memory_quarantines AS quarantine JOIN brain.memory_items AS item ON item.id=quarantine.item_id JOIN brain.scopes AS scope ON scope.id=item.scope_id WHERE scope.project_id=$1)
++ (SELECT count(*) FROM brain.memory_secret_scans AS scan JOIN brain.memory_items AS item ON item.id=scan.item_id JOIN brain.scopes AS scope ON scope.id=item.scope_id WHERE scope.project_id=$1)
++ (SELECT count(*) FROM relay.idempotency_records WHERE key='16161616-1616-4616-8616-161616161615')`, projectID).Scan(&failedBatchEffects); err != nil || failedBatchEffects != 0 {
+		t.Fatalf("failed rescan batch effects=%d err=%v", failedBatchEffects, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=digest(document::text,'sha256') WHERE item_id=$1 AND revision=1`, second.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: readerID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161611", Limit: 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized secret rescan error=%v", err)
+	}
+	request := MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161602", Limit: 1,
+	}
+	result, err := app.RescanMemorySecrets(ctx, request)
+	if err != nil || result.Scanned != 1 || result.Quarantined != 1 || result.Released != 0 || !result.Remaining {
+		t.Fatalf("secret rescan=%#v err=%v", result, err)
+	}
+	if retry, err := app.RescanMemorySecrets(ctx, request); err != nil || retry != result {
+		t.Fatalf("secret rescan retry=%#v err=%v", retry, err)
+	}
+	changedRequest := request
+	changedRequest.Limit = 2
+	if _, err := app.RescanMemorySecrets(ctx, changedRequest); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed secret rescan retry error=%v", err)
+	}
+	secondBatch, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161612", Limit: 1,
+	})
+	if err != nil || secondBatch.Scanned != 1 || secondBatch.Quarantined != 1 || secondBatch.Released != 0 || secondBatch.Remaining {
+		t.Fatalf("second secret rescan batch=%#v err=%v", secondBatch, err)
+	}
+	if encoded, _ := json.Marshal(result); strings.Contains(string(encoded), "resolved-legacy") {
+		t.Fatalf("secret rescan result leaked content: %s", encoded)
+	}
+	if _, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("quarantined ordinary get error=%v", err)
+	}
+	if _, err := app.ReviewMemorySecretQuarantine(ctx, outsiderID, projectID, created.ItemID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized quarantine review error=%v", err)
+	}
+	review, err := app.ReviewMemorySecretQuarantine(ctx, actorID, projectID, created.ItemID)
+	var reviewedDocument map[string]any
+	if err != nil || json.Unmarshal(review.Item.Document, &reviewedDocument) != nil || !review.Active || review.Item.ItemID != created.ItemID || reviewedDocument["token"] != "resolved-legacy-value-123" || review.Finding.RuleID != secretguard.RuleSensitiveField || review.Finding.FieldPath != "/token" {
+		t.Fatalf("quarantine review=%#v err=%v", review, err)
+	}
+	secondReview, err := app.ReviewMemorySecretQuarantine(ctx, actorID, projectID, second.ItemID)
+	if err != nil {
+		t.Fatalf("second quarantine review: %v", err)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: second.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161613", ExpectedETag: secondReview.Item.ETag,
+		LogicalKey: "legacy.second", Kind: "preference", Trust: "curated", Document: json.RawMessage(`{"title":"second clean replacement"}`),
+	}); err != nil {
+		t.Fatalf("clean second quarantined item: %v", err)
+	}
+	noOp, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161614", Limit: 2,
+	})
+	if err != nil || noOp.Scanned != 0 || noOp.Quarantined != 0 || noOp.Released != 0 || noOp.Remaining {
+		t.Fatalf("completed no-op rescan=%#v err=%v", noOp, err)
+	}
+	archived, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161603", ExpectedETag: review.Item.ETag, Archived: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("archive escaped quarantine: %v", err)
+	}
+	restored, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161604", ExpectedETag: archived.ETag, Archived: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exception, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161605",
+		RuleID: review.Finding.RuleID, FieldPath: review.Finding.FieldPath, RuleVersion: review.Finding.RuleVersion, Fingerprint: review.Finding.Fingerprint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161606", Limit: 2,
+	})
+	if err != nil || released.Scanned != 2 || released.Quarantined != 0 || released.Released != 1 || released.Remaining {
+		t.Fatalf("excepted rescan=%#v err=%v", released, err)
+	}
+	if item, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); err != nil || json.Unmarshal(item.Document, &reviewedDocument) != nil || reviewedDocument["token"] != "resolved-legacy-value-123" || item.Revision != restored.Revision {
+		t.Fatalf("released ordinary get=%#v err=%v", item, err)
+	}
+	if _, err := app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161607", ExceptionID: exception.ExceptionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requarantined, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161608", Limit: 2,
+	})
+	if err != nil || requarantined.Scanned != 2 || requarantined.Quarantined != 1 || requarantined.Released != 0 || requarantined.Remaining {
+		t.Fatalf("post-revoke rescan=%#v err=%v", requarantined, err)
+	}
+	cleaned, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161609", ExpectedETag: restored.ETag,
+		LogicalKey: "legacy.secret", Kind: "preference", Trust: "curated", Document: json.RawMessage(`{"title":"clean replacement"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); err != nil || json.Unmarshal(item.Document, &reviewedDocument) != nil || item.Revision != cleaned.Revision || reviewedDocument["title"] != "clean replacement" {
+		t.Fatalf("clean update release=%#v err=%v", item, err)
+	}
+	var metadataLeaked bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+EXISTS (SELECT 1 FROM audit.events WHERE project_id=$1 AND to_jsonb(audit.events)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
+OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE to_jsonb(relay.idempotency_records)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
+OR EXISTS (SELECT 1 FROM brain.memory_changes AS change JOIN brain.scopes AS scope ON scope.id=change.scope_id WHERE scope.project_id=$1 AND to_jsonb(change)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))
+OR EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine JOIN brain.memory_items AS item ON item.id=quarantine.item_id JOIN brain.scopes AS scope ON scope.id=item.scope_id WHERE scope.project_id=$1 AND to_jsonb(quarantine)::text LIKE ANY (ARRAY['%resolved-legacy%','%second-legacy%']))`, projectID).Scan(&metadataLeaked); err != nil || metadataLeaked {
+		t.Fatalf("quarantine metadata leaked content=%v err=%v", metadataLeaked, err)
+	}
+}
+
 type brainEffects struct {
 	revisions         int
 	changes           int
@@ -936,6 +1159,7 @@ func assertBrainEffects(ctx context.Context, t *testing.T, ownerDB *sql.DB, item
 
 type secretGuardEffects struct {
 	items, revisions, changes, audits, idempotency, jobs, scopes int
+	scans, quarantines, projectStates                            int
 	changeSequence, contentGeneration                            int64
 }
 
@@ -950,10 +1174,14 @@ func readSecretGuardEffects(ctx context.Context, t *testing.T, ownerDB *sql.DB) 
   (SELECT count(*) FROM relay.idempotency_records),
   (SELECT count(*) FROM jobs.outbox),
   (SELECT count(*) FROM brain.scopes),
+  (SELECT count(*) FROM brain.memory_secret_scans),
+  (SELECT count(*) FROM brain.memory_quarantines),
+  (SELECT count(*) FROM brain.secret_project_state),
   (SELECT change_sequence FROM jobs.server_state WHERE singleton),
   (SELECT sum(content_generation) FROM relay.projects)`).Scan(
 		&effects.items, &effects.revisions, &effects.changes, &effects.audits,
 		&effects.idempotency, &effects.jobs, &effects.scopes,
+		&effects.scans, &effects.quarantines, &effects.projectStates,
 		&effects.changeSequence, &effects.contentGeneration,
 	); err != nil {
 		t.Fatal(err)

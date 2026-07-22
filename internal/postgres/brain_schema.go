@@ -14,7 +14,8 @@ WITH objects AS (
            to_regclass('brain.memory_items') AS items_oid,
 		   to_regclass('brain.memory_revisions') AS revisions_oid,
 		   to_regclass('brain.memory_changes') AS changes_oid,
-		   to_regclass('brain.memory_tombstones') AS tombstones_oid,
+	           to_regclass('brain.memory_tombstones') AS tombstones_oid,
+	           to_regclass('brain.memory_quarantines') AS quarantines_oid,
            to_regclass('brain.memory_items_scope_logical_key') AS logical_key_index_oid,
            to_regclass('brain.memory_items_scope_state') AS state_index_oid,
            to_regclass('brain.memory_changes_scope_cursor') AS cursor_index_oid,
@@ -98,7 +99,7 @@ WITH objects AS (
 	  ('brain.memory_changes','memory_changes_pkey','p','{1,2}','','','',false,false,''),
 	  ('brain.memory_changes','memory_changes_sequence_check','c','{2}','','','',false,false,'(change_sequence >= 1)'),
 	  ('brain.memory_changes','memory_changes_scope_id_fkey','f','{3}','brain.scopes','{1}','a',false,false,''),
-	  ('brain.memory_changes','memory_changes_operation_check','c','{5}','','','',false,false,'(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text]))'),
+	  ('brain.memory_changes','memory_changes_operation_check','c','{5}','','','',false,false,'(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text, ''quarantine''::text, ''quarantine_release''::text]))'),
 	  ('brain.memory_changes','memory_changes_revision_check','c','{6}','','','',false,false,'(revision >= 1)'),
 	  ('brain.memory_tombstones','memory_tombstones_pkey','p','{1}','','','',false,false,''),
 	  ('brain.memory_tombstones','memory_tombstones_scope_id_fkey','f','{2}','brain.scopes','{1}','a',false,false,''),
@@ -111,8 +112,11 @@ WITH objects AS (
 	       CASE WHEN constraint_row.contype='f' THEN constraint_row.confkey::text ELSE '' END,
 	       CASE WHEN constraint_row.contype='f' THEN constraint_row.confdeltype::text ELSE '' END,
 	       constraint_row.condeferrable, constraint_row.condeferred,
-	       CASE WHEN constraint_row.contype='c' THEN
+	           CASE WHEN constraint_row.contype='c' THEN
 	         CASE
+	           WHEN constraint_row.conname='memory_changes_operation_check' AND quarantines_oid IS NULL
+	             AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text]))'
+	           THEN '(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''restore''::text, ''delete''::text, ''quarantine''::text, ''quarantine_release''::text]))'
 	           WHEN constraint_row.conname='memory_items_logical_key_check'
 	             AND pg_get_expr(constraint_row.conbin,constraint_row.conrelid)='((logical_key IS NULL) OR ((char_length(logical_key) >= 1) AND (char_length(logical_key) <= 128) AND (octet_length(logical_key) <= 512) AND (logical_key !~ ''[[:cntrl:]]''::text)))'
 	           THEN '((logical_key IS NULL) OR (((char_length(logical_key) >= 1) AND (char_length(logical_key) <= 128)) AND (octet_length(logical_key) <= 512) AND (logical_key !~ ''[[:cntrl:]]''::text)))'
