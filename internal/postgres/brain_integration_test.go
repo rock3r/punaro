@@ -518,7 +518,7 @@ FROM brain.memory_proposals WHERE payload=convert_to('alias-maintenance-batch','
 		t.Fatalf("alias maintenance expired=%d source=%d err=%v", maintained, sourceMaintained, err)
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events AS event
-JOIN brain.memory_proposals AS proposal ON proposal.id::text=event.target_id
+JOIN brain.memory_proposals AS proposal ON proposal.id=event.target_id
 WHERE event.action='memory.proposal.expire' AND event.principal_id IS NULL AND proposal.payload=convert_to('alias-maintenance-batch','UTF8')`).Scan(&maintenanceAudits); err != nil || maintenanceAudits != memoryProposalMaintenanceBatch {
 		t.Fatalf("alias maintenance audit count=%d err=%v", maintenanceAudits, err)
 	}
