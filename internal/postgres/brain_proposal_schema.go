@@ -93,7 +93,7 @@ WITH objects AS (
       ('brain.memory_proposals','memory_proposals_state_check','(state = ANY (ARRAY[''pending''::text, ''approved''::text, ''rejected''::text, ''expired''::text]))'),
       ('brain.memory_proposals','memory_proposals_decision_check','(((state = ''pending''::text) AND (decided_by IS NULL) AND (decided_at IS NULL) AND (decided_xid IS NULL)) OR ((state = ANY (ARRAY[''approved''::text, ''rejected''::text])) AND (decided_by IS NOT NULL) AND (decided_at IS NOT NULL) AND (decided_at >= created_at) AND (decided_xid IS NOT NULL)) OR ((state = ''expired''::text) AND (decided_by IS NULL) AND (decided_at = expires_at) AND (decided_xid IS NOT NULL)))'),
       ('brain.memory_proposals','memory_proposals_payload_sha256_check','(octet_length(payload_sha256) = 32)'),
-      ('brain.memory_proposals','memory_proposals_payload_check','((octet_length(payload) >= 2) AND (octet_length(payload) <= 4194304))'),
+      ('brain.memory_proposals','memory_proposals_payload_check','((octet_length(payload) >= 2) AND (octet_length(payload) <= 1048576))'),
       ('brain.memory_proposals','memory_proposals_expiry_check','(expires_at > created_at)'),
       ('brain.memory_proposal_steps','memory_proposal_steps_ordinal_check','((ordinal >= 0) AND (ordinal <= 7))'),
       ('brain.memory_proposal_steps','memory_proposal_steps_operation_check','(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text]))'),

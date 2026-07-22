@@ -195,7 +195,8 @@ Schema version 18 adds immutable, revision-bound memory proposals. Creating a
 proposal requires `memory.propose`; reading requires `memory.read`; approving
 or rejecting requires `memory.administer`. Approval revalidates every target
 and evidence revision and applies all primitive steps atomically. Proposals
-expire after seven days. Before attempting a later proposal, a separate
+have a 1 MiB aggregate canonical payload ceiling and expire after seven days.
+Before attempting a later proposal, a separate
 authorized maintenance transaction records a bounded expiry batch as terminal
 `expired` states with system-attributed, content-free audit events.
 Approval and project-merge fences use the authoritative expiry timestamp even

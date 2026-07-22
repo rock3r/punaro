@@ -90,6 +90,25 @@ func TestMemoryProposalCreateRequestRejectsAmbiguousOrUnboundedShapes(t *testing
 	}
 }
 
+func TestMemoryProposalCreateRequestRejectsAggregatePayloadAboveIdempotencyLimit(t *testing.T) {
+	t.Parallel()
+	largeDocument := json.RawMessage(`{"x":"` + strings.Repeat("x", 220<<10) + `"}`)
+	steps := []MemoryProposalStepInput{{
+		Operation: MemoryProposalStepArchive, ItemID: "18181818-1818-4818-8818-181818181825",
+		ExpectedETag: memoryETag("18181818-1818-4818-8818-181818181825", 1), Archived: true,
+	}}
+	for range 5 {
+		steps = append(steps, MemoryProposalStepInput{Operation: MemoryProposalStepCreate, Kind: "decision", Trust: "proposed", Document: largeDocument})
+	}
+	request := MemoryProposalCreateRequest{
+		PrincipalID: "18181818-1818-4818-8818-181818181821", ProjectID: "18181818-1818-4818-8818-181818181822",
+		IdempotencyKey: "18181818-1818-4818-8818-181818181826", Action: MemoryProposalSplit, Steps: steps,
+	}
+	if _, err := request.normalized(); err == nil {
+		t.Fatal("aggregate proposal payload above the idempotency limit was accepted")
+	}
+}
+
 func TestMemoryProposalDecisionRequestRequiresProposalCAS(t *testing.T) {
 	t.Parallel()
 	proposalID := "18181818-1818-4818-8818-181818181831"

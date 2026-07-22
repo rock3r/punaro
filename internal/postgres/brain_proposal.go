@@ -219,6 +219,10 @@ func (r MemoryProposalCreateRequest) normalized() (MemoryProposalCreateRequest, 
 		}
 		evidenceItems[evidence.ItemID] = struct{}{}
 	}
+	payload, _ := memoryProposalPayloadSHA(result.ProjectID, result.Action, result.Steps, result.Evidence)
+	if len(payload) > maxIdempotencyRequestBytes {
+		return MemoryProposalCreateRequest{}, errors.New("memory proposal payload is too large")
+	}
 	return result, nil
 }
 

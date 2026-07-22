@@ -12,7 +12,7 @@ CREATE TABLE brain.memory_proposals (
     created_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
     decided_at timestamptz,
     payload_sha256 bytea NOT NULL CONSTRAINT memory_proposals_payload_sha256_check CHECK (octet_length(payload_sha256) = 32),
-    payload bytea NOT NULL CONSTRAINT memory_proposals_payload_check CHECK (octet_length(payload) BETWEEN 2 AND 4194304),
+    payload bytea NOT NULL CONSTRAINT memory_proposals_payload_check CHECK (octet_length(payload) BETWEEN 2 AND 1048576),
     assembly_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     decided_xid xid8,
     expires_at timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '7 days')
