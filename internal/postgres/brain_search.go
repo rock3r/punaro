@@ -101,7 +101,18 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
 	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return MemorySearchPage{}, errors.New("memory search timeout cannot be installed")
 	}
-	rows, err := tx.QueryContext(searchCtx, `WITH search_query AS (
+	page, err := searchMemoryInTx(searchCtx, tx, projectID, request.Query, request.Limit, false, false)
+	if err != nil {
+		return MemorySearchPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemorySearchPage{}, errors.New("memory search transaction could not finish")
+	}
+	return page, nil
+}
+
+func searchMemoryInTx(ctx context.Context, tx *sql.Tx, projectID, query string, limit int, curatedOnly, requireProjection bool) (MemorySearchPage, error) {
+	rows, err := tx.QueryContext(ctx, `WITH search_query AS (
     SELECT websearch_to_tsquery('simple'::regconfig,$2) AS query
 ), exact_key AS MATERIALIZED (
     SELECT item.id,item.logical_key,item.kind,item.trust,item.layer,item.current_revision,item.updated_at,
@@ -110,7 +121,9 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
     JOIN brain.scopes AS scope ON scope.id=item.scope_id AND scope.project_id=$1
     JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
     CROSS JOIN search_query
-    WHERE item.state='active' AND item.logical_key=$2
+    WHERE item.state='active' AND item.logical_key=$2 AND (NOT $7 OR item.layer='curated')
+      AND (NOT $8 OR (jsonb_typeof(revision.document->'title')='string' AND btrim(revision.document->>'title')<>'')
+                  OR (jsonb_typeof(revision.document->'summary')='string' AND btrim(revision.document->>'summary')<>''))
       AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)
     LIMIT 1
 ), exact_title AS MATERIALIZED (
@@ -120,7 +133,9 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
 	JOIN brain.memory_items AS item ON item.id=revision.item_id AND item.current_revision=revision.revision
 	JOIN brain.scopes AS scope ON scope.id=item.scope_id AND scope.project_id=$1
 	CROSS JOIN search_query
-	WHERE item.state='active' AND revision.search_title=$2
+	WHERE item.state='active' AND revision.search_title=$2 AND (NOT $7 OR item.layer='curated')
+	  AND (NOT $8 OR (jsonb_typeof(revision.document->'title')='string' AND btrim(revision.document->>'title')<>'')
+	              OR (jsonb_typeof(revision.document->'summary')='string' AND btrim(revision.document->>'summary')<>''))
 	  AND octet_length(revision.search_title)<=1024
 	  AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)
 	ORDER BY lexical_score DESC,item.updated_at DESC,item.id
@@ -134,7 +149,9 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
     JOIN brain.scopes AS scope ON scope.id=item.scope_id AND scope.project_id=$1
     JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
     CROSS JOIN search_query
-    WHERE item.state='active' AND revision.search_vector @@ search_query.query
+    WHERE item.state='active' AND revision.search_vector @@ search_query.query AND (NOT $7 OR item.layer='curated')
+      AND (NOT $8 OR (jsonb_typeof(revision.document->'title')='string' AND btrim(revision.document->>'title')<>'')
+                  OR (jsonb_typeof(revision.document->'summary')='string' AND btrim(revision.document->>'summary')<>''))
       AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)
 	ORDER BY match_tier DESC,lexical_score DESC,item.updated_at DESC,item.id
 	LIMIT $6
@@ -149,17 +166,19 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
 	  AND NOT EXISTS (SELECT 1 FROM exact_title WHERE exact_title.id=lexical.id)
 )
 SELECT id::text,COALESCE(logical_key,''),kind,trust,layer,current_revision,
-       CASE WHEN jsonb_typeof(revision.document->'title')='string' THEN left(revision.document->>'title',$4) ELSE '' END,
-       CASE WHEN jsonb_typeof(revision.document->'summary')='string' THEN left(revision.document->>'summary',$5) ELSE '' END,
+	   CASE WHEN jsonb_typeof(revision.document->'title')='string'
+	        THEN left(CASE WHEN $8 THEN btrim(revision.document->>'title') ELSE revision.document->>'title' END,$4) ELSE '' END,
+	   CASE WHEN jsonb_typeof(revision.document->'summary')='string'
+	        THEN left(CASE WHEN $8 THEN btrim(revision.document->>'summary') ELSE revision.document->>'summary' END,$5) ELSE '' END,
 	   match_tier,lexical_score
 FROM candidates AS revision
 ORDER BY match_tier DESC,lexical_score DESC,updated_at DESC,id
-LIMIT $3`, projectID, request.Query, request.Limit+1, maxMemorySearchTitleRunes, maxMemorySearchSummaryRunes, maxMemorySearchCandidates)
+LIMIT $3`, projectID, query, limit+1, maxMemorySearchTitleRunes, maxMemorySearchSummaryRunes, maxMemorySearchCandidates, curatedOnly, requireProjection)
 	if err != nil {
 		return MemorySearchPage{}, errors.New("memory search is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	page := MemorySearchPage{Results: make([]MemorySearchResult, 0, request.Limit)}
+	page := MemorySearchPage{Results: make([]MemorySearchResult, 0, limit)}
 	for rows.Next() {
 		var result MemorySearchResult
 		var matchTier int
@@ -180,7 +199,7 @@ LIMIT $3`, projectID, request.Query, request.Limit+1, maxMemorySearchTitleRunes,
 			return MemorySearchPage{}, errors.New("memory search result has invalid match tier")
 		}
 		result.ETag = memoryETag(result.ItemID, result.Revision)
-		if len(page.Results) == request.Limit {
+		if len(page.Results) == limit {
 			page.More = true
 			continue
 		}
@@ -188,9 +207,6 @@ LIMIT $3`, projectID, request.Query, request.Limit+1, maxMemorySearchTitleRunes,
 	}
 	if err := rows.Err(); err != nil {
 		return MemorySearchPage{}, errors.New("memory search is unavailable")
-	}
-	if err := tx.Commit(); err != nil {
-		return MemorySearchPage{}, errors.New("memory search transaction could not finish")
 	}
 	return page, nil
 }

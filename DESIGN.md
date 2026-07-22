@@ -57,8 +57,17 @@ rank, and only bounded title/summary metadata is returned under a two-second
 SQL deadline. Full documents still require `memory.read`. Existing databases
 above either 100,000 revisions or 256 MiB of stored canonical documents refuse
 the blocking migration. They remain upgrade-blocked pending a later explicit,
-backed-up, bounded-backfill slice. The first native memory client remains a
-later independently reviewed slice.
+backed-up, bounded-backfill slice. The dark `BuildMemoryPromptBrief` read uses
+the same authorization, pool, snapshot, deadline, and bounded title/summary
+projection. It places up to four curated boolean-pinned records, the newest
+curated `project_brief`, and six curated lexical results into deterministic
+JSON framed as untrusted memory data. Pin and kind are retrieval hints, never
+authority or truth. The response is fixed to versioned section budgets and a
+16,384-rune/64-KiB rendered ceiling, reports lexical-only semantic status, and
+binds future client caches to the same-snapshot installation, timeline, change,
+project-content, and project-ACL generations. It never returns bodies, source
+coordinates, or control-plane arguments. The first native memory client remains
+a later independently reviewed slice.
 
 ## Goals
 
