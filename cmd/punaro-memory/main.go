@@ -2,16 +2,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/memoryclient"
 )
 
@@ -33,6 +36,18 @@ type client interface {
 var newMemoryClient = func(origin, credential string) (client, error) { return memoryclient.New(origin, credential) }
 var loadCredential = memoryclient.LoadCredential
 
+const (
+	profileVersion = 1
+	maxProfileSize = int64(4096)
+)
+
+type profile struct {
+	Version        int    `json:"version"`
+	Origin         string `json:"origin"`
+	CredentialFile string `json:"credential_file"`
+	Project        string `json:"project,omitempty"`
+}
+
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
@@ -43,6 +58,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	command := args[0]
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	profilePath := flags.String("profile", "", "absolute protected non-secret profile file")
 	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
 	credentialFile := flags.String("credential-file", "", "absolute protected device credential file")
 	project := flags.String("project", "", "opaque project UUID")
@@ -56,7 +72,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 	kind := flags.String("kind", "", "project identity kind")
 	locator := flags.String("locator", "", "project identity locator")
 	cursorFile := flags.String("cursor-file", "", "optional absolute JSON cursor file")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !validFlags(command, args[1:], flags) || *origin == "" || !filepath.IsAbs(*credentialFile) {
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || !validFlags(command, args[1:], flags) {
+		return 2
+	}
+	explicit := make(map[string]bool)
+	flags.Visit(func(parsed *flag.Flag) { explicit[parsed.Name] = true })
+	if command == "profile-write" {
+		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project}
+		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanPath(*profilePath, candidate.CredentialFile) {
+			return 2
+		}
+		if err := saveProfile(*profilePath, candidate); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro-memory: profile failed")
+			return 1
+		}
+		return 0
+	}
+	if *profilePath != "" {
+		loaded, err := loadProfile(*profilePath)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro-memory: profile failed")
+			return 1
+		}
+		if !explicit["origin"] {
+			*origin = loaded.Origin
+		}
+		if !explicit["credential-file"] {
+			*credentialFile = loaded.CredentialFile
+		}
+		if !explicit["project"] {
+			*project = loaded.Project
+		}
+	}
+	if *origin == "" || !filepath.IsAbs(*credentialFile) {
 		return 2
 	}
 	if !validCommand(command, *project, *item, *proposal, *key, *etag, *input, *query, *kind, *locator, *cursorFile, *limit) {
@@ -140,7 +188,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func validFlags(command string, args []string, flags *flag.FlagSet) bool {
-	allowed := map[string]bool{"origin": true, "credential-file": true}
+	allowed := map[string]bool{"profile": true, "origin": true, "credential-file": true}
 	for _, name := range commandFlags(command) {
 		allowed[name] = true
 	}
@@ -188,6 +236,8 @@ func flagName(argument string) (string, bool) {
 
 func commandFlags(command string) []string {
 	switch command {
+	case "profile-write":
+		return []string{"profile", "origin", "credential-file", "project"}
 	case "resolve":
 		return []string{"kind", "locator"}
 	case "get":
@@ -211,6 +261,185 @@ func commandFlags(command string) []string {
 	default:
 		return nil
 	}
+}
+
+func saveProfile(path string, value profile) error {
+	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanPath(path, value.CredentialFile) {
+		return errors.New("profile is invalid")
+	}
+	if !noSymlinkPath(filepath.Dir(path)) || !noSymlinkPath(filepath.Dir(value.CredentialFile)) {
+		return errors.New("profile path is unsafe")
+	}
+	value.Version = profileVersion
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if int64(len(raw)) > maxProfileSize {
+		return errors.New("profile is too large")
+	}
+	directory := filepath.Dir(path)
+	temp, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-") // #nosec G304 -- directory is explicit, absolute, and checked for symlink components.
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tempPath) // #nosec G703 -- tempPath comes from os.CreateTemp in the already validated profile directory.
+		}
+	}()
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if _, err := temp.Write(raw); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if !noSymlinkPath(directory) {
+		return errors.New("profile directory changed while writing")
+	}
+	if err := os.Rename(tempPath, path); err != nil { // #nosec G703 -- source and target are validated absolute profile paths in the same checked directory.
+		return err
+	}
+	removeTemp = false
+	if err := syncDirectory(directory); err != nil {
+		return err
+	}
+	return nil
+}
+
+func loadProfile(path string) (profile, error) {
+	var value profile
+	if !safeProfilePath(path) || !privateProfilePath(path) || !noSymlinkPath(path) {
+		return value, errors.New("profile path is unsafe")
+	}
+	before, err := os.Lstat(path) // #nosec G703 -- explicit absolute CLI profile path checked component-by-component.
+	if err != nil || !before.Mode().IsRegular() || !privateProfileFile(before) {
+		return value, errors.New("profile is unavailable")
+	}
+	file, err := os.Open(path) // #nosec G304,G703 -- explicit absolute CLI profile path checked before and after opening.
+	if err != nil {
+		return value, errors.New("profile is unavailable")
+	}
+	defer func() { _ = file.Close() }()
+	after, err := file.Stat()
+	if err != nil || !after.Mode().IsRegular() || !privateProfileFile(after) || !os.SameFile(before, after) || !noSymlinkPath(path) {
+		return value, errors.New("profile changed while opening")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxProfileSize+1))
+	if err != nil || int64(len(raw)) > maxProfileSize || len(strings.TrimSpace(string(raw))) == 0 {
+		return value, errors.New("profile is invalid")
+	}
+	if err := rejectDuplicateTopLevelJSONFields(raw); err != nil {
+		return value, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return value, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return value, errors.New("profile has trailing data")
+	}
+	if value.Version != profileVersion || !validProfile(value) {
+		return value, errors.New("profile is invalid")
+	}
+	return value, nil
+}
+
+func safeProfilePath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path
+}
+
+func sameCleanPath(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func validProfile(value profile) bool {
+	return validProfileOrigin(value.Origin) &&
+		filepath.IsAbs(value.CredentialFile) &&
+		filepath.Clean(value.CredentialFile) == value.CredentialFile &&
+		(value.Project == "" || validProfileUUID(value.Project))
+}
+
+func validProfileOrigin(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil &&
+		parsed.Scheme == "https" &&
+		parsed.Host != "" &&
+		parsed.User == nil &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment == "" &&
+		(parsed.Path == "" || parsed.Path == "/") &&
+		parsed.Opaque == ""
+}
+
+func validProfileUUID(value string) bool {
+	parsed, err := uuid.Parse(value)
+	return err == nil && parsed != uuid.Nil && parsed.String() == value
+}
+
+func rejectDuplicateTopLevelJSONFields(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != '{' {
+		return errors.New("profile must be a JSON object")
+	}
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return errors.New("profile key is invalid")
+		}
+		if seen[key] {
+			return errors.New("profile has duplicate fields")
+		}
+		seen[key] = true
+		var discard json.RawMessage
+		if err := decoder.Decode(&discard); err != nil {
+			return err
+		}
+	}
+	token, err = decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok = token.(json.Delim)
+	if !ok || delimiter != '}' {
+		return errors.New("profile object is invalid")
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return errors.New("profile has trailing data")
+	}
+	return nil
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path) // #nosec G304,G703 -- directory path is explicit and checked before use.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	return directory.Sync()
 }
 
 func validCommand(command, project, item, proposal, key, etag, input, query, kind, locator, cursorFile string, limit int) bool {
@@ -277,5 +506,5 @@ func noSymlinkPath(path string) bool {
 }
 
 func usage(stderr io.Writer) {
-	_, _ = fmt.Fprintln(stderr, "usage: punaro-memory <resolve|get|search|brief|changes|create|update|archive|restore|purge|propose|proposal-get|proposal-approve|proposal-reject> [flags]")
+	_, _ = fmt.Fprintln(stderr, "usage: punaro-memory <profile-write|resolve|get|search|brief|changes|create|update|archive|restore|purge|propose|proposal-get|proposal-approve|proposal-reject> [flags]")
 }

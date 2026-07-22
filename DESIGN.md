@@ -82,8 +82,19 @@ only canonical active project IDs, bind the authenticated principal, require a
 canonical UUID idempotency key, and require a strong revision ETag for every
 CAS operation. PostgreSQL remains authoritative for capability checks,
 idempotency, atomic proposal application, secret rejection, and permanent
-read-only project aliases. The native local client remains a later
-independently reviewed slice.
+read-only project aliases. The native local memory client now exists as an
+independently reviewed slice. `punaro-memory` binds each command to a fixed
+HTTPS origin and protected device credential file. Operators may create an
+explicit local profile, but it is only a non-secret convenience contract:
+versioned JSON containing origin, credential-file path, and optional project
+UUID. The profile never stores the bearer credential value. Profile files are
+atomically replaced, owner-only regular files under trusted non-writable,
+non-symlink parent directories. Loading revalidates the path, owner-only file
+state, strict schema, fixed-HTTPS origin, absolute credential path, and
+optional project UUID before any request can use the defaults. Explicit CLI
+flags override profile defaults for the current invocation. Profiles do not
+add retry, queue, cache, Git discovery, project registry, fallback local brain,
+enrollment recovery, MCP, semantic retrieval, or Compose Pi behavior.
 
 ## Goals
 

@@ -188,15 +188,15 @@ an existing private download root. Follow the
 send, receive, and delete safety boundaries. No production installer accepts
 legacy v2/v3 authority, role, directory, wrapping-key, or permit options.
 
-On macOS and Linux the same installer also builds `punaro-memory`, the
-stateless native client for an already enabled M-17 memory API. It does not
-create a memory profile or credential. Supply the fixed HTTPS origin, an
-absolute owner-only device credential file, and explicit project/key/ETag
-coordinates on every invocation; see the
-[operator guide](operator-guide.md#stateless-native-memory-client). Windows
-memory credential loading remains fail-closed until the persisted-client slice
-adds strong ACL and reparse-point verification, so the Windows installer does
-not install this binary yet.
+On macOS and Linux the same installer also builds `punaro-memory`, the native
+client for an already enabled M-17 memory API. Supply the fixed HTTPS origin,
+an absolute owner-only device credential file, and explicit project/key/ETag
+coordinates, or write a protected non-secret profile containing only the
+origin, credential-file path, and optional default project; see the
+[operator guide](operator-guide.md#native-memory-client). Windows memory
+credential loading remains fail-closed until a later slice adds paired ACL and
+reparse-point provisioning and verification, so the Windows installer does not
+install this binary yet.
 
 ## Agent mailbox behavior
 
