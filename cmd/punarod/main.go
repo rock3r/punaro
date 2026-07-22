@@ -23,6 +23,7 @@ import (
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/devicehttp"
 	"github.com/rock3r/punaro/internal/ingress"
+	"github.com/rock3r/punaro/internal/memoryhttp"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/trustedattachment"
@@ -52,6 +53,16 @@ type trustedAttachmentDatabase interface {
 	trustedattachment.Repository
 	TrustedAttachmentRuntimeReady(context.Context) error
 	ReserveAttachment(context.Context, punaropostgres.AttachmentReservationRequest) (punaropostgres.AttachmentReservation, error)
+}
+
+type memoryDatabase interface {
+	deviceDatabase
+	ResolveProjectIdentity(context.Context, string, punaropostgres.ProjectIdentityKind, string) (punaropostgres.ProjectIdentityResolution, error)
+	GetMemory(context.Context, string, string, string) (punaropostgres.MemoryItem, error)
+	GetMemoryProposal(context.Context, string, string, string) (punaropostgres.MemoryProposal, error)
+	SearchMemory(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemorySearchPage, error)
+	BuildMemoryPromptBrief(context.Context, punaropostgres.MemoryPromptBriefRequest) (punaropostgres.MemoryPromptBrief, error)
+	FetchMemoryChanges(context.Context, punaropostgres.MemoryChangeRequest) (punaropostgres.MemoryChangePage, error)
 }
 
 type credentialTransitionDatabase interface {
@@ -180,6 +191,11 @@ func run(args []string, stderr io.Writer) int {
 	if trustedAttachmentHandler != nil {
 		defer trustedAttachmentHandler.Close()
 	}
+	memoryHandler, err := buildMemoryHandler(cfg, platformDB)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "punarod memory API configuration error: %v\n", err)
+		return 2
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
@@ -206,7 +222,7 @@ func run(args []string, stderr io.Writer) int {
 		mux.Handle("/v1/enrollments/redeem", deviceHandler)
 		mux.Handle("/v1/device/session", deviceHandler)
 	}
-	registerProductionRoutes(mux, trustedAttachmentHandler, relayHandler)
+	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler)
 	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
 	healthServer := configuredServer(cfg.HealthListenAddr, securityHeaders(healthMux))
 	publicListener, err := listenTCP("tcp", cfg.ListenAddr)
@@ -252,7 +268,11 @@ func run(args []string, stderr io.Writer) int {
 	}
 }
 
-func registerProductionRoutes(mux *http.ServeMux, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler) {
+func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler) {
+	if memoryHandler != nil {
+		mux.Handle("/v1/projects/resolve", memoryHandler)
+		mux.Handle("/v1/projects/", memoryHandler)
+	}
 	if trustedAttachmentHandler != nil {
 		mux.Handle("/v1/trusted-attachments", trustedAttachmentHandler)
 		mux.Handle("/v1/trusted-attachments/", trustedAttachmentHandler)
@@ -260,6 +280,21 @@ func registerProductionRoutes(mux *http.ServeMux, trustedAttachmentHandler *trus
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
 	}
+}
+
+func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {
+	if !cfg.MemoryAPIEnabled {
+		return nil, nil
+	}
+	database, ok := platformDB.(memoryDatabase)
+	if !ok {
+		return nil, errors.New("PostgreSQL memory database authority is unavailable")
+	}
+	policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
+	if err := policy.Validate(); err != nil {
+		return nil, errors.New("memory credential transport policy is invalid")
+	}
+	return memoryhttp.New(database, policy), nil
 }
 
 func buildTrustedAttachmentHandler(cfg config.Config, platformDB platformDatabase) (*trustedAttachmentRuntime, error) {

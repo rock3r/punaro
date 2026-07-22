@@ -259,6 +259,32 @@ client cache must additionally bind principal, normalized query, budget
 version, project, installation, timeline, change sequence, and project
 generations. Compose Pi cache/send behavior is outside this implementation.
 
+The first native memory network slice is dark by default behind
+`PUNARO_MEMORY_API_ENABLED` and requires the already validated PostgreSQL device
+authentication ingress. It adds no schema. The server accepts exactly one
+bearer credential, binds its principal internally, and exposes only project
+identity resolution plus project-scoped get, proposal-get, lexical search,
+prompt-brief, and change-fetch routes. Callers cannot select a principal,
+origin, route, credential, destination, source path, URL fetch, secret
+resolution, or other control-plane argument through memory input.
+
+All JSON is strict, duplicate-free, unknown-field rejecting, and limited to
+4 KiB. Handler concurrency is capped at 32 and each complete authentication and
+store operation has a five-second deadline; the lexical/brief store retains its
+stricter two-second SQL deadline. Responses are `no-store`. Full documents
+remain exclusive to authorized get. Search and brief keep their existing
+bounded projections, proposals keep their existing bounded staged payload, and
+changes remain content-free. Missing, unauthorized, and cross-project
+resources all return the same not-found boundary. Stale merged project IDs
+resolve only through their permanent canonical lookup aliases and confer no
+authority beyond the caller's grant on the canonical project. Cursor
+timeline/future conflicts are typed but content-free. A null cursor means the
+current installation and timeline at sequence zero, enabling a first bounded
+enumeration; every returned cursor then pins installation, timeline, and
+sequence so restore cannot create silent divergence. Mutation routes, local
+credential/project state, retry/cache behavior, MCP, semantic retrieval, and
+Compose Pi remain absent.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds

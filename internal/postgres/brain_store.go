@@ -459,6 +459,9 @@ func (d *Database) FetchMemoryChanges(ctx context.Context, request MemoryChangeR
 	if err := tx.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&current.InstallationID, &current.TimelineID, &current.ChangeSequence); err != nil {
 		return MemoryChangePage{}, errors.New("memory change cursor is unavailable")
 	}
+	if request.Cursor == (InstallationState{}) {
+		request.Cursor = InstallationState{InstallationID: current.InstallationID, TimelineID: current.TimelineID}
+	}
 	if err := ValidateCursor(current, request.Cursor); err != nil {
 		return MemoryChangePage{}, err
 	}

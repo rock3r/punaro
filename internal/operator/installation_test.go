@@ -67,6 +67,7 @@ func validInitOptions(t *testing.T) InitOptions {
 
 func TestInitPublishesConfigurationOnlyAfterOwnerBootstrap(t *testing.T) {
 	options := validInitOptions(t)
+	options.MemoryAPIEnabled = true
 	called := false
 	installation, err := Init(context.Background(), options, func(_ context.Context, dsnFile, name string) (punaropostgres.Principal, error) {
 		called = true
@@ -82,8 +83,12 @@ func TestInitPublishesConfigurationOnlyAfterOwnerBootstrap(t *testing.T) {
 		t.Fatalf("installation=%#v called=%t err=%v", installation, called, err)
 	}
 	loaded, err := Load(options.Directory)
-	if err != nil || loaded.OwnerPrincipalID != "11111111-1111-4111-8111-111111111111" {
+	if err != nil || loaded.OwnerPrincipalID != "11111111-1111-4111-8111-111111111111" || !loaded.MemoryAPIEnabled {
 		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+	environment, err := os.ReadFile(EnvFile(options.Directory))
+	if err != nil || !strings.Contains(string(environment), "PUNARO_MEMORY_API_ENABLED=true\n") {
+		t.Fatalf("memory API environment=%q err=%v", environment, err)
 	}
 	info, err := os.Stat(filepath.Join(options.Directory, configName))
 	if err != nil || info.Mode().Perm() != 0o600 {
@@ -512,6 +517,16 @@ func TestPublishMailCutoverSwitchesRuntimeMarkerLast(t *testing.T) {
 	changed.SourceFingerprint = strings.Repeat("c", 64)
 	if _, err := PublishMailCutover(installation.Directory, changed); err == nil {
 		t.Fatal("changed cutover publication was accepted")
+	}
+}
+
+func TestComposeOverrideKeepsMemoryAPIDarkButOperatorEnableable(t *testing.T) {
+	override := composeOverride()
+	if !strings.Contains(override, "PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}") {
+		t.Fatalf("compose override does not pass the dark memory API switch: %s", override)
+	}
+	if environment := daemonEnv(Installation{}); !strings.Contains(environment, "PUNARO_MEMORY_API_ENABLED=false\n") {
+		t.Fatalf("default generated environment is not dark: %s", environment)
 	}
 }
 

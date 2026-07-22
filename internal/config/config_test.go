@@ -281,6 +281,26 @@ func TestLoadRequiresCompleteTrustedAttachmentReleaseSurface(t *testing.T) {
 	}
 }
 
+func TestLoadMemoryAPIIsDarkByDefaultAndRequiresPostgresDeviceAuthority(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil || cfg.MemoryAPIEnabled {
+		t.Fatalf("default config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_MEMORY_API_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("memory API was enabled without PostgreSQL device authority")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	cfg, err = Load("")
+	if err != nil || !cfg.MemoryAPIEnabled {
+		t.Fatalf("memory API config=%#v err=%v", cfg, err)
+	}
+}
+
 func TestLoadAcceptsExplicitRelayMachineEnrollment(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)

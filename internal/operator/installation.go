@@ -91,6 +91,7 @@ type Installation struct {
 	Ingress           ingress.Policy          `json:"ingress"`
 	HealthListenAddr  string                  `json:"health_listen_addr"`
 	HealthURL         string                  `json:"health_url"`
+	MemoryAPIEnabled  bool                    `json:"memory_api_enabled"`
 	RelayMachinesJSON string                  `json:"relay_machines_json,omitempty"`
 	MailCutover       *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
@@ -106,6 +107,7 @@ type InitOptions struct {
 	OwnerName        string
 	Ingress          ingress.Policy
 	HealthListenAddr string
+	MemoryAPIEnabled bool
 }
 
 // BootstrapOwner is the only database mutation performed by Init.
@@ -209,7 +211,7 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr}); err != nil {
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled}); err != nil {
 		return Installation{}, errors.New("initialization staging configuration is invalid")
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {
@@ -315,7 +317,7 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if !listener.IsLoopback(healthListenAddr) || listener.Same(policy.ListenAddr, healthListenAddr) {
 		return Installation{}, errors.New("health listener must be a distinct concrete loopback address")
 	}
-	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr)}, nil
+	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled}, nil
 }
 
 // Load reads only a completely published installation marker.
@@ -345,7 +347,7 @@ func Load(directory string) (Installation, error) {
 			return Installation{}, errors.New("published installation relay enrollment is invalid")
 		}
 	}
-	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr})
+	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
 	}
@@ -524,6 +526,7 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_POSTGRES_ENABLED=true",
 		"PUNARO_POSTGRES_DSN_FILE=" + installation.AppDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
+		fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t", installation.MemoryAPIEnabled),
 		"PUNARO_RELAY_ENABLED=" + relayEnabled,
 		"PUNARO_RELAY_MACHINES_JSON='" + installation.RelayMachinesJSON + "'",
 		"PUNARO_RELAY_STORE=" + relayStore,
@@ -568,6 +571,7 @@ func composeOverride() string {
       PUNARO_POSTGRES_ENABLED: ${PUNARO_POSTGRES_ENABLED:?required}
       PUNARO_POSTGRES_DSN_FILE: ${PUNARO_POSTGRES_DSN_FILE:?required}
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}
+      PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}
       PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}
       PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}
       PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}
