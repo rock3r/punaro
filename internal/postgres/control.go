@@ -199,6 +199,7 @@ const (
 	AuditProjectMergePreview         AuditAction = "project.merge.preview"
 	AuditProjectMerge                AuditAction = "project.merge"
 	AuditMemoryCreate                AuditAction = "memory.create"
+	AuditMemoryEvidenceCreate        AuditAction = "memory.evidence_create"
 	AuditMemoryUpdate                AuditAction = "memory.update"
 	AuditMemoryArchive               AuditAction = "memory.archive"
 	AuditMemoryRestore               AuditAction = "memory.restore"
@@ -237,7 +238,7 @@ const (
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {}, AuditMemorySecretRescan: {}, AuditMemoryQuarantine: {}, AuditMemoryQuarantineRelease: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryEvidenceCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {}, AuditMemorySecretRescan: {}, AuditMemoryQuarantine: {}, AuditMemoryQuarantineRelease: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.

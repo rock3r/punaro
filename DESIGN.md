@@ -39,7 +39,7 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
-PostgreSQL schema 14 also contains the dark canonical Big Brain store. It has
+PostgreSQL schema 17 also contains the dark canonical Big Brain store. It has
 no production route or client switch yet; the first native memory client is a
 later independently reviewed slice.
 
@@ -301,6 +301,26 @@ that returns the canonical document and exact content-free finding coordinates.
 A clean guarded update or a rescan satisfied by narrow exact exceptions releases
 the quarantine; there is no wildcard or model override. Quarantine history is
 retained until the canonical item is explicitly purged.
+
+Schema version 17 adds an explicit `evidence` layer beside curated memory.
+Evidence creation is one bounded, idempotent transaction containing a guarded
+document, one to eight provenance sources, and at most sixteen exact-revision
+claims. Copied sources retain only a canonical SHA-256 reference digest. Live
+message, attachment, and memory sources retain opaque project/resource
+coordinates; memory sources also bind an exact revision. Creation locks the
+target and every live-source project in UUID order, locks each required grant
+and mutable source authority record, then rechecks source-specific authority
+before publication. Relay messages themselves are immutable.
+
+Evidence content is immutable through ordinary update. Archive and restore
+append identical content and copy the exact provenance graph to the new
+revision; purge cascades that graph. Retrieval first authorizes the target and
+then reauthorizes every live source independently in one repeatable-read
+snapshot. A denied source is represented only by its evidence-local source ID,
+ordinal, mode, and a redaction marker; its kind and source coordinates are not
+revealed. Active quarantine suppresses the whole evidence item exactly as it
+does curated memory. No search, embedding, proposal, ingestion worker, HTTP
+route, or production client is enabled by this schema-only slice.
 
 ## Minimal HTTP surface
 

@@ -103,8 +103,8 @@ func testCanonicalBrainSchemaDriftIntegration(ctx context.Context, t *testing.T,
 		},
 		{
 			name:    "memory operation constraint",
-			apply:   `ALTER TABLE brain.memory_revisions DROP CONSTRAINT memory_revisions_operation_check; ALTER TABLE brain.memory_revisions ADD CONSTRAINT memory_revisions_operation_check CHECK (operation IN ('create','update','archive','restore','unexpected'))`,
-			restore: `ALTER TABLE brain.memory_revisions DROP CONSTRAINT memory_revisions_operation_check; ALTER TABLE brain.memory_revisions ADD CONSTRAINT memory_revisions_operation_check CHECK (operation IN ('create','update','archive','restore'))`,
+			apply:   `ALTER TABLE brain.memory_revisions DROP CONSTRAINT memory_revisions_operation_check; ALTER TABLE brain.memory_revisions ADD CONSTRAINT memory_revisions_operation_check CHECK (operation IN ('create','evidence_create','update','archive','restore','unexpected'))`,
+			restore: `ALTER TABLE brain.memory_revisions DROP CONSTRAINT memory_revisions_operation_check; ALTER TABLE brain.memory_revisions ADD CONSTRAINT memory_revisions_operation_check CHECK (operation IN ('create','evidence_create','update','archive','restore'))`,
 		},
 		{
 			name:    "memory scope foreign key",
@@ -160,6 +160,441 @@ AS $function$ BEGIN RETURN; END $function$`); err != nil {
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("readiness did not recover after memory purge routine restoration: %v", err)
+	}
+}
+
+func testMemoryEvidenceSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	for _, drift := range []struct {
+		name, apply, restore string
+	}{
+		{"source public read", `GRANT SELECT ON brain.memory_sources TO PUBLIC`, `REVOKE SELECT ON brain.memory_sources FROM PUBLIC`},
+		{"edge delete", `GRANT DELETE ON brain.memory_edges TO punaro_app`, `REVOKE DELETE ON brain.memory_edges FROM punaro_app`},
+		{"source fence", `ALTER TABLE brain.memory_sources DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_sources ENABLE TRIGGER application_mutation_fence`},
+		{"source row security", `ALTER TABLE brain.memory_sources ENABLE ROW LEVEL SECURITY`, `ALTER TABLE brain.memory_sources DISABLE ROW LEVEL SECURITY`},
+		{"source index", `DROP INDEX brain.memory_sources_live_resource`, `CREATE INDEX memory_sources_live_resource ON brain.memory_sources (source_project_id,kind,source_resource_id,source_revision) WHERE mode='live'`},
+		{"layer constraint", `ALTER TABLE brain.memory_items DROP CONSTRAINT memory_items_layer_check; ALTER TABLE brain.memory_items ADD CONSTRAINT memory_items_layer_check CHECK (layer IS NOT NULL)`, `ALTER TABLE brain.memory_items DROP CONSTRAINT memory_items_layer_check; ALTER TABLE brain.memory_items ADD CONSTRAINT memory_items_layer_check CHECK (layer IN ('curated','evidence'))`},
+		{"source shape constraint", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_shape_check; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_shape_check CHECK (mode IS NOT NULL)`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_shape_check; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_shape_check CHECK ((mode='copied' AND source_project_id IS NULL AND source_resource_id IS NULL AND source_revision IS NULL AND reference_sha256 IS NOT NULL) OR (mode='live' AND source_project_id IS NOT NULL AND source_resource_id IS NOT NULL AND reference_sha256 IS NULL AND ((kind='memory' AND source_revision IS NOT NULL) OR (kind IN ('message','attachment') AND source_revision IS NULL))))`},
+		{"source project FK action", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id) ON DELETE CASCADE`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id)`},
+		{"source project FK update", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id)`},
+		{"edge target FK action", `ALTER TABLE brain.memory_edges DROP CONSTRAINT memory_edges_to_revision_fkey; ALTER TABLE brain.memory_edges ADD CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id,to_revision) REFERENCES brain.memory_revisions(item_id,revision)`, `ALTER TABLE brain.memory_edges DROP CONSTRAINT memory_edges_to_revision_fkey; ALTER TABLE brain.memory_edges ADD CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id,to_revision) REFERENCES brain.memory_revisions(item_id,revision) ON DELETE CASCADE`},
+	} {
+		t.Run("evidence "+drift.name, func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err == nil {
+				t.Fatal("readiness accepted memory-evidence drift")
+			}
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatalf("restore memory-evidence drift: %v", err)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover: %v", err)
+			}
+		})
+	}
+}
+
+func testMemoryEvidenceIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "evidence actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "evidence reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "evidence outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targetProject, sourceProject, otherProject string
+	for name, destination := range map[string]*string{"evidence target": &targetProject, "evidence source": &sourceProject, "evidence other": &otherProject} {
+		if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ($1,$2) RETURNING id::text`, name, actor.ID).Scan(destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, grant := range []struct {
+		principal, project string
+		capability         Capability
+	}{
+		{actor.ID, targetProject, CapabilityMemoryRead}, {actor.ID, targetProject, CapabilityMemoryWrite}, {actor.ID, targetProject, CapabilityMemoryPurge},
+		{actor.ID, targetProject, CapabilityMemoryAdminister},
+		{actor.ID, sourceProject, CapabilityMemoryRead}, {actor.ID, sourceProject, CapabilityMemoryWrite},
+		{actor.ID, sourceProject, CapabilityMemoryPurge},
+		{actor.ID, sourceProject, CapabilityConversationReceive}, {actor.ID, sourceProject, CapabilityAttachmentDownload},
+		{actor.ID, otherProject, CapabilityMemoryRead}, {actor.ID, otherProject, CapabilityMemoryWrite},
+		{reader.ID, targetProject, CapabilityMemoryRead}, {reader.ID, sourceProject, CapabilityMemoryRead},
+		{reader.ID, sourceProject, CapabilityConversationReceive}, {reader.ID, sourceProject, CapabilityAttachmentDownload},
+		{outsider.ID, targetProject, CapabilityMemoryRead}, {outsider.ID, targetProject, CapabilityMemoryWrite},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, grant.project, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171701",
+		LogicalKey: "evidence.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"accepted"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherMemory, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: otherProject, IdempotencyKey: "17171717-1717-4717-8717-171717171709",
+		LogicalKey: "evidence.other", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"other"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceMemory, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: sourceProject, IdempotencyKey: "17171717-1717-4717-8717-171717171702",
+		LogicalKey: "evidence.source", Kind: "observation", Trust: "observed", Document: json.RawMessage(`{"fact":"bounded"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var timelineID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT timeline_id::text FROM jobs.server_state WHERE singleton`).Scan(&timelineID); err != nil {
+		t.Fatal(err)
+	}
+	actorEndpoint, readerEndpoint := "agent/evidence/actor", "agent/evidence/reader"
+	actorLookup, readerLookup := "17171717-1717-4717-8717-171717171711", "17171717-1717-4717-8717-171717171712"
+	for _, endpoint := range []struct{ name, principal, lookup, digest string }{
+		{actorEndpoint, actor.ID, actorLookup, strings.Repeat("11", 32)},
+		{readerEndpoint, reader.ID, readerLookup, strings.Repeat("22", 32)},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials(lookup_id,principal_id,label,secret_digest) VALUES ($1,$2,$3,decode($4,'hex'))`, endpoint.lookup, endpoint.principal, endpoint.name, endpoint.digest); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_endpoints(endpoint,machine_id,lease_until) VALUES ($1,$2,statement_timestamp()+interval '1 day')`, endpoint.name, endpoint.name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.endpoint_principals(endpoint,machine_id,principal_id,credential_lookup_id,credential_generation,ownership_generation) VALUES ($1,$2,$3,$4,1,1)`, endpoint.name, endpoint.name, endpoint.principal, endpoint.lookup); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var conversationID, messageID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.mail_conversations(next_sequence) VALUES (1) RETURNING id::text`).Scan(&conversationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES ($1,$2,7),($1,$3,7)`, conversationID, actorEndpoint, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.conversation_projects(conversation_id,project_id,bound_by) VALUES ($1,$2,$3)`, conversationID, sourceProject, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.mail_messages(conversation_id,sequence,from_endpoint,body,created_at) VALUES ($1,1,$2,'bounded message',statement_timestamp()) RETURNING id::text`, conversationID, actorEndpoint).Scan(&messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES ($1,$2)`, messageID, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	artifactID := "17171717-1717-4717-8717-171717171720"
+	artifactSHA := strings.Repeat("33", 32)
+	storagePath := "ready/" + artifactID + ".blob"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.ready_blob_manifest(storage_path,size_bytes,sha256) VALUES ($1,7,$2)`, storagePath, artifactSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.uploads(artifact_id,project_id,principal_id,timeline_id,idempotency_key,request_sha256,size_bytes,sha256,display_name,media_type,state,expires_at,ready_at)
+VALUES ($1,$2,$3,$4,$5,$6,7,$6,'evidence.txt','text/plain','ready',statement_timestamp()+interval '1 day',statement_timestamp())`, artifactID, sourceProject, actor.ID, timelineID, "17171717-1717-4717-8717-171717171721", artifactSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.ready_artifacts(artifact_id,storage_path) VALUES ($1,$2)`, artifactID, storagePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.message_artifacts(message_id,ordinal,artifact_id,sender_principal_id) VALUES ($1,0,$2,$3)`, messageID, artifactID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.recipient_grants(artifact_id,recipient_principal_id,message_id) VALUES ($1,$2,$3)`, artifactID, reader.ID, messageID); err != nil {
+		t.Fatal(err)
+	}
+	readEffects := func() [7]int64 {
+		var effects [7]int64
+		if err := ownerDB.QueryRowContext(ctx, `SELECT
+(SELECT count(*) FROM brain.memory_items),(SELECT count(*) FROM brain.memory_revisions),
+(SELECT count(*) FROM brain.memory_sources),(SELECT count(*) FROM brain.memory_edges),
+(SELECT count(*) FROM relay.idempotency_records),(SELECT change_sequence FROM jobs.server_state WHERE singleton),
+(SELECT sum(content_generation) FROM relay.projects)`).Scan(&effects[0], &effects[1], &effects[2], &effects[3], &effects[4], &effects[5], &effects[6]); err != nil {
+			t.Fatal(err)
+		}
+		return effects
+	}
+	assertRejectedAtomically := func(name string, rejected MemoryEvidenceCreateRequest) {
+		t.Helper()
+		before := readEffects()
+		if _, err := app.CreateMemoryEvidence(ctx, rejected); err == nil {
+			t.Fatalf("%s evidence unexpectedly created", name)
+		}
+		if after := readEffects(); after != before {
+			t.Fatalf("%s rejection changed state: before=%v after=%v", name, before, after)
+		}
+	}
+	baseRejected := MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, LogicalKey: "evidence.rejected", Kind: "evidence.excerpt", Trust: "observed",
+		Document: json.RawMessage(`{"excerpt":"bounded"}`),
+	}
+	for index, source := range []MemoryEvidenceSourceInput{
+		{Mode: MemorySourceLive, Kind: MemorySourceMessage, ProjectID: sourceProject, ResourceID: "17171717-1717-4717-8717-171717171731"},
+		{Mode: MemorySourceLive, Kind: MemorySourceAttachment, ProjectID: sourceProject, ResourceID: "17171717-1717-4717-8717-171717171732"},
+		{Mode: MemorySourceLive, Kind: MemorySourceMemory, ProjectID: sourceProject, ResourceID: sourceMemory.ItemID, ResourceRevision: sourceMemory.Revision + 1},
+	} {
+		rejected := baseRejected
+		rejected.IdempotencyKey = []string{"17171717-1717-4717-8717-171717171733", "17171717-1717-4717-8717-171717171734", "17171717-1717-4717-8717-171717171735"}[index]
+		rejected.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("55", 32)}, source}
+		assertRejectedAtomically("missing "+string(source.Kind), rejected)
+	}
+	crossProject := baseRejected
+	crossProject.IdempotencyKey = "17171717-1717-4717-8717-171717171736"
+	crossProject.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("56", 32)}}
+	crossProject.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: otherMemory.ItemID, TargetRevision: otherMemory.Revision}}
+	assertRejectedAtomically("cross-project claim", crossProject)
+	missingClaim := baseRejected
+	missingClaim.IdempotencyKey = "17171717-1717-4717-8717-171717171740"
+	missingClaim.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("58", 32)}}
+	missingClaim.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: "17171717-1717-4717-8717-171717171741", TargetRevision: 1}}
+	assertRejectedAtomically("missing claim", missingClaim)
+	claimQuarantineFingerprint := strings.Repeat("59", 32)
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'sensitive-field','/status',decode($3,'hex'),$4)`, target.ItemID, target.Revision, claimQuarantineFingerprint, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	quarantinedClaim := baseRejected
+	quarantinedClaim.IdempotencyKey = "17171717-1717-4717-8717-171717171742"
+	quarantinedClaim.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5a", 32)}}
+	quarantinedClaim.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: target.ItemID, TargetRevision: target.Revision}}
+	assertRejectedAtomically("quarantined claim", quarantinedClaim)
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, target.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	secretRejected := baseRejected
+	secretRejected.IdempotencyKey = "17171717-1717-4717-8717-171717171737"
+	secretRejected.Document = json.RawMessage(`{"token":"resolved-evidence-value-123"}`)
+	secretRejected.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("57", 32)}}
+	assertRejectedAtomically("guarded secret", secretRejected)
+	revocationRequest := baseRejected
+	revocationRequest.IdempotencyKey = "17171717-1717-4717-8717-171717171747"
+	revocationRequest.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceLive, Kind: MemorySourceMessage, ProjectID: sourceProject, ResourceID: messageID}}
+	revocationTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := revocationTx.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability='conversation.receive' AND revoked_at IS NULL`, actor.ID, sourceProject); err != nil {
+		_ = revocationTx.Rollback()
+		t.Fatal(err)
+	}
+	revocationBefore := readEffects()
+	revocationDone := make(chan error, 1)
+	go func() {
+		_, createErr := app.CreateMemoryEvidence(ctx, revocationRequest)
+		revocationDone <- createErr
+	}()
+	waitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT capability_grant.id::text%FOR SHARE OF principal, capability_grant')`).Scan(&waiting); err != nil {
+			_ = revocationTx.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case createErr := <-revocationDone:
+			_ = revocationTx.Rollback()
+			t.Fatalf("evidence create escaped grant revocation lock: %v", createErr)
+		default:
+		}
+		if time.Now().After(waitDeadline) {
+			_ = revocationTx.Rollback()
+			t.Fatal("evidence create did not reach the grant revocation lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := revocationTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case createErr := <-revocationDone:
+		if !errors.Is(createErr, ErrNotFound) {
+			t.Fatalf("post-revocation evidence create error=%v", createErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence create remained blocked after grant revocation")
+	}
+	if after := readEffects(); after != revocationBefore {
+		t.Fatalf("revocation-race rejection changed evidence state: before=%v after=%v", revocationBefore, after)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,'conversation.receive')`, actor.ID, sourceProject); err != nil {
+		t.Fatal(err)
+	}
+	request := MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171703",
+		LogicalKey: "evidence.release", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"excerpt":"bounded source fact"}`),
+		Sources: []MemoryEvidenceSourceInput{
+			{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("44", 32)},
+			{Mode: MemorySourceLive, Kind: MemorySourceMessage, ProjectID: sourceProject, ResourceID: messageID},
+			{Mode: MemorySourceLive, Kind: MemorySourceAttachment, ProjectID: sourceProject, ResourceID: artifactID},
+			{Mode: MemorySourceLive, Kind: MemorySourceMemory, ProjectID: sourceProject, ResourceID: sourceMemory.ItemID, ResourceRevision: sourceMemory.Revision},
+		},
+		Claims: []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: target.ItemID, TargetRevision: target.Revision}},
+	}
+	created, err := app.CreateMemoryEvidence(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := app.CreateMemoryEvidence(ctx, request); err != nil || retry != created {
+		t.Fatalf("evidence idempotent retry=%#v err=%v", retry, err)
+	}
+	changed := request
+	changed.Document = json.RawMessage(`{"excerpt":"changed"}`)
+	if _, err := app.CreateMemoryEvidence(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed evidence retry error=%v", err)
+	}
+	for name, principal := range map[string]string{"creator": actor.ID, "recipient": reader.ID} {
+		got, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: principal, ProjectID: targetProject, ItemID: created.ItemID})
+		if err != nil || got.Item.Layer != MemoryLayerEvidence || len(got.Sources) != 4 || len(got.Claims) != 1 {
+			t.Fatalf("%s evidence=%#v err=%v", name, got, err)
+		}
+		for _, source := range got.Sources {
+			if source.Redacted {
+				t.Fatalf("%s source unexpectedly redacted: %#v", name, source)
+			}
+		}
+	}
+	sourceArchived, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: sourceProject, ItemID: sourceMemory.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171738", ExpectedETag: sourceMemory.ETag, Archived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID}); err != nil || got.Sources[3].Redacted {
+		t.Fatalf("archived readable memory source=%#v err=%v", got, err)
+	}
+	sourceRestored, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: sourceProject, ItemID: sourceMemory.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171739", ExpectedETag: sourceArchived.ETag, Archived: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.recipient_grants WHERE artifact_id=$1 AND recipient_principal_id=$2`, artifactID, reader.ID); err != nil {
+		t.Fatal(err)
+	}
+	recipientRedacted, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: reader.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || !recipientRedacted.Sources[2].Redacted || recipientRedacted.Sources[1].Redacted || recipientRedacted.Sources[3].Redacted {
+		t.Fatalf("recipient-grant redaction=%#v err=%v", recipientRedacted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.recipient_grants(artifact_id,recipient_principal_id,message_id) VALUES ($1,$2,$3)`, artifactID, reader.ID, messageID); err != nil {
+		t.Fatal(err)
+	}
+	redacted, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: outsider.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || len(redacted.Sources) != 4 || redacted.Sources[0].Redacted {
+		t.Fatalf("outsider evidence=%#v err=%v", redacted, err)
+	}
+	for _, source := range redacted.Sources[1:] {
+		if !source.Redacted || source.Kind != "" || source.ProjectID != "" || source.ResourceID != "" {
+			t.Fatalf("live source was not fully redacted: %#v", source)
+		}
+	}
+	quarantineFingerprint := strings.Repeat("66", 32)
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'sensitive-field','/fact',decode($3,'hex'),$4)`, sourceMemory.ItemID, sourceMemory.Revision, quarantineFingerprint, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	sourceQuarantined, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || !sourceQuarantined.Sources[3].Redacted || sourceQuarantined.Sources[1].Redacted || sourceQuarantined.Sources[2].Redacted {
+		t.Fatalf("quarantined-source redaction=%#v err=%v", sourceQuarantined, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, sourceMemory.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{PrincipalID: actor.ID, ProjectID: sourceProject, ItemID: sourceMemory.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171743", ExpectedETag: sourceRestored.ETag}); err != nil {
+		t.Fatal(err)
+	}
+	purgedSource, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || !purgedSource.Sources[3].Redacted || purgedSource.Sources[1].Redacted || purgedSource.Sources[2].Redacted {
+		t.Fatalf("purged-source redaction=%#v err=%v", purgedSource, err)
+	}
+	if item, err := app.GetMemory(ctx, actor.ID, targetProject, created.ItemID); err != nil || item.Layer != MemoryLayerEvidence {
+		t.Fatalf("canonical evidence get=%#v err=%v", item, err)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171704",
+		ExpectedETag: created.ETag, LogicalKey: "evidence.release", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"excerpt":"mutated"}`),
+	}); !errors.Is(err, ErrImmutableMemoryEvidence) {
+		t.Fatalf("ordinary evidence update error=%v", err)
+	}
+	archived, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171705", ExpectedETag: created.ETag, Archived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171706", ExpectedETag: archived.ETag, Archived: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID}); err != nil || got.Item.Revision != restored.Revision || len(got.Sources) != 4 || len(got.Claims) != 1 {
+		t.Fatalf("restored evidence=%#v err=%v", got, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'sensitive-field','/excerpt',decode($3,'hex'),$4)`, created.ItemID, restored.Revision, quarantineFingerprint, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("quarantined evidence get error=%v", err)
+	}
+	review, err := app.ReviewMemorySecretQuarantine(ctx, actor.ID, targetProject, created.ItemID)
+	if err != nil || review.Item.Layer != MemoryLayerEvidence {
+		t.Fatalf("quarantined evidence review=%#v err=%v", review, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, created.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	unauthorizedWrite := request
+	unauthorizedWrite.PrincipalID = reader.ID
+	unauthorizedWrite.IdempotencyKey = "17171717-1717-4717-8717-171717171707"
+	unauthorizedWrite.LogicalKey = "evidence.unauthorized-write"
+	unauthorizedWrite.Claims = nil
+	unauthorizedWrite.Sources = unauthorizedWrite.Sources[:1]
+	assertRejectedAtomically("unauthorized target write", unauthorizedWrite)
+	for index, source := range request.Sources[1:] {
+		if source.Kind == MemorySourceMemory {
+			source.ProjectID, source.ResourceID, source.ResourceRevision = otherProject, otherMemory.ItemID, otherMemory.Revision
+		}
+		unauthorized := request
+		unauthorized.PrincipalID = outsider.ID
+		unauthorized.IdempotencyKey = []string{"17171717-1717-4717-8717-171717171744", "17171717-1717-4717-8717-171717171745", "17171717-1717-4717-8717-171717171746"}[index]
+		unauthorized.LogicalKey = "evidence.unauthorized-" + string(source.Kind)
+		unauthorized.Claims = nil
+		unauthorized.Sources = []MemoryEvidenceSourceInput{source}
+		assertRejectedAtomically("unauthorized "+string(source.Kind), unauthorized)
+	}
+	for _, capability := range []Capability{CapabilityConversationReceive, CapabilityAttachmentDownload, CapabilityMemoryRead} {
+		if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability=$3 AND revoked_at IS NULL`, reader.ID, sourceProject, capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	afterRevocation, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: reader.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || afterRevocation.Sources[0].Redacted {
+		t.Fatalf("post-revocation evidence=%#v err=%v", afterRevocation, err)
+	}
+	for _, source := range afterRevocation.Sources[1:] {
+		if !source.Redacted {
+			t.Fatalf("revoked source remained visible: %#v", source)
+		}
+	}
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171708", ExpectedETag: restored.ETag}); err != nil {
+		t.Fatal(err)
+	}
+	var provenance int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM brain.memory_sources WHERE item_id=$1)+(SELECT count(*) FROM brain.memory_edges WHERE from_item_id=$1)`, created.ItemID).Scan(&provenance); err != nil || provenance != 0 {
+		t.Fatalf("purged evidence provenance=%d err=%v", provenance, err)
+	}
+	var metadataLeaked bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+EXISTS (SELECT 1 FROM audit.events AS event WHERE event.target_id=$1 AND to_jsonb(event)::text LIKE '%bounded source fact%')
+OR EXISTS (SELECT 1 FROM brain.memory_changes AS change WHERE change.item_id=$1 AND to_jsonb(change)::text LIKE '%bounded source fact%')
+OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND result::text LIKE '%bounded source fact%')`, created.ItemID).Scan(&metadataLeaked); err != nil || metadataLeaked {
+		t.Fatalf("evidence metadata leaked content=%v err=%v", metadataLeaked, err)
 	}
 }
 

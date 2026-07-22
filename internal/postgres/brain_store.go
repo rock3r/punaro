@@ -133,7 +133,7 @@ func (d *Database) GetMemory(ctx context.Context, principalID, projectID, itemID
 	var item MemoryItem
 	var logicalKey sql.NullString
 	var document, contentHash []byte
-	err = d.db.QueryRowContext(ctx, `SELECT item.id::text,scope.id::text,scope.project_id::text,item.logical_key,item.kind,item.state,item.trust,
+	err = d.db.QueryRowContext(ctx, `SELECT item.id::text,scope.id::text,scope.project_id::text,item.logical_key,item.kind,item.state,item.trust,item.layer,
 	       item.current_revision,revision.document::text,revision.content_sha256,revision.author_principal_id::text,
        item.created_at,revision.created_at,
        COALESCE((SELECT max(change.change_sequence) FROM brain.memory_changes AS change
@@ -144,7 +144,7 @@ JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 WHERE item.id=$1 AND scope.project_id=$2
   AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)`, itemID, canonicalProjectID).Scan(
-		&item.ItemID, &item.ScopeID, &item.ProjectID, &logicalKey, &item.Kind, &item.State, &item.Trust,
+		&item.ItemID, &item.ScopeID, &item.ProjectID, &logicalKey, &item.Kind, &item.State, &item.Trust, &item.Layer,
 		&item.Revision, &document, &contentHash, &item.AuthorID, &item.CreatedAt, &item.RevisionAt, &item.ChangeSequence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return MemoryItem{}, ErrNotFound
@@ -176,6 +176,9 @@ func (d *Database) UpdateMemory(ctx context.Context, raw MemoryUpdateRequest) (M
 		Document     json.RawMessage `json:"document"`
 	}{request.ProjectID, request.ItemID, request.ExpectedETag, request.LogicalKey, request.Kind, request.Trust, request.Document})
 	return d.mutateMemory(ctx, request.PrincipalID, request.IdempotencyKey, "memory.update", body, request.ProjectID, request.ItemID, CapabilityMemoryWrite, func(tx *sql.Tx, control *ControlTx, locked lockedMemory) (MemoryMutationResult, error) {
+		if locked.Layer == MemoryLayerEvidence {
+			return MemoryMutationResult{}, ErrImmutableMemoryEvidence
+		}
 		if !memoryETagMatches(request.ExpectedETag, request.ItemID, locked.Revision) {
 			return MemoryMutationResult{}, ErrStaleMemoryETag
 		}
@@ -251,6 +254,11 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 		if err := insertMemoryRevision(ctx, tx, request.ItemID, next, locked.Document, request.PrincipalID, change); err != nil {
 			return MemoryMutationResult{}, err
 		}
+		if locked.Layer == MemoryLayerEvidence {
+			if err := copyMemoryEvidenceProvenance(ctx, tx, request.ItemID, locked.Revision, next, request.PrincipalID); err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE brain.memory_items SET state=$2,current_revision=$3,updated_at=statement_timestamp() WHERE id=$1`, request.ItemID, target, next); err != nil {
 			return MemoryMutationResult{}, errors.New("memory archive state could not be updated")
 		}
@@ -294,6 +302,7 @@ type lockedMemory struct {
 	ProjectID   string
 	Revision    int64
 	State       MemoryState
+	Layer       MemoryLayer
 	Document    []byte
 	ContentHash []byte
 }
@@ -338,12 +347,12 @@ func (d *Database) mutateMemory(ctx context.Context, principalID, idempotencyKey
 func lockMemory(ctx context.Context, tx *sql.Tx, projectID, itemID string) (lockedMemory, error) {
 	var locked lockedMemory
 	locked.ProjectID = projectID
-	err := tx.QueryRowContext(ctx, `SELECT scope.id::text,item.current_revision,item.state,revision.document::text,revision.content_sha256
+	err := tx.QueryRowContext(ctx, `SELECT scope.id::text,item.current_revision,item.state,item.layer,revision.document::text,revision.content_sha256
 FROM brain.memory_items AS item
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 WHERE item.id=$1 AND scope.project_id=$2
-FOR UPDATE OF item`, itemID, projectID).Scan(&locked.ScopeID, &locked.Revision, &locked.State, &locked.Document, &locked.ContentHash)
+FOR UPDATE OF item`, itemID, projectID).Scan(&locked.ScopeID, &locked.Revision, &locked.State, &locked.Layer, &locked.Document, &locked.ContentHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return lockedMemory{}, ErrNotFound
 	}
