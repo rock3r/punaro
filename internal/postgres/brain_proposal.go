@@ -153,6 +153,7 @@ func (r MemoryProposalCreateRequest) normalized() (MemoryProposalCreateRequest, 
 	result.Steps = append([]MemoryProposalStepInput(nil), r.Steps...)
 	result.Evidence = append([]MemoryProposalEvidenceInput(nil), r.Evidence...)
 	targets := make(map[string]struct{}, len(result.Steps))
+	createKeys := make(map[string]struct{}, len(result.Steps))
 	for index := range result.Steps {
 		step := &result.Steps[index]
 		switch step.Operation {
@@ -186,6 +187,12 @@ func (r MemoryProposalCreateRequest) normalized() (MemoryProposalCreateRequest, 
 				return MemoryProposalCreateRequest{}, errors.New("duplicate memory proposal target")
 			}
 			targets[step.ItemID] = struct{}{}
+		}
+		if step.Operation == MemoryProposalStepCreate && step.LogicalKey != "" {
+			if _, duplicate := createKeys[step.LogicalKey]; duplicate {
+				return MemoryProposalCreateRequest{}, errors.New("duplicate memory proposal create key")
+			}
+			createKeys[step.LogicalKey] = struct{}{}
 		}
 	}
 	if !validMemoryProposalShape(result.Action, result.Steps) {

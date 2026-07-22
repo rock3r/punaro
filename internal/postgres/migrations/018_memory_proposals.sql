@@ -68,6 +68,10 @@ CREATE UNIQUE INDEX memory_proposal_steps_target
 ON brain.memory_proposal_steps (proposal_id, item_id)
 WHERE item_id IS NOT NULL;
 
+CREATE UNIQUE INDEX memory_proposal_steps_create_key
+ON brain.memory_proposal_steps (proposal_id, logical_key)
+WHERE operation = 'create' AND logical_key IS NOT NULL;
+
 CREATE TABLE brain.memory_proposal_evidence (
     proposal_id uuid NOT NULL REFERENCES brain.memory_proposals(id) ON DELETE CASCADE,
     ordinal smallint NOT NULL CONSTRAINT memory_proposal_evidence_ordinal_check CHECK (ordinal BETWEEN 0 AND 15),

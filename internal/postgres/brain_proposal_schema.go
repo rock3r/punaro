@@ -13,6 +13,7 @@ WITH objects AS (
            to_regclass('brain.memory_proposal_results') AS results_oid,
            to_regclass('brain.memory_proposals_scope_state') AS scope_state_oid,
            to_regclass('brain.memory_proposal_steps_target') AS step_target_oid,
+	       to_regclass('brain.memory_proposal_steps_create_key') AS step_create_key_oid,
            to_regclass('brain.memory_proposal_evidence_revision') AS evidence_revision_oid,
            to_regclass('brain.memory_proposal_results_item_revision') AS results_revision_oid,
            to_regprocedure('brain.guard_memory_proposal_update()') AS guard_oid,
@@ -122,7 +123,7 @@ WITH objects AS (
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND constraint_row.contype IN ('p','u','f','c')
 ), index_safety AS (
-    SELECT count(*)=10 AND bool_and(index_row.indisvalid AND index_row.indisready) AS exact
+    SELECT count(*)=11 AND bool_and(index_row.indisvalid AND index_row.indisready) AS exact
     FROM pg_index AS index_row,objects WHERE index_row.indrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid])
 ), expected_table_acl(relation_name,grantee,privilege_type,is_grantable) AS (
     SELECT relation_name,'punaro_owner',privilege_type,false
@@ -162,7 +163,7 @@ WITH objects AS (
     WHERE proc.oid=ANY(ARRAY[guard_oid,child_guard_oid,result_guard_oid,complete_guard_oid])
 )
 SELECT proposals_oid IS NOT NULL AND steps_oid IS NOT NULL AND evidence_oid IS NOT NULL AND results_oid IS NOT NULL
-   AND scope_state_oid IS NOT NULL AND step_target_oid IS NOT NULL AND evidence_revision_oid IS NOT NULL AND results_revision_oid IS NOT NULL
+   AND scope_state_oid IS NOT NULL AND step_target_oid IS NOT NULL AND step_create_key_oid IS NOT NULL AND evidence_revision_oid IS NOT NULL AND results_revision_oid IS NOT NULL
    AND guard_oid IS NOT NULL AND child_guard_oid IS NOT NULL AND result_guard_oid IS NOT NULL AND complete_guard_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
@@ -177,10 +178,11 @@ SELECT proposals_oid IS NOT NULL AND steps_oid IS NOT NULL AND evidence_oid IS N
    AND NOT EXISTS (SELECT * FROM actual_column_acl EXCEPT SELECT * FROM expected_column_acl)
    AND NOT EXISTS (SELECT * FROM expected_routine_acl EXCEPT SELECT * FROM actual_routine_acl)
    AND NOT EXISTS (SELECT * FROM actual_routine_acl EXCEPT SELECT * FROM expected_routine_acl)
-   AND (SELECT count(*)=10 AND bool_and(
+   AND (SELECT count(*)=11 AND bool_and(
           CASE index_row.indexrelid
             WHEN scope_state_oid THEN NOT index_row.indisunique AND index_row.indnkeyatts=4 AND index_row.indkey='2 4 7 1'::int2vector AND index_row.indexprs IS NULL AND index_row.indpred IS NULL
             WHEN step_target_oid THEN index_row.indisunique AND index_row.indnkeyatts=2 AND index_row.indkey='1 4'::int2vector AND index_row.indexprs IS NULL AND pg_get_expr(index_row.indpred,index_row.indrelid)='(item_id IS NOT NULL)'
+	        WHEN step_create_key_oid THEN index_row.indisunique AND index_row.indnkeyatts=2 AND index_row.indkey='1 6'::int2vector AND index_row.indexprs IS NULL AND pg_get_expr(index_row.indpred,index_row.indrelid)='((operation = ''create''::text) AND (logical_key IS NOT NULL))'
             WHEN evidence_revision_oid THEN NOT index_row.indisunique AND index_row.indnkeyatts=3 AND index_row.indkey='3 4 1'::int2vector AND index_row.indexprs IS NULL AND index_row.indpred IS NULL
             WHEN results_revision_oid THEN NOT index_row.indisunique AND index_row.indnkeyatts=3 AND index_row.indkey='3 4 1'::int2vector AND index_row.indexprs IS NULL AND index_row.indpred IS NULL
             ELSE index_row.indisunique AND index_row.indexprs IS NULL AND index_row.indpred IS NULL

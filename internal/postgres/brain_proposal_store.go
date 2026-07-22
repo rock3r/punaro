@@ -360,8 +360,10 @@ func readMemoryProposal(ctx context.Context, tx *sql.Tx, projectID, proposalID s
 	var decidedBy sql.NullString
 	var decidedAt sql.NullTime
 	query := `SELECT proposal.id::text,proposal.scope_id::text,scope.project_id::text,proposal.action,proposal.state,proposal.proposed_by::text,proposal.decided_by::text,proposal.created_at,proposal.decided_at,proposal.payload_sha256,proposal.payload
-FROM brain.memory_proposals AS proposal JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
-WHERE proposal.id=$1 AND scope.project_id=$2`
+FROM brain.memory_proposals AS proposal
+JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$2`
 	if lock {
 		query += ` FOR UPDATE OF proposal`
 	}

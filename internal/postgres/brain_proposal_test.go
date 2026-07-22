@@ -18,11 +18,12 @@ func TestMemoryProposalCreateRequestNormalizesClosedActionShapes(t *testing.T) {
 	archive := MemoryProposalStepInput{Operation: MemoryProposalStepArchive, ItemID: "18181818-1818-4818-8818-181818181805", ExpectedETag: memoryETag("18181818-1818-4818-8818-181818181805", 1), Archived: true}
 
 	for name, request := range map[string]MemoryProposalCreateRequest{
-		"create":  {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181811", Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{create}},
-		"update":  {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181812", Action: MemoryProposalUpdate, Steps: []MemoryProposalStepInput{update}},
-		"archive": {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181813", Action: MemoryProposalArchive, Steps: []MemoryProposalStepInput{archive}},
-		"merge":   {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181814", Action: MemoryProposalMerge, Steps: []MemoryProposalStepInput{update, archive}},
-		"split":   {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181815", Action: MemoryProposalSplit, Steps: []MemoryProposalStepInput{archive, create, {Operation: MemoryProposalStepCreate, LogicalKey: "decision.second", Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":2}`)}}, Evidence: []MemoryProposalEvidenceInput{{ItemID: evidence, Revision: 2}}},
+		"create":               {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181811", Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{create}},
+		"update":               {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181812", Action: MemoryProposalUpdate, Steps: []MemoryProposalStepInput{update}},
+		"archive":              {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181813", Action: MemoryProposalArchive, Steps: []MemoryProposalStepInput{archive}},
+		"merge":                {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181814", Action: MemoryProposalMerge, Steps: []MemoryProposalStepInput{update, archive}},
+		"split":                {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181815", Action: MemoryProposalSplit, Steps: []MemoryProposalStepInput{archive, create, {Operation: MemoryProposalStepCreate, LogicalKey: "decision.second", Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":2}`)}}, Evidence: []MemoryProposalEvidenceInput{{ItemID: evidence, Revision: 2}}},
+		"split anonymous keys": {PrincipalID: principal, ProjectID: project, IdempotencyKey: "18181818-1818-4818-8818-181818181816", Action: MemoryProposalSplit, Steps: []MemoryProposalStepInput{archive, {Operation: MemoryProposalStepCreate, Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":1}`)}, {Operation: MemoryProposalStepCreate, Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":2}`)}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			normalized, err := request.normalized()
@@ -55,6 +56,7 @@ func TestMemoryProposalCreateRequestRejectsAmbiguousOrUnboundedShapes(t *testing
 		"merge without archived source": {PrincipalID: principal, ProjectID: project, IdempotencyKey: base.IdempotencyKey, Action: MemoryProposalMerge, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepUpdate, ItemID: target, ExpectedETag: memoryETag(target, 1), Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"ok":true}`)}, create}},
 		"split with one child":          {PrincipalID: principal, ProjectID: project, IdempotencyKey: base.IdempotencyKey, Action: MemoryProposalSplit, Steps: []MemoryProposalStepInput{archive, create}},
 		"duplicate target":              {PrincipalID: principal, ProjectID: project, IdempotencyKey: base.IdempotencyKey, Action: MemoryProposalMerge, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepUpdate, ItemID: target, ExpectedETag: memoryETag(target, 1), Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"ok":true}`)}, archive}},
+		"duplicate create logical key":  {PrincipalID: principal, ProjectID: project, IdempotencyKey: base.IdempotencyKey, Action: MemoryProposalSplit, Steps: []MemoryProposalStepInput{archive, {Operation: MemoryProposalStepCreate, LogicalKey: "decision.duplicate", Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":1}`)}, {Operation: MemoryProposalStepCreate, LogicalKey: "decision.duplicate", Kind: "decision", Trust: "proposed", Document: json.RawMessage(`{"part":2}`)}}},
 		"too many steps": func() MemoryProposalCreateRequest {
 			r := base
 			r.Steps = make([]MemoryProposalStepInput, maxMemoryProposalSteps+1)

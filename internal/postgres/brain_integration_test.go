@@ -211,6 +211,7 @@ func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T,
 		{"proposal fence", `ALTER TABLE brain.memory_proposal_evidence DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_proposal_evidence ENABLE TRIGGER application_mutation_fence`},
 		{"proposal child guard", `ALTER TABLE brain.memory_proposal_steps DISABLE TRIGGER memory_proposal_step_insert_guard`, `ALTER TABLE brain.memory_proposal_steps ENABLE TRIGGER memory_proposal_step_insert_guard`},
 		{"proposal index", `DROP INDEX brain.memory_proposal_steps_target`, `CREATE UNIQUE INDEX memory_proposal_steps_target ON brain.memory_proposal_steps (proposal_id,item_id) WHERE item_id IS NOT NULL`},
+		{"proposal create-key index", `DROP INDEX brain.memory_proposal_steps_create_key`, `CREATE UNIQUE INDEX memory_proposal_steps_create_key ON brain.memory_proposal_steps (proposal_id,logical_key) WHERE operation='create' AND logical_key IS NOT NULL`},
 		{"proposal scope FK update", `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id)`},
 		{"proposal result FK match", `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) MATCH FULL ON DELETE CASCADE`, `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) ON DELETE CASCADE`},
 	} {
@@ -321,6 +322,49 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 		IdempotencyKey: "18181818-1818-4818-8818-181818181822", ExpectedETag: proposeOnly.ETag,
 	}); err != nil {
 		t.Fatalf("reject propose-only proposal: %v", err)
+	}
+	var proposalOnlyProjectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal-only merge source',$1) RETURNING id::text`, actor.ID).Scan(&proposalOnlyProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_identities(project_id,kind,normalized_locator,created_by) VALUES ($1,'operator_alias','proposal-only-merge-source',$2); INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($3,'project',$1,$4),($2,'project',$1,$5)`, proposalOnlyProjectID, actor.ID, reader.ID, CapabilityMemoryPropose, CapabilityMemoryAdminister); err != nil {
+		t.Fatal(err)
+	}
+	proposalOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: reader.ID, ProjectID: proposalOnlyProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181860", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.only", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"pending":true}`)}},
+	})
+	if err != nil || proposalOnly.State != MemoryProposalPending {
+		t.Fatalf("proposal-only merge source proposal=%#v err=%v", proposalOnly, err)
+	}
+	mergeTx, err := beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, _, _, mergeErr := projectMergeCounts(ctx, mergeTx, actor.ID, proposalOnlyProjectID, projectID); !errors.Is(mergeErr, ErrProjectMergeBrainState) {
+		_ = mergeTx.Rollback()
+		t.Fatalf("pending proposal did not block project merge: %v", mergeErr)
+	}
+	_ = mergeTx.Rollback()
+	proposalOnly, err = app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: actor.ID, ProjectID: proposalOnlyProjectID, ProposalID: proposalOnly.ProposalID, IdempotencyKey: "18181818-1818-4818-8818-181818181861", ExpectedETag: proposalOnly.ETag})
+	if err != nil || proposalOnly.State != MemoryProposalRejected {
+		t.Fatalf("reject proposal-only merge source proposal=%#v err=%v", proposalOnly, err)
+	}
+	mergeTx, err = beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, _, _, mergeErr := projectMergeCounts(ctx, mergeTx, actor.ID, proposalOnlyProjectID, projectID); mergeErr != nil {
+		_ = mergeTx.Rollback()
+		t.Fatalf("rejected proposal-only scope permanently blocked project merge: %v", mergeErr)
+	}
+	_ = mergeTx.Rollback()
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2); UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, proposalOnlyProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	mergedHistory, err := app.GetMemoryProposal(ctx, actor.ID, proposalOnlyProjectID, proposalOnly.ProposalID)
+	if err != nil || mergedHistory.State != MemoryProposalRejected || mergedHistory.ProjectID != proposalOnlyProjectID {
+		t.Fatalf("merged rejected proposal history=%#v err=%v", mergedHistory, err)
 	}
 	request := MemoryProposalCreateRequest{
 		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181803", Action: MemoryProposalUpdate,
