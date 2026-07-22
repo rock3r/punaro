@@ -969,18 +969,28 @@ func testMemorySecretQuarantine(ctx context.Context, t *testing.T, app *Database
 		t.Fatal(err)
 	}
 	legacyDocument := `{"token":"resolved-legacy-value-123"}`
+	var legacyStoredDocument string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT $1::jsonb::text`, legacyDocument).Scan(&legacyStoredDocument); err != nil {
+		t.Fatal(err)
+	}
+	legacyDocumentHash := sha256.Sum256([]byte(legacyStoredDocument))
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions
-SET document=$2::jsonb,content_sha256=digest(($2::jsonb)::text,'sha256')
-WHERE item_id=$1 AND revision=1`, created.ItemID, legacyDocument); err != nil {
+SET document=$2::jsonb,content_sha256=$3
+WHERE item_id=$1 AND revision=1`, created.ItemID, legacyDocument, legacyDocumentHash[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM brain.memory_secret_scans WHERE item_id=$1`, created.ItemID); err != nil {
 		t.Fatal(err)
 	}
 	secondLegacyDocument := `{"password":"second-legacy-value-456"}`
+	var secondLegacyStoredDocument string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT $1::jsonb::text`, secondLegacyDocument).Scan(&secondLegacyStoredDocument); err != nil {
+		t.Fatal(err)
+	}
+	secondLegacyDocumentHash := sha256.Sum256([]byte(secondLegacyStoredDocument))
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions
-SET document=$2::jsonb,content_sha256=digest(($2::jsonb)::text,'sha256')
-WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument); err != nil {
+SET document=$2::jsonb,content_sha256=$3
+WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLegacyDocumentHash[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM brain.memory_secret_scans WHERE item_id=$1`, second.ItemID); err != nil {
@@ -1001,7 +1011,7 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument); err != n
 + (SELECT count(*) FROM relay.idempotency_records WHERE key='16161616-1616-4616-8616-161616161615')`, projectID).Scan(&failedBatchEffects); err != nil || failedBatchEffects != 0 {
 		t.Fatalf("failed rescan batch effects=%d err=%v", failedBatchEffects, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=digest(document::text,'sha256') WHERE item_id=$1 AND revision=1`, second.ItemID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=$2 WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocumentHash[:]); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.RescanMemorySecrets(ctx, MemorySecretRescanRequest{
