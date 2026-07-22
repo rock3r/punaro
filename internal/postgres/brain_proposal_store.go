@@ -130,24 +130,56 @@ func (d *Database) maintainMemoryProposals(ctx context.Context, principalID, pro
 	if !allowed {
 		return ErrNotFound
 	}
-	var scopeID string
-	if err := tx.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes WHERE project_id=$1`, project.ID).Scan(&scopeID); errors.Is(err, sql.ErrNoRows) {
-		return tx.Commit()
-	} else if err != nil {
+	type maintenanceScope struct{ id, projectID string }
+	rows, err := tx.QueryContext(ctx, `SELECT scope.id::text,scope.project_id::text
+FROM brain.scopes AS scope
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE COALESCE(alias.canonical_project_id,scope.project_id)=$1
+ORDER BY scope.project_id,scope.id`, project.ID)
+	if err != nil {
 		return errors.New("memory proposal maintenance scope is unavailable")
 	}
-	expired, err := expireMemoryProposals(ctx, tx, &ControlTx{tx: tx}, project.ID, scopeID)
-	if err != nil {
-		return err
+	var scopes []maintenanceScope
+	for rows.Next() {
+		var scope maintenanceScope
+		if err := rows.Scan(&scope.id, &scope.projectID); err != nil {
+			_ = rows.Close()
+			return errors.New("memory proposal maintenance scope is malformed")
+		}
+		scopes = append(scopes, scope)
 	}
-	var pruned int
-	if err := tx.QueryRowContext(ctx, `SELECT brain.prune_memory_proposals($1,$2,$3,statement_timestamp()-($4 * interval '1 microsecond'),$5)`, principalID, project.ID, scopeID, memoryProposalRetention.Microseconds(), memoryProposalMaintenanceBatch).Scan(&pruned); err != nil {
-		return errors.New("retained memory proposals could not be pruned")
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return errors.New("memory proposal maintenance scopes are unavailable")
 	}
-	if pruned < 0 || pruned > memoryProposalMaintenanceBatch {
-		return errors.New("memory proposal pruning was not bounded")
+	if err := rows.Close(); err != nil {
+		return errors.New("memory proposal maintenance scopes cannot close")
 	}
-	if expired+pruned > 0 {
+	changed := 0
+	for _, scope := range scopes {
+		remaining := memoryProposalMaintenanceBatch - changed
+		if remaining == 0 {
+			break
+		}
+		expired, err := expireMemoryProposals(ctx, tx, &ControlTx{tx: tx}, scope.projectID, scope.id, remaining)
+		if err != nil {
+			return err
+		}
+		changed += expired
+		remaining = memoryProposalMaintenanceBatch - changed
+		if remaining == 0 {
+			break
+		}
+		var pruned int
+		if err := tx.QueryRowContext(ctx, `SELECT brain.prune_memory_proposals($1,$2,$3,statement_timestamp()-($4 * interval '1 microsecond'),$5)`, principalID, project.ID, scope.id, memoryProposalRetention.Microseconds(), remaining).Scan(&pruned); err != nil {
+			return errors.New("retained memory proposals could not be pruned")
+		}
+		if pruned < 0 || pruned > remaining {
+			return errors.New("memory proposal pruning was not bounded")
+		}
+		changed += pruned
+	}
+	if changed > 0 {
 		if err := advanceProposalGeneration(ctx, tx, project.ID); err != nil {
 			return err
 		}
@@ -158,7 +190,7 @@ func (d *Database) maintainMemoryProposals(ctx context.Context, principalID, pro
 	return nil
 }
 
-func expireMemoryProposals(ctx context.Context, tx *sql.Tx, control *ControlTx, projectID, scopeID string) (int, error) {
+func expireMemoryProposals(ctx context.Context, tx *sql.Tx, control *ControlTx, projectID, scopeID string, limit int) (int, error) {
 	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
     SELECT id FROM brain.memory_proposals
     WHERE scope_id=$1 AND state='pending' AND expires_at <= statement_timestamp()
@@ -167,11 +199,11 @@ func expireMemoryProposals(ctx context.Context, tx *sql.Tx, control *ControlTx, 
 )
 UPDATE brain.memory_proposals AS proposal
 SET state='expired',decided_by=NULL,decided_at=proposal.expires_at,decided_xid=pg_current_xact_id()
-FROM candidates WHERE proposal.id=candidates.id RETURNING proposal.id::text`, scopeID, memoryProposalMaintenanceBatch)
+FROM candidates WHERE proposal.id=candidates.id RETURNING proposal.id::text`, scopeID, limit)
 	if err != nil {
 		return 0, errors.New("expired memory proposals could not be claimed")
 	}
-	proposalIDs := make([]string, 0, memoryProposalMaintenanceBatch)
+	proposalIDs := make([]string, 0, limit)
 	for rows.Next() {
 		var proposalID string
 		if err := rows.Scan(&proposalID); err != nil {

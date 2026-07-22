@@ -485,6 +485,15 @@ VALUES ($1,$2,'create',$3,statement_timestamp()-interval '8 days',statement_time
 	if err != nil || proposalOnly.State != MemoryProposalRejected {
 		t.Fatalf("reject proposal-only merge source proposal=%#v err=%v", proposalOnly, err)
 	}
+	var proposalOnlyScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT scope_id::text FROM brain.memory_proposals WHERE id=$1`, proposalOnly.ProposalID).Scan(&proposalOnlyScopeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,proposed_by,created_at,expires_at,payload_sha256,payload)
+SELECT scope_id,'create',$3,statement_timestamp()-interval '9 days',statement_timestamp()-interval '2 days',decode(repeat('00',32),'hex'),convert_to('alias-maintenance-batch','UTF8')
+FROM unnest(ARRAY[$1::uuid,$2::uuid]) AS candidate(scope_id) CROSS JOIN generate_series(1,40)`, scopeID, proposalOnlyScopeID, reader.ID); err != nil {
+		t.Fatal(err)
+	}
 	mergeTx, err = beginMutation(ctx, app.db)
 	if err != nil {
 		t.Fatal(err)
@@ -499,6 +508,19 @@ VALUES ($1,$2,'create',$3,statement_timestamp()-interval '8 days',statement_time
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, proposalOnlyProjectID, projectID); err != nil {
 		t.Fatal(err)
+	}
+	if err := app.maintainMemoryProposals(ctx, actor.ID, projectID); err != nil {
+		t.Fatalf("maintain merged proposal scope: %v", err)
+	}
+	var maintained, sourceMaintained, maintenanceAudits int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FILTER (WHERE state='expired'),count(*) FILTER (WHERE state='expired' AND scope_id=$1)
+FROM brain.memory_proposals WHERE payload=convert_to('alias-maintenance-batch','UTF8')`, proposalOnlyScopeID).Scan(&maintained, &sourceMaintained); err != nil || maintained != memoryProposalMaintenanceBatch || sourceMaintained == 0 {
+		t.Fatalf("alias maintenance expired=%d source=%d err=%v", maintained, sourceMaintained, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events AS event
+JOIN brain.memory_proposals AS proposal ON proposal.id::text=event.target_id
+WHERE event.action='memory.proposal.expire' AND event.principal_id IS NULL AND proposal.payload=convert_to('alias-maintenance-batch','UTF8')`).Scan(&maintenanceAudits); err != nil || maintenanceAudits != memoryProposalMaintenanceBatch {
+		t.Fatalf("alias maintenance audit count=%d err=%v", maintenanceAudits, err)
 	}
 	mergedHistory, err := app.GetMemoryProposal(ctx, actor.ID, proposalOnlyProjectID, proposalOnly.ProposalID)
 	if err != nil || mergedHistory.State != MemoryProposalRejected || mergedHistory.ProjectID != proposalOnlyProjectID {

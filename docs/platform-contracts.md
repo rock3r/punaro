@@ -202,7 +202,10 @@ Approval and project-merge fences use the authoritative expiry timestamp even
 before that maintenance transition runs. Hard per-principal-per-scope and
 per-scope live and retained proposal quotas keep staged payload storage bounded. A narrow
 owner routine prunes only terminal proposal payloads older than 30 days in a
-bounded batch, while their content-free audit history remains durable.
+bounded batch, while their content-free audit history remains durable. The
+canonical project's maintenance pass also covers scopes retained behind its
+permanent project aliases under one shared batch bound, so expiry and retention
+remain operable after merge without multiplying transaction work per alias.
 
 ### Implemented dark control-plane primitives
 

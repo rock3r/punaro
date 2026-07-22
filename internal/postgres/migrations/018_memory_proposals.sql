@@ -247,8 +247,10 @@ BEGIN
     SELECT capability_grant.id INTO authority_id
     FROM auth.principals AS principal
     JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
-    JOIN brain.scopes AS scope ON scope.id = p_scope_id AND scope.project_id = p_project_id
-    JOIN relay.projects AS project ON project.id = scope.project_id AND project.merged_into IS NULL
+    JOIN brain.scopes AS scope ON scope.id = p_scope_id
+    LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id = scope.project_id
+    JOIN relay.projects AS project ON project.id = p_project_id AND project.merged_into IS NULL
+      AND COALESCE(alias.canonical_project_id, scope.project_id) = project.id
     WHERE principal.id = p_principal_id AND principal.disabled_at IS NULL
       AND capability_grant.revoked_at IS NULL AND capability_grant.capability = 'memory.propose'
       AND ((capability_grant.scope = 'project' AND capability_grant.project_id = p_project_id)

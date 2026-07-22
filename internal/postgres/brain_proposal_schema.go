@@ -208,7 +208,7 @@ SELECT proposals_oid IS NOT NULL AND steps_oid IS NOT NULL AND evidence_oid IS N
           AND proc.proargtypes='2950 2950 2950 1184 23'::oidvector AND NOT proc.proisstrict AND NOT proc.proleakproof AND proc.proparallel='u'
           AND proc.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
           AND proc.proconfig=ARRAY['search_path=pg_catalog']::text[]
-          AND md5(btrim(proc.prosrc,E' \n\r\t'))='fdfdd2c25be431506219685458c84ef6'
+          AND md5(btrim(proc.prosrc,E' \n\r\t'))='a93d5ff219d996ad06004e61c49edf82'
         FROM pg_proc AS proc,objects WHERE proc.oid=prune_oid)
    AND (SELECT count(*)=4 AND bool_and(trigger_row.tgenabled='O' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=62 AND trigger_row.tgqual IS NULL)
         FROM pg_trigger AS trigger_row,objects WHERE trigger_row.tgrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND trigger_row.tgname='application_mutation_fence' AND NOT trigger_row.tgisinternal)
