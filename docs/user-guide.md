@@ -39,8 +39,10 @@ protected credential file, project or resolver input, and any required
 idempotency key and strong ETag, or uses an explicit protected profile that
 stores only non-secret defaults: origin, credential-file path, and optional
 project UUID. It never discovers Git state, retries, queues writes, falls back
-to local memory, or accepts memory content from stdin. See the
-[operator guide](operator-guide.md#native-memory-client).
+to local memory, or accepts memory content from stdin. The same binary can run
+as a local stdio MCP server with `punaro-memory mcp --profile ...`; MCP tool
+calls cannot provide credentials, origin, profile, or credential-file
+arguments. See the [operator guide](operator-guide.md#native-memory-client).
 
 ## What you can do today
 

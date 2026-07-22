@@ -193,7 +193,9 @@ client for an already enabled M-17 memory API. Supply the fixed HTTPS origin,
 an absolute owner-only device credential file, and explicit project/key/ETag
 coordinates, or write a protected non-secret profile containing only the
 origin, credential-file path, and optional default project; see the
-[operator guide](operator-guide.md#native-memory-client). Windows memory
+[operator guide](operator-guide.md#native-memory-client). The same binary can
+run as a local stdio MCP server with `punaro-memory mcp --profile ...`; this is
+local profile-backed MCP, not the later remote OAuth MCP gateway. Windows memory
 credential loading remains fail-closed until a later slice adds paired ACL and
 reparse-point provisioning and verification, so the Windows installer does not
 install this binary yet.
