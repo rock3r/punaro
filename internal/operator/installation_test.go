@@ -68,6 +68,7 @@ func validInitOptions(t *testing.T) InitOptions {
 func TestInitPublishesConfigurationOnlyAfterOwnerBootstrap(t *testing.T) {
 	options := validInitOptions(t)
 	options.MemoryAPIEnabled = true
+	options.MemoryMutationsEnabled = true
 	called := false
 	installation, err := Init(context.Background(), options, func(_ context.Context, dsnFile, name string) (punaropostgres.Principal, error) {
 		called = true
@@ -83,16 +84,27 @@ func TestInitPublishesConfigurationOnlyAfterOwnerBootstrap(t *testing.T) {
 		t.Fatalf("installation=%#v called=%t err=%v", installation, called, err)
 	}
 	loaded, err := Load(options.Directory)
-	if err != nil || loaded.OwnerPrincipalID != "11111111-1111-4111-8111-111111111111" || !loaded.MemoryAPIEnabled {
+	if err != nil || loaded.OwnerPrincipalID != "11111111-1111-4111-8111-111111111111" || !loaded.MemoryAPIEnabled || !loaded.MemoryMutationsEnabled {
 		t.Fatalf("loaded=%#v err=%v", loaded, err)
 	}
 	environment, err := os.ReadFile(EnvFile(options.Directory))
 	if err != nil || !strings.Contains(string(environment), "PUNARO_MEMORY_API_ENABLED=true\n") {
 		t.Fatalf("memory API environment=%q err=%v", environment, err)
 	}
+	if !strings.Contains(string(environment), "PUNARO_MEMORY_MUTATIONS_ENABLED=true\n") {
+		t.Fatalf("memory mutation environment=%q", environment)
+	}
 	info, err := os.Stat(filepath.Join(options.Directory, configName))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("config mode=%v err=%v", info.Mode(), err)
+	}
+}
+
+func TestInitRejectsMemoryMutationsWithoutReadAPI(t *testing.T) {
+	options := validInitOptions(t)
+	options.MemoryMutationsEnabled = true
+	if _, err := validateStatic(options); err == nil || !strings.Contains(err.Error(), "require the memory API") {
+		t.Fatalf("memory mutations without read API err=%v", err)
 	}
 }
 
@@ -525,6 +537,9 @@ func TestComposeOverrideKeepsMemoryAPIDarkButOperatorEnableable(t *testing.T) {
 	if !strings.Contains(override, "PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}") {
 		t.Fatalf("compose override does not pass the dark memory API switch: %s", override)
 	}
+	if !strings.Contains(override, "PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}") {
+		t.Fatal("compose override did not default memory mutations to dark")
+	}
 	if environment := daemonEnv(Installation{}); !strings.Contains(environment, "PUNARO_MEMORY_API_ENABLED=false\n") {
 		t.Fatalf("default generated environment is not dark: %s", environment)
 	}
@@ -556,6 +571,30 @@ func TestCheckPathsAcceptsExactPreMemoryAPITemplatesAsDark(t *testing.T) {
 	installation.MemoryAPIEnabled = true
 	if failures := CheckPaths(installation); len(failures) == 0 {
 		t.Fatal("pre-memory-API templates accepted for an enabled installation")
+	}
+}
+
+func TestCheckPathsAcceptsExactPreMemoryMutationTemplatesAsReadOnly(t *testing.T) {
+	options := validInitOptions(t)
+	options.MemoryAPIEnabled = true
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(preMemoryMutationsDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(preMemoryMutationsComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); len(failures) != 0 {
+		t.Fatalf("pre-mutation generation failures=%v", failures)
+	}
+	installation.MemoryMutationsEnabled = true
+	if failures := CheckPaths(installation); len(failures) == 0 {
+		t.Fatal("enabled mutation installation accepted historical read-only templates")
 	}
 }
 
@@ -629,6 +668,76 @@ func TestPublishMailCutoverRecoversFromPreMemoryAPIConfiguration(t *testing.T) {
 				t.Fatalf("step=%s recovered=%#v failures=%v err=%v", step, recovered, CheckPaths(recovered), err)
 			}
 		})
+	}
+}
+
+func TestPublishMailCutoverRecoversFromPreMemoryMutationConfiguration(t *testing.T) {
+	for _, step := range []string{"staged", "environment", "override", "marker"} {
+		t.Run(step, func(t *testing.T) {
+			options := validInitOptions(t)
+			options.MemoryAPIEnabled = true
+			installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+				return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			installation = configureTestRelayMachines(t, installation)
+			if err := os.WriteFile(EnvFile(installation.Directory), []byte(preMemoryMutationsDaemonEnv(installation)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(OverrideFile(installation.Directory), []byte(preMemoryMutationsComposeOverride()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+			injected := errors.New("injected publication crash")
+			if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
+				if completed == step {
+					return injected
+				}
+				return nil
+			}); !errors.Is(err, injected) {
+				t.Fatalf("step=%s err=%v", step, err)
+			}
+			if _, err := LoadMailCutoverRecovery(installation.Directory); err != nil {
+				t.Fatalf("step=%s recovery preflight: %v", step, err)
+			}
+			recovered, err := PublishMailCutover(installation.Directory, publication)
+			if err != nil || recovered.MailCutover == nil || !recovered.MemoryAPIEnabled || recovered.MemoryMutationsEnabled || len(CheckPaths(recovered)) != 0 {
+				t.Fatalf("step=%s recovered=%#v failures=%v err=%v", step, recovered, CheckPaths(recovered), err)
+			}
+		})
+	}
+}
+
+func TestMailCutoverRecoveryRejectsPreMemoryMutationTemplatesWhenMutationsEnabled(t *testing.T) {
+	options := validInitOptions(t)
+	options.MemoryAPIEnabled, options.MemoryMutationsEnabled = true, true
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation = configureTestRelayMachines(t, installation)
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(preMemoryMutationsDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(preMemoryMutationsComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+	injected := errors.New("injected publication crash")
+	if _, err := publishMailCutover(installation.Directory, publication, func(completed string) error {
+		if completed == "staged" {
+			return injected
+		}
+		return nil
+	}); !errors.Is(err, injected) {
+		t.Fatal(err)
+	}
+	if _, err := LoadMailCutoverRecovery(installation.Directory); err == nil {
+		t.Fatal("mutation-enabled recovery accepted pre-mutation templates")
 	}
 }
 

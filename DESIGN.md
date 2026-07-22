@@ -74,8 +74,16 @@ project-scoped v1 routes. The server binds the principal, uses strict bounded
 inputs and content-free failures, and keeps unauthorized resources
 indistinguishable from missing. An explicit null change cursor starts at the
 current installation/timeline origin; subsequent cursors fail on restore or
-future coordinates. Mutations and the native local client remain later
-independently reviewed slices.
+future coordinates. The mutation slice is separately dark behind
+`PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
+strict canonical create/update/archive/restore/purge and staged-proposal
+create/approve/reject routes without changing the schema. Mutations accept
+only canonical active project IDs, bind the authenticated principal, require a
+canonical UUID idempotency key, and require a strong revision ETag for every
+CAS operation. PostgreSQL remains authoritative for capability checks,
+idempotency, atomic proposal application, secret rejection, and permanent
+read-only project aliases. The native local client remains a later
+independently reviewed slice.
 
 ## Goals
 

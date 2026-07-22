@@ -64,6 +64,13 @@ type memoryDatabase interface {
 	SearchMemory(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemorySearchPage, error)
 	BuildMemoryPromptBrief(context.Context, punaropostgres.MemoryPromptBriefRequest) (punaropostgres.MemoryPromptBrief, error)
 	FetchMemoryChanges(context.Context, punaropostgres.MemoryChangeRequest) (punaropostgres.MemoryChangePage, error)
+	CreateMemory(context.Context, punaropostgres.MemoryCreateRequest) (punaropostgres.MemoryMutationResult, error)
+	UpdateMemory(context.Context, punaropostgres.MemoryUpdateRequest) (punaropostgres.MemoryMutationResult, error)
+	ArchiveMemory(context.Context, punaropostgres.MemoryArchiveRequest) (punaropostgres.MemoryMutationResult, error)
+	DeleteMemory(context.Context, punaropostgres.MemoryDeleteRequest) (punaropostgres.MemoryMutationResult, error)
+	ProposeMemory(context.Context, punaropostgres.MemoryProposalCreateRequest) (punaropostgres.MemoryProposalResult, error)
+	ApproveMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error)
+	RejectMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error)
 }
 
 type credentialTransitionDatabase interface {
@@ -300,7 +307,7 @@ func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Ha
 	if err := policy.Validate(); err != nil {
 		return nil, errors.New("memory credential transport policy is invalid")
 	}
-	return memoryhttp.New(database, policy), nil
+	return memoryhttp.New(database, policy, cfg.MemoryMutationsEnabled), nil
 }
 
 func buildTrustedAttachmentHandler(cfg config.Config, platformDB platformDatabase) (*trustedAttachmentRuntime, error) {

@@ -77,37 +77,39 @@ func validateRelayMachinesJSON(raw string) error {
 // Installation is the content-free operator configuration. DSN values remain
 // in separately protected files and are never copied here.
 type Installation struct {
-	Version           int                     `json:"version"`
-	Directory         string                  `json:"-"`
-	DataDir           string                  `json:"data_dir"`
-	BackupDir         string                  `json:"backup_dir"`
-	Image             string                  `json:"image"`
-	OwnerDSNFile      string                  `json:"owner_dsn_file"`
-	AppDSNFile        string                  `json:"app_dsn_file"`
-	OwnerPrincipalID  string                  `json:"owner_principal_id"`
-	OwnerName         string                  `json:"owner_name"`
-	RuntimeUID        string                  `json:"runtime_uid"`
-	RuntimeGID        string                  `json:"runtime_gid"`
-	Ingress           ingress.Policy          `json:"ingress"`
-	HealthListenAddr  string                  `json:"health_listen_addr"`
-	HealthURL         string                  `json:"health_url"`
-	MemoryAPIEnabled  bool                    `json:"memory_api_enabled"`
-	RelayMachinesJSON string                  `json:"relay_machines_json,omitempty"`
-	MailCutover       *MailCutoverPublication `json:"mail_cutover,omitempty"`
+	Version                int                     `json:"version"`
+	Directory              string                  `json:"-"`
+	DataDir                string                  `json:"data_dir"`
+	BackupDir              string                  `json:"backup_dir"`
+	Image                  string                  `json:"image"`
+	OwnerDSNFile           string                  `json:"owner_dsn_file"`
+	AppDSNFile             string                  `json:"app_dsn_file"`
+	OwnerPrincipalID       string                  `json:"owner_principal_id"`
+	OwnerName              string                  `json:"owner_name"`
+	RuntimeUID             string                  `json:"runtime_uid"`
+	RuntimeGID             string                  `json:"runtime_gid"`
+	Ingress                ingress.Policy          `json:"ingress"`
+	HealthListenAddr       string                  `json:"health_listen_addr"`
+	HealthURL              string                  `json:"health_url"`
+	MemoryAPIEnabled       bool                    `json:"memory_api_enabled"`
+	MemoryMutationsEnabled bool                    `json:"memory_mutations_enabled"`
+	RelayMachinesJSON      string                  `json:"relay_machines_json,omitempty"`
+	MailCutover            *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
 
 // InitOptions is the complete explicit input to a first installation.
 type InitOptions struct {
-	Directory        string
-	DataDir          string
-	BackupDir        string
-	Image            string
-	OwnerDSNFile     string
-	AppDSNFile       string
-	OwnerName        string
-	Ingress          ingress.Policy
-	HealthListenAddr string
-	MemoryAPIEnabled bool
+	Directory              string
+	DataDir                string
+	BackupDir              string
+	Image                  string
+	OwnerDSNFile           string
+	AppDSNFile             string
+	OwnerName              string
+	Ingress                ingress.Policy
+	HealthListenAddr       string
+	MemoryAPIEnabled       bool
+	MemoryMutationsEnabled bool
 }
 
 // BootstrapOwner is the only database mutation performed by Init.
@@ -211,7 +213,7 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled}); err != nil {
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled}); err != nil {
 		return Installation{}, errors.New("initialization staging configuration is invalid")
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {
@@ -317,7 +319,10 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if !listener.IsLoopback(healthListenAddr) || listener.Same(policy.ListenAddr, healthListenAddr) {
 		return Installation{}, errors.New("health listener must be a distinct concrete loopback address")
 	}
-	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled}, nil
+	if options.MemoryMutationsEnabled && !options.MemoryAPIEnabled {
+		return Installation{}, errors.New("memory mutations require the memory API")
+	}
+	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled}, nil
 }
 
 // Load reads only a completely published installation marker.
@@ -347,7 +352,7 @@ func Load(directory string) (Installation, error) {
 			return Installation{}, errors.New("published installation relay enrollment is invalid")
 		}
 	}
-	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled})
+	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
 	}
@@ -457,7 +462,7 @@ func CheckPaths(installation Installation) []string {
 		failures = append(failures, "daemon-writable data directory overlaps database credentials or operator state")
 	}
 	envPath := EnvFile(installation.Directory)
-	envAvailable, envCurrent, envPreMemoryAPI, envLegacy := false, false, false, false
+	envAvailable, envCurrent, envPreMemoryMutations, envPreMemoryAPI, envLegacy := false, false, false, false, false
 	if err := requireTrustedProtectedFile(envPath, 64<<10); err != nil {
 		failures = append(failures, "generated daemon environment unavailable or unsafe")
 	} else {
@@ -466,15 +471,16 @@ func CheckPaths(installation Installation) []string {
 		envAvailable = err == nil
 		if envAvailable {
 			envCurrent = string(body) == daemonEnv(installation)
+			envPreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsDaemonEnv(installation)
 			envPreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
 			envLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
 		}
-		if !envCurrent && !envPreMemoryAPI && !envLegacy {
+		if !envCurrent && !envPreMemoryMutations && !envPreMemoryAPI && !envLegacy {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 		}
 	}
 	overridePath := OverrideFile(installation.Directory)
-	overrideAvailable, overrideCurrent, overridePreMemoryAPI, overrideLegacy := false, false, false, false
+	overrideAvailable, overrideCurrent, overridePreMemoryMutations, overridePreMemoryAPI, overrideLegacy := false, false, false, false, false
 	if err := requireTrustedProtectedFile(overridePath, 64<<10); err != nil {
 		failures = append(failures, "generated Compose override unavailable or unsafe")
 	} else {
@@ -483,16 +489,17 @@ func CheckPaths(installation Installation) []string {
 		overrideAvailable = err == nil
 		if overrideAvailable {
 			overrideCurrent = string(body) == composeOverride()
+			overridePreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsComposeOverride()
 			overridePreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
 			overrideLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
 		}
-		if !overrideCurrent && !overridePreMemoryAPI && !overrideLegacy {
+		if !overrideCurrent && !overridePreMemoryMutations && !overridePreMemoryAPI && !overrideLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
 	}
 	if envAvailable && overrideAvailable {
-		sameGeneration := envCurrent && overrideCurrent || envPreMemoryAPI && overridePreMemoryAPI || envLegacy && overrideLegacy
-		if !sameGeneration && (envCurrent || envPreMemoryAPI || envLegacy) && (overrideCurrent || overridePreMemoryAPI || overrideLegacy) {
+		sameGeneration := envCurrent && overrideCurrent || envPreMemoryMutations && overridePreMemoryMutations || envPreMemoryAPI && overridePreMemoryAPI || envLegacy && overrideLegacy
+		if !sameGeneration && (envCurrent || envPreMemoryMutations || envPreMemoryAPI || envLegacy) && (overrideCurrent || overridePreMemoryMutations || overridePreMemoryAPI || overrideLegacy) {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
@@ -528,6 +535,7 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_POSTGRES_DSN_FILE=" + installation.AppDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
 		fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t", installation.MemoryAPIEnabled),
+		fmt.Sprintf("PUNARO_MEMORY_MUTATIONS_ENABLED=%t", installation.MemoryMutationsEnabled),
 		"PUNARO_RELAY_ENABLED=" + relayEnabled,
 		"PUNARO_RELAY_MACHINES_JSON='" + installation.RelayMachinesJSON + "'",
 		"PUNARO_RELAY_STORE=" + relayStore,
@@ -541,6 +549,10 @@ func daemonEnv(installation Installation) string {
 	}, "\n") + "\n"
 }
 
+func preMemoryMutationsDaemonEnv(installation Installation) string {
+	return strings.Replace(daemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_MUTATIONS_ENABLED=%t\n", installation.MemoryMutationsEnabled), "", 1)
+}
+
 func legacyDaemonEnv(installation Installation) string {
 	return strings.NewReplacer(
 		"PUNARO_RELAY_ENABLED=false\n", "",
@@ -551,7 +563,7 @@ func legacyDaemonEnv(installation Installation) string {
 }
 
 func preMemoryAPIDaemonEnv(installation Installation) string {
-	return strings.Replace(daemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t\n", installation.MemoryAPIEnabled), "", 1)
+	return strings.Replace(preMemoryMutationsDaemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t\n", installation.MemoryAPIEnabled), "", 1)
 }
 
 func composeOverride() string {
@@ -577,6 +589,7 @@ func composeOverride() string {
       PUNARO_POSTGRES_DSN_FILE: ${PUNARO_POSTGRES_DSN_FILE:?required}
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}
       PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}
+      PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}
       PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}
       PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}
       PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}
@@ -596,6 +609,10 @@ func composeOverride() string {
 `
 }
 
+func preMemoryMutationsComposeOverride() string {
+	return strings.Replace(composeOverride(), "      PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}\n", "", 1)
+}
+
 func legacyComposeOverride() string {
 	return strings.NewReplacer(
 		"      PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}\n", "",
@@ -606,7 +623,7 @@ func legacyComposeOverride() string {
 }
 
 func preMemoryAPIComposeOverride() string {
-	return strings.Replace(composeOverride(), "      PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}\n", "", 1)
+	return strings.Replace(preMemoryMutationsComposeOverride(), "      PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}\n", "", 1)
 }
 
 func numericIdentity(value string) bool {

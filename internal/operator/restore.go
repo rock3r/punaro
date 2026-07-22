@@ -55,7 +55,7 @@ func ParseInstallationArtifact(body []byte) (Installation, error) {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}
 	validationDirectory := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), ".punaro-backup-source")
-	validated, err := validateStatic(InitOptions{Directory: validationDirectory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled})
+	validated, err := validateStatic(InitOptions{Directory: validationDirectory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled})
 	if err != nil || validated.HealthURL != installation.HealthURL {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}
@@ -116,7 +116,7 @@ func PrepareRestore(options RestoreOptions) (Installation, error) {
 	if err != nil {
 		return Installation{}, err
 	}
-	installation, err := validateStatic(InitOptions{Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Source.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.Source.OwnerName, Ingress: options.Source.Ingress, HealthListenAddr: options.Source.HealthListenAddr, MemoryAPIEnabled: options.Source.MemoryAPIEnabled})
+	installation, err := validateStatic(InitOptions{Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Source.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.Source.OwnerName, Ingress: options.Source.Ingress, HealthListenAddr: options.Source.HealthListenAddr, MemoryAPIEnabled: options.Source.MemoryAPIEnabled, MemoryMutationsEnabled: options.Source.MemoryMutationsEnabled})
 	if err != nil {
 		return Installation{}, err
 	}

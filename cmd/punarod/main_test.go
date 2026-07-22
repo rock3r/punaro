@@ -101,6 +101,27 @@ func (*unavailableMemoryDatabase) BuildMemoryPromptBrief(context.Context, punaro
 func (*unavailableMemoryDatabase) FetchMemoryChanges(context.Context, punaropostgres.MemoryChangeRequest) (punaropostgres.MemoryChangePage, error) {
 	return punaropostgres.MemoryChangePage{}, errors.New("unused")
 }
+func (*unavailableMemoryDatabase) CreateMemory(context.Context, punaropostgres.MemoryCreateRequest) (punaropostgres.MemoryMutationResult, error) {
+	return punaropostgres.MemoryMutationResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) UpdateMemory(context.Context, punaropostgres.MemoryUpdateRequest) (punaropostgres.MemoryMutationResult, error) {
+	return punaropostgres.MemoryMutationResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) ArchiveMemory(context.Context, punaropostgres.MemoryArchiveRequest) (punaropostgres.MemoryMutationResult, error) {
+	return punaropostgres.MemoryMutationResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) DeleteMemory(context.Context, punaropostgres.MemoryDeleteRequest) (punaropostgres.MemoryMutationResult, error) {
+	return punaropostgres.MemoryMutationResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) ProposeMemory(context.Context, punaropostgres.MemoryProposalCreateRequest) (punaropostgres.MemoryProposalResult, error) {
+	return punaropostgres.MemoryProposalResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) ApproveMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error) {
+	return punaropostgres.MemoryProposalResult{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) RejectMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error) {
+	return punaropostgres.MemoryProposalResult{}, errors.New("unused")
+}
 
 func TestBuildMemoryHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
 	database := &unavailableMemoryDatabase{}

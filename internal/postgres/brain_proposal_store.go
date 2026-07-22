@@ -61,7 +61,7 @@ func (d *Database) ProposeMemory(ctx context.Context, raw MemoryProposalCreateRe
 			if step.Operation == MemoryProposalStepArchive {
 				locked := items[step.ItemID]
 				if (locked.State == MemoryArchived) == step.Archived {
-					return IdempotencyOutcome{}, errors.New("memory proposal archive is already satisfied")
+					return IdempotencyOutcome{}, ErrMemoryProposalAlreadySatisfied
 				}
 			}
 		}

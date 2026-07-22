@@ -283,7 +283,7 @@ func TestLoadRequiresCompleteTrustedAttachmentReleaseSurface(t *testing.T) {
 
 func TestLoadMemoryAPIIsDarkByDefaultAndRequiresPostgresDeviceAuthority(t *testing.T) {
 	cfg, err := Load("")
-	if err != nil || cfg.MemoryAPIEnabled {
+	if err != nil || cfg.MemoryAPIEnabled || cfg.MemoryMutationsEnabled {
 		t.Fatalf("default config=%#v err=%v", cfg, err)
 	}
 	t.Setenv("PUNARO_MEMORY_API_ENABLED", "true")
@@ -298,6 +298,16 @@ func TestLoadMemoryAPIIsDarkByDefaultAndRequiresPostgresDeviceAuthority(t *testi
 	cfg, err = Load("")
 	if err != nil || !cfg.MemoryAPIEnabled {
 		t.Fatalf("memory API config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_MEMORY_API_ENABLED", "false")
+	t.Setenv("PUNARO_MEMORY_MUTATIONS_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("memory mutations were enabled without the read API")
+	}
+	t.Setenv("PUNARO_MEMORY_API_ENABLED", "true")
+	cfg, err = Load("")
+	if err != nil || !cfg.MemoryMutationsEnabled {
+		t.Fatalf("memory mutation config=%#v err=%v", cfg, err)
 	}
 }
 
