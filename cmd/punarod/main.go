@@ -57,6 +57,7 @@ type trustedAttachmentDatabase interface {
 
 type memoryDatabase interface {
 	deviceDatabase
+	CanonicalBrainRuntimeReady(context.Context) error
 	ResolveProjectIdentity(context.Context, string, punaropostgres.ProjectIdentityKind, string) (punaropostgres.ProjectIdentityResolution, error)
 	GetMemory(context.Context, string, string, string) (punaropostgres.MemoryItem, error)
 	GetMemoryProposal(context.Context, string, string, string) (punaropostgres.MemoryProposal, error)
@@ -289,6 +290,11 @@ func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Ha
 	database, ok := platformDB.(memoryDatabase)
 	if !ok {
 		return nil, errors.New("PostgreSQL memory database authority is unavailable")
+	}
+	readinessCtx, readinessCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer readinessCancel()
+	if err := database.CanonicalBrainRuntimeReady(readinessCtx); err != nil {
+		return nil, errors.New("PostgreSQL canonical brain schema is unavailable")
 	}
 	policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
 	if err := policy.Validate(); err != nil {
