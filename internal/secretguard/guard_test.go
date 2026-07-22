@@ -44,6 +44,26 @@ func TestRejectionErrorEscapesHostileJSONPointerControls(t *testing.T) {
 	if strings.ContainsAny(message, "\n\r\t") || !strings.Contains(message, `"/to\nken"`) {
 		t.Fatalf("rejection contains raw controls or lacks escaped path: %q", message)
 	}
+	if !ValidIdentity(findings[0].RuleID, findings[0].FieldPath, findings[0].RuleVersion, findings[0].Fingerprint) {
+		t.Fatalf("scanner finding cannot be used as an exact exception: %#v", findings[0])
+	}
+}
+
+func TestValidIdentityAcceptsEmptyPropertyJSONPointer(t *testing.T) {
+	findings, err := ScanDocument([]byte(`{"":"-----BEGIN ` + `PRIVATE KEY-----\nmaterial"}`))
+	if err != nil || len(findings) != 1 || findings[0].FieldPath != "/" {
+		t.Fatalf("findings=%#v err=%v", findings, err)
+	}
+	if !ValidIdentity(findings[0].RuleID, findings[0].FieldPath, findings[0].RuleVersion, findings[0].Fingerprint) {
+		t.Fatalf("scanner finding cannot be used as an exact exception: %#v", findings[0])
+	}
+}
+
+func TestValidIdentityRejectsPostgresUnstorableNULPath(t *testing.T) {
+	fingerprint := [32]byte{1}
+	if ValidIdentity(RuleSensitiveField, "/to\x00ken", RuleVersion, fingerprint) {
+		t.Fatal("accepted JSON Pointer containing PostgreSQL-unstorable NUL")
+	}
 }
 
 func TestScanDocumentFindsPrivateKeyAndCredentialAssignment(t *testing.T) {

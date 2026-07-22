@@ -94,6 +94,8 @@ ON CONFLICT (project_id,rule_version,rule_id,field_path,value_fingerprint) WHERE
 RETURNING id::text`, project.ID, request.RuleVersion, request.RuleID, request.FieldPath, request.Fingerprint[:], request.PrincipalID).Scan(&exceptionID)
 		if errors.Is(err, sql.ErrNoRows) {
 			inserted = false
+			// Approval and revocation both hold the same project row FOR UPDATE,
+			// so an active conflict cannot be revoked before this lookup.
 			err = tx.QueryRowContext(ctx, `SELECT id::text FROM brain.secret_exceptions
 WHERE project_id=$1 AND rule_version=$2 AND rule_id=$3 AND field_path=$4 AND value_fingerprint=$5 AND revoked_at IS NULL`, project.ID, request.RuleVersion, request.RuleID, request.FieldPath, request.Fingerprint[:]).Scan(&exceptionID)
 		}

@@ -265,10 +265,11 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	if after := readSecretGuardEffects(ctx, t, ownerDB); after != beforeSecretRejection {
 		t.Fatalf("rejected secret create effects before=%#v after=%#v", beforeSecretRejection, after)
 	}
-	if _, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+	otherProjectException, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
 		PrincipalID: actor.ID, ProjectID: otherProjectID, IdempotencyKey: "15151515-1515-4515-8515-151515151513",
 		RuleID: sensitiveFinding.RuleID, FieldPath: sensitiveFinding.FieldPath, RuleVersion: sensitiveFinding.RuleVersion, Fingerprint: sensitiveFinding.Fingerprint,
-	}); err != nil {
+	})
+	if err != nil || !otherProjectException.Active {
 		t.Fatalf("approve other-project exception: %v", err)
 	}
 	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151514"
@@ -351,8 +352,10 @@ func testCanonicalBrainIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err != nil || !exception.Active {
 		t.Fatalf("approve exact exception=%#v err=%v", exception, err)
 	}
-	secretCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151505"
-	if _, err := app.CreateMemory(ctx, secretCreate); err != nil {
+	otherProjectCreate := secretCreate
+	otherProjectCreate.ProjectID = otherProjectID
+	otherProjectCreate.IdempotencyKey = "15151515-1515-4515-8515-151515151505"
+	if _, err := app.CreateMemory(ctx, otherProjectCreate); err != nil {
 		t.Fatalf("exact exception did not allow create: %v", err)
 	}
 	guardTx, err := app.db.BeginTx(ctx, nil)

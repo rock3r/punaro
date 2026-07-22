@@ -66,13 +66,10 @@ func (e RejectionError) Error() string {
 
 // ValidIdentity validates content-free exception coordinates.
 func ValidIdentity(ruleID, fieldPath string, ruleVersion int64, fingerprint [sha256.Size]byte) bool {
-	if ruleVersion != RuleVersion || !KnownRule(ruleID) || len(fieldPath) < 2 || len(fieldPath) > 1024 || !strings.HasPrefix(fieldPath, "/") || !utf8.ValidString(fieldPath) || fingerprint == ([sha256.Size]byte{}) {
+	// PostgreSQL text/jsonb cannot persist U+0000; every other valid UTF-8
+	// JSON Pointer coordinate remains eligible for an exact exception.
+	if ruleVersion != RuleVersion || !KnownRule(ruleID) || len(fieldPath) < 1 || len(fieldPath) > 1024 || !strings.HasPrefix(fieldPath, "/") || !utf8.ValidString(fieldPath) || strings.ContainsRune(fieldPath, '\x00') || fingerprint == ([sha256.Size]byte{}) {
 		return false
-	}
-	for _, r := range fieldPath {
-		if unicode.IsControl(r) {
-			return false
-		}
 	}
 	return true
 }
