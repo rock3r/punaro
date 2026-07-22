@@ -554,6 +554,33 @@ WHERE key = $1 AND status = 'pending'`, request.Key, outcome.Status, nullableID(
 	return outcome, nil
 }
 
+func completedIdempotencyOutcome(ctx context.Context, q queryer, request IdempotencyRequest) (IdempotencyOutcome, bool, error) {
+	if q == nil || request.Validate() != nil {
+		return IdempotencyOutcome{}, false, errors.New("invalid idempotency operation")
+	}
+	digest := requestDigest(request.Body)
+	var storedPrincipal, storedOperation, storedStatus string
+	var storedHash []byte
+	var storedResource sql.NullString
+	var storedResult []byte
+	err := q.QueryRowContext(ctx, `SELECT principal_id::text,operation,request_hash,status,resource_id::text,result
+FROM relay.idempotency_records WHERE key=$1`, request.Key).Scan(&storedPrincipal, &storedOperation, &storedHash, &storedStatus, &storedResource, &storedResult)
+	if errors.Is(err, sql.ErrNoRows) {
+		return IdempotencyOutcome{}, false, nil
+	}
+	if err != nil {
+		return IdempotencyOutcome{}, false, errors.New("idempotency record state is unavailable")
+	}
+	if storedPrincipal != request.PrincipalID || storedOperation != request.Operation || !bytes.Equal(storedHash, digest[:]) {
+		return IdempotencyOutcome{}, false, ErrIdempotencyConflict
+	}
+	outcome := IdempotencyOutcome{Status: OutcomeStatus(storedStatus), ResourceID: storedResource.String, Result: append(json.RawMessage(nil), storedResult...)}
+	if storedStatus == "pending" || outcome.Validate() != nil {
+		return IdempotencyOutcome{}, false, errors.New("idempotency record is incomplete")
+	}
+	return outcome, true, nil
+}
+
 // AppendAudit inserts one closed, content-free event in the surrounding transaction.
 func (t *ControlTx) AppendAudit(ctx context.Context, event AuditEvent) error {
 	if t == nil || t.tx == nil || event.Validate() != nil {

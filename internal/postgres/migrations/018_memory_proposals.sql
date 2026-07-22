@@ -5,7 +5,7 @@ CREATE TABLE brain.memory_proposals (
         action IN ('create', 'update', 'archive', 'merge', 'split')
     ),
     state text NOT NULL DEFAULT 'pending' CONSTRAINT memory_proposals_state_check CHECK (
-        state IN ('pending', 'approved', 'rejected')
+        state IN ('pending', 'approved', 'rejected', 'expired')
     ),
     proposed_by uuid NOT NULL REFERENCES auth.principals(id),
     decided_by uuid REFERENCES auth.principals(id),
@@ -15,9 +15,12 @@ CREATE TABLE brain.memory_proposals (
     payload bytea NOT NULL CONSTRAINT memory_proposals_payload_check CHECK (octet_length(payload) BETWEEN 2 AND 4194304),
     assembly_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     decided_xid xid8,
+    expires_at timestamptz NOT NULL DEFAULT (statement_timestamp() + interval '7 days')
+        CONSTRAINT memory_proposals_expiry_check CHECK (expires_at > created_at),
     CONSTRAINT memory_proposals_decision_check CHECK (
         (state = 'pending' AND decided_by IS NULL AND decided_at IS NULL AND decided_xid IS NULL)
         OR (state IN ('approved', 'rejected') AND decided_by IS NOT NULL AND decided_at IS NOT NULL AND decided_at >= created_at AND decided_xid IS NOT NULL)
+        OR (state = 'expired' AND decided_by IS NULL AND decided_at = expires_at AND decided_xid IS NOT NULL)
     )
 );
 
@@ -205,11 +208,17 @@ BEGIN
        OR NEW.payload_sha256 <> OLD.payload_sha256
        OR NEW.payload <> OLD.payload
        OR NEW.assembly_xid <> OLD.assembly_xid
-       OR NEW.state NOT IN ('approved', 'rejected')
-       OR NEW.decided_by IS NULL
-       OR NEW.decided_at IS NULL
-       OR NEW.decided_at <> transaction_timestamp()
-       OR NEW.decided_xid <> pg_current_xact_id() THEN
+       OR NEW.expires_at <> OLD.expires_at
+       OR NEW.state NOT IN ('approved', 'rejected', 'expired')
+       OR NEW.decided_xid <> pg_current_xact_id()
+       OR (NEW.state = 'expired' AND (
+            NEW.decided_by IS NOT NULL OR NEW.decided_at <> OLD.expires_at
+            OR OLD.expires_at > statement_timestamp()
+       ))
+       OR (NEW.state IN ('approved', 'rejected') AND (
+            NEW.decided_by IS NULL OR NEW.decided_at <> statement_timestamp()
+            OR OLD.expires_at <= statement_timestamp()
+       )) THEN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'memory proposal transition is invalid';
     END IF;
     RETURN NEW;
@@ -219,6 +228,57 @@ $function$;
 CREATE TRIGGER memory_proposal_transition_guard
 BEFORE UPDATE ON brain.memory_proposals
 FOR EACH ROW EXECUTE FUNCTION brain.guard_memory_proposal_update();
+
+CREATE FUNCTION brain.prune_memory_proposals(p_principal_id uuid, p_project_id uuid, p_scope_id uuid, p_before timestamptz, p_limit integer)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    authority_id uuid;
+    deleted_count integer;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    IF p_principal_id IS NULL OR p_project_id IS NULL OR p_scope_id IS NULL OR p_before IS NULL OR p_limit IS NULL OR p_limit NOT BETWEEN 1 AND 64
+       OR p_before > statement_timestamp() - interval '30 days' THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid memory proposal retention request';
+    END IF;
+    SELECT capability_grant.id INTO authority_id
+    FROM auth.principals AS principal
+    JOIN auth.capability_grants AS capability_grant ON capability_grant.principal_id = principal.id
+    JOIN brain.scopes AS scope ON scope.id = p_scope_id AND scope.project_id = p_project_id
+    JOIN relay.projects AS project ON project.id = scope.project_id AND project.merged_into IS NULL
+    WHERE principal.id = p_principal_id AND principal.disabled_at IS NULL
+      AND capability_grant.revoked_at IS NULL AND capability_grant.capability = 'memory.propose'
+      AND ((capability_grant.scope = 'project' AND capability_grant.project_id = p_project_id)
+           OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+    ORDER BY capability_grant.id LIMIT 1
+    FOR SHARE OF principal, capability_grant, scope, project;
+    IF authority_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'memory proposal retention is not authorized';
+    END IF;
+    WITH candidates AS MATERIALIZED (
+        SELECT proposal.id, scope.project_id
+        FROM brain.memory_proposals AS proposal
+        JOIN brain.scopes AS scope ON scope.id = proposal.scope_id
+        WHERE proposal.scope_id = p_scope_id
+          AND proposal.state IN ('approved', 'rejected', 'expired')
+          AND proposal.decided_at < p_before
+        ORDER BY proposal.decided_at, proposal.id
+        LIMIT p_limit FOR UPDATE OF proposal SKIP LOCKED
+    ), audited AS (
+        INSERT INTO audit.events(principal_id,project_id,action,outcome,target_kind,target_id)
+        SELECT NULL, project_id, 'memory.proposal.prune', 'succeeded', 'memory_proposal', id
+        FROM candidates
+        RETURNING target_id
+    )
+    DELETE FROM brain.memory_proposals AS proposal
+    USING audited WHERE proposal.id = audited.target_id;
+    GET DIAGNOSTICS deleted_count = ROW_COUNT;
+    RETURN deleted_count;
+END
+$function$;
 
 ALTER TABLE audit.events DROP CONSTRAINT events_action_check;
 ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN (
@@ -231,7 +291,7 @@ ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN (
     'memory.create', 'memory.evidence_create', 'memory.update', 'memory.archive', 'memory.restore', 'memory.delete',
     'memory.secret_exception.create', 'memory.secret_exception.revoke',
     'memory.secret_rescan', 'memory.quarantine', 'memory.quarantine_release',
-    'memory.proposal.create', 'memory.proposal.approve', 'memory.proposal.reject'
+    'memory.proposal.create', 'memory.proposal.approve', 'memory.proposal.reject', 'memory.proposal.expire', 'memory.proposal.prune'
 ));
 
 ALTER TABLE audit.events DROP CONSTRAINT events_target_kind_check;
@@ -264,6 +324,7 @@ REVOKE ALL ON FUNCTION brain.guard_memory_proposal_update() FROM PUBLIC;
 REVOKE ALL ON FUNCTION brain.guard_memory_proposal_child_insert() FROM PUBLIC;
 REVOKE ALL ON FUNCTION brain.guard_memory_proposal_result_insert() FROM PUBLIC;
 REVOKE ALL ON FUNCTION brain.guard_memory_proposal_results_complete() FROM PUBLIC;
+REVOKE ALL ON FUNCTION brain.prune_memory_proposals(uuid,uuid,uuid,timestamptz,integer) FROM PUBLIC;
 GRANT SELECT ON brain.memory_proposals, brain.memory_proposal_steps, brain.memory_proposal_evidence, brain.memory_proposal_results TO punaro_app;
 GRANT INSERT (scope_id, action, proposed_by, payload_sha256, payload) ON brain.memory_proposals TO punaro_app;
 GRANT INSERT (proposal_id, ordinal, operation, item_id, target_revision, logical_key, kind, trust, document, archived)
@@ -271,3 +332,4 @@ GRANT INSERT (proposal_id, ordinal, operation, item_id, target_revision, logical
 GRANT INSERT (proposal_id, ordinal, item_id, revision) ON brain.memory_proposal_evidence TO punaro_app;
 GRANT INSERT (proposal_id, ordinal, item_id, revision) ON brain.memory_proposal_results TO punaro_app;
 GRANT UPDATE (state, decided_by, decided_at, decided_xid) ON brain.memory_proposals TO punaro_app;
+GRANT EXECUTE ON FUNCTION brain.prune_memory_proposals(uuid,uuid,uuid,timestamptz,integer) TO punaro_app;

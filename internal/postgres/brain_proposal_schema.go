@@ -20,6 +20,7 @@ WITH objects AS (
            to_regprocedure('brain.guard_memory_proposal_child_insert()') AS child_guard_oid,
            to_regprocedure('brain.guard_memory_proposal_result_insert()') AS result_guard_oid,
            to_regprocedure('brain.guard_memory_proposal_results_complete()') AS complete_guard_oid,
+           to_regprocedure('brain.prune_memory_proposals(uuid,uuid,uuid,timestamp with time zone,integer)') AS prune_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS fence_oid
 ), expected_columns(relation_name,column_name,ordinal_position,data_type,not_null,default_expression) AS (
     VALUES
@@ -35,6 +36,7 @@ WITH objects AS (
       ('brain.memory_proposals','payload',10,'bytea',true,''),
       ('brain.memory_proposals','assembly_xid',11,'xid8',true,'pg_current_xact_id()'),
       ('brain.memory_proposals','decided_xid',12,'xid8',false,''),
+      ('brain.memory_proposals','expires_at',13,'timestamp with time zone',true,'(statement_timestamp() + ''7 days''::interval)'),
       ('brain.memory_proposal_steps','proposal_id',1,'uuid',true,''),
       ('brain.memory_proposal_steps','ordinal',2,'smallint',true,''),
       ('brain.memory_proposal_steps','operation',3,'text',true,''),
@@ -88,10 +90,11 @@ WITH objects AS (
 ), expected_checks(relation_name,constraint_name,expression) AS (
     VALUES
       ('brain.memory_proposals','memory_proposals_action_check','(action = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text, ''merge''::text, ''split''::text]))'),
-      ('brain.memory_proposals','memory_proposals_state_check','(state = ANY (ARRAY[''pending''::text, ''approved''::text, ''rejected''::text]))'),
-      ('brain.memory_proposals','memory_proposals_decision_check','(((state = ''pending''::text) AND (decided_by IS NULL) AND (decided_at IS NULL) AND (decided_xid IS NULL)) OR ((state = ANY (ARRAY[''approved''::text, ''rejected''::text])) AND (decided_by IS NOT NULL) AND (decided_at IS NOT NULL) AND (decided_at >= created_at) AND (decided_xid IS NOT NULL)))'),
+      ('brain.memory_proposals','memory_proposals_state_check','(state = ANY (ARRAY[''pending''::text, ''approved''::text, ''rejected''::text, ''expired''::text]))'),
+      ('brain.memory_proposals','memory_proposals_decision_check','(((state = ''pending''::text) AND (decided_by IS NULL) AND (decided_at IS NULL) AND (decided_xid IS NULL)) OR ((state = ANY (ARRAY[''approved''::text, ''rejected''::text])) AND (decided_by IS NOT NULL) AND (decided_at IS NOT NULL) AND (decided_at >= created_at) AND (decided_xid IS NOT NULL)) OR ((state = ''expired''::text) AND (decided_by IS NULL) AND (decided_at = expires_at) AND (decided_xid IS NOT NULL)))'),
       ('brain.memory_proposals','memory_proposals_payload_sha256_check','(octet_length(payload_sha256) = 32)'),
       ('brain.memory_proposals','memory_proposals_payload_check','((octet_length(payload) >= 2) AND (octet_length(payload) <= 4194304))'),
+      ('brain.memory_proposals','memory_proposals_expiry_check','(expires_at > created_at)'),
       ('brain.memory_proposal_steps','memory_proposal_steps_ordinal_check','((ordinal >= 0) AND (ordinal <= 7))'),
       ('brain.memory_proposal_steps','memory_proposal_steps_operation_check','(operation = ANY (ARRAY[''create''::text, ''update''::text, ''archive''::text]))'),
       ('brain.memory_proposal_steps','memory_proposal_steps_target_revision_check','((target_revision IS NULL) OR (target_revision >= 1))'),
@@ -119,7 +122,7 @@ WITH objects AS (
         AND NOT relation.relforcerowsecurity AND pg_get_userbyid(relation.relowner)='punaro_owner') AS exact
     FROM pg_class AS relation,objects WHERE relation.oid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid])
 ), constraint_safety AS (
-    SELECT count(*)=28 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
+    SELECT count(*)=29 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND constraint_row.contype IN ('p','u','f','c')
 ), index_safety AS (
@@ -154,17 +157,19 @@ WITH objects AS (
     WHERE attribute.attrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND attribute.attnum>0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
 ), expected_routine_acl(routine_oid,grantee,privilege_type,is_grantable) AS (
     SELECT routine_oid::oid,'punaro_owner','EXECUTE',false
-    FROM objects CROSS JOIN LATERAL (VALUES (guard_oid),(child_guard_oid),(result_guard_oid),(complete_guard_oid)) AS routines(routine_oid)
+    FROM objects CROSS JOIN LATERAL (VALUES (guard_oid),(child_guard_oid),(result_guard_oid),(complete_guard_oid),(prune_oid)) AS routines(routine_oid)
+    UNION ALL
+    SELECT prune_oid::oid,'punaro_app','EXECUTE',false FROM objects
 ), actual_routine_acl AS (
     SELECT proc.oid,COALESCE(grantee.rolname,'PUBLIC'),acl.privilege_type,acl.is_grantable
     FROM pg_proc AS proc
     CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
     LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee,objects
-    WHERE proc.oid=ANY(ARRAY[guard_oid,child_guard_oid,result_guard_oid,complete_guard_oid])
+    WHERE proc.oid=ANY(ARRAY[guard_oid,child_guard_oid,result_guard_oid,complete_guard_oid,prune_oid])
 )
 SELECT proposals_oid IS NOT NULL AND steps_oid IS NOT NULL AND evidence_oid IS NOT NULL AND results_oid IS NOT NULL
    AND scope_state_oid IS NOT NULL AND step_target_oid IS NOT NULL AND step_create_key_oid IS NOT NULL AND evidence_revision_oid IS NOT NULL AND results_revision_oid IS NOT NULL
-   AND guard_oid IS NOT NULL AND child_guard_oid IS NOT NULL AND result_guard_oid IS NOT NULL AND complete_guard_oid IS NOT NULL AND fence_oid IS NOT NULL
+   AND guard_oid IS NOT NULL AND child_guard_oid IS NOT NULL AND result_guard_oid IS NOT NULL AND complete_guard_oid IS NOT NULL AND prune_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
@@ -193,11 +198,18 @@ SELECT proposals_oid IS NOT NULL AND steps_oid IS NOT NULL AND evidence_oid IS N
           AND NOT proc.proisstrict AND NOT proc.proleakproof AND proc.proparallel='u'
           AND proc.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
           AND proc.proconfig=ARRAY['search_path=pg_catalog']::text[]
-          AND ((proc.oid=guard_oid AND md5(btrim(proc.prosrc,E' \n\r\t'))='9c6d7527748d9b349df2756c8fd426ae')
+          AND ((proc.oid=guard_oid AND md5(btrim(proc.prosrc,E' \n\r\t'))='f9c3eccbdb715b4ff0f8429948a0a8d1')
             OR (proc.oid=child_guard_oid AND md5(btrim(proc.prosrc,E' \n\r\t'))='94cc11906346e8ab340b449aacd09262')
             OR (proc.oid=result_guard_oid AND md5(btrim(proc.prosrc,E' \n\r\t'))='f075be9604c87bc897dd9ecdce849e28')
             OR (proc.oid=complete_guard_oid AND md5(btrim(proc.prosrc,E' \n\r\t'))='5131d49b7467b60cbb27b9fde5c2e4d6'))) AS exact
         FROM pg_proc AS proc,objects WHERE proc.oid=ANY(ARRAY[guard_oid,child_guard_oid,result_guard_oid,complete_guard_oid]))
+   AND (SELECT pg_get_userbyid(proc.proowner)='punaro_owner' AND proc.prosecdef AND proc.prokind='f'
+          AND proc.provolatile='v' AND NOT proc.proretset AND proc.prorettype='integer'::regtype AND proc.pronargs=5
+          AND proc.proargtypes='2950 2950 2950 1184 23'::oidvector AND NOT proc.proisstrict AND NOT proc.proleakproof AND proc.proparallel='u'
+          AND proc.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+          AND proc.proconfig=ARRAY['search_path=pg_catalog']::text[]
+          AND md5(btrim(proc.prosrc,E' \n\r\t'))='fdfdd2c25be431506219685458c84ef6'
+        FROM pg_proc AS proc,objects WHERE proc.oid=prune_oid)
    AND (SELECT count(*)=4 AND bool_and(trigger_row.tgenabled='O' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=62 AND trigger_row.tgqual IS NULL)
         FROM pg_trigger AS trigger_row,objects WHERE trigger_row.tgrelid=ANY(ARRAY[proposals_oid,steps_oid,evidence_oid,results_oid]) AND trigger_row.tgname='application_mutation_fence' AND NOT trigger_row.tgisinternal)
    AND EXISTS (SELECT 1 FROM pg_trigger AS trigger_row WHERE trigger_row.tgrelid=proposals_oid AND trigger_row.tgname='memory_proposal_transition_guard'

@@ -11,8 +11,14 @@ import (
 )
 
 const (
-	maxMemoryProposalSteps    = 8
-	maxMemoryProposalEvidence = 16
+	maxMemoryProposalSteps              = 8
+	maxMemoryProposalEvidence           = 16
+	maxLiveMemoryProposalsPrincipal     = 16
+	maxLiveMemoryProposalsScope         = 64
+	maxRetainedMemoryProposalsPrincipal = 128
+	maxRetainedMemoryProposalsScope     = 512
+	memoryProposalMaintenanceBatch      = 64
+	memoryProposalRetention             = 30 * 24 * time.Hour
 )
 
 // MemoryProposalAction is the closed user-visible intent of one staged action.
@@ -53,11 +59,15 @@ const (
 	MemoryProposalApproved MemoryProposalState = "approved"
 	// MemoryProposalRejected records an explicitly closed proposal with no canonical mutation.
 	MemoryProposalRejected MemoryProposalState = "rejected"
+	// MemoryProposalExpired records a deterministic timeout with no canonical mutation.
+	MemoryProposalExpired MemoryProposalState = "expired"
 )
 
 var (
 	// ErrStaleMemoryProposal reports proposal or bound-revision CAS failure.
 	ErrStaleMemoryProposal = errors.New("memory proposal is stale")
+	// ErrMemoryProposalCapacity reports a hard live or retained proposal quota.
+	ErrMemoryProposalCapacity = errors.New("memory proposal capacity is full")
 )
 
 // MemoryProposalStepInput is a typed create, update, or archive primitive.
@@ -128,6 +138,7 @@ type MemoryProposal struct {
 	ProposedBy string                      `json:"proposed_by"`
 	DecidedBy  string                      `json:"decided_by,omitempty"`
 	CreatedAt  time.Time                   `json:"created_at"`
+	ExpiresAt  time.Time                   `json:"expires_at"`
 	DecidedAt  *time.Time                  `json:"decided_at,omitempty"`
 	Steps      []MemoryProposalStep        `json:"steps"`
 	Evidence   []MemoryProposalEvidence    `json:"evidence"`

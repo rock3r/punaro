@@ -22,12 +22,21 @@ func (d *Database) ProposeMemory(ctx context.Context, raw MemoryProposalCreateRe
 		return MemoryProposalResult{}, err
 	}
 	body, payloadSHA := memoryProposalPayloadSHA(request.ProjectID, request.Action, request.Steps, request.Evidence)
+	idempotency := IdempotencyRequest{PrincipalID: request.PrincipalID, Operation: "memory.proposal.create", Key: request.IdempotencyKey, Body: body}
+	if outcome, completed, err := completedIdempotencyOutcome(ctx, d.db, idempotency); err != nil {
+		return MemoryProposalResult{}, err
+	} else if completed {
+		return decodeMemoryProposalOutcome(outcome)
+	}
+	if err := d.maintainMemoryProposals(ctx, request.PrincipalID, request.ProjectID); err != nil {
+		return MemoryProposalResult{}, err
+	}
 	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
 		return MemoryProposalResult{}, mutationStartError(err, "memory proposal transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	outcome, err := executeIdempotentTx(ctx, tx, IdempotencyRequest{PrincipalID: request.PrincipalID, Operation: "memory.proposal.create", Key: request.IdempotencyKey, Body: body}, func(control *ControlTx) (IdempotencyOutcome, error) {
+	outcome, err := executeIdempotentTx(ctx, tx, idempotency, func(control *ControlTx) (IdempotencyOutcome, error) {
 		project, err := lockDirectActiveProject(ctx, tx, request.ProjectID)
 		if err != nil {
 			return IdempotencyOutcome{}, ErrNotFound
@@ -58,6 +67,9 @@ func (d *Database) ProposeMemory(ctx context.Context, raw MemoryProposalCreateRe
 		}
 		scopeID, err := ensureMemoryScope(ctx, tx, project.ID, request.PrincipalID)
 		if err != nil {
+			return IdempotencyOutcome{}, err
+		}
+		if err := checkMemoryProposalCapacity(ctx, tx, scopeID, request.PrincipalID); err != nil {
 			return IdempotencyOutcome{}, err
 		}
 		var proposalID string
@@ -99,6 +111,106 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 		return MemoryProposalResult{}, errors.New("memory proposal transaction could not commit")
 	}
 	return decodeMemoryProposalOutcome(outcome)
+}
+
+func (d *Database) maintainMemoryProposals(ctx context.Context, principalID, projectID string) error {
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return mutationStartError(err, "memory proposal maintenance cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	project, err := lockDirectActiveProject(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
+	allowed, err := lockCapability(ctx, tx, principalID, project.ID, CapabilityMemoryPropose)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrNotFound
+	}
+	var scopeID string
+	if err := tx.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes WHERE project_id=$1`, project.ID).Scan(&scopeID); errors.Is(err, sql.ErrNoRows) {
+		return tx.Commit()
+	} else if err != nil {
+		return errors.New("memory proposal maintenance scope is unavailable")
+	}
+	expired, err := expireMemoryProposals(ctx, tx, &ControlTx{tx: tx}, project.ID, scopeID)
+	if err != nil {
+		return err
+	}
+	var pruned int
+	if err := tx.QueryRowContext(ctx, `SELECT brain.prune_memory_proposals($1,$2,$3,statement_timestamp()-($4 * interval '1 microsecond'),$5)`, principalID, project.ID, scopeID, memoryProposalRetention.Microseconds(), memoryProposalMaintenanceBatch).Scan(&pruned); err != nil {
+		return errors.New("retained memory proposals could not be pruned")
+	}
+	if pruned < 0 || pruned > memoryProposalMaintenanceBatch {
+		return errors.New("memory proposal pruning was not bounded")
+	}
+	if expired+pruned > 0 {
+		if err := advanceProposalGeneration(ctx, tx, project.ID); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("memory proposal maintenance cannot commit")
+	}
+	return nil
+}
+
+func expireMemoryProposals(ctx context.Context, tx *sql.Tx, control *ControlTx, projectID, scopeID string) (int, error) {
+	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
+    SELECT id FROM brain.memory_proposals
+    WHERE scope_id=$1 AND state='pending' AND expires_at <= statement_timestamp()
+    ORDER BY expires_at,id
+    LIMIT $2 FOR UPDATE SKIP LOCKED
+)
+UPDATE brain.memory_proposals AS proposal
+SET state='expired',decided_by=NULL,decided_at=proposal.expires_at,decided_xid=pg_current_xact_id()
+FROM candidates WHERE proposal.id=candidates.id RETURNING proposal.id::text`, scopeID, memoryProposalMaintenanceBatch)
+	if err != nil {
+		return 0, errors.New("expired memory proposals could not be claimed")
+	}
+	proposalIDs := make([]string, 0, memoryProposalMaintenanceBatch)
+	for rows.Next() {
+		var proposalID string
+		if err := rows.Scan(&proposalID); err != nil {
+			_ = rows.Close()
+			return 0, errors.New("expired memory proposal is malformed")
+		}
+		proposalIDs = append(proposalIDs, proposalID)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, errors.New("expired memory proposals are unavailable")
+	}
+	if err := rows.Close(); err != nil {
+		return 0, errors.New("expired memory proposals cannot close")
+	}
+	for _, proposalID := range proposalIDs {
+		if err := control.AppendAudit(ctx, AuditEvent{ProjectID: projectID, Action: AuditMemoryProposalExpire, Outcome: AuditSucceeded, TargetKind: AuditTargetMemoryProposal, TargetID: proposalID}); err != nil {
+			return 0, err
+		}
+	}
+	return len(proposalIDs), nil
+}
+
+func checkMemoryProposalCapacity(ctx context.Context, tx *sql.Tx, scopeID, principalID string) error {
+	var livePrincipal, liveScope, retainedPrincipal, retainedScope int
+	err := tx.QueryRowContext(ctx, `SELECT
+    count(*) FILTER (WHERE proposed_by=$2 AND state='pending' AND expires_at > statement_timestamp()),
+    count(*) FILTER (WHERE state='pending' AND expires_at > statement_timestamp()),
+    count(*) FILTER (WHERE proposed_by=$2),
+    count(*)
+FROM brain.memory_proposals WHERE scope_id=$1`, scopeID, principalID).Scan(&livePrincipal, &liveScope, &retainedPrincipal, &retainedScope)
+	if err != nil {
+		return errors.New("memory proposal capacity cannot be checked")
+	}
+	if livePrincipal >= maxLiveMemoryProposalsPrincipal || liveScope >= maxLiveMemoryProposalsScope ||
+		retainedPrincipal >= maxRetainedMemoryProposalsPrincipal || retainedScope >= maxRetainedMemoryProposalsScope {
+		return ErrMemoryProposalCapacity
+	}
+	return nil
 }
 
 // GetMemoryProposal returns one authorized immutable proposal payload.
@@ -183,7 +295,7 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 		if proposal.State != MemoryProposalPending || !memoryProposalETagMatches(request.ExpectedETag, proposal.ProposalID, proposal.State, proposal.payloadSHA) {
 			return IdempotencyOutcome{}, ErrStaleMemoryProposal
 		}
-		updated, err := tx.ExecContext(ctx, `UPDATE brain.memory_proposals SET state=$2,decided_by=$3,decided_at=transaction_timestamp(),decided_xid=pg_current_xact_id() WHERE id=$1 AND state='pending'`, request.ProposalID, decision, request.PrincipalID)
+		updated, err := tx.ExecContext(ctx, `UPDATE brain.memory_proposals SET state=$2,decided_by=$3,decided_at=statement_timestamp(),decided_xid=pg_current_xact_id() WHERE id=$1 AND state='pending' AND expires_at > statement_timestamp()`, request.ProposalID, decision, request.PrincipalID)
 		if err != nil {
 			return IdempotencyOutcome{}, errors.New("memory proposal could not be decided")
 		}
@@ -359,7 +471,7 @@ func readMemoryProposal(ctx context.Context, tx *sql.Tx, projectID, proposalID s
 	var proposal MemoryProposal
 	var decidedBy sql.NullString
 	var decidedAt sql.NullTime
-	query := `SELECT proposal.id::text,proposal.scope_id::text,scope.project_id::text,proposal.action,proposal.state,proposal.proposed_by::text,proposal.decided_by::text,proposal.created_at,proposal.decided_at,proposal.payload_sha256,proposal.payload
+	query := `SELECT proposal.id::text,proposal.scope_id::text,scope.project_id::text,proposal.action,proposal.state,proposal.proposed_by::text,proposal.decided_by::text,proposal.created_at,proposal.decided_at,proposal.expires_at,proposal.payload_sha256,proposal.payload
 FROM brain.memory_proposals AS proposal
 JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
 LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
@@ -367,7 +479,7 @@ WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$
 	if lock {
 		query += ` FOR UPDATE OF proposal`
 	}
-	if err := tx.QueryRowContext(ctx, query, proposalID, projectID).Scan(&proposal.ProposalID, &proposal.ScopeID, &proposal.ProjectID, &proposal.Action, &proposal.State, &proposal.ProposedBy, &decidedBy, &proposal.CreatedAt, &decidedAt, &proposal.payloadSHA, &proposal.payload); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, query, proposalID, projectID).Scan(&proposal.ProposalID, &proposal.ScopeID, &proposal.ProjectID, &proposal.Action, &proposal.State, &proposal.ProposedBy, &decidedBy, &proposal.CreatedAt, &decidedAt, &proposal.ExpiresAt, &proposal.payloadSHA, &proposal.payload); errors.Is(err, sql.ErrNoRows) {
 		return MemoryProposal{}, ErrNotFound
 	} else if err != nil {
 		return MemoryProposal{}, errors.New("memory proposal is unavailable")

@@ -633,7 +633,7 @@ func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourc
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
     SELECT 1 FROM brain.memory_proposals AS proposal
     JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
-    WHERE scope.project_id=$1 AND proposal.state='pending'
+    WHERE scope.project_id=$1 AND proposal.state='pending' AND proposal.expires_at > statement_timestamp()
 )`, sourceID).Scan(&hasPendingProposal); err != nil {
 			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
 		}

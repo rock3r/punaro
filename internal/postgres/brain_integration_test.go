@@ -208,10 +208,12 @@ func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T,
 		{"step delete", `GRANT DELETE ON brain.memory_proposal_steps TO punaro_app`, `REVOKE DELETE ON brain.memory_proposal_steps FROM punaro_app`},
 		{"proposal broad insert", `GRANT INSERT ON brain.memory_proposals TO punaro_app`, `REVOKE INSERT ON brain.memory_proposals FROM punaro_app; GRANT INSERT (scope_id,action,proposed_by,payload_sha256,payload) ON brain.memory_proposals TO punaro_app`},
 		{"proposal insert grant option", `GRANT INSERT (payload_sha256) ON brain.memory_proposals TO punaro_app WITH GRANT OPTION`, `REVOKE GRANT OPTION FOR INSERT (payload_sha256) ON brain.memory_proposals FROM punaro_app`},
+		{"proposal prune public execute", `GRANT EXECUTE ON FUNCTION brain.prune_memory_proposals(uuid,uuid,uuid,timestamptz,integer) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.prune_memory_proposals(uuid,uuid,uuid,timestamptz,integer) FROM PUBLIC`},
 		{"proposal fence", `ALTER TABLE brain.memory_proposal_evidence DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_proposal_evidence ENABLE TRIGGER application_mutation_fence`},
 		{"proposal child guard", `ALTER TABLE brain.memory_proposal_steps DISABLE TRIGGER memory_proposal_step_insert_guard`, `ALTER TABLE brain.memory_proposal_steps ENABLE TRIGGER memory_proposal_step_insert_guard`},
 		{"proposal index", `DROP INDEX brain.memory_proposal_steps_target`, `CREATE UNIQUE INDEX memory_proposal_steps_target ON brain.memory_proposal_steps (proposal_id,item_id) WHERE item_id IS NOT NULL`},
 		{"proposal create-key index", `DROP INDEX brain.memory_proposal_steps_create_key`, `CREATE UNIQUE INDEX memory_proposal_steps_create_key ON brain.memory_proposal_steps (proposal_id,logical_key) WHERE operation='create' AND logical_key IS NOT NULL`},
+		{"proposal expiry constraint", `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_expiry_check`, `ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_expiry_check CHECK (expires_at > created_at)`},
 		{"proposal scope FK update", `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id)`},
 		{"proposal result FK match", `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) MATCH FULL ON DELETE CASCADE`, `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) ON DELETE CASCADE`},
 	} {
@@ -310,6 +312,15 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("write-only proposal error=%v", err)
 	}
+	var scopeID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes WHERE project_id=$1`, projectID).Scan(&scopeID); err != nil {
+		t.Fatal(err)
+	}
+	expiredProposalID := "18181818-1818-4818-8818-181818181864"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(id,scope_id,action,proposed_by,created_at,expires_at,payload_sha256,payload)
+VALUES ($1,$2,'create',$3,transaction_timestamp()-interval '8 days',transaction_timestamp()-interval '1 day',decode(repeat('00',32),'hex'),'{}')`, expiredProposalID, scopeID, reader.ID); err != nil {
+		t.Fatal(err)
+	}
 	proposeOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
 		PrincipalID: reader.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181821", Action: MemoryProposalCreate,
 		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.propose-only", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"allowed":true}`)}},
@@ -317,11 +328,132 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err != nil {
 		t.Fatalf("propose-only principal: %v", err)
 	}
+	var expiredState MemoryProposalState
+	var expiredDecider sql.NullString
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,decided_by::text FROM brain.memory_proposals WHERE id=$1`, expiredProposalID).Scan(&expiredState, &expiredDecider); err != nil || expiredState != MemoryProposalExpired || expiredDecider.Valid {
+		t.Fatalf("abandoned proposal state=%q decider=%#v err=%v", expiredState, expiredDecider, err)
+	}
+	var expiryAudits int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events WHERE action='memory.proposal.expire' AND target_id=$1 AND principal_id IS NULL`, expiredProposalID).Scan(&expiryAudits); err != nil || expiryAudits != 1 {
+		t.Fatalf("abandoned proposal audit count=%d err=%v", expiryAudits, err)
+	}
 	if _, err := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{
 		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: proposeOnly.ProposalID,
 		IdempotencyKey: "18181818-1818-4818-8818-181818181822", ExpectedETag: proposeOnly.ETag,
 	}); err != nil {
 		t.Fatalf("reject propose-only proposal: %v", err)
+	}
+	var capacityProjectID, capacityScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal capacity',$1) RETURNING id::text`, actor.ID).Scan(&capacityProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, reader.ID, capacityProjectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, capacityProjectID, reader.ID).Scan(&capacityScopeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,proposed_by,payload_sha256,payload)
+SELECT $1,'create',$2,decode(repeat('00',32),'hex'),'{}' FROM generate_series(1,$3)`, capacityScopeID, reader.ID, maxLiveMemoryProposalsPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: reader.ID, ProjectID: capacityProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181865", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.capacity", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"bounded":true}`)}},
+	}); !errors.Is(err, ErrMemoryProposalCapacity) {
+		t.Fatalf("proposal capacity error=%v", err)
+	}
+	var retentionProjectID, retentionScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal retention',$1) RETURNING id::text`, actor.ID).Scan(&retentionProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, reader.ID, retentionProjectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, retentionProjectID, reader.ID).Scan(&retentionScopeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,state,proposed_by,decided_by,created_at,decided_at,payload_sha256,payload,decided_xid,expires_at)
+SELECT $1,'create','rejected',$2,$2,statement_timestamp()-interval '40 days',statement_timestamp()-interval '39 days',decode(repeat('00',32),'hex'),'{}',pg_current_xact_id(),statement_timestamp()-interval '33 days'
+FROM generate_series(1,$3)`, retentionScopeID, reader.ID, maxRetainedMemoryProposalsPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: reader.ID, ProjectID: retentionProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181866", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.retention", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"recovered":true}`)}},
+	}); err != nil {
+		t.Fatalf("proposal retention recovery: %v", err)
+	}
+	var retainedCount, pruneAudits int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, retentionScopeID).Scan(&retainedCount); err != nil || retainedCount != maxRetainedMemoryProposalsPrincipal-memoryProposalMaintenanceBatch+1 {
+		t.Fatalf("retained proposal count=%d err=%v", retainedCount, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM audit.events WHERE project_id=$1 AND action='memory.proposal.prune' AND principal_id IS NULL`, retentionProjectID).Scan(&pruneAudits); err != nil || pruneAudits != memoryProposalMaintenanceBatch {
+		t.Fatalf("proposal prune audit count=%d err=%v", pruneAudits, err)
+	}
+	for name, limit := range map[string]any{"null": nil, "zero": 0, "over batch": memoryProposalMaintenanceBatch + 1} {
+		t.Run("proposal prune rejects "+name, func(t *testing.T) {
+			pruneTx, err := beginMutation(ctx, app.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			err = pruneTx.QueryRowContext(ctx, `SELECT brain.prune_memory_proposals($1,$2,$3,statement_timestamp()-interval '30 days',$4)`, reader.ID, retentionProjectID, retentionScopeID, limit).Scan(&count)
+			_ = pruneTx.Rollback()
+			if err == nil {
+				t.Fatalf("invalid prune limit accepted: count=%d", count)
+			}
+		})
+	}
+	for name, args := range map[string][3]string{
+		"unauthorized principal": {outsider.ID, retentionProjectID, retentionScopeID},
+		"mismatched project":     {reader.ID, projectID, retentionScopeID},
+	} {
+		t.Run("proposal prune rejects "+name, func(t *testing.T) {
+			pruneTx, err := beginMutation(ctx, app.db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			err = pruneTx.QueryRowContext(ctx, `SELECT brain.prune_memory_proposals($1,$2,$3,statement_timestamp()-interval '30 days',1)`, args[0], args[1], args[2]).Scan(&count)
+			_ = pruneTx.Rollback()
+			if err == nil {
+				t.Fatalf("unauthorized prune accepted: count=%d", count)
+			}
+		})
+	}
+	var retainedAfterInvalidPrune int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, retentionScopeID).Scan(&retainedAfterInvalidPrune); err != nil || retainedAfterInvalidPrune != retainedCount {
+		t.Fatalf("invalid prune changed retained count=%d want=%d err=%v", retainedAfterInvalidPrune, retainedCount, err)
+	}
+	var fullProjectID, fullScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal retained capacity',$1) RETURNING id::text`, actor.ID).Scan(&fullProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, reader.ID, fullProjectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, fullProjectID, reader.ID).Scan(&fullScopeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,state,proposed_by,decided_by,created_at,decided_at,payload_sha256,payload,decided_xid,expires_at)
+SELECT $1,'create','rejected',$2,$2,statement_timestamp()-interval '2 days',statement_timestamp()-interval '1 day',decode(repeat('00',32),'hex'),'{}',pg_current_xact_id(),statement_timestamp()+interval '5 days'
+FROM generate_series(1,$3)`, fullScopeID, reader.ID, maxRetainedMemoryProposalsPrincipal-1); err != nil {
+		t.Fatal(err)
+	}
+	fullExpiredID := "18181818-1818-4818-8818-181818181868"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(id,scope_id,action,proposed_by,created_at,expires_at,payload_sha256,payload)
+VALUES ($1,$2,'create',$3,statement_timestamp()-interval '8 days',statement_timestamp()-interval '1 day',decode(repeat('00',32),'hex'),'{}')`, fullExpiredID, fullScopeID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: reader.ID, ProjectID: fullProjectID, IdempotencyKey: "18181818-1818-4818-8818-181818181867", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.full", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"bounded":true}`)}},
+	}); !errors.Is(err, ErrMemoryProposalCapacity) {
+		t.Fatalf("retained proposal capacity error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,decided_by::text FROM brain.memory_proposals WHERE id=$1`, fullExpiredID).Scan(&expiredState, &expiredDecider); err != nil || expiredState != MemoryProposalExpired || expiredDecider.Valid {
+		t.Fatalf("full-capacity expiry state=%q decider=%#v err=%v", expiredState, expiredDecider, err)
 	}
 	var proposalOnlyProjectID string
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal-only merge source',$1) RETURNING id::text`, actor.ID).Scan(&proposalOnlyProjectID); err != nil {
@@ -383,6 +515,15 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	}
 	if retry, err := app.ProposeMemory(ctx, request); err != nil || retry.ProposalID != created.ProposalID || retry.State != created.State || retry.ETag != created.ETag || len(retry.Mutations) != 0 {
 		t.Fatalf("proposal idempotent retry=%#v err=%v", retry, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability=$3 AND revoked_at IS NULL`, actor.ID, projectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := app.ProposeMemory(ctx, request); err != nil || retry.ProposalID != created.ProposalID || retry.State != created.State || retry.ETag != created.ETag {
+		t.Fatalf("proposal retry after grant revoke=%#v err=%v", retry, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=NULL WHERE principal_id=$1 AND project_id=$2 AND capability=$3`, actor.ID, projectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
 	}
 	changed := request
 	changed.Action = MemoryProposalArchive
@@ -454,7 +595,7 @@ func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Datab
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := falseResultTx.ExecContext(ctx, `UPDATE brain.memory_proposals SET state='approved',decided_by=$2,decided_at=transaction_timestamp(),decided_xid=pg_current_xact_id() WHERE id=$1`, falseResultProposal.ProposalID, actor.ID); err != nil {
+	if _, err := falseResultTx.ExecContext(ctx, `UPDATE brain.memory_proposals SET state='approved',decided_by=$2,decided_at=statement_timestamp(),decided_xid=pg_current_xact_id() WHERE id=$1`, falseResultProposal.ProposalID, actor.ID); err != nil {
 		_ = falseResultTx.Rollback()
 		t.Fatal(err)
 	}
