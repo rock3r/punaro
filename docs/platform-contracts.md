@@ -191,6 +191,23 @@ canonical quarantined document, and only a clean guarded update or a rescan
 satisfied by exact exceptions releases it. Results, changes, audit events, and
 stored quarantine coordinates do not contain the suspected value.
 
+Schema version 18 adds immutable, revision-bound memory proposals. Creating a
+proposal requires `memory.propose`; reading requires `memory.read`; approving
+or rejecting requires `memory.administer`. Approval revalidates every target
+and evidence revision and applies all primitive steps atomically. Proposals
+have a 1 MiB aggregate canonical payload ceiling and expire after seven days.
+Before attempting a later proposal, a separate
+authorized maintenance transaction records a bounded expiry batch as terminal
+`expired` states with system-attributed, content-free audit events.
+Approval and project-merge fences use the authoritative expiry timestamp even
+before that maintenance transition runs. Hard per-principal-per-scope and
+per-scope live and retained proposal quotas keep staged payload storage bounded. A narrow
+owner routine prunes only terminal proposal payloads older than 30 days in a
+bounded batch, while their content-free audit history remains durable. The
+canonical project's maintenance pass also covers scopes retained behind its
+permanent project aliases under one shared batch bound, so expiry and retention
+remain operable after merge without multiplying transaction work per alias.
+
 ### Implemented dark control-plane primitives
 
 Schema version 3 is the minimum for the current PostgreSQL opt-in. Version 2 adds

@@ -606,18 +606,38 @@ WHERE consumed_at IS NULL AND expires_at > statement_timestamp()`, actorPrincipa
 
 func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourceID, canonicalID string) (int, int, int, int, int, []string, error) {
 	var identityCount, canonicalIdentityCount, grantCount, aliasCount, pendingEnrollmentCount, privateRecordCount int
-	var memoryScopesPresent, secretExceptionsPresent bool
+	var memoryScopesPresent, memoryProposalsPresent, secretExceptionsPresent bool
 	if err := tx.QueryRowContext(ctx, `SELECT
     to_regclass('brain.scopes') IS NOT NULL,
-    to_regclass('brain.secret_exceptions') IS NOT NULL`).Scan(&memoryScopesPresent, &secretExceptionsPresent); err != nil {
+	to_regclass('brain.memory_proposals') IS NOT NULL,
+    to_regclass('brain.secret_exceptions') IS NOT NULL`).Scan(&memoryScopesPresent, &memoryProposalsPresent, &secretExceptionsPresent); err != nil {
 		return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
 	}
 	if memoryScopesPresent {
 		var hasMemoryLifecycle bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM brain.scopes WHERE project_id=$1)`, sourceID).Scan(&hasMemoryLifecycle); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+    SELECT 1 FROM brain.scopes AS scope
+    WHERE scope.project_id=$1 AND (
+        EXISTS (SELECT 1 FROM brain.memory_items AS item WHERE item.scope_id=scope.id)
+        OR EXISTS (SELECT 1 FROM brain.memory_changes AS change WHERE change.scope_id=scope.id)
+    )
+)`, sourceID).Scan(&hasMemoryLifecycle); err != nil {
 			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
 		}
 		if hasMemoryLifecycle {
+			return 0, 0, 0, 0, 0, nil, ErrProjectMergeBrainState
+		}
+	}
+	if memoryProposalsPresent {
+		var hasPendingProposal bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+    SELECT 1 FROM brain.memory_proposals AS proposal
+    JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
+    WHERE scope.project_id=$1 AND proposal.state='pending' AND proposal.expires_at > statement_timestamp()
+)`, sourceID).Scan(&hasPendingProposal); err != nil {
+			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
+		}
+		if hasPendingProposal {
 			return 0, 0, 0, 0, 0, nil, ErrProjectMergeBrainState
 		}
 	}

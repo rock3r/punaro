@@ -209,6 +209,11 @@ const (
 	AuditMemorySecretRescan          AuditAction = "memory.secret_rescan"
 	AuditMemoryQuarantine            AuditAction = "memory.quarantine"
 	AuditMemoryQuarantineRelease     AuditAction = "memory.quarantine_release"
+	AuditMemoryProposalCreate        AuditAction = "memory.proposal.create"
+	AuditMemoryProposalApprove       AuditAction = "memory.proposal.approve"
+	AuditMemoryProposalReject        AuditAction = "memory.proposal.reject"
+	AuditMemoryProposalExpire        AuditAction = "memory.proposal.expire"
+	AuditMemoryProposalPrune         AuditAction = "memory.proposal.prune"
 )
 
 // AuditOutcome is a closed content-free result class.
@@ -235,10 +240,11 @@ const (
 	AuditTargetProjectIdentity AuditTargetKind = "project_identity"
 	AuditTargetProjectMerge    AuditTargetKind = "project_merge"
 	AuditTargetMemoryItem      AuditTargetKind = "memory_item"
+	AuditTargetMemoryProposal  AuditTargetKind = "memory_proposal"
 )
 
 var validAuditActions = map[AuditAction]struct{}{
-	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryEvidenceCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {}, AuditMemorySecretRescan: {}, AuditMemoryQuarantine: {}, AuditMemoryQuarantineRelease: {},
+	AuditPrincipalCreate: {}, AuditProjectCreate: {}, AuditGrantCreate: {}, AuditGrantDelete: {}, AuditJobEnqueue: {}, AuditJobComplete: {}, AuditJobRetry: {}, AuditJobFail: {}, AuditOwnerBootstrap: {}, AuditEnrollmentCreate: {}, AuditEnrollmentRedeem: {}, AuditCredentialRotate: {}, AuditCredentialRevoke: {}, AuditLegacyRegister: {}, AuditLegacyExchange: {}, AuditLegacyRetire: {}, AuditLegacyDisable: {}, AuditProjectIdentityAttach: {}, AuditProjectMergePreview: {}, AuditProjectMerge: {}, AuditMemoryCreate: {}, AuditMemoryEvidenceCreate: {}, AuditMemoryUpdate: {}, AuditMemoryArchive: {}, AuditMemoryRestore: {}, AuditMemoryDelete: {}, AuditMemorySecretExceptionCreate: {}, AuditMemorySecretExceptionRevoke: {}, AuditMemorySecretRescan: {}, AuditMemoryQuarantine: {}, AuditMemoryQuarantineRelease: {}, AuditMemoryProposalCreate: {}, AuditMemoryProposalApprove: {}, AuditMemoryProposalReject: {}, AuditMemoryProposalExpire: {}, AuditMemoryProposalPrune: {},
 }
 
 // AuditEvent contains identifiers and closed classification values only.
@@ -266,7 +272,7 @@ func (e AuditEvent) Validate() error {
 	if _, ok := validAuditActions[e.Action]; !ok {
 		return errors.New("invalid audit classification")
 	}
-	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob && e.TargetKind != AuditTargetEnrollment && e.TargetKind != AuditTargetCredential && e.TargetKind != AuditTargetLegacyMachine && e.TargetKind != AuditTargetProjectIdentity && e.TargetKind != AuditTargetProjectMerge && e.TargetKind != AuditTargetMemoryItem) {
+	if (e.Outcome != AuditSucceeded && e.Outcome != AuditRejected) || (e.TargetKind != AuditTargetPrincipal && e.TargetKind != AuditTargetProject && e.TargetKind != AuditTargetGrant && e.TargetKind != AuditTargetJob && e.TargetKind != AuditTargetEnrollment && e.TargetKind != AuditTargetCredential && e.TargetKind != AuditTargetLegacyMachine && e.TargetKind != AuditTargetProjectIdentity && e.TargetKind != AuditTargetProjectMerge && e.TargetKind != AuditTargetMemoryItem && e.TargetKind != AuditTargetMemoryProposal) {
 		return errors.New("invalid audit classification")
 	}
 	return nil
