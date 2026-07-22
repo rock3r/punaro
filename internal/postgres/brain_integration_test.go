@@ -438,7 +438,7 @@ FROM generate_series(1,$3)`, retentionScopeID, reader.ID, maxRetainedMemoryPropo
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,state,proposed_by,decided_by,created_at,decided_at,payload_sha256,payload,decided_xid,expires_at)
 SELECT $1,'create','rejected',$2,$2,statement_timestamp()-interval '2 days',statement_timestamp()-interval '1 day',decode(repeat('00',32),'hex'),'{}',pg_current_xact_id(),statement_timestamp()+interval '5 days'
-FROM generate_series(1,$3)`, fullScopeID, reader.ID, maxRetainedMemoryProposalsPrincipal-1); err != nil {
+FROM generate_series(1,$3)`, fullScopeID, reader.ID, maxRetainedMemoryProposalsPrincipal); err != nil {
 		t.Fatal(err)
 	}
 	fullExpiredID := "18181818-1818-4818-8818-181818181868"
