@@ -161,8 +161,9 @@ and timeline-aware; authorized project pages may contain global-sequence gaps an
 reject abandoned or future cursors. Live brain records or retained brain
 history fail closed at project
 merge until a later collision-aware rehome contract is implemented. Secret
-guarding begins at schema version 15; client search surfaces, prompt briefs,
-and embeddings remain separate later slices.
+guarding begins at schema version 15; client search surfaces and embeddings
+remain separate later slices. The dark prompt-brief store read is specified
+with lexical retrieval below.
 
 Schema version 15 adds the shared deterministic secret scanner and
 content-free exception registry. Canonical create and update scan only after
@@ -227,6 +228,36 @@ refused above either 100,000 existing revisions or 256 MiB of stored canonical
 documents; a larger corpus requires the separately backed-up, bounded backfill
 slice. Large version-18 corpora remain deliberately upgrade-blocked until that
 slice exists; the ordinary migration will not proceed.
+
+The dark prompt-brief read adds no schema and exposes no route or client. It
+accepts the same bounded normalized query as lexical search, resolves the
+active canonical project, and requires only `memory.search` because it returns
+exactly the existing bounded title/summary projection. In one read-only
+repeatable-read transaction on the isolated search pool it reads the
+installation/timeline/change cursor and project content/ACL generations, then
+selects current active non-quarantined curated records in three sections:
+four with the exact JSON boolean `pinned: true`, the newest
+`kind=project_brief` by `updated_at DESC,id`, and six lexical results. Item-ID
+deduplication gives core, then project, then relevant precedence. Empty
+title/summary projections are omitted; ordinary-space padding is trimmed before
+the field bound, while other whitespace remains JSON-quoted data.
+
+`pinned` and `project_brief` are writer-controlled retrieval hints, not proof
+of operator approval, verification, truth, or authority. The server emits a
+versioned JSON envelope warning that all memory is untrusted data. Fixed v1
+title/summary budgets are 4,096 core runes, 2,048 project runes, and 6,000
+relevant runes, with no more than 12,144 raw content runes and a final
+16,384-rune/64-KiB rendered ceiling after JSON escaping. Lower-priority fields
+and entries are deterministically truncated or omitted to preserve valid JSON.
+The response explicitly reports lexical retrieval and semantic
+`not_configured`; the server returns a fresh snapshot or fails and never serves
+a stale cache. Bodies, logical keys, live source coordinates, author/content
+hashes, routes, destinations, paths, URL-fetch requests, secret resolution,
+tool calls, and destructive-operation arguments are absent. Memory text can
+still influence model output; framing does not claim otherwise. A future
+client cache must additionally bind principal, normalized query, budget
+version, project, installation, timeline, change sequence, and project
+generations. Compose Pi cache/send behavior is outside this implementation.
 
 ### Implemented dark control-plane primitives
 
