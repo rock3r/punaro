@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -259,6 +261,65 @@ func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T,
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("readiness did not recover after transition-routine restoration: %v", err)
+	}
+}
+
+func testMemoryLexicalSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_vector;
+CREATE INDEX memory_revisions_search_vector ON brain.memory_revisions USING gin(search_vector) WHERE revision > 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted a partial memory search index")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_vector;
+CREATE INDEX memory_revisions_search_vector ON brain.memory_revisions USING gin(search_vector)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after search index restoration: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_title;
+CREATE INDEX memory_revisions_search_title ON brain.memory_revisions(search_title) WHERE octet_length(search_title)<=512`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted a partial exact-title index")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_title;
+CREATE INDEX memory_revisions_search_title ON brain.memory_revisions(search_title) WHERE octet_length(search_title)<=1024`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after exact-title index restoration: %v", err)
+	}
+
+	wrongExpression := `ALTER TABLE brain.memory_revisions DROP COLUMN search_vector;
+ALTER TABLE brain.memory_revisions ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'title')='string' THEN document->>'title' ELSE '' END),'A') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'summary')='string' THEN document->>'summary' ELSE '' END),'C') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'keywords') IN ('string','array') THEN document->>'keywords' ELSE '' END),'B') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'body')='string' THEN document->>'body' ELSE '' END),'D')) STORED NOT NULL;
+CREATE INDEX memory_revisions_search_vector ON brain.memory_revisions USING gin(search_vector)`
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_vector; `+wrongExpression); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted drifted memory search weights")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX brain.memory_revisions_search_vector;
+ALTER TABLE brain.memory_revisions DROP COLUMN search_vector;
+ALTER TABLE brain.memory_revisions ADD COLUMN search_vector tsvector GENERATED ALWAYS AS (
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'title')='string' THEN document->>'title' ELSE '' END),'A') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'summary')='string' THEN document->>'summary' ELSE '' END),'B') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'keywords') IN ('string','array') THEN document->>'keywords' ELSE '' END),'C') ||
+setweight(to_tsvector('simple'::regconfig,CASE WHEN jsonb_typeof(document->'body')='string' THEN document->>'body' ELSE '' END),'D')) STORED NOT NULL;
+CREATE INDEX memory_revisions_search_vector ON brain.memory_revisions USING gin(search_vector)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after generated-expression restoration: %v", err)
 	}
 }
 
@@ -2376,6 +2437,281 @@ WHERE principal_id=$1 AND project_id=$2 AND capability='memory.purge' AND revoke
 	}
 }
 
+func testMemoryLexicalSearchIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if app.brainDB == nil || app.brainDB.Stats().MaxOpenConnections != 2 {
+		t.Fatalf("brain search pool is not independently capped: %#v", app.brainDB)
+	}
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "lexical memory actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	searcher, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "lexical search only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "lexical read only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allProjects, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "lexical all-project search")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID, otherProjectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('lexical search project',$1) RETURNING id::text`, actor.ID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('lexical search other project',$1) RETURNING id::text`, actor.ID).Scan(&otherProjectID); err != nil {
+		t.Fatal(err)
+	}
+	for _, grant := range []struct {
+		principal, project string
+		capability         Capability
+	}{
+		{actor.ID, projectID, CapabilityMemoryWrite},
+		{actor.ID, projectID, CapabilityMemoryRead},
+		{actor.ID, projectID, CapabilityMemoryPurge},
+		{searcher.ID, projectID, CapabilityMemorySearch},
+		{reader.ID, projectID, CapabilityMemoryRead},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, grant.project, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,capability) VALUES ($1,'all_projects',$2)`, allProjects.ID, CapabilityMemorySearch); err != nil {
+		t.Fatal(err)
+	}
+
+	type fixture struct {
+		key, document string
+	}
+	fixtures := []fixture{
+		{`lexical.exact`, `{"title":"unrelated"}`},
+		{`lexical.title-exact`, `{"title":"orion","summary":"short"}`},
+		{`lexical.title`, `{"title":"orion guidance"}`},
+		{`lexical.summary`, `{"title":"summary match","summary":"orion guidance"}`},
+		{`lexical.keywords`, `{"title":"keyword match","keywords":["orion","guidance"]}`},
+		{`lexical.body`, `{"title":"body match","body":"orion guidance"}`},
+		{`lexical.syntax`, `{"title":"foo -bar"}`},
+	}
+	created := make(map[string]MemoryMutationResult, len(fixtures))
+	for index, fixture := range fixtures {
+		result, err := app.CreateMemory(ctx, MemoryCreateRequest{
+			PrincipalID: actor.ID, ProjectID: projectID,
+			IdempotencyKey: fmt.Sprintf("19191919-1919-4919-8919-%012d", index+1),
+			LogicalKey:     fixture.key, Kind: "decision", Trust: "curated", Document: json.RawMessage(fixture.document),
+		})
+		if err != nil {
+			t.Fatalf("create lexical fixture %q: %v", fixture.key, err)
+		}
+		created[fixture.key] = result
+	}
+	longTitleDocument, err := json.Marshal(map[string]string{"title": strings.Repeat("x", 4096)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	longTitle, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "19191919-1919-4919-8919-191919191930",
+		LogicalKey: "lexical.long-title", Kind: "decision", Trust: "curated", Document: longTitleDocument,
+	})
+	if err != nil {
+		t.Fatalf("large valid title create failed: %v", err)
+	}
+	longTitleUpdate, err := json.Marshal(map[string]string{"title": strings.Repeat("y", 5000)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: longTitle.ItemID,
+		IdempotencyKey: "19191919-1919-4919-8919-191919191931", ExpectedETag: longTitle.ETag,
+		LogicalKey: "lexical.long-title", Kind: "decision", Trust: "curated", Document: longTitleUpdate,
+	}); err != nil {
+		t.Fatalf("large valid title update failed: %v", err)
+	}
+
+	crowIDs := make([]string, 0, maxMemorySearchCandidates+1)
+	crowItems := make(map[string]MemoryMutationResult, maxMemorySearchCandidates+1)
+	crowKeys := make(map[string]string, maxMemorySearchCandidates+1)
+	for index := range maxMemorySearchCandidates + 1 {
+		logicalKey := fmt.Sprintf("ranking.%03d", index)
+		result, err := app.CreateMemory(ctx, MemoryCreateRequest{
+			PrincipalID: actor.ID, ProjectID: projectID,
+			IdempotencyKey: fmt.Sprintf("29292929-2929-4929-8929-%012d", index+1),
+			LogicalKey:     logicalKey, Kind: "decision", Trust: "curated",
+			Document: json.RawMessage(`{"body":"crow"}`),
+		})
+		if err != nil {
+			t.Fatalf("create ranking fixture %d: %v", index, err)
+		}
+		crowIDs = append(crowIDs, result.ItemID)
+		crowItems[result.ItemID] = result
+		crowKeys[result.ItemID] = logicalKey
+	}
+	sort.Strings(crowIDs)
+	rankedTargetID := crowIDs[len(crowIDs)-1]
+	rankedTarget := crowItems[rankedTargetID]
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: rankedTargetID,
+		IdempotencyKey: "29292929-2929-4929-8929-292929292930", ExpectedETag: rankedTarget.ETag,
+		LogicalKey: crowKeys[rankedTargetID], Kind: "decision", Trust: "curated",
+		Document: json.RawMessage(`{"title":"crow guidance"}`),
+	}); err != nil {
+		t.Fatalf("promote ranking fixture: %v", err)
+	}
+	search := func(principalID, query string, limit int) MemorySearchPage {
+		t.Helper()
+		page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: principalID, ProjectID: projectID, Query: query, Limit: limit})
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		return page
+	}
+	page := search(searcher.ID, "orion", 10)
+	if len(page.Results) != 5 || page.More {
+		t.Fatalf("orion page=%#v", page)
+	}
+	wantOrder := []string{"lexical.title-exact", "lexical.title", "lexical.summary", "lexical.keywords", "lexical.body"}
+	for index, want := range wantOrder {
+		if page.Results[index].LogicalKey != want || page.Results[index].ETag == "" {
+			t.Fatalf("orion result %d=%#v, want %q", index, page.Results[index], want)
+		}
+	}
+	exact := search(searcher.ID, "lexical.exact", 2)
+	if len(exact.Results) != 1 || exact.Results[0].Match != MemorySearchMatchLogicalKey || exact.Results[0].LogicalKey != "lexical.exact" {
+		t.Fatalf("logical exact page=%#v", exact)
+	}
+	exactTitle := search(searcher.ID, "foo -bar", 2)
+	if len(exactTitle.Results) != 1 || exactTitle.Results[0].Match != MemorySearchMatchTitle || exactTitle.Results[0].LogicalKey != "lexical.syntax" {
+		t.Fatalf("websearch-syntax exact title page=%#v", exactTitle)
+	}
+	ranked := search(searcher.ID, "crow", 50)
+	if len(ranked.Results) != 50 || !ranked.More || ranked.Results[0].ItemID != rankedTargetID || ranked.Results[0].Title != "crow guidance" {
+		t.Fatalf("bounded lexical rank lost the high-weight title: first=%#v count=%d more=%v", ranked.Results[0], len(ranked.Results), ranked.More)
+	}
+	limited := search(searcher.ID, "orion", 2)
+	if len(limited.Results) != 2 || !limited.More {
+		t.Fatalf("bounded page=%#v", limited)
+	}
+	if _, err := app.GetMemory(ctx, searcher.ID, projectID, created["lexical.title"].ItemID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("search-only principal read error=%v", err)
+	}
+	if _, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: reader.ID, ProjectID: projectID, Query: "orion", Limit: 5}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("read-only principal search error=%v", err)
+	}
+	if _, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: searcher.ID, ProjectID: otherProjectID, Query: "orion", Limit: 5}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-project search error=%v", err)
+	}
+	if all := search(allProjects.ID, "orion", 10); len(all.Results) != 5 {
+		t.Fatalf("all-project search=%#v", all)
+	}
+
+	title := created["lexical.title"]
+	updated, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: title.ItemID,
+		IdempotencyKey: "19191919-1919-4919-8919-191919191920", ExpectedETag: title.ETag,
+		LogicalKey: "lexical.title", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"nebula guidance"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old := search(searcher.ID, "orion", 10); len(old.Results) != 4 {
+		t.Fatalf("stale revision remained searchable: %#v", old)
+	}
+	if fresh := search(searcher.ID, "nebula", 10); len(fresh.Results) != 1 || fresh.Results[0].Revision != updated.Revision {
+		t.Fatalf("current revision not synchronously searchable: %#v", fresh)
+	}
+	archived, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: title.ItemID,
+		IdempotencyKey: "19191919-1919-4919-8919-191919191921", ExpectedETag: updated.ETag, Archived: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hidden := search(searcher.ID, "nebula", 10); len(hidden.Results) != 0 {
+		t.Fatalf("archived memory remained searchable: %#v", hidden)
+	}
+	restoredMutation, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: title.ItemID,
+		IdempotencyKey: "19191919-1919-4919-8919-191919191922", ExpectedETag: archived.ETag, Archived: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored := search(searcher.ID, "nebula", 10); len(restored.Results) != 1 {
+		t.Fatalf("restored memory not searchable: %#v", restored)
+	}
+
+	type concurrentSearchResult struct {
+		page MemorySearchPage
+		err  error
+	}
+	started := make(chan struct{})
+	searchDone := make(chan concurrentSearchResult, 1)
+	updateDone := make(chan struct {
+		result MemoryMutationResult
+		err    error
+	}, 1)
+	go func() {
+		<-started
+		page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: searcher.ID, ProjectID: projectID, Query: "snapshot", Limit: 2})
+		searchDone <- concurrentSearchResult{page: page, err: err}
+	}()
+	go func() {
+		<-started
+		result, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, ItemID: title.ItemID,
+			IdempotencyKey: "19191919-1919-4919-8919-191919191923", ExpectedETag: restoredMutation.ETag,
+			LogicalKey: "lexical.title", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"snapshot alpha"}`),
+		})
+		updateDone <- struct {
+			result MemoryMutationResult
+			err    error
+		}{result, err}
+	}()
+	close(started)
+	concurrentSearch, concurrentUpdate := <-searchDone, <-updateDone
+	if concurrentSearch.err != nil || concurrentUpdate.err != nil {
+		t.Fatalf("concurrent search=%v update=%v", concurrentSearch.err, concurrentUpdate.err)
+	}
+	if len(concurrentSearch.page.Results) > 1 || (len(concurrentSearch.page.Results) == 1 &&
+		(concurrentSearch.page.Results[0].Revision != concurrentUpdate.result.Revision || concurrentSearch.page.Results[0].Title != "snapshot alpha")) {
+		t.Fatalf("search observed a mixed revision snapshot: %#v", concurrentSearch.page)
+	}
+	if current := search(searcher.ID, "snapshot", 2); len(current.Results) != 1 || current.Results[0].Revision != concurrentUpdate.result.Revision {
+		t.Fatalf("concurrent update not synchronously searchable: %#v", current)
+	}
+	lockTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockTx.ExecContext(ctx, `LOCK TABLE brain.memory_items IN ACCESS EXCLUSIVE MODE`); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatal(err)
+	}
+	timeoutStarted := time.Now()
+	_, timeoutErr := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: searcher.ID, ProjectID: projectID, Query: "snapshot", Limit: 2})
+	timeoutElapsed := time.Since(timeoutStarted)
+	if err := lockTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if timeoutErr == nil || timeoutElapsed < time.Second || timeoutElapsed > 3*time.Second {
+		t.Fatalf("search timeout err=%v elapsed=%s", timeoutErr, timeoutElapsed)
+	}
+	if recovered := search(searcher.ID, "snapshot", 2); len(recovered.Results) != 1 {
+		t.Fatalf("search pool did not recover after timeout: %#v", recovered)
+	}
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: title.ItemID,
+		IdempotencyKey: "19191919-1919-4919-8919-191919191924", ExpectedETag: concurrentUpdate.result.ETag,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if purged := search(searcher.ID, "snapshot", 2); len(purged.Results) != 0 {
+		t.Fatalf("purged memory remained searchable: %#v", purged)
+	}
+}
+
 func testMemorySecretQuarantine(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, actorID, readerID, outsiderID string) {
 	t.Helper()
 	var projectID string
@@ -2390,6 +2726,7 @@ func testMemorySecretQuarantine(ctx context.Context, t *testing.T, app *Database
 		{actorID, CapabilityMemoryWrite},
 		{actorID, CapabilityMemoryAdminister},
 		{readerID, CapabilityMemoryRead},
+		{readerID, CapabilityMemorySearch},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, projectID, grant.capability); err != nil {
 			t.Fatal(err)
@@ -2401,6 +2738,9 @@ func testMemorySecretQuarantine(ctx context.Context, t *testing.T, app *Database
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 1 {
+		t.Fatalf("pre-quarantine search=%#v err=%v", page, err)
 	}
 	second, err := app.CreateMemory(ctx, MemoryCreateRequest{
 		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161610",
@@ -2487,6 +2827,9 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	if _, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("quarantined ordinary get error=%v", err)
 	}
+	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 0 {
+		t.Fatalf("quarantined memory search=%#v err=%v", page, err)
+	}
 	if _, err := app.ReviewMemorySecretQuarantine(ctx, outsiderID, projectID, created.ItemID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized quarantine review error=%v", err)
 	}
@@ -2545,6 +2888,9 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	if item, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); err != nil || json.Unmarshal(item.Document, &reviewedDocument) != nil || reviewedDocument["token"] != "resolved-legacy-value-123" || item.Revision != restored.Revision {
 		t.Fatalf("released ordinary get=%#v err=%v", item, err)
 	}
+	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 1 {
+		t.Fatalf("released memory search=%#v err=%v", page, err)
+	}
 	if _, err := app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
 		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161607", ExceptionID: exception.ExceptionID,
 	}); err != nil {
@@ -2556,6 +2902,9 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	if err != nil || requarantined.Scanned != 2 || requarantined.Quarantined != 1 || requarantined.Released != 0 || requarantined.Remaining {
 		t.Fatalf("post-revoke rescan=%#v err=%v", requarantined, err)
 	}
+	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 0 {
+		t.Fatalf("requarantined memory search=%#v err=%v", page, err)
+	}
 	cleaned, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
 		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
 		IdempotencyKey: "16161616-1616-4616-8616-161616161609", ExpectedETag: restored.ETag,
@@ -2566,6 +2915,9 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	}
 	if item, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); err != nil || json.Unmarshal(item.Document, &reviewedDocument) != nil || item.Revision != cleaned.Revision || reviewedDocument["title"] != "clean replacement" {
 		t.Fatalf("clean update release=%#v err=%v", item, err)
+	}
+	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 1 || page.Results[0].Revision != cleaned.Revision {
+		t.Fatalf("clean update search=%#v err=%v", page, err)
 	}
 	var metadataLeaked bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT

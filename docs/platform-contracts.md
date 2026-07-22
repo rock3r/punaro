@@ -161,8 +161,8 @@ and timeline-aware; authorized project pages may contain global-sequence gaps an
 reject abandoned or future cursors. Live brain records or retained brain
 history fail closed at project
 merge until a later collision-aware rehome contract is implemented. Secret
-guarding begins at schema version 15; evidence/proposals, lexical search,
-clients, and embeddings remain separate later slices.
+guarding begins at schema version 15; client search surfaces, prompt briefs,
+and embeddings remain separate later slices.
 
 Schema version 15 adds the shared deterministic secret scanner and
 content-free exception registry. Canonical create and update scan only after
@@ -207,6 +207,26 @@ bounded batch, while their content-free audit history remains durable. The
 canonical project's maintenance pass also covers scopes retained behind its
 permanent project aliases under one shared batch bound, so expiry and retention
 remain operable after merge without multiplying transaction work per alias.
+
+Schema version 19 adds synchronous lexical retrieval without making the search
+projection authoritative. Every immutable revision receives a stored generated
+`tsvector` in the same transaction, weighted title, summary, keywords, then
+body, with a GIN index that is derived and rebuildable. Search resolves the
+active canonical project and verifies `memory.search` before querying. It joins
+only each item's current revision, excludes archived and actively quarantined
+items, and returns at most 50 bounded title/summary results plus a `more` bit;
+the full document still requires `memory.read`. Exact logical-key and title
+matches precede a 200-row weighted lexical candidate stage and stable metadata
+ordering. A separate two-connection pool and two-second context/statement
+deadline prevent search from consuming the general or reserved mail pool.
+No total count, body excerpt, source detail, HTTP/MCP/CLI surface, embedding,
+or semantic fallback is part of this slice. Schema readiness separately pins
+the exact generated expression and GIN access path while valid version-18
+databases remain upgrade-compatible. The inline generated-column rewrite is
+refused above either 100,000 existing revisions or 256 MiB of stored canonical
+documents; a larger corpus requires the separately backed-up, bounded backfill
+slice. Large version-18 corpora remain deliberately upgrade-blocked until that
+slice exists; the ordinary migration will not proceed.
 
 ### Implemented dark control-plane primitives
 
