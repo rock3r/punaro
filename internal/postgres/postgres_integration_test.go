@@ -1734,13 +1734,13 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	request = UpdateRequest{
 		UpdateID:                "019b4eb0-798c-7a52-8d29-8560fcbb2089",
 		SourceRelease:           "v0.10.0",
-		TargetRelease:           "v0.16.0",
+		TargetRelease:           "v0.17.0",
 		SourceImage:             "ghcr.io/rock3r/punaro@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		TargetImage:             "ghcr.io/rock3r/punaro@sha256:abababababababababababababababababababababababababababababababab",
 		SourceSchema:            10,
-		TargetSchema:            16,
+		TargetSchema:            current.MaxSupported,
 		SchemaMin:               10,
-		SchemaMax:               16,
+		SchemaMax:               current.MaxSupported,
 		RollbackFloor:           10,
 		PostgresMajor:           postgresMajor,
 		ReleaseSHA256:           "9494949494949494949494949494949494949494949494949494949494949494",
@@ -1749,11 +1749,11 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	}
 	transaction, err = admin.BeginUpdate(ctx, request)
 	if err != nil || transaction.Phase != UpdateFenced {
-		t.Fatalf("begin v14 update transaction=%#v err=%v", transaction, err)
+		t.Fatalf("begin current update transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateFenced, UpdateWritersStopped, nil)
 	if err != nil || transaction.Phase != UpdateWritersStopped {
-		t.Fatalf("stop v14 writers transaction=%#v err=%v", transaction, err)
+		t.Fatalf("stop current writers transaction=%#v err=%v", transaction, err)
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton`).Scan(&state.InstallationID, &state.TimelineID, &state.ChangeSequence); err != nil {
 		t.Fatal(err)
@@ -1768,7 +1768,7 @@ FROM jobs.server_state WHERE singleton`, bridgeCorruptArtifactID, bridgeCorruptP
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateWritersStopped, UpdateBackupVerified, marker)
 	if err != nil || transaction.Phase != UpdateBackupVerified {
-		t.Fatalf("bind v14 backup transaction=%#v err=%v", transaction, err)
+		t.Fatalf("bind current backup transaction=%#v err=%v", transaction, err)
 	}
 	transaction, err = admin.AdvanceUpdate(ctx, request.UpdateID, UpdateBackupVerified, UpdateMigrationStarted, nil)
 	if err != nil || transaction.Phase != UpdateMigrationStarted {
