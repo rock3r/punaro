@@ -34,12 +34,13 @@ origin, project UUID, and safe download root. The installer never reads or
 prints the credential.
 
 On macOS and Linux the installer also provides `punaro-memory` for an already
-enabled native memory API. It is deliberately stateless: every command names
-the fixed HTTPS origin, protected credential file, project or resolver input,
-and any required idempotency key and strong ETag. It never discovers Git state,
-stores a profile, retries, queues writes, falls back to local memory, or accepts
-memory content from stdin. See the
-[operator guide](operator-guide.md#stateless-native-memory-client).
+enabled native memory API. Every command either names the fixed HTTPS origin,
+protected credential file, project or resolver input, and any required
+idempotency key and strong ETag, or uses an explicit protected profile that
+stores only non-secret defaults: origin, credential-file path, and optional
+project UUID. It never discovers Git state, retries, queues writes, falls back
+to local memory, or accepts memory content from stdin. See the
+[operator guide](operator-guide.md#native-memory-client).
 
 ## What you can do today
 

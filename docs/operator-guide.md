@@ -665,7 +665,7 @@ capability and is irreversible. Secret-shaped documents are rejected without
 echoing the value or fingerprint. There is still no native client, MCP adapter,
 semantic retrieval, offline queue, or Compose Pi integration.
 
-### Stateless native memory client
+### Native memory client
 
 M-17C1 adds `punaro-memory` without changing the server activation flags. Build
 it with `make memory-client`; the macOS/Linux client installer also places it
@@ -673,7 +673,24 @@ in `~/.local/bin`. The operator must separately provision an absolute regular
 credential file below non-writable, non-symlink parent directories. The file
 must be owned by the current user, have no group/other permissions, and have
 exactly one hard link. The CLI accepts an explicit HTTPS `--origin` and
-`--credential-file` on every invocation and never stores either value.
+`--credential-file`, and the bearer credential value is never stored by the
+client.
+
+M-17C2 adds a protected local profile for convenience. Create it only with an
+absolute target path:
+
+```sh
+punaro-memory profile-write \
+  --profile /absolute/path/to/punaro-memory-profile.json \
+  --origin https://punaro.example \
+  --credential-file /absolute/path/to/punaro-device \
+  --project 11111111-1111-4111-8111-111111111111
+```
+
+The profile is an atomically replaced `0600` JSON file containing only
+non-secret defaults: origin, credential-file path, and optional project UUID.
+Normal commands may pass `--profile`; explicit `--origin`, `--credential-file`,
+and `--project` flags override the profile defaults for that invocation.
 
 Pass an explicit `--project` UUID to project-scoped commands. `resolve` accepts
 only an explicit `--kind` and `--locator`; it discovers existing authorized
@@ -685,12 +702,12 @@ bounded `--input` file. Every mutation requires a caller-generated stable
 and rejection are separate commands, so no destructive action is inferred.
 
 The client makes one request and exits. It has no implicit retry, writable
-cache, queue, profile, Git configuration lookup, project registry, stdin body,
-or fallback memory. A retry is an explicit caller decision using the same body,
+cache, queue, Git configuration lookup, project registry, stdin body, or
+fallback memory. A retry is an explicit caller decision using the same body,
 key, and ETag. Errors are deliberately generic; use server-side content-free
 audit metadata for diagnosis. Windows credential loading is intentionally
-unavailable in this slice and fails closed until the persisted-client work adds
-verified DACL and reparse-point handling. MCP, enrollment/profile recovery,
+unavailable until a later slice pairs protected credential/profile creation
+with verified DACL and reparse-point handling. MCP, enrollment recovery,
 semantic retrieval, and Compose Pi remain absent.
 
 ## Operations and incident response

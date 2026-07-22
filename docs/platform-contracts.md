@@ -309,17 +309,20 @@ permanent aliases exist only for compatible reads. Local credential/project
 state, retry/cache behavior, MCP, semantic retrieval, and Compose Pi remain
 absent.
 
-The first native client is `punaro-memory`. It is stateless and accepts only an
-explicit fixed HTTPS origin, absolute owner-protected credential file, and
-explicit project UUID or resolver request. It sends each command exactly once:
-there is no retry, queue, cache, profile, project registry, Git inference, or
-fallback brain. Mutation input comes from a bounded regular file; callers must
-reuse the same input, idempotency UUID, and exact strong ETag when they
+The first native client is `punaro-memory`. It accepts an explicit fixed HTTPS
+origin, absolute owner-protected credential file, and explicit project UUID or
+resolver request. It may also read an explicit protected profile containing
+only non-secret defaults: origin, credential-file path, and optional default
+project UUID. Explicit flags always override profile defaults, and the bearer
+credential value is never persisted by the profile. It sends each command
+exactly once: there is no retry, queue, cache, project registry, Git inference,
+or fallback brain. Mutation input comes from a bounded regular file; callers
+must reuse the same input, idempotency UUID, and exact strong ETag when they
 explicitly retry. Success is the validated server JSON on stdout. Failures are
 content-free on stderr and never include credentials, request bodies, response
-bodies, URLs, or server diagnostics. Windows credential loading remains
-fail-closed until the later persisted-client slice supplies and verifies its
-ACL and reparse-point contract.
+bodies, URLs, file paths, or server diagnostics. Windows credential loading
+remains fail-closed until a later slice supplies paired protected-file
+provisioning plus ACL and reparse-point verification.
 
 ### Implemented dark control-plane primitives
 
