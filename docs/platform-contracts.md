@@ -306,8 +306,7 @@ and immutable-item conflicts are closed 409 categories; secret rejection is a
 content-free 422 category; proposal capacity is 429; transient failures are
 503. Mutation project IDs are never canonicalized through a retired alias:
 permanent aliases exist only for compatible reads. Local credential/project
-state, retry/cache behavior, MCP, semantic retrieval, and Compose Pi remain
-absent.
+state, retry/cache behavior, semantic retrieval, and Compose Pi remain absent.
 
 The first native client is `punaro-memory`. It accepts an explicit fixed HTTPS
 origin, absolute owner-protected credential file, and explicit project UUID or
@@ -323,6 +322,20 @@ content-free on stderr and never include credentials, request bodies, response
 bodies, URLs, file paths, or server diagnostics. Windows credential loading
 remains fail-closed until a later slice supplies paired protected-file
 provisioning plus ACL and reparse-point verification.
+
+The same binary also supports local stdio MCP mode. `punaro-memory mcp` loads
+the fixed HTTPS origin, protected credential-file path, and optional default
+project from its startup flags/profile before accepting JSON-RPC messages on
+stdin/stdout. MCP tool calls cannot provide origin, credential-file, profile,
+or bearer credential arguments. The first local tool set covers bounded search,
+get, prompt brief, content-free change pages, proposal creation, and proposal
+get; direct update/archive/restore/purge and proposal decisions remain CLI/API
+operations that require explicit idempotency and ETag handling. MCP failures
+are generic tool errors and do not echo sensitive values, request bodies,
+response bodies, URLs, file paths, or server diagnostics. This local MCP mode is
+not the later OAuth-protected remote MCP gateway and does not add retries,
+queues, cache, Git inference, local fallback memory, semantic retrieval, or
+Compose Pi behavior.
 
 ### Implemented dark control-plane primitives
 

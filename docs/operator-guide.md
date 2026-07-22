@@ -662,8 +662,8 @@ need the exact strong ETag returned by the preceding read or mutation in
 `If-Match`. Retired project aliases are readable compatibility coordinates but
 are deliberately rejected for every mutation. Purge requires its distinct
 capability and is irreversible. Secret-shaped documents are rejected without
-echoing the value or fingerprint. There is still no native client, MCP adapter,
-semantic retrieval, offline queue, or Compose Pi integration.
+echoing the value or fingerprint. This slice still has no native client, MCP
+adapter, semantic retrieval, offline queue, or Compose Pi integration.
 
 ### Native memory client
 
@@ -707,8 +707,27 @@ fallback memory. A retry is an explicit caller decision using the same body,
 key, and ETag. Errors are deliberately generic; use server-side content-free
 audit metadata for diagnosis. Windows credential loading is intentionally
 unavailable until a later slice pairs protected credential/profile creation
-with verified DACL and reparse-point handling. MCP, enrollment recovery,
-semantic retrieval, and Compose Pi remain absent.
+with verified DACL and reparse-point handling.
+
+M-17D adds local stdio MCP mode to the same binary:
+
+```sh
+punaro-memory mcp \
+  --profile /absolute/path/to/punaro-memory-profile.json
+```
+
+The MCP server loads the protected profile and credential once at startup.
+Configure it with the profile path or explicit origin plus credential-file path;
+do not pass bearer credential values in MCP configuration. Tool calls may pass
+an explicit project UUID or use the profile default project, but they cannot
+set or override the fixed origin, credential-file path, profile path, or bearer
+credential. The exposed tools are bounded wrappers for search, get, brief,
+content-free changes, proposal creation, and proposal get. Tool-call failures
+return generic content-free MCP errors; request bodies, response bodies,
+credential values, file paths, and server diagnostics are not echoed. This is
+not the remote OAuth MCP gateway planned for a later slice, and it adds no
+offline writable brain, retry queue, Git discovery, enrollment recovery,
+semantic retrieval, or Compose Pi behavior.
 
 ## Operations and incident response
 

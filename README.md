@@ -110,7 +110,7 @@ precedence over dotenv values.
 | `PUNARO_POSTGRES_ENABLED` | `false` | Opts into the PostgreSQL platform substrate. Ordinary startup only checks compatibility and never migrates. |
 | `PUNARO_POSTGRES_DSN_FILE` | unset | Required with PostgreSQL enabled: absolute path to a private application-role DSN file. The application role has no DDL authority. |
 | `PUNARO_DEVICE_AUTH_ENABLED` | `false` | Mounts bounded enrollment redemption and device-session authentication; requires PostgreSQL and a complete ingress policy. |
-| `PUNARO_MEMORY_API_ENABLED` | `false` | Separately mounts the dark authenticated native memory read API; requires PostgreSQL device authentication. It does not enable mutations, a local client, MCP, semantic retrieval, or Compose Pi integration. |
+| `PUNARO_MEMORY_API_ENABLED` | `false` | Separately mounts the dark authenticated native memory read API; requires PostgreSQL device authentication. It does not enable mutations, semantic retrieval, remote MCP, or Compose Pi integration. The separately installed local `punaro-memory` client/MCP mode still requires protected device credentials. |
 | `PUNARO_CREDENTIAL_TRANSITION_ENABLED` | `false` | Dormant M-9 bridge. Requires device auth and the PostgreSQL relay. Legacy Ed25519 requests must pass the durable global gate; a migrated device bearer resolves through its proof-bound exchange to the exact static machine enrollment and inherits no additional endpoint authority. |
 | `PUNARO_INGRESS_MODE` | unset | Required with device auth: `lan`, `proxy`, or `internet`. Proxy and Internet origins bind loopback and require `PUNARO_PUBLIC_URL=https://...`. |
 | `PUNARO_PUBLIC_URL` | unset | Canonical HTTPS public URL for proxy/Internet mode. It does not make forwarded headers trustworthy. |

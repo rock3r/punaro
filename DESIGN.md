@@ -92,9 +92,14 @@ atomically replaced, owner-only regular files under trusted non-writable,
 non-symlink parent directories. Loading revalidates the path, owner-only file
 state, strict schema, fixed-HTTPS origin, absolute credential path, and
 optional project UUID before any request can use the defaults. Explicit CLI
-flags override profile defaults for the current invocation. Profiles do not
-add retry, queue, cache, Git discovery, project registry, fallback local brain,
-enrollment recovery, MCP, semantic retrieval, or Compose Pi behavior.
+flags override profile defaults for the current invocation. The same binary
+also has a local stdio MCP mode, `punaro-memory mcp`, that loads the protected
+credential and profile once at startup and exposes only bounded memory tools
+over JSON-RPC. MCP tool arguments cannot set or override origin, credential
+path, profile path, or credential value. Profiles and MCP mode do not add
+retry, queue, cache, Git discovery, project registry, fallback local brain,
+enrollment recovery, semantic retrieval, remote MCP/OAuth, or Compose Pi
+behavior.
 
 ## Goals
 

@@ -48,9 +48,13 @@ type profile struct {
 	Project        string `json:"project,omitempty"`
 }
 
-func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
+func main() { os.Exit(runWithInput(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithInput(args, strings.NewReader(""), stdout, stderr)
+}
+
+func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		usage(stderr)
 		return 2
@@ -88,6 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+	mcpMode := command == "mcp"
 	if *profilePath != "" {
 		loaded, err := loadProfile(*profilePath)
 		if err != nil {
@@ -106,6 +111,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *origin == "" || !filepath.IsAbs(*credentialFile) {
 		return 2
+	}
+	if mcpMode && !validMCPDefaults(*project) {
+		return 2
+	}
+	if mcpMode {
+		credential, err := loadCredential(*credentialFile)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro-memory: protected credential is unavailable")
+			return 1
+		}
+		remote, err := newMemoryClient(*origin, credential)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro-memory: client configuration is invalid")
+			return 1
+		}
+		if err := runMCP(context.Background(), stdin, stdout, remote, *project); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro-memory: mcp failed")
+			return 1
+		}
+		return 0
 	}
 	if !validCommand(command, *project, *item, *proposal, *key, *etag, *input, *query, *kind, *locator, *cursorFile, *limit) {
 		return 2
@@ -236,6 +261,8 @@ func flagName(argument string) (string, bool) {
 
 func commandFlags(command string) []string {
 	switch command {
+	case "mcp":
+		return []string{"project"}
 	case "profile-write":
 		return []string{"profile", "origin", "credential-file", "project"}
 	case "resolve":
@@ -506,5 +533,5 @@ func noSymlinkPath(path string) bool {
 }
 
 func usage(stderr io.Writer) {
-	_, _ = fmt.Fprintln(stderr, "usage: punaro-memory <profile-write|resolve|get|search|brief|changes|create|update|archive|restore|purge|propose|proposal-get|proposal-approve|proposal-reject> [flags]")
+	_, _ = fmt.Fprintln(stderr, "usage: punaro-memory <mcp|profile-write|resolve|get|search|brief|changes|create|update|archive|restore|purge|propose|proposal-get|proposal-approve|proposal-reject> [flags]")
 }
