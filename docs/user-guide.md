@@ -33,6 +33,14 @@ then have the operator provision its protected credential file, fixed trusted
 origin, project UUID, and safe download root. The installer never reads or
 prints the credential.
 
+On macOS and Linux the installer also provides `punaro-memory` for an already
+enabled native memory API. It is deliberately stateless: every command names
+the fixed HTTPS origin, protected credential file, project or resolver input,
+and any required idempotency key and strong ETag. It never discovers Git state,
+stores a profile, retries, queues writes, falls back to local memory, or accepts
+memory content from stdin. See the
+[operator guide](operator-guide.md#stateless-native-memory-client).
+
 ## What you can do today
 
 Developers can run the local health check and alpha relay described in the
