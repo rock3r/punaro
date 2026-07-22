@@ -170,6 +170,8 @@ func testMemoryEvidenceSchemaDriftIntegration(ctx context.Context, t *testing.T,
 	}{
 		{"source public read", `GRANT SELECT ON brain.memory_sources TO PUBLIC`, `REVOKE SELECT ON brain.memory_sources FROM PUBLIC`},
 		{"edge delete", `GRANT DELETE ON brain.memory_edges TO punaro_app`, `REVOKE DELETE ON brain.memory_edges FROM punaro_app`},
+		{"edge direct insert", `GRANT INSERT (from_item_id) ON brain.memory_edges TO punaro_app`, `REVOKE INSERT (from_item_id) ON brain.memory_edges FROM punaro_app`},
+		{"claim routine parallel safety", `ALTER FUNCTION brain.record_evidence_claim(uuid,bigint,smallint,text,uuid,bigint,uuid) PARALLEL SAFE`, `ALTER FUNCTION brain.record_evidence_claim(uuid,bigint,smallint,text,uuid,bigint,uuid) PARALLEL UNSAFE`},
 		{"source fence", `ALTER TABLE brain.memory_sources DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_sources ENABLE TRIGGER application_mutation_fence`},
 		{"source row security", `ALTER TABLE brain.memory_sources ENABLE ROW LEVEL SECURITY`, `ALTER TABLE brain.memory_sources DISABLE ROW LEVEL SECURITY`},
 		{"source index", `DROP INDEX brain.memory_sources_live_resource`, `CREATE INDEX memory_sources_live_resource ON brain.memory_sources (source_project_id,kind,source_resource_id,source_revision) WHERE mode='live'`},
@@ -177,7 +179,7 @@ func testMemoryEvidenceSchemaDriftIntegration(ctx context.Context, t *testing.T,
 		{"source shape constraint", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_shape_check; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_shape_check CHECK (mode IS NOT NULL)`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_shape_check; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_shape_check CHECK ((mode='copied' AND source_project_id IS NULL AND source_resource_id IS NULL AND source_revision IS NULL AND reference_sha256 IS NOT NULL) OR (mode='live' AND source_project_id IS NOT NULL AND source_resource_id IS NOT NULL AND reference_sha256 IS NULL AND ((kind='memory' AND source_revision IS NOT NULL) OR (kind IN ('message','attachment') AND source_revision IS NULL))))`},
 		{"source project FK action", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id) ON DELETE CASCADE`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id)`},
 		{"source project FK update", `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_sources DROP CONSTRAINT memory_sources_source_project_id_fkey; ALTER TABLE brain.memory_sources ADD CONSTRAINT memory_sources_source_project_id_fkey FOREIGN KEY (source_project_id) REFERENCES relay.projects(id)`},
-		{"edge target FK action", `ALTER TABLE brain.memory_edges DROP CONSTRAINT memory_edges_to_revision_fkey; ALTER TABLE brain.memory_edges ADD CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id,to_revision) REFERENCES brain.memory_revisions(item_id,revision)`, `ALTER TABLE brain.memory_edges DROP CONSTRAINT memory_edges_to_revision_fkey; ALTER TABLE brain.memory_edges ADD CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id,to_revision) REFERENCES brain.memory_revisions(item_id,revision) ON DELETE CASCADE`},
+		{"edge target FK", `ALTER TABLE brain.memory_edges ADD CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id,to_revision) REFERENCES brain.memory_revisions(item_id,revision) ON DELETE CASCADE`, `ALTER TABLE brain.memory_edges DROP CONSTRAINT memory_edges_to_revision_fkey`},
 	} {
 		t.Run("evidence "+drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
@@ -335,6 +337,232 @@ VALUES ($1,$2,$3,$4,$5,$6,7,$6,'evidence.txt','text/plain','ready',statement_tim
 		PrincipalID: actor.ID, ProjectID: targetProject, LogicalKey: "evidence.rejected", Kind: "evidence.excerpt", Trust: "observed",
 		Document: json.RawMessage(`{"excerpt":"bounded"}`),
 	}
+	purgeFirstTarget, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171750",
+		LogicalKey: "evidence.purge-first-target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"race":"purge-first"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	purgeFirstRequest := baseRejected
+	purgeFirstRequest.IdempotencyKey = "17171717-1717-4717-8717-171717171751"
+	purgeFirstRequest.LogicalKey = "evidence.purge-first"
+	purgeFirstRequest.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5d", 32)}}
+	purgeFirstRequest.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: purgeFirstTarget.ItemID, TargetRevision: purgeFirstTarget.Revision}}
+	purgeFirstGate, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var purgeFirstLocked string
+	if err := purgeFirstGate.QueryRowContext(ctx, `SELECT id::text FROM brain.memory_items WHERE id=$1 FOR UPDATE`, purgeFirstTarget.ItemID).Scan(&purgeFirstLocked); err != nil {
+		_ = purgeFirstGate.Rollback()
+		t.Fatal(err)
+	}
+	purgeFirstDeleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := app.DeleteMemory(ctx, MemoryDeleteRequest{
+			PrincipalID: actor.ID, ProjectID: targetProject, ItemID: purgeFirstTarget.ItemID,
+			IdempotencyKey: "17171717-1717-4717-8717-171717171752", ExpectedETag: purgeFirstTarget.ETag,
+		})
+		purgeFirstDeleteDone <- deleteErr
+	}()
+	purgeFirstDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT scope.id::text,item.current_revision%FOR UPDATE OF item')`).Scan(&waiting); err != nil {
+			_ = purgeFirstGate.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case deleteErr := <-purgeFirstDeleteDone:
+			_ = purgeFirstGate.Rollback()
+			t.Fatalf("purge-first delete escaped item lock: %v", deleteErr)
+		default:
+		}
+		if time.Now().After(purgeFirstDeadline) {
+			_ = purgeFirstGate.Rollback()
+			t.Fatal("purge-first delete did not reach the item lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	purgeFirstCreateDone := make(chan error, 1)
+	go func() {
+		_, createErr := app.CreateMemoryEvidence(ctx, purgeFirstRequest)
+		purgeFirstCreateDone <- createErr
+	}()
+	purgeFirstDeadline = time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT id::text,merged_into::text FROM relay.projects%FOR UPDATE')`).Scan(&waiting); err != nil {
+			_ = purgeFirstGate.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case createErr := <-purgeFirstCreateDone:
+			_ = purgeFirstGate.Rollback()
+			t.Fatalf("purge-first evidence escaped project lock: %v", createErr)
+		default:
+		}
+		if time.Now().After(purgeFirstDeadline) {
+			_ = purgeFirstGate.Rollback()
+			t.Fatal("purge-first evidence did not reach the project lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := purgeFirstGate.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case deleteErr := <-purgeFirstDeleteDone:
+		if deleteErr != nil {
+			t.Fatalf("purge-first delete: %v", deleteErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("purge-first delete remained blocked after item release")
+	}
+	select {
+	case createErr := <-purgeFirstCreateDone:
+		if !errors.Is(createErr, ErrNotFound) {
+			t.Fatalf("purge-first evidence error=%v", createErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("purge-first evidence remained blocked after target purge")
+	}
+	var purgeFirstEvidence int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_items WHERE logical_key='evidence.purge-first'`).Scan(&purgeFirstEvidence); err != nil || purgeFirstEvidence != 0 {
+		t.Fatalf("purge-first evidence count=%d err=%v", purgeFirstEvidence, err)
+	}
+
+	createFirstTarget, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171753",
+		LogicalKey: "evidence.create-first-target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"race":"create-first"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createFirstRequest := baseRejected
+	createFirstRequest.IdempotencyKey = "17171717-1717-4717-8717-171717171754"
+	createFirstRequest.LogicalKey = "evidence.create-first"
+	createFirstRequest.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5e", 32)}}
+	createFirstRequest.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: createFirstTarget.ItemID, TargetRevision: createFirstTarget.Revision}}
+	createFirstGate, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createFirstLocked string
+	if err := createFirstGate.QueryRowContext(ctx, `SELECT id::text FROM brain.memory_items WHERE id=$1 FOR UPDATE`, createFirstTarget.ItemID).Scan(&createFirstLocked); err != nil {
+		_ = createFirstGate.Rollback()
+		t.Fatal(err)
+	}
+	type createFirstResult struct {
+		result MemoryMutationResult
+		err    error
+	}
+	createFirstDone := make(chan createFirstResult, 1)
+	go func() {
+		createdRace, createErr := app.CreateMemoryEvidence(ctx, createFirstRequest)
+		createFirstDone <- createFirstResult{createdRace, createErr}
+	}()
+	createFirstDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT item.id::text%FOR SHARE OF item')`).Scan(&waiting); err != nil {
+			_ = createFirstGate.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case createResult := <-createFirstDone:
+			_ = createFirstGate.Rollback()
+			t.Fatalf("create-first evidence escaped item lock: %#v", createResult)
+		default:
+		}
+		if time.Now().After(createFirstDeadline) {
+			_ = createFirstGate.Rollback()
+			t.Fatal("create-first evidence did not reach the item lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	createFirstDeleteDone := make(chan error, 1)
+	go func() {
+		_, deleteErr := app.DeleteMemory(ctx, MemoryDeleteRequest{
+			PrincipalID: actor.ID, ProjectID: targetProject, ItemID: createFirstTarget.ItemID,
+			IdempotencyKey: "17171717-1717-4717-8717-171717171755", ExpectedETag: createFirstTarget.ETag,
+		})
+		createFirstDeleteDone <- deleteErr
+	}()
+	createFirstDeadline = time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT id::text, identity_generation, acl_generation, content_generation, merged_into::text%FOR UPDATE')`).Scan(&waiting); err != nil {
+			_ = createFirstGate.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case deleteErr := <-createFirstDeleteDone:
+			_ = createFirstGate.Rollback()
+			t.Fatalf("create-first delete escaped project lock: %v", deleteErr)
+		default:
+		}
+		if time.Now().After(createFirstDeadline) {
+			_ = createFirstGate.Rollback()
+			t.Fatal("create-first delete did not reach the project lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := createFirstGate.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	var createRace createFirstResult
+	select {
+	case createRace = <-createFirstDone:
+		if createRace.err != nil {
+			t.Fatalf("create-first evidence: %v", createRace.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("create-first evidence remained blocked after item release")
+	}
+	select {
+	case deleteErr := <-createFirstDeleteDone:
+		if deleteErr != nil {
+			t.Fatalf("create-first delete: %v", deleteErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("create-first delete remained blocked after evidence commit")
+	}
+	createFirstEvidence, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: createRace.result.ItemID})
+	if err != nil || len(createFirstEvidence.Claims) != 1 || createFirstEvidence.Claims[0].TargetItemID != createFirstTarget.ItemID {
+		t.Fatalf("create-first retained claim=%#v err=%v", createFirstEvidence.Claims, err)
+	}
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, ItemID: createRace.result.ItemID,
+		IdempotencyKey: "17171717-1717-4717-8717-171717171756", ExpectedETag: createRace.result.ETag,
+	}); err != nil {
+		t.Fatalf("clean up create-first evidence: %v", err)
+	}
 	for index, source := range []MemoryEvidenceSourceInput{
 		{Mode: MemorySourceLive, Kind: MemorySourceMessage, ProjectID: sourceProject, ResourceID: "17171717-1717-4717-8717-171717171731"},
 		{Mode: MemorySourceLive, Kind: MemorySourceAttachment, ProjectID: sourceProject, ResourceID: "17171717-1717-4717-8717-171717171732"},
@@ -365,6 +593,73 @@ VALUES ($1,$2,1,'sensitive-field','/status',decode($3,'hex'),$4)`, target.ItemID
 	quarantinedClaim.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5a", 32)}}
 	quarantinedClaim.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: target.ItemID, TargetRevision: target.Revision}}
 	assertRejectedAtomically("quarantined claim", quarantinedClaim)
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, target.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimRace := baseRejected
+	claimRace.IdempotencyKey = "17171717-1717-4717-8717-171717171748"
+	claimRace.LogicalKey = "evidence.claim-race"
+	claimRace.Sources = []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5b", 32)}}
+	claimRace.Claims = []MemoryEvidenceClaimInput{{Type: MemoryEdgeSupports, TargetItemID: target.ItemID, TargetRevision: target.Revision}}
+	claimRaceBefore := readEffects()
+	claimLockTx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lockedClaimTarget string
+	if err := claimLockTx.QueryRowContext(ctx, `SELECT id::text FROM brain.memory_items WHERE id=$1 FOR UPDATE`, target.ItemID).Scan(&lockedClaimTarget); err != nil {
+		_ = claimLockTx.Rollback()
+		t.Fatal(err)
+	}
+	claimRaceDone := make(chan error, 1)
+	go func() {
+		_, createErr := app.CreateMemoryEvidence(ctx, claimRace)
+		claimRaceDone <- createErr
+	}()
+	claimWaitDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := ownerDB.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM pg_stat_activity
+WHERE usename='punaro_app' AND wait_event_type='Lock'
+  AND query LIKE 'SELECT item.id::text%FOR SHARE OF item')`).Scan(&waiting); err != nil {
+			_ = claimLockTx.Rollback()
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case createErr := <-claimRaceDone:
+			_ = claimLockTx.Rollback()
+			t.Fatalf("evidence create escaped claim target lock: %v", createErr)
+		default:
+		}
+		if time.Now().After(claimWaitDeadline) {
+			_ = claimLockTx.Rollback()
+			t.Fatal("evidence create did not reach the claim target lock")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := claimLockTx.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'sensitive-field','/status',decode($3,'hex'),$4)`, target.ItemID, target.Revision, strings.Repeat("5c", 32), actor.ID); err != nil {
+		_ = claimLockTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := claimLockTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case createErr := <-claimRaceDone:
+		if !errors.Is(createErr, ErrNotFound) {
+			t.Fatalf("post-quarantine evidence create error=%v", createErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("evidence create remained blocked after claim quarantine")
+	}
+	if after := readEffects(); after != claimRaceBefore {
+		t.Fatalf("claim-quarantine race rejection changed evidence state: before=%v after=%v", claimRaceBefore, after)
+	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, target.ItemID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -447,6 +742,17 @@ WHERE usename='punaro_app' AND wait_event_type='Lock'
 	if err != nil {
 		t.Fatal(err)
 	}
+	directEdgeTx, err := beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, directEdgeErr := directEdgeTx.ExecContext(ctx, `INSERT INTO brain.memory_edges
+(from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by)
+VALUES ($1,1,15,'contradicts',$2,$3,$4)`, created.ItemID, target.ItemID, target.Revision, actor.ID)
+	_ = directEdgeTx.Rollback()
+	if !isSQLState(directEdgeErr, "42501") {
+		t.Fatalf("direct edge insert error=%v, want permission denied", directEdgeErr)
+	}
 	if retry, err := app.CreateMemoryEvidence(ctx, request); err != nil || retry != created {
 		t.Fatalf("evidence idempotent retry=%#v err=%v", retry, err)
 	}
@@ -465,6 +771,13 @@ WHERE usename='punaro_app' AND wait_event_type='Lock'
 				t.Fatalf("%s source unexpectedly redacted: %#v", name, source)
 			}
 		}
+	}
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: target.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171749", ExpectedETag: target.ETag}); err != nil {
+		t.Fatalf("purge claimed target: %v", err)
+	}
+	retainedClaim, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: created.ItemID})
+	if err != nil || len(retainedClaim.Claims) != 1 || retainedClaim.Claims[0].TargetItemID != target.ItemID || retainedClaim.Claims[0].TargetRevision != target.Revision {
+		t.Fatalf("claim after target purge=%#v err=%v", retainedClaim.Claims, err)
 	}
 	sourceArchived, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: sourceProject, ItemID: sourceMemory.ItemID, IdempotencyKey: "17171717-1717-4717-8717-171717171738", ExpectedETag: sourceMemory.ETag, Archived: true})
 	if err != nil {

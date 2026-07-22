@@ -14,6 +14,8 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
            to_regclass('brain.memory_edges_target_revision') AS edge_index_oid,
            to_regprocedure('brain.authorize_evidence_source(uuid,text,uuid,uuid,bigint)') AS authorize_oid,
            to_regprocedure('brain.lock_evidence_source(uuid,text,uuid,uuid,bigint)') AS lock_oid,
+           to_regprocedure('brain.record_evidence_claim(uuid,bigint,smallint,text,uuid,bigint,uuid)') AS record_claim_oid,
+           to_regprocedure('brain.copy_evidence_claims(uuid,bigint,bigint,uuid)') AS copy_claims_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS fence_oid
 ), expected_columns(relation_name,column_name,type_name,not_null,default_expression) AS (
     VALUES
@@ -59,7 +61,6 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
       ('brain.memory_edges','memory_edges_pkey','p','{1}','','','','',''),
       ('brain.memory_edges','memory_edges_created_by_fkey','f','{8}','auth.principals','{1}','a','a','s'),
       ('brain.memory_edges','memory_edges_from_revision_fkey','f','{2,3}','brain.memory_revisions','{1,2}','a','c','s'),
-      ('brain.memory_edges','memory_edges_to_revision_fkey','f','{6,7}','brain.memory_revisions','{1,2}','a','c','s'),
       ('brain.memory_edges','memory_edges_exact_key','u','{2,3,5,6,7}','','','','',''),
       ('brain.memory_edges','memory_edges_item_revision_ordinal_key','u','{2,3,4}','','','','','')
 ), actual_relational_constraints AS (
@@ -92,7 +93,7 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
     WHERE constraint_row.conrelid=ANY(ARRAY[sources_oid,edges_oid]) AND constraint_row.contype='c'
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
 ), constraint_safety AS (
-    SELECT count(*)=24 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
+    SELECT count(*)=23 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=ANY(ARRAY[sources_oid,edges_oid]) AND constraint_row.contype<>'n'
 ), index_safety AS (
@@ -118,34 +119,41 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
 ), expected_column_acl(relation_name,column_name,grantee,privilege_type,is_grantable) AS (
     SELECT 'brain.memory_sources',column_name,'punaro_app','INSERT',false
     FROM (VALUES ('item_id'),('revision'),('ordinal'),('mode'),('kind'),('source_project_id'),('source_resource_id'),('source_revision'),('reference_sha256'),('created_by')) AS columns(column_name)
-    UNION ALL
-    SELECT 'brain.memory_edges',column_name,'punaro_app','INSERT',false
-    FROM (VALUES ('from_item_id'),('from_revision'),('ordinal'),('edge_type'),('to_item_id'),('to_revision'),('created_by')) AS columns(column_name)
 ), actual_column_acl AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,COALESCE(grantee.rolname,'PUBLIC'),entry.privilege_type,entry.is_grantable
     FROM pg_attribute AS attribute CROSS JOIN LATERAL aclexplode(attribute.attacl) AS entry
     LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects
     WHERE attribute.attrelid=ANY(ARRAY[sources_oid,edges_oid]) AND attribute.attnum>0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
 ), routine_safety AS (
-    SELECT count(*)=2 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
+    SELECT count(*)=4 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
         AND routine.prokind='f' AND routine.prosecdef AND NOT routine.proretset
-        AND routine.prorettype='boolean'::regtype AND routine.pronargs=5
+        AND NOT routine.proisstrict AND NOT routine.proleakproof AND routine.proparallel='u' AND routine.provariadic=0
         AND routine.proconfig=ARRAY['search_path=pg_catalog']::text[]
-        AND ((routine.oid=authorize_oid AND language.lanname='sql' AND routine.provolatile='s'
+        AND ((routine.oid=authorize_oid AND routine.prorettype='boolean'::regtype AND routine.pronargs=5
+              AND language.lanname='sql' AND routine.provolatile='s'
 		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='87f442f8d737d5f13d747304c45d3403')
-          OR (routine.oid=lock_oid AND language.lanname='plpgsql' AND routine.provolatile='v'
-		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='7baec7f39e031ad9db527cfeac3fd707'))) AS exact
-	FROM pg_proc AS routine JOIN pg_language AS language ON language.oid=routine.prolang,objects WHERE routine.oid=ANY(ARRAY[authorize_oid,lock_oid])
+          OR (routine.oid=lock_oid AND routine.prorettype='boolean'::regtype AND routine.pronargs=5
+              AND language.lanname='plpgsql' AND routine.provolatile='v'
+		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='7baec7f39e031ad9db527cfeac3fd707')
+          OR (routine.oid=record_claim_oid AND routine.prorettype='uuid'::regtype AND routine.pronargs=7
+              AND language.lanname='plpgsql' AND routine.provolatile='v'
+		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='a7b66d8aad85cf3237eed2e52744047d')
+          OR (routine.oid=copy_claims_oid AND routine.prorettype='integer'::regtype AND routine.pronargs=4
+              AND language.lanname='plpgsql' AND routine.provolatile='v'
+		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='40975e6a2397f21f0eb45b365e994fc5'))) AS exact
+	FROM pg_proc AS routine JOIN pg_language AS language ON language.oid=routine.prolang,objects
+	WHERE routine.oid=ANY(ARRAY[authorize_oid,lock_oid,record_claim_oid,copy_claims_oid])
 ), routine_acl AS (
-    SELECT count(*)=4 AND bool_and(entry.privilege_type='EXECUTE' AND NOT entry.is_grantable)
+    SELECT count(*)=8 AND bool_and(entry.privilege_type='EXECUTE' AND NOT entry.is_grantable)
         AND bool_and(grantee.rolname IN ('punaro_owner','punaro_app')) AS exact
     FROM pg_proc AS routine
     CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) AS entry
-    LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects WHERE routine.oid=ANY(ARRAY[authorize_oid,lock_oid])
+    LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects
+    WHERE routine.oid=ANY(ARRAY[authorize_oid,lock_oid,record_claim_oid,copy_claims_oid])
 )
 SELECT items_oid IS NOT NULL AND sources_oid IS NOT NULL AND edges_oid IS NOT NULL
    AND source_exact_index_oid IS NOT NULL AND source_index_oid IS NOT NULL AND edge_index_oid IS NOT NULL
-   AND authorize_oid IS NOT NULL AND lock_oid IS NOT NULL AND fence_oid IS NOT NULL
+   AND authorize_oid IS NOT NULL AND lock_oid IS NOT NULL AND record_claim_oid IS NOT NULL AND copy_claims_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact AND fence_safety.exact
    AND routine_safety.exact AND routine_acl.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
@@ -172,6 +180,8 @@ SELECT items_oid IS NOT NULL AND sources_oid IS NOT NULL AND edges_oid IS NOT NU
        AND indisvalid AND indisready AND indkey='6 7 5 2 3'::int2vector AND indexprs IS NULL AND indpred IS NULL)
    AND has_function_privilege('punaro_app',authorize_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',lock_oid,'EXECUTE')
+   AND has_function_privilege('punaro_app',record_claim_oid,'EXECUTE')
+   AND has_function_privilege('punaro_app',copy_claims_oid,'EXECUTE')
 FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl`).Scan(&available)
 	return available, err
 }

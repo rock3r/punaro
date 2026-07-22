@@ -329,20 +329,8 @@ func (d *Database) CreateMemoryEvidence(ctx context.Context, raw MemoryEvidenceC
 				return IdempotencyOutcome{}, ErrNotFound
 			}
 		}
-		for _, claim := range request.Claims {
-			var exists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
-SELECT 1 FROM brain.memory_items AS item
-JOIN brain.scopes AS scope ON scope.id=item.scope_id
-JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=$3
-			WHERE item.id=$2 AND scope.project_id=$1
-  AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)
-)`, request.ProjectID, claim.TargetItemID, claim.TargetRevision).Scan(&exists); err != nil {
-				return IdempotencyOutcome{}, errors.New("memory evidence claim could not be authorized")
-			}
-			if !exists {
-				return IdempotencyOutcome{}, ErrNotFound
-			}
+		if err := lockEvidenceClaims(ctx, tx, request.ProjectID, request.Claims); err != nil {
+			return IdempotencyOutcome{}, err
 		}
 		scopeID, err := ensureMemoryScope(ctx, tx, request.ProjectID, request.PrincipalID)
 		if err != nil {
@@ -380,10 +368,13 @@ VALUES ($1,1,$2,$3,$4,$5,$6,$7,$8,$9)`, itemID, ordinal, source.Mode, source.Kin
 			}
 		}
 		for ordinal, claim := range request.Claims {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO brain.memory_edges
-(from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by)
-VALUES ($1,1,$2,$3,$4,$5,$6)`, itemID, ordinal, claim.Type, claim.TargetItemID, claim.TargetRevision, request.PrincipalID); err != nil {
+			var edgeID sql.NullString
+			if err := tx.QueryRowContext(ctx, `SELECT brain.record_evidence_claim($1,1,$2::smallint,$3,$4,$5,$6)::text`,
+				itemID, ordinal, claim.Type, claim.TargetItemID, claim.TargetRevision, request.PrincipalID).Scan(&edgeID); err != nil {
 				return IdempotencyOutcome{}, errors.New("memory evidence claim could not be recorded")
+			}
+			if !edgeID.Valid {
+				return IdempotencyOutcome{}, ErrNotFound
 			}
 		}
 		if err := recordMemorySecretScan(ctx, tx, request.ProjectID, itemID, 1, request.PrincipalID, "clear"); err != nil {
@@ -429,6 +420,44 @@ func lockActiveEvidenceProjects(ctx context.Context, tx *sql.Tx, requested map[s
 	}
 	if seen != len(ids) {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func lockEvidenceClaims(ctx context.Context, tx *sql.Tx, projectID string, claims []MemoryEvidenceClaimInput) error {
+	ordered := append([]MemoryEvidenceClaimInput(nil), claims...)
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].TargetItemID == ordered[j].TargetItemID {
+			return ordered[i].TargetRevision < ordered[j].TargetRevision
+		}
+		return ordered[i].TargetItemID < ordered[j].TargetItemID
+	})
+	for _, claim := range ordered {
+		var itemID string
+		err := tx.QueryRowContext(ctx, `SELECT item.id::text
+FROM brain.memory_items AS item
+JOIN brain.scopes AS scope ON scope.id=item.scope_id
+JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=$3
+WHERE item.id=$2 AND scope.project_id=$1
+FOR SHARE OF item`, projectID, claim.TargetItemID, claim.TargetRevision).Scan(&itemID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return errors.New("memory evidence claim could not be locked")
+		}
+	}
+	for _, claim := range ordered {
+		var quarantined bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+SELECT 1 FROM brain.memory_quarantines AS quarantine
+WHERE quarantine.item_id=$1 AND quarantine.released_at IS NULL
+)`, claim.TargetItemID).Scan(&quarantined); err != nil {
+			return errors.New("memory evidence claim could not be authorized")
+		}
+		if quarantined {
+			return ErrNotFound
+		}
 	}
 	return nil
 }
@@ -507,6 +536,10 @@ FROM brain.memory_sources WHERE item_id=$1 AND revision=$2 ORDER BY ordinal`, re
 		}
 		storedSources = append(storedSources, stored)
 	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return MemoryEvidence{}, errors.New("memory evidence sources are unavailable")
+	}
 	if err := rows.Close(); err != nil {
 		return MemoryEvidence{}, errors.New("memory evidence sources are unavailable")
 	}
@@ -541,6 +574,10 @@ FROM brain.memory_edges WHERE from_item_id=$1 AND from_revision=$2 ORDER BY ordi
 			_ = edgeRows.Close()
 			return MemoryEvidence{}, errors.New("memory evidence claims exceed the supported bound")
 		}
+	}
+	if err := edgeRows.Err(); err != nil {
+		_ = edgeRows.Close()
+		return MemoryEvidence{}, errors.New("memory evidence claims are unavailable")
 	}
 	if err := edgeRows.Close(); err != nil {
 		return MemoryEvidence{}, errors.New("memory evidence claims are unavailable")
@@ -588,10 +625,11 @@ SELECT item_id,$3,ordinal,mode,kind,source_project_id,source_resource_id,source_
 FROM brain.memory_sources WHERE item_id=$1 AND revision=$2`, itemID, fromRevision, toRevision, principalID); err != nil {
 		return errors.New("memory evidence sources could not advance")
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO brain.memory_edges
-(from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by)
-SELECT from_item_id,$3,ordinal,edge_type,to_item_id,to_revision,$4
-FROM brain.memory_edges WHERE from_item_id=$1 AND from_revision=$2`, itemID, fromRevision, toRevision, principalID); err != nil {
+	var copied sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT brain.copy_evidence_claims($1,$2,$3,$4)`, itemID, fromRevision, toRevision, principalID).Scan(&copied); err != nil {
+		return errors.New("memory evidence claims could not advance")
+	}
+	if !copied.Valid || copied.Int64 < 0 || copied.Int64 > maxMemoryEvidenceClaims {
 		return errors.New("memory evidence claims could not advance")
 	}
 	return nil

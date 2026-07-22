@@ -308,13 +308,16 @@ document, one to eight provenance sources, and at most sixteen exact-revision
 claims. Copied sources retain only a canonical SHA-256 reference digest. Live
 message, attachment, and memory sources retain opaque project/resource
 coordinates; memory sources also bind an exact revision. Creation locks the
-target and every live-source project in UUID order, locks each required grant
-and mutable source authority record, then rechecks source-specific authority
-before publication. Relay messages themselves are immutable.
+target and every live-source project in UUID order, locks each required grant,
+each mutable source authority record, and each claimed memory item in UUID
+order, then rechecks quarantine and source-specific authority before
+publication. Relay messages themselves are immutable.
 
 Evidence content is immutable through ordinary update. Archive and restore
 append identical content and copy the exact provenance graph to the new
-revision; purge cascades that graph. Retrieval first authorizes the target and
+revision. Purging the evidence item cascades its own provenance; purging a
+claimed target retains the incoming opaque exact-revision claim so another
+item's immutable provenance is not silently rewritten. Retrieval first authorizes the target and
 then reauthorizes every live source independently in one repeatable-read
 snapshot. A denied source is represented only by its evidence-local source ID,
 ordinal, mode, and a redaction marker; its kind and source coordinates are not

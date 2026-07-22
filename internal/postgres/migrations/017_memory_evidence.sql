@@ -64,8 +64,6 @@ CREATE TABLE brain.memory_edges (
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     CONSTRAINT memory_edges_from_revision_fkey FOREIGN KEY (from_item_id, from_revision)
         REFERENCES brain.memory_revisions(item_id, revision) ON DELETE CASCADE,
-    CONSTRAINT memory_edges_to_revision_fkey FOREIGN KEY (to_item_id, to_revision)
-        REFERENCES brain.memory_revisions(item_id, revision) ON DELETE CASCADE,
     CONSTRAINT memory_edges_not_self_check CHECK (
         from_item_id <> to_item_id OR from_revision <> to_revision
     ),
@@ -252,6 +250,118 @@ BEGIN
 END
 $function$;
 
+CREATE FUNCTION brain.record_evidence_claim(
+    requested_from_item uuid,
+    requested_from_revision bigint,
+    requested_ordinal smallint,
+    requested_edge_type text,
+    requested_to_item uuid,
+    requested_to_revision bigint,
+    requested_principal uuid
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+VOLATILE
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    source_project uuid;
+    locked_target uuid;
+    inserted_edge uuid;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    SELECT scope.project_id INTO source_project
+    FROM brain.memory_items AS item
+    JOIN brain.scopes AS scope ON scope.id = item.scope_id
+    JOIN brain.memory_revisions AS revision
+      ON revision.item_id = item.id AND revision.revision = requested_from_revision
+    WHERE item.id = requested_from_item
+      AND item.layer = 'evidence'
+      AND item.current_revision = requested_from_revision
+      AND revision.operation = 'evidence_create'
+      AND revision.author_principal_id = requested_principal
+      AND NOT EXISTS (
+          SELECT 1 FROM brain.memory_changes AS change
+          WHERE change.item_id = item.id AND change.revision = requested_from_revision
+      )
+    FOR SHARE OF item;
+    IF source_project IS NULL THEN
+        RETURN NULL;
+    END IF;
+    SELECT target.id INTO locked_target
+    FROM brain.memory_items AS target
+    JOIN brain.scopes AS target_scope ON target_scope.id = target.scope_id
+    JOIN brain.memory_revisions AS target_revision
+      ON target_revision.item_id = target.id AND target_revision.revision = requested_to_revision
+    WHERE target.id = requested_to_item
+      AND target_scope.project_id = source_project
+    FOR SHARE OF target;
+    IF locked_target IS NULL OR EXISTS (
+        SELECT 1 FROM brain.memory_quarantines AS quarantine
+        WHERE quarantine.item_id = requested_to_item AND quarantine.released_at IS NULL
+    ) THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO brain.memory_edges (
+        from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by
+    ) VALUES (
+        requested_from_item,requested_from_revision,requested_ordinal,requested_edge_type,
+        requested_to_item,requested_to_revision,requested_principal
+    ) RETURNING id INTO inserted_edge;
+    RETURN inserted_edge;
+END
+$function$;
+
+CREATE FUNCTION brain.copy_evidence_claims(
+    requested_item uuid,
+    requested_from_revision bigint,
+    requested_to_revision bigint,
+    requested_principal uuid
+)
+RETURNS integer
+LANGUAGE plpgsql
+SECURITY DEFINER
+VOLATILE
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    copied integer;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    PERFORM 1
+    FROM brain.memory_items AS item
+    JOIN brain.memory_revisions AS old_revision
+      ON old_revision.item_id = item.id AND old_revision.revision = requested_from_revision
+    JOIN brain.memory_revisions AS new_revision
+      ON new_revision.item_id = item.id AND new_revision.revision = requested_to_revision
+    WHERE item.id = requested_item
+      AND item.layer = 'evidence'
+      AND item.current_revision = requested_from_revision
+      AND requested_to_revision = requested_from_revision + 1
+      AND new_revision.operation IN ('archive', 'restore')
+      AND new_revision.author_principal_id = requested_principal
+      AND new_revision.document = old_revision.document
+      AND new_revision.content_sha256 = old_revision.content_sha256
+      AND NOT EXISTS (
+          SELECT 1 FROM brain.memory_changes AS change
+          WHERE change.item_id = item.id AND change.revision = requested_to_revision
+      )
+    FOR SHARE OF item;
+    IF NOT FOUND THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO brain.memory_edges (
+        from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by
+    )
+    SELECT from_item_id,requested_to_revision,ordinal,edge_type,to_item_id,to_revision,requested_principal
+    FROM brain.memory_edges
+    WHERE from_item_id = requested_item AND from_revision = requested_from_revision;
+    GET DIAGNOSTICS copied = ROW_COUNT;
+    RETURN copied;
+END
+$function$;
+
 ALTER TABLE audit.events DROP CONSTRAINT events_action_check;
 ALTER TABLE audit.events ADD CONSTRAINT events_action_check CHECK (action IN (
     'principal.create', 'project.create', 'grant.create', 'grant.delete',
@@ -282,10 +392,12 @@ $block$;
 REVOKE ALL ON brain.memory_sources, brain.memory_edges FROM PUBLIC, punaro_app;
 REVOKE ALL ON FUNCTION brain.authorize_evidence_source(uuid,text,uuid,uuid,bigint) FROM PUBLIC;
 REVOKE ALL ON FUNCTION brain.lock_evidence_source(uuid,text,uuid,uuid,bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION brain.record_evidence_claim(uuid,bigint,smallint,text,uuid,bigint,uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION brain.copy_evidence_claims(uuid,bigint,bigint,uuid) FROM PUBLIC;
 GRANT SELECT ON brain.memory_sources, brain.memory_edges TO punaro_app;
 GRANT INSERT (item_id,revision,ordinal,mode,kind,source_project_id,source_resource_id,source_revision,reference_sha256,created_by)
     ON brain.memory_sources TO punaro_app;
-GRANT INSERT (from_item_id,from_revision,ordinal,edge_type,to_item_id,to_revision,created_by)
-    ON brain.memory_edges TO punaro_app;
 GRANT EXECUTE ON FUNCTION brain.authorize_evidence_source(uuid,text,uuid,uuid,bigint) TO punaro_app;
 GRANT EXECUTE ON FUNCTION brain.lock_evidence_source(uuid,text,uuid,uuid,bigint) TO punaro_app;
+GRANT EXECUTE ON FUNCTION brain.record_evidence_claim(uuid,bigint,smallint,text,uuid,bigint,uuid) TO punaro_app;
+GRANT EXECUTE ON FUNCTION brain.copy_evidence_claims(uuid,bigint,bigint,uuid) TO punaro_app;
