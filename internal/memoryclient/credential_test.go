@@ -101,5 +101,25 @@ func secureTempDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(directory, 0o700); err != nil { // #nosec G302 -- directory must be owner-only for this test.
+		t.Fatal(err)
+	}
+	if privateCredentialPath(filepath.Join(directory, "credential")) {
+		return directory
+	}
+
+	directory, err = os.MkdirTemp(".", ".memoryclient-credential-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(directory); err != nil {
+			t.Errorf("remove temporary credential directory: %v", err)
+		}
+	})
+	directory, err = filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return directory
 }
