@@ -514,7 +514,7 @@ func validStrongETag(value, prefix string) bool {
 }
 
 func emptyMutationRequest(response http.ResponseWriter, request *http.Request) bool {
-	if request.URL.RawQuery != "" || !(request.Body == nil || request.Body == http.NoBody || request.ContentLength == 0) {
+	if request.URL.RawQuery != "" || request.Body != nil && request.Body != http.NoBody && request.ContentLength != 0 {
 		writeError(response, http.StatusBadRequest, "request is invalid")
 		return false
 	}
@@ -534,11 +534,15 @@ func validToken(value string) bool {
 		return false
 	}
 	for _, r := range value[1:] {
-		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == ':' || r == '-') {
+		if !validTokenRune(r) {
 			return false
 		}
 	}
 	return true
+}
+
+func validTokenRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == ':' || r == '-'
 }
 
 func validDocument(raw json.RawMessage) bool {
