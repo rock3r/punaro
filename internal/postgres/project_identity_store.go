@@ -620,7 +620,6 @@ func projectMergeCounts(ctx context.Context, tx *sql.Tx, actorPrincipalID, sourc
     WHERE scope.project_id=$1 AND (
         EXISTS (SELECT 1 FROM brain.memory_items AS item WHERE item.scope_id=scope.id)
         OR EXISTS (SELECT 1 FROM brain.memory_changes AS change WHERE change.scope_id=scope.id)
-        OR EXISTS (SELECT 1 FROM brain.memory_tombstones AS tombstone WHERE tombstone.scope_id=scope.id)
     )
 )`, sourceID).Scan(&hasMemoryLifecycle); err != nil {
 			return 0, 0, 0, 0, 0, nil, errors.New("project memory state is unavailable")
