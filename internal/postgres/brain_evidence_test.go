@@ -3,6 +3,7 @@ package postgres
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestMemoryEvidenceCreateRequestValidation(t *testing.T) {
@@ -24,6 +25,11 @@ func TestMemoryEvidenceCreateRequestValidation(t *testing.T) {
 	}
 	if normalized, err := valid.normalized(); err != nil || string(normalized.Document) != `{"excerpt":"bounded source fact"}` {
 		t.Fatalf("valid evidence request normalized=%#v err=%v", normalized, err)
+	}
+	futureExpiry := time.Now().Add(time.Hour).UTC()
+	valid.ExpiresAt = &futureExpiry
+	if normalized, err := valid.normalized(); err != nil || normalized.ExpiresAt == nil || !normalized.ExpiresAt.Equal(futureExpiry) {
+		t.Fatalf("valid expiring evidence request normalized=%#v err=%v", normalized, err)
 	}
 
 	tests := []struct {
@@ -78,6 +84,10 @@ func TestMemoryEvidenceCreateRequestValidation(t *testing.T) {
 		{"invalid target", func(request *MemoryEvidenceCreateRequest) { request.Claims[0].TargetItemID = "nope" }},
 		{"invalid revision", func(request *MemoryEvidenceCreateRequest) { request.Claims[0].TargetRevision = 0 }},
 		{"duplicate claim", func(request *MemoryEvidenceCreateRequest) { request.Claims = append(request.Claims, request.Claims[0]) }},
+		{"expired evidence", func(request *MemoryEvidenceCreateRequest) {
+			expired := time.Now().Add(-time.Hour)
+			request.ExpiresAt = &expired
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

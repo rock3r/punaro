@@ -1092,6 +1092,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = lexicalObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 20 {
+		evidenceExpiryObjectsPresent, err := memoryEvidenceExpiryControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory evidence expiry schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = evidenceExpiryObjectsPresent
+	}
 	return snapshot, nil
 }
 

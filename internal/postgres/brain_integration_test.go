@@ -1468,6 +1468,32 @@ WHERE usename='punaro_app' AND wait_event_type='Lock'
 	if err != nil {
 		t.Fatal(err)
 	}
+	ephemeralExpiry := time.Now().Add(time.Hour).UTC()
+	ephemeral, err := app.CreateMemoryEvidence(ctx, MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171757",
+		LogicalKey: "evidence.ephemeral", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"excerpt":"expires"}`),
+		Sources:   []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("5f", 32)}},
+		ExpiresAt: &ephemeralExpiry,
+	})
+	if err != nil {
+		t.Fatalf("ephemeral evidence create: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_evidence_expirations
+SET created_at=statement_timestamp()-interval '2 hours',expires_at=statement_timestamp()-interval '1 second'
+WHERE item_id=$1`, ephemeral.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	expiredEvidence, err := app.MaintainMemoryEvidence(ctx, actor.ID, targetProject, memoryEvidenceMaintenanceBatch)
+	if err != nil || expiredEvidence != 1 {
+		t.Fatalf("ephemeral evidence maintenance count=%d err=%v", expiredEvidence, err)
+	}
+	if _, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: targetProject, ItemID: ephemeral.ItemID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired evidence get error=%v", err)
+	}
+	var ephemeralState MemoryState
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.memory_items WHERE id=$1`, ephemeral.ItemID).Scan(&ephemeralState); err != nil || ephemeralState != MemoryArchived {
+		t.Fatalf("expired evidence state=%q err=%v", ephemeralState, err)
+	}
 	directEdgeTx, err := beginMutation(ctx, app.db)
 	if err != nil {
 		t.Fatal(err)

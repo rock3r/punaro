@@ -20,6 +20,7 @@ const (
 	maxMemoryEvidenceDocumentBytes = 64 << 10
 	maxMemoryEvidenceSources       = 8
 	maxMemoryEvidenceClaims        = 16
+	memoryEvidenceMaintenanceBatch = 64
 )
 
 // MemoryLayer distinguishes curated knowledge from explicit evidence.
@@ -102,6 +103,7 @@ type MemoryEvidenceCreateRequest struct {
 	Document       json.RawMessage             `json:"document"`
 	Sources        []MemoryEvidenceSourceInput `json:"sources"`
 	Claims         []MemoryEvidenceClaimInput  `json:"claims,omitempty"`
+	ExpiresAt      *time.Time                  `json:"expires_at,omitempty"`
 }
 
 // MemoryEvidenceGetRequest fetches one target-authorized evidence revision.
@@ -152,6 +154,13 @@ func (request MemoryEvidenceCreateRequest) normalized() (MemoryEvidenceCreateReq
 		return MemoryEvidenceCreateRequest{}, errors.New("invalid memory evidence document")
 	}
 	request.Document = document
+	if request.ExpiresAt != nil {
+		expiresAt := request.ExpiresAt.UTC()
+		if !expiresAt.After(time.Now()) {
+			return MemoryEvidenceCreateRequest{}, errors.New("invalid memory evidence expiry")
+		}
+		request.ExpiresAt = &expiresAt
+	}
 	sources := make([]MemoryEvidenceSourceInput, len(request.Sources))
 	seenSources := make(map[string]struct{}, len(request.Sources))
 	for index, source := range request.Sources {
@@ -345,6 +354,11 @@ VALUES ($1,$2,'active',$3,$4,1,$5,'evidence') RETURNING id::text`, scopeID, requ
 		if err != nil {
 			return IdempotencyOutcome{}, errors.New("memory evidence item could not be created")
 		}
+		if request.ExpiresAt != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO brain.memory_evidence_expirations(item_id,expires_at,created_by) VALUES ($1,$2,$3)`, itemID, *request.ExpiresAt, request.PrincipalID); err != nil {
+				return IdempotencyOutcome{}, errors.New("memory evidence expiry could not be recorded")
+			}
+		}
 		if err := insertMemoryRevision(ctx, tx, itemID, 1, request.Document, request.PrincipalID, MemoryChangeEvidenceCreate); err != nil {
 			return IdempotencyOutcome{}, err
 		}
@@ -495,6 +509,7 @@ FROM brain.memory_items AS item
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 WHERE item.id=$1 AND scope.project_id=$2 AND item.layer='evidence'
+AND item.state='active'
 AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)`, request.ItemID, projectID).Scan(
 		&result.Item.ItemID, &result.Item.ScopeID, &result.Item.ProjectID, &logicalKey, &result.Item.Kind, &result.Item.State, &result.Item.Trust, &result.Item.Layer,
 		&result.Item.Revision, &document, &contentHash, &result.Item.AuthorID, &result.Item.CreatedAt, &result.Item.RevisionAt, &result.Item.ChangeSequence)
@@ -592,6 +607,92 @@ FROM brain.memory_edges WHERE from_item_id=$1 AND from_revision=$2 ORDER BY ordi
 		return MemoryEvidence{}, errors.New("memory evidence snapshot cannot commit")
 	}
 	return result, nil
+}
+
+// MaintainMemoryEvidence archives an authorized bounded batch of explicitly expired evidence.
+func (d *Database) MaintainMemoryEvidence(ctx context.Context, principalID, projectID string, limit int) (int, error) {
+	if !validOpaqueID(principalID) || !validOpaqueID(projectID) || limit < 1 || limit > memoryEvidenceMaintenanceBatch {
+		return 0, errors.New("invalid memory evidence maintenance request")
+	}
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return 0, mutationStartError(err, "memory evidence maintenance cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	project, err := lockDirectActiveProject(ctx, tx, projectID)
+	if err != nil {
+		return 0, ErrNotFound
+	}
+	allowed, err := lockCapability(ctx, tx, principalID, project.ID, CapabilityMemoryAdminister)
+	if err != nil {
+		return 0, err
+	}
+	if !allowed {
+		return 0, ErrNotFound
+	}
+	type expiredEvidence struct {
+		itemID   string
+		scopeID  string
+		revision int64
+		document []byte
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT item.id::text,scope.id::text,item.current_revision,revision.document::text
+FROM brain.memory_evidence_expirations AS expiry
+JOIN brain.memory_items AS item ON item.id=expiry.item_id
+JOIN brain.scopes AS scope ON scope.id=item.scope_id
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
+WHERE COALESCE(alias.canonical_project_id,scope.project_id)=$1
+  AND item.layer='evidence' AND item.state='active'
+  AND expiry.expires_at <= statement_timestamp()
+ORDER BY expiry.expires_at,item.id
+LIMIT $2
+FOR UPDATE OF item SKIP LOCKED`, project.ID, limit)
+	if err != nil {
+		return 0, errors.New("expired memory evidence could not be claimed")
+	}
+	candidates := make([]expiredEvidence, 0, limit)
+	for rows.Next() {
+		var candidate expiredEvidence
+		if err := rows.Scan(&candidate.itemID, &candidate.scopeID, &candidate.revision, &candidate.document); err != nil {
+			_ = rows.Close()
+			return 0, errors.New("expired memory evidence is malformed")
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, errors.New("expired memory evidence is unavailable")
+	}
+	if err := rows.Close(); err != nil {
+		return 0, errors.New("expired memory evidence cannot close")
+	}
+	control := &ControlTx{tx: tx}
+	for _, candidate := range candidates {
+		next := candidate.revision + 1
+		if err := insertMemoryRevision(ctx, tx, candidate.itemID, next, candidate.document, principalID, MemoryChangeArchive); err != nil {
+			return 0, err
+		}
+		if err := copyMemoryEvidenceProvenance(ctx, tx, candidate.itemID, candidate.revision, next, principalID); err != nil {
+			return 0, err
+		}
+		updated, err := tx.ExecContext(ctx, `UPDATE brain.memory_items
+SET state='archived',current_revision=$2,updated_at=statement_timestamp()
+WHERE id=$1 AND state='active' AND current_revision=$3 AND layer='evidence'`, candidate.itemID, next, candidate.revision)
+		if err != nil {
+			return 0, errors.New("expired memory evidence could not be archived")
+		}
+		if count, err := updated.RowsAffected(); err != nil || count != 1 {
+			return 0, errors.New("expired memory evidence archive was not stable")
+		}
+		if _, err := commitMemoryChange(ctx, tx, control, principalID, project.ID, candidate.scopeID, candidate.itemID, next, MemoryChangeArchive, AuditMemoryArchive); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, errors.New("memory evidence maintenance cannot commit")
+	}
+	return len(candidates), nil
 }
 
 func evidenceSourceAuthorized(ctx context.Context, q queryer, principalID string, kind MemorySourceKind, projectID, resourceID string, revision int64) (bool, error) {
