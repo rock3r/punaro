@@ -198,6 +198,444 @@ func testMemoryEvidenceSchemaDriftIntegration(ctx context.Context, t *testing.T,
 	}
 }
 
+func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	for _, drift := range []struct {
+		name, apply, restore string
+	}{
+		{"proposal public read", `GRANT SELECT ON brain.memory_proposals TO PUBLIC`, `REVOKE SELECT ON brain.memory_proposals FROM PUBLIC`},
+		{"result public read", `GRANT SELECT ON brain.memory_proposal_results TO PUBLIC`, `REVOKE SELECT ON brain.memory_proposal_results FROM PUBLIC`},
+		{"step delete", `GRANT DELETE ON brain.memory_proposal_steps TO punaro_app`, `REVOKE DELETE ON brain.memory_proposal_steps FROM punaro_app`},
+		{"proposal broad insert", `GRANT INSERT ON brain.memory_proposals TO punaro_app`, `REVOKE INSERT ON brain.memory_proposals FROM punaro_app; GRANT INSERT (scope_id,action,proposed_by,payload_sha256,payload) ON brain.memory_proposals TO punaro_app`},
+		{"proposal insert grant option", `GRANT INSERT (payload_sha256) ON brain.memory_proposals TO punaro_app WITH GRANT OPTION`, `REVOKE GRANT OPTION FOR INSERT (payload_sha256) ON brain.memory_proposals FROM punaro_app`},
+		{"proposal fence", `ALTER TABLE brain.memory_proposal_evidence DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_proposal_evidence ENABLE TRIGGER application_mutation_fence`},
+		{"proposal child guard", `ALTER TABLE brain.memory_proposal_steps DISABLE TRIGGER memory_proposal_step_insert_guard`, `ALTER TABLE brain.memory_proposal_steps ENABLE TRIGGER memory_proposal_step_insert_guard`},
+		{"proposal index", `DROP INDEX brain.memory_proposal_steps_target`, `CREATE UNIQUE INDEX memory_proposal_steps_target ON brain.memory_proposal_steps (proposal_id,item_id) WHERE item_id IS NOT NULL`},
+		{"proposal scope FK update", `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id) ON UPDATE CASCADE`, `ALTER TABLE brain.memory_proposals DROP CONSTRAINT memory_proposals_scope_id_fkey; ALTER TABLE brain.memory_proposals ADD CONSTRAINT memory_proposals_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES brain.scopes(id)`},
+		{"proposal result FK match", `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) MATCH FULL ON DELETE CASCADE`, `ALTER TABLE brain.memory_proposal_results DROP CONSTRAINT memory_proposal_results_step_fkey; ALTER TABLE brain.memory_proposal_results ADD CONSTRAINT memory_proposal_results_step_fkey FOREIGN KEY (proposal_id,ordinal) REFERENCES brain.memory_proposal_steps(proposal_id,ordinal) ON DELETE CASCADE`},
+	} {
+		t.Run("proposal "+drift.name, func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			if err := app.Ready(ctx); err == nil {
+				t.Fatal("readiness accepted memory-proposal drift")
+			}
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatalf("restore memory-proposal drift: %v", err)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover: %v", err)
+			}
+		})
+	}
+	var guardDefinition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef('brain.guard_memory_proposal_update()'::regprocedure)`).Scan(&guardDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION brain.guard_memory_proposal_update() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted replacement memory-proposal transition routine")
+	}
+	if _, err := ownerDB.ExecContext(ctx, guardDefinition); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after transition-routine restoration: %v", err)
+	}
+}
+
+func testMemoryProposalIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "proposal actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "proposal reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "proposal outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('proposal integration',$1) RETURNING id::text`, actor.ID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	for _, grant := range []struct {
+		principal  string
+		capability Capability
+	}{
+		{actor.ID, CapabilityMemoryRead}, {actor.ID, CapabilityMemoryPropose}, {actor.ID, CapabilityMemoryWrite}, {actor.ID, CapabilityMemoryAdminister},
+		{reader.ID, CapabilityMemoryRead}, {reader.ID, CapabilityMemoryPropose}, {outsider.ID, CapabilityMemoryWrite},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, projectID, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	target, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181801",
+		LogicalKey: "proposal.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"draft"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := app.CreateMemoryEvidence(ctx, MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181802",
+		LogicalKey: "proposal.evidence", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"fact":"approved"}`),
+		Sources: []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("18", 32)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: outsider.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181820", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.write-only", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"denied":true}`)}},
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("write-only proposal error=%v", err)
+	}
+	proposeOnly, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: reader.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181821", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.propose-only", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"allowed":true}`)}},
+	})
+	if err != nil {
+		t.Fatalf("propose-only principal: %v", err)
+	}
+	if _, err := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: proposeOnly.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181822", ExpectedETag: proposeOnly.ETag,
+	}); err != nil {
+		t.Fatalf("reject propose-only proposal: %v", err)
+	}
+	request := MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181803", Action: MemoryProposalUpdate,
+		Steps:    []MemoryProposalStepInput{{Operation: MemoryProposalStepUpdate, ItemID: target.ItemID, ExpectedETag: target.ETag, LogicalKey: "proposal.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"approved"}`)}},
+		Evidence: []MemoryProposalEvidenceInput{{ItemID: evidence.ItemID, Revision: evidence.Revision}},
+	}
+	created, err := app.ProposeMemory(ctx, request)
+	if err != nil || created.State != MemoryProposalPending || len(created.Mutations) != 0 {
+		t.Fatalf("create proposal=%#v err=%v", created, err)
+	}
+	if retry, err := app.ProposeMemory(ctx, request); err != nil || retry.ProposalID != created.ProposalID || retry.State != created.State || retry.ETag != created.ETag || len(retry.Mutations) != 0 {
+		t.Fatalf("proposal idempotent retry=%#v err=%v", retry, err)
+	}
+	changed := request
+	changed.Action = MemoryProposalArchive
+	changed.Steps = []MemoryProposalStepInput{{Operation: MemoryProposalStepArchive, ItemID: target.ItemID, ExpectedETag: target.ETag, Archived: true}}
+	if _, err := app.ProposeMemory(ctx, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed proposal retry error=%v", err)
+	}
+	got, err := app.GetMemoryProposal(ctx, reader.ID, projectID, created.ProposalID)
+	if err != nil || got.Action != MemoryProposalUpdate || len(got.Steps) != 1 || len(got.Evidence) != 1 || got.ETag != created.ETag {
+		t.Fatalf("read proposal=%#v err=%v", got, err)
+	}
+	if _, err := app.GetMemoryProposal(ctx, outsider.ID, projectID, created.ProposalID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized proposal read error=%v", err)
+	}
+	for name, decide := range map[string]func() error{
+		"approve": func() error {
+			_, decisionErr := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: reader.ID, ProjectID: projectID, ProposalID: created.ProposalID, IdempotencyKey: "18181818-1818-4818-8818-181818181823", ExpectedETag: created.ETag})
+			return decisionErr
+		},
+		"reject": func() error {
+			_, decisionErr := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: reader.ID, ProjectID: projectID, ProposalID: created.ProposalID, IdempotencyKey: "18181818-1818-4818-8818-181818181824", ExpectedETag: created.ETag})
+			return decisionErr
+		},
+	} {
+		if err := decide(); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unauthorized %s error=%v", name, err)
+		}
+	}
+	approved, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: created.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181804", ExpectedETag: created.ETag,
+	})
+	if err != nil || approved.State != MemoryProposalApproved || len(approved.Mutations) != 1 || approved.Mutations[0].Revision != 2 {
+		t.Fatalf("approve proposal=%#v err=%v", approved, err)
+	}
+	approvalRetry, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: created.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181804", ExpectedETag: created.ETag,
+	})
+	if err != nil || approvalRetry.ProposalID != approved.ProposalID || approvalRetry.State != approved.State || approvalRetry.ETag != approved.ETag || len(approvalRetry.Mutations) != 1 || approvalRetry.Mutations[0] != approved.Mutations[0] {
+		t.Fatalf("approval idempotent retry=%#v err=%v", approvalRetry, err)
+	}
+	item, err := app.GetMemory(ctx, actor.ID, projectID, target.ItemID)
+	if err != nil || string(item.Document) != `{"status":"approved"}` {
+		t.Fatalf("approved memory=%#v err=%v", item, err)
+	}
+	approvedProposal, err := app.GetMemoryProposal(ctx, actor.ID, projectID, created.ProposalID)
+	if err != nil || len(approvedProposal.Results) != 1 || approvedProposal.Results[0].ItemID != target.ItemID || approvedProposal.Results[0].Revision != 2 {
+		t.Fatalf("durable proposal results=%#v err=%v", approvedProposal.Results, err)
+	}
+	appendTx, err := beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, appendErr := appendTx.ExecContext(ctx, `INSERT INTO brain.memory_proposal_steps(proposal_id,ordinal,operation,kind,trust,document) VALUES ($1,1,'create','decision','curated','{"late":true}')`, created.ProposalID)
+	_ = appendTx.Rollback()
+	if !isSQLState(appendErr, "23514") {
+		t.Fatalf("decided proposal payload append error=%v", appendErr)
+	}
+	falseResultProposal, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181860", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.false-result", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"false":true}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	falseResultTx, err := beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := falseResultTx.ExecContext(ctx, `UPDATE brain.memory_proposals SET state='approved',decided_by=$2,decided_at=transaction_timestamp(),decided_xid=pg_current_xact_id() WHERE id=$1`, falseResultProposal.ProposalID, actor.ID); err != nil {
+		_ = falseResultTx.Rollback()
+		t.Fatal(err)
+	}
+	_, falseResultErr := falseResultTx.ExecContext(ctx, `INSERT INTO brain.memory_proposal_results(proposal_id,ordinal,item_id,revision) VALUES ($1,0,$2,1)`, falseResultProposal.ProposalID, "18181818-1818-4818-8818-181818181861")
+	_ = falseResultTx.Rollback()
+	if !isSQLState(falseResultErr, "23514") {
+		t.Fatalf("false proposal result error=%v", falseResultErr)
+	}
+	if _, err := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: created.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181805", ExpectedETag: created.ETag,
+	}); !errors.Is(err, ErrStaleMemoryProposal) {
+		t.Fatalf("second decision error=%v", err)
+	}
+
+	stale, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181806", Action: MemoryProposalArchive,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepArchive, ItemID: target.ItemID, ExpectedETag: approved.Mutations[0].ETag, Archived: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: target.ItemID, IdempotencyKey: "18181818-1818-4818-8818-181818181807",
+		ExpectedETag: approved.Mutations[0].ETag, LogicalKey: "proposal.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"changed"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: stale.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181808", ExpectedETag: stale.ETag,
+	}); !errors.Is(err, ErrStaleMemoryProposal) {
+		t.Fatalf("stale target approval error=%v", err)
+	}
+	current, err := app.GetMemory(ctx, actor.ID, projectID, target.ItemID)
+	if err != nil || current.ETag != updated.ETag {
+		t.Fatalf("stale proposal changed canonical memory=%#v err=%v", current, err)
+	}
+	evidenceStale, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181817", Action: MemoryProposalUpdate,
+		Steps:    []MemoryProposalStepInput{{Operation: MemoryProposalStepUpdate, ItemID: target.ItemID, ExpectedETag: updated.ETag, LogicalKey: "proposal.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"evidence-stale"}`)}},
+		Evidence: []MemoryProposalEvidenceInput{{ItemID: evidence.ItemID, Revision: evidence.Revision}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: evidence.ItemID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181818", ExpectedETag: evidence.ETag, Archived: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: evidenceStale.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181819", ExpectedETag: evidenceStale.ETag,
+	}); !errors.Is(err, ErrStaleMemoryProposal) {
+		t.Fatalf("stale evidence approval error=%v", err)
+	}
+	secretDocument := json.RawMessage(`{"token":"proposal-secret-value-123"}`)
+	secretRequest := MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181850", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.secret", Kind: "decision", Trust: "curated", Document: secretDocument}},
+	}
+	var secretRejection MemorySecretRejection
+	if _, err := app.ProposeMemory(ctx, secretRequest); !errors.As(err, &secretRejection) || strings.Contains(err.Error(), "proposal-secret-value-123") {
+		t.Fatalf("secret proposal rejection=%#v err=%v", secretRejection, err)
+	}
+	findings, err := secretguard.ScanDocument(secretDocument)
+	if err != nil || len(findings) == 0 {
+		t.Fatalf("secret proposal finding=%#v err=%v", findings, err)
+	}
+	exception, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181851",
+		RuleID: findings[0].RuleID, FieldPath: findings[0].FieldPath, RuleVersion: findings[0].RuleVersion, Fingerprint: findings[0].Fingerprint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretRequest.IdempotencyKey = "18181818-1818-4818-8818-181818181852"
+	secretProposal, err := app.ProposeMemory(ctx, secretRequest)
+	if err != nil {
+		t.Fatalf("excepted secret proposal: %v", err)
+	}
+	if _, err := app.RevokeMemorySecretException(ctx, MemorySecretExceptionRevokeRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181853", ExceptionID: exception.ExceptionID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: secretProposal.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181854", ExpectedETag: secretProposal.ETag,
+	}); !errors.As(err, &secretRejection) || strings.Contains(err.Error(), "proposal-secret-value-123") {
+		t.Fatalf("approval-time secret rescan=%#v err=%v", secretRejection, err)
+	}
+	var secretItems int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_items WHERE logical_key='proposal.secret'`).Scan(&secretItems); err != nil || secretItems != 0 {
+		t.Fatalf("secret approval left canonical items=%d err=%v", secretItems, err)
+	}
+
+	rejected, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181809", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.rejected", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"status":"rejected"}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: rejected.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181810", ExpectedETag: rejected.ETag,
+	})
+	if err != nil || decision.State != MemoryProposalRejected || len(decision.Mutations) != 0 {
+		t.Fatalf("reject proposal=%#v err=%v", decision, err)
+	}
+	var rejectedItems int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_items WHERE logical_key='proposal.rejected'`).Scan(&rejectedItems); err != nil || rejectedItems != 0 {
+		t.Fatalf("rejected proposal canonical item count=%d err=%v", rejectedItems, err)
+	}
+	approve := func(createKey, decisionKey string, action MemoryProposalAction, steps []MemoryProposalStepInput) MemoryProposalResult {
+		t.Helper()
+		proposal, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: createKey, Action: action, Steps: steps})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: actor.ID, ProjectID: projectID, ProposalID: proposal.ProposalID, IdempotencyKey: decisionKey, ExpectedETag: proposal.ETag})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	createdProposal := approve("18181818-1818-4818-8818-181818181830", "18181818-1818-4818-8818-181818181831", MemoryProposalCreate,
+		[]MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.created", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"created":true}`)}})
+	if len(createdProposal.Mutations) != 1 || createdProposal.Mutations[0].Revision != 1 {
+		t.Fatalf("create proposal mutations=%#v", createdProposal.Mutations)
+	}
+	archivedProposal := approve("18181818-1818-4818-8818-181818181832", "18181818-1818-4818-8818-181818181833", MemoryProposalArchive,
+		[]MemoryProposalStepInput{{Operation: MemoryProposalStepArchive, ItemID: createdProposal.Mutations[0].ItemID, ExpectedETag: createdProposal.Mutations[0].ETag, Archived: true}})
+	if len(archivedProposal.Mutations) != 1 || archivedProposal.Mutations[0].State != MemoryArchived {
+		t.Fatalf("archive proposal mutations=%#v", archivedProposal.Mutations)
+	}
+	mergeLeft, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181834", LogicalKey: "proposal.merge-left", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"side":"left"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergeRight, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181835", LogicalKey: "proposal.merge-right", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"side":"right"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mergedProposal := approve("18181818-1818-4818-8818-181818181836", "18181818-1818-4818-8818-181818181837", MemoryProposalMerge, []MemoryProposalStepInput{
+		{Operation: MemoryProposalStepUpdate, ItemID: mergeLeft.ItemID, ExpectedETag: mergeLeft.ETag, LogicalKey: "proposal.merge-left", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"merged":true}`)},
+		{Operation: MemoryProposalStepArchive, ItemID: mergeRight.ItemID, ExpectedETag: mergeRight.ETag, Archived: true},
+	})
+	if len(mergedProposal.Mutations) != 2 || mergedProposal.Mutations[1].State != MemoryArchived {
+		t.Fatalf("merge proposal mutations=%#v", mergedProposal.Mutations)
+	}
+	splitSource, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181838", LogicalKey: "proposal.split-source", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"split":true}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	splitProposal := approve("18181818-1818-4818-8818-181818181839", "18181818-1818-4818-8818-181818181840", MemoryProposalSplit, []MemoryProposalStepInput{
+		{Operation: MemoryProposalStepArchive, ItemID: splitSource.ItemID, ExpectedETag: splitSource.ETag, Archived: true},
+		{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.split-a", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"part":"a"}`)},
+		{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.split-b", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"part":"b"}`)},
+	})
+	if len(splitProposal.Mutations) != 3 || splitProposal.Mutations[0].State != MemoryArchived || splitProposal.Mutations[1].Revision != 1 || splitProposal.Mutations[2].Revision != 1 {
+		t.Fatalf("split proposal mutations=%#v", splitProposal.Mutations)
+	}
+
+	race, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181811", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.race", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"winner":true}`)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type decisionResult struct {
+		result MemoryProposalResult
+		err    error
+	}
+	decisions := make(chan decisionResult, 2)
+	go func() {
+		result, decisionErr := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, ProposalID: race.ProposalID,
+			IdempotencyKey: "18181818-1818-4818-8818-181818181812", ExpectedETag: race.ETag,
+		})
+		decisions <- decisionResult{result, decisionErr}
+	}()
+	go func() {
+		result, decisionErr := app.RejectMemoryProposal(ctx, MemoryProposalDecisionRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, ProposalID: race.ProposalID,
+			IdempotencyKey: "18181818-1818-4818-8818-181818181813", ExpectedETag: race.ETag,
+		})
+		decisions <- decisionResult{result, decisionErr}
+	}()
+	first, second := <-decisions, <-decisions
+	if (first.err == nil) == (second.err == nil) {
+		t.Fatalf("concurrent decisions first=%#v second=%#v", first, second)
+	}
+	loser := first
+	if first.err == nil {
+		loser = second
+	}
+	if !errors.Is(loser.err, ErrStaleMemoryProposal) {
+		t.Fatalf("concurrent decision loser error=%v", loser.err)
+	}
+	finalRace, err := app.GetMemoryProposal(ctx, actor.ID, projectID, race.ProposalID)
+	if err != nil || (finalRace.State != MemoryProposalApproved && finalRace.State != MemoryProposalRejected) {
+		t.Fatalf("concurrent decision final=%#v err=%v", finalRace, err)
+	}
+
+	atomicSource, err := app.CreateMemory(ctx, MemoryCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181814",
+		LogicalKey: "proposal.atomic-source", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"atomic":"source"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	atomicProposal, err := app.ProposeMemory(ctx, MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "18181818-1818-4818-8818-181818181815", Action: MemoryProposalSplit,
+		Steps: []MemoryProposalStepInput{
+			{Operation: MemoryProposalStepArchive, ItemID: atomicSource.ItemID, ExpectedETag: atomicSource.ETag, Archived: true},
+			{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.atomic-child", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"child":1}`)},
+			{Operation: MemoryProposalStepCreate, LogicalKey: "proposal.target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"child":2}`)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ProposalID: atomicProposal.ProposalID,
+		IdempotencyKey: "18181818-1818-4818-8818-181818181816", ExpectedETag: atomicProposal.ETag,
+	}); !errors.Is(err, ErrMemoryLogicalKeyConflict) {
+		t.Fatalf("atomic conflict approval error=%v", err)
+	}
+	atomicCurrent, err := app.GetMemory(ctx, actor.ID, projectID, atomicSource.ItemID)
+	if err != nil || atomicCurrent.State != MemoryActive || atomicCurrent.Revision != atomicSource.Revision {
+		t.Fatalf("atomic failure changed source=%#v err=%v", atomicCurrent, err)
+	}
+	var atomicChildren int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_items WHERE logical_key='proposal.atomic-child'`).Scan(&atomicChildren); err != nil || atomicChildren != 0 {
+		t.Fatalf("atomic failure left child count=%d err=%v", atomicChildren, err)
+	}
+}
+
 func testMemoryEvidenceIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
 	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "evidence actor")
