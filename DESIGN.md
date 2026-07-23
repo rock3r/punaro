@@ -39,7 +39,7 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
-PostgreSQL schema 21 also contains the dark canonical Big Brain store and its
+PostgreSQL schema 22 also contains the dark canonical Big Brain store and its
 operator-approved proposal authority. A writer can stage one immutable,
 bounded create, update, archive, merge, or split proposal; an administrator
 can approve or reject its exact pending ETag. Approval locks every referenced
@@ -130,6 +130,19 @@ ceiling to one repeatable-read snapshot. It includes permanent-alias scopes,
 excludes pinned, archived, and quarantined records, returns no document, and
 caps output at 64 stable CAS candidates. The report never archives or proposes
 anything; usage is derived metadata and may be rebuilt from future recalls.
+
+Schema 22 adds bounded canonical reference reconciliation. A direct active
+project's `memory.administer` caller may repair only permanent lookup aliases
+whose retired project already names that canonical project in `merged_into`,
+then remove only soft evidence edges whose exact target revision no longer
+exists. One owner-controlled, mutation-fenced batch performs at most 64 changes
+in stable alias-then-edge order, advances identity/content generations and the
+global change sequence once per non-empty batch, and emits one content-free
+audit event. The result contains counts, a `more` bit, and the changed sequence;
+converged retries are no-ops. Live source coordinates and proposal
+evidence/result coordinates intentionally remain durable provenance and are
+never reconciliation targets. The operation does not discover or merge
+projects, rewrite memory, or repair derived indexes.
 
 ## Goals
 
