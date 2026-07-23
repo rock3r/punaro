@@ -251,6 +251,29 @@ neither authority nor a writable target. The isolated two-connection brain
 pool and a two-second SQL statement deadline bound report work so it cannot
 starve mail. Application rollback needs no database change.
 
+Schema 21 adds derived `brain.memory_usage` rows containing only a saturating
+recall count and monotonic last-recalled timestamp. Successful authorized
+canonical gets, evidence gets, returned lexical results, and final prompt-brief
+entries attempt one distinct-item batch through an owner-controlled routine.
+The batch is capped at 64 items and offered without waiting to a bounded
+64-batch in-process queue. One worker uses the isolated brain pool and a
+150-millisecond SQL deadline. Queue saturation or usage failure is non-fatal
+and adds no database wait to the read, including during the global maintenance
+fence; hard delete cascades the row. The application role can select usage for
+maintenance policy but cannot directly insert, update, or delete it.
+
+A schema-internal `memory.administer` archive-candidate report accepts an
+explicit inactivity duration from 24 hours through ten years, an inclusive
+recall-count ceiling, and a result limit up to 64. It reports only active
+current, non-quarantined, non-pinned items whose later of update or recall is
+old enough, including scopes retained behind permanent project lookup aliases.
+Output is limited to opaque IDs, current revision/ETag, classification, usage,
+and timestamps; it contains no document and performs no archive, proposal, or
+rewrite. One two-second read-only repeatable-read transaction makes an
+overlapping recall visible only to the next report. Schema-21 application
+rollback to a schema-20 image requires the normal verified pre-update backup
+restore because that older manifest correctly rejects schema 21 as newer.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

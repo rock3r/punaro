@@ -606,6 +606,7 @@ FROM brain.memory_edges WHERE from_item_id=$1 AND from_revision=$2 ORDER BY ordi
 	if err := tx.Commit(); err != nil {
 		return MemoryEvidence{}, errors.New("memory evidence snapshot cannot commit")
 	}
+	d.recordMemoryRecalls(ctx, projectID, []string{result.Item.ItemID})
 	return result, nil
 }
 

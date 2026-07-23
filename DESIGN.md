@@ -39,7 +39,7 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
-PostgreSQL schema 20 also contains the dark canonical Big Brain store and its
+PostgreSQL schema 21 also contains the dark canonical Big Brain store and its
 operator-approved proposal authority. A writer can stage one immutable,
 bounded create, update, archive, merge, or split proposal; an administrator
 can approve or reject its exact pending ETag. Approval locks every referenced
@@ -115,6 +115,21 @@ candidates. The deterministic oldest item is a reporting anchor only:
 detection never merges, archives, proposes, or rewrites content. A two-second
 SQL deadline and the isolated two-connection brain pool bound its effect on the
 rest of the service.
+
+Schema 21 adds derived recall usage: a saturating count and monotonic
+last-recalled time per memory item. Successful authorized canonical gets,
+evidence gets, returned lexical results, and final prompt-brief entries attempt
+one deduplicated enqueue into a bounded 64-batch in-process queue without
+waiting for SQL. One worker uses the isolated brain pool and a 150-millisecond
+write deadline. Accounting is deliberately optional: queue saturation, a
+maintenance fence, usage-table failure, or a hard-deleted race never delays or
+fails a successful read. Hard delete cascades usage; ordinary application SQL
+cannot directly insert, update, or delete usage rows. A `memory.administer` archive-candidate
+report applies an explicit 24-hour-to-ten-year inactivity policy and recall
+ceiling to one repeatable-read snapshot. It includes permanent-alias scopes,
+excludes pinned, archived, and quarantined records, returns no document, and
+caps output at 64 stable CAS candidates. The report never archives or proposes
+anything; usage is derived metadata and may be rebuilt from future recalls.
 
 ## Goals
 

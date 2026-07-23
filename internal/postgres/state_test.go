@@ -69,8 +69,12 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 20 || len(manifest.Migrations) != 20 {
-		t.Fatalf("manifest=%#v, want exact v10-v20 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 21 || len(manifest.Migrations) != 21 {
+		t.Fatalf("manifest=%#v, want exact v10-v21 compatibility window", manifest)
+	}
+	usage := manifest.Migrations[20]
+	if usage.Version != 21 || usage.Name != "021_memory_usage" || usage.CompatibilityFloor != 10 || !strings.Contains(usage.SQL, "CREATE TABLE brain.memory_usage") {
+		t.Fatalf("unexpected memory-usage migration: %#v", usage)
 	}
 	for index, migration := range manifest.Migrations {
 		want := int64(index + 1)
@@ -83,7 +87,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20:
+		case 14, 15, 16, 17, 18, 19, 20, 21:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
@@ -142,7 +146,10 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 19}, manifest) {
 		t.Fatal("compatible v19 schema must still apply the pending v20 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 20}, manifest) {
-		t.Fatal("current v20 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 20}, manifest) {
+		t.Fatal("compatible v20 schema must still apply the pending v21 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 21}, manifest) {
+		t.Fatal("current v21 schema reported a pending migration")
 	}
 }

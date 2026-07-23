@@ -157,6 +157,7 @@ WHERE item.id=$1 AND scope.project_id=$2
 	item.Document = append(json.RawMessage(nil), document...)
 	item.ContentSHA256 = hex.EncodeToString(contentHash)
 	item.ETag = memoryETag(item.ItemID, item.Revision)
+	d.recordMemoryRecalls(ctx, canonicalProjectID, []string{item.ItemID})
 	return item, nil
 }
 
