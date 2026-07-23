@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -410,6 +411,397 @@ WHERE collision.item_id=$1 AND collision.revision=1 AND keeper.item_id=$2 AND ke
 		if candidate.DuplicateItemID == direct.ItemID {
 			t.Fatalf("fresh duplicate page retained updated item=%#v", candidate)
 		}
+	}
+}
+
+func testMemoryUsageAndArchiveCandidatesIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	waitUsageCount := func(itemID string, want int64) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var count int64
+			err := ownerDB.QueryRowContext(ctx, `SELECT recall_count FROM brain.memory_usage WHERE item_id=$1`, itemID).Scan(&count)
+			if err == nil && count == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("usage item=%s count=%d err=%v, want %d", itemID, count, err, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "usage actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "usage reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID, aliasProjectID, otherProjectID string
+	for name, destination := range map[string]*string{
+		"usage canonical": &projectID,
+		"usage alias":     &aliasProjectID,
+		"usage other":     &otherProjectID,
+	} {
+		if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ($1,$2) RETURNING id::text`, name, actor.ID).Scan(destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, grant := range []struct {
+		principal, project string
+		capability         Capability
+	}{
+		{actor.ID, projectID, CapabilityMemoryRead},
+		{actor.ID, projectID, CapabilityMemorySearch},
+		{actor.ID, projectID, CapabilityMemoryWrite},
+		{actor.ID, projectID, CapabilityMemoryAdminister},
+		{actor.ID, projectID, CapabilityMemoryPurge},
+		{actor.ID, aliasProjectID, CapabilityMemoryWrite},
+		{actor.ID, otherProjectID, CapabilityMemoryWrite},
+		{actor.ID, otherProjectID, CapabilityMemoryAdminister},
+		{reader.ID, projectID, CapabilityMemoryRead},
+		{reader.ID, projectID, CapabilityMemorySearch},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, grant.project, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create := func(project, key, idempotency, document string) MemoryMutationResult {
+		t.Helper()
+		created, createErr := app.CreateMemory(ctx, MemoryCreateRequest{
+			PrincipalID: actor.ID, ProjectID: project, IdempotencyKey: idempotency,
+			LogicalKey: key, Kind: "fact", Trust: "curated", Document: json.RawMessage(document),
+		})
+		if createErr != nil {
+			t.Fatalf("create usage fixture %s: %v", key, createErr)
+		}
+		return created
+	}
+	never := create(projectID, "usage.never", "23232323-2323-4323-8323-232323232311", `{"title":"never recalled"}`)
+	low := create(projectID, "usage.low", "23232323-2323-4323-8323-232323232312", `{"title":"low recall"}`)
+	high := create(projectID, "usage.high", "23232323-2323-4323-8323-232323232313", `{"title":"high recall"}`)
+	recent := create(projectID, "usage.recent", "23232323-2323-4323-8323-232323232314", `{"title":"recent"}`)
+	pinned := create(projectID, "usage.pinned", "23232323-2323-4323-8323-232323232315", `{"title":"pinned","summary":"core","pinned":true}`)
+	archived := create(projectID, "usage.archived", "23232323-2323-4323-8323-232323232316", `{"title":"archived"}`)
+	quarantined := create(projectID, "usage.quarantined", "23232323-2323-4323-8323-232323232317", `{"title":"quarantined"}`)
+	alias := create(aliasProjectID, "usage.alias", "23232323-2323-4323-8323-232323232318", `{"title":"alias"}`)
+	other := create(otherProjectID, "usage.other", "23232323-2323-4323-8323-232323232319", `{"title":"other"}`)
+	deleted := create(projectID, "usage.deleted", "23232323-2323-4323-8323-232323232320", `{"title":"deleted"}`)
+	searchOne := create(projectID, "usage.search-one", "23232323-2323-4323-8323-232323232321", `{"title":"recall accounting search"}`)
+	searchTwo := create(projectID, "usage.search-two", "23232323-2323-4323-8323-232323232322", `{"summary":"recall accounting search"}`)
+	projectBrief := create(projectID, "usage.brief", "23232323-2323-4323-8323-232323232323", `{"title":"project usage brief","summary":"brief recall"}`)
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_items SET kind='project_brief' WHERE id=$1`, projectBrief.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := app.CreateMemoryEvidence(ctx, MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "23232323-2323-4323-8323-232323232324",
+		LogicalKey: "usage.evidence", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"title":"usage evidence"}`),
+		Sources: []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("23", 32)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.GetMemory(ctx, actor.ID, projectID, low.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := app.GetMemory(ctx, actor.ID, projectID, high.ItemID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	search, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "recall accounting search", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	searchIDs := map[string]bool{searchOne.ItemID: false, searchTwo.ItemID: false}
+	for _, result := range search.Results {
+		if _, ok := searchIDs[result.ItemID]; ok {
+			searchIDs[result.ItemID] = true
+		}
+	}
+	if !searchIDs[searchOne.ItemID] || !searchIDs[searchTwo.ItemID] {
+		t.Fatalf("search recall fixtures missing: results=%#v", search.Results)
+	}
+	brief, err := app.BuildMemoryPromptBrief(ctx, MemoryPromptBriefRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "brief recall"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	briefIDs := map[string]bool{pinned.ItemID: false, projectBrief.ItemID: false}
+	for _, entry := range brief.Entries {
+		if _, ok := briefIDs[entry.ItemID]; ok {
+			briefIDs[entry.ItemID] = true
+		}
+	}
+	if !briefIDs[pinned.ItemID] || !briefIDs[projectBrief.ItemID] {
+		t.Fatalf("brief recall fixtures missing: entries=%#v", brief.Entries)
+	}
+	if _, err := app.GetMemoryEvidence(ctx, MemoryEvidenceGetRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: evidence.ItemID}); err != nil {
+		t.Fatal(err)
+	}
+	for itemID, wantCount := range map[string]int64{
+		low.ItemID: 1, high.ItemID: 3, searchOne.ItemID: 1, searchTwo.ItemID: 1,
+		pinned.ItemID: 1, projectBrief.ItemID: 1, evidence.ItemID: 1,
+	} {
+		waitUsageCount(itemID, wantCount)
+		var count int64
+		var recalledAt time.Time
+		if err := ownerDB.QueryRowContext(ctx, `SELECT recall_count,last_recalled_at FROM brain.memory_usage WHERE item_id=$1`, itemID).Scan(&count, &recalledAt); err != nil || count != wantCount || recalledAt.IsZero() {
+			t.Fatalf("usage item=%s count=%d recalled=%s err=%v, want %d", itemID, count, recalledAt, err, wantCount)
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_usage SET recall_count=9223372036854775807,last_recalled_at='2020-01-04T00:00:00Z' WHERE item_id=$1`, high.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GetMemory(ctx, actor.ID, projectID, high.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	var saturated int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT recall_count FROM brain.memory_usage WHERE item_id=$1`, high.ItemID).Scan(&saturated); err != nil || saturated != int64(^uint64(0)>>1) {
+		t.Fatalf("saturated recall count=%d err=%v", saturated, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE EXECUTE ON FUNCTION brain.record_memory_recall(uuid,uuid[]) FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.GetMemory(ctx, actor.ID, projectID, recent.ItemID); err != nil {
+		t.Fatalf("usage failure broke canonical get: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT EXECUTE ON FUNCTION brain.record_memory_recall(uuid,uuid[]) TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	app.recordMemoryRecalls(ctx, projectID, []string{deleted.ItemID, deleted.ItemID})
+	waitUsageCount(deleted.ItemID, 1)
+	if _, err := app.DeleteMemory(ctx, MemoryDeleteRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: deleted.ItemID,
+		IdempotencyKey: "23232323-2323-4323-8323-232323232325", ExpectedETag: deleted.ETag,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var deletedUsage int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_usage WHERE item_id=$1`, deleted.ItemID).Scan(&deletedUsage); err != nil || deletedUsage != 0 {
+		t.Fatalf("hard-deleted usage count=%d err=%v", deletedUsage, err)
+	}
+
+	if _, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: archived.ItemID,
+		IdempotencyKey: "23232323-2323-4323-8323-232323232326", ExpectedETag: archived.ETag, Archived: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines
+(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,1,1,'sensitive-field','/title',decode(repeat('23',32),'hex'),$2)`, quarantined.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2)`, aliasProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, aliasProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	oldTimes := map[string]string{
+		never.ItemID:       "2020-01-01T00:00:00Z",
+		alias.ItemID:       "2020-01-02T00:00:00Z",
+		low.ItemID:         "2020-01-03T00:00:00Z",
+		high.ItemID:        "2020-01-04T00:00:00Z",
+		pinned.ItemID:      "2020-01-05T00:00:00Z",
+		archived.ItemID:    "2020-01-06T00:00:00Z",
+		quarantined.ItemID: "2020-01-07T00:00:00Z",
+		other.ItemID:       "2020-01-08T00:00:00Z",
+	}
+	for itemID, timestamp := range oldTimes {
+		if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_items SET created_at=$2,updated_at=$2 WHERE id=$1`, itemID, timestamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_usage SET last_recalled_at='2020-01-03T00:00:00Z' WHERE item_id=$1`, low.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	request := MemoryArchiveCandidateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, InactiveFor: minMemoryArchiveInactiveFor,
+		MaxRecallCount: 1, Limit: maxMemoryArchiveCandidates,
+	}
+	page, err := app.FindMemoryArchiveCandidates(ctx, request)
+	if err != nil || page.More || len(page.Candidates) != 3 {
+		t.Fatalf("archive-candidate page=%#v err=%v", page, err)
+	}
+	wantOrder := []string{never.ItemID, alias.ItemID, low.ItemID}
+	for index, candidate := range page.Candidates {
+		if candidate.ItemID != wantOrder[index] || candidate.ETag == "" || candidate.Revision != 1 || candidate.LastActivityAt.IsZero() {
+			t.Fatalf("archive candidate[%d]=%#v, want item %s", index, candidate, wantOrder[index])
+		}
+	}
+	if page.Candidates[0].LastRecalledAt != nil || page.Candidates[2].LastRecalledAt == nil || page.Candidates[2].RecallCount != 1 {
+		t.Fatalf("archive candidate usage metadata=%#v", page.Candidates)
+	}
+	bounded, err := app.FindMemoryArchiveCandidates(ctx, MemoryArchiveCandidateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, InactiveFor: minMemoryArchiveInactiveFor, MaxRecallCount: 1, Limit: 2,
+	})
+	if err != nil || len(bounded.Candidates) != 2 || !bounded.More {
+		t.Fatalf("bounded archive candidates=%#v err=%v", bounded, err)
+	}
+	aliasPage, err := app.FindMemoryArchiveCandidates(ctx, MemoryArchiveCandidateRequest{
+		PrincipalID: actor.ID, ProjectID: aliasProjectID, InactiveFor: minMemoryArchiveInactiveFor, MaxRecallCount: 1, Limit: 2,
+	})
+	if err != nil || len(aliasPage.Candidates) != len(bounded.Candidates) || aliasPage.More != bounded.More {
+		t.Fatalf("alias archive candidates=%#v err=%v", aliasPage, err)
+	}
+	for index := range bounded.Candidates {
+		if !reflect.DeepEqual(aliasPage.Candidates[index], bounded.Candidates[index]) {
+			t.Fatalf("alias archive ordering changed: canonical=%#v alias=%#v", bounded, aliasPage)
+		}
+	}
+	if _, err := app.FindMemoryArchiveCandidates(ctx, MemoryArchiveCandidateRequest{
+		PrincipalID: reader.ID, ProjectID: projectID, InactiveFor: minMemoryArchiveInactiveFor, MaxRecallCount: 1, Limit: 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-admin archive-candidate error=%v", err)
+	}
+	otherPage, err := app.FindMemoryArchiveCandidates(ctx, MemoryArchiveCandidateRequest{
+		PrincipalID: actor.ID, ProjectID: otherProjectID, InactiveFor: minMemoryArchiveInactiveFor, MaxRecallCount: 1, Limit: 5,
+	})
+	if err != nil || len(otherPage.Candidates) != 1 || otherPage.Candidates[0].ItemID != other.ItemID {
+		t.Fatalf("other-project archive candidates=%#v err=%v", otherPage, err)
+	}
+
+	snapshotTx, err := app.brainPool().BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotBefore, err := findMemoryArchiveCandidatesInTx(ctx, snapshotTx, projectID, request)
+	if err != nil || len(snapshotBefore.Candidates) != 3 {
+		_ = snapshotTx.Rollback()
+		t.Fatalf("archive snapshot before recall=%#v err=%v", snapshotBefore, err)
+	}
+	app.recordMemoryRecalls(ctx, projectID, []string{never.ItemID})
+	waitUsageCount(never.ItemID, 1)
+	snapshotAfter, err := findMemoryArchiveCandidatesInTx(ctx, snapshotTx, projectID, request)
+	if err != nil || len(snapshotAfter.Candidates) != len(snapshotBefore.Candidates) {
+		_ = snapshotTx.Rollback()
+		t.Fatalf("archive snapshot after recall=%#v err=%v", snapshotAfter, err)
+	}
+	for index := range snapshotBefore.Candidates {
+		if !reflect.DeepEqual(snapshotAfter.Candidates[index], snapshotBefore.Candidates[index]) {
+			_ = snapshotTx.Rollback()
+			t.Fatalf("repeatable archive snapshot changed: before=%#v after=%#v", snapshotBefore, snapshotAfter)
+		}
+	}
+	if err := snapshotTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := app.FindMemoryArchiveCandidates(ctx, request)
+	if err != nil || len(fresh.Candidates) != 2 {
+		t.Fatalf("fresh archive candidates after recall=%#v err=%v", fresh, err)
+	}
+	for _, candidate := range fresh.Candidates {
+		if candidate.ItemID == never.ItemID {
+			t.Fatalf("fresh archive candidates retained recalled item=%#v", candidate)
+		}
+	}
+
+	blockingUsage, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := blockingUsage.ExecContext(ctx, `LOCK TABLE brain.memory_usage IN ACCESS EXCLUSIVE MODE`); err != nil {
+		_ = blockingUsage.Rollback()
+		t.Fatal(err)
+	}
+	assertRecallDoesNotWait := func(name string, recall func(context.Context) error) {
+		t.Helper()
+		recallCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		started := time.Now()
+		err := recall(recallCtx)
+		elapsed := time.Since(started)
+		if err != nil || elapsed >= 100*time.Millisecond {
+			t.Fatalf("%s waited for optional usage accounting: elapsed=%s err=%v", name, elapsed, err)
+		}
+	}
+	assertRecallDoesNotWait("get", func(recallCtx context.Context) error {
+		_, recallErr := app.GetMemory(recallCtx, actor.ID, projectID, recent.ItemID)
+		return recallErr
+	})
+	assertRecallDoesNotWait("evidence get", func(recallCtx context.Context) error {
+		_, recallErr := app.GetMemoryEvidence(recallCtx, MemoryEvidenceGetRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, ItemID: evidence.ItemID,
+		})
+		return recallErr
+	})
+	assertRecallDoesNotWait("search", func(recallCtx context.Context) error {
+		_, recallErr := app.SearchMemory(recallCtx, MemorySearchRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, Query: "recall accounting search", Limit: 10,
+		})
+		return recallErr
+	})
+	assertRecallDoesNotWait("prompt brief", func(recallCtx context.Context) error {
+		_, recallErr := app.BuildMemoryPromptBrief(recallCtx, MemoryPromptBriefRequest{
+			PrincipalID: actor.ID, ProjectID: projectID, Query: "brief recall",
+		})
+		return recallErr
+	})
+	if err := blockingUsage.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func testMemoryUsageSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	for _, drift := range []struct {
+		name, apply, restore string
+	}{
+		{
+			name:    "usage delete privilege",
+			apply:   `GRANT DELETE ON brain.memory_usage TO punaro_app`,
+			restore: `REVOKE DELETE ON brain.memory_usage FROM punaro_app`,
+		},
+		{
+			name:    "usage mutation fence",
+			apply:   `ALTER TABLE brain.memory_usage DISABLE TRIGGER application_mutation_fence`,
+			restore: `ALTER TABLE brain.memory_usage ENABLE TRIGGER application_mutation_fence`,
+		},
+		{
+			name:    "usage inactivity index",
+			apply:   `DROP INDEX brain.memory_usage_last_recalled; CREATE INDEX memory_usage_last_recalled ON brain.memory_usage USING brin (last_recalled_at,item_id)`,
+			restore: `DROP INDEX brain.memory_usage_last_recalled; CREATE INDEX memory_usage_last_recalled ON brain.memory_usage (last_recalled_at,item_id)`,
+		},
+		{
+			name:    "usage inactivity sort semantics",
+			apply:   `DROP INDEX brain.memory_usage_last_recalled; CREATE INDEX memory_usage_last_recalled ON brain.memory_usage (last_recalled_at DESC,item_id)`,
+			restore: `DROP INDEX brain.memory_usage_last_recalled; CREATE INDEX memory_usage_last_recalled ON brain.memory_usage (last_recalled_at,item_id)`,
+		},
+		{
+			name:    "usage count constraint",
+			apply:   `ALTER TABLE brain.memory_usage DROP CONSTRAINT memory_usage_recall_count_check; ALTER TABLE brain.memory_usage ADD CONSTRAINT memory_usage_recall_count_check CHECK (recall_count >= -1)`,
+			restore: `ALTER TABLE brain.memory_usage DROP CONSTRAINT memory_usage_recall_count_check; ALTER TABLE brain.memory_usage ADD CONSTRAINT memory_usage_recall_count_check CHECK (recall_count >= 0)`,
+		},
+		{
+			name:    "usage function volatility",
+			apply:   `ALTER FUNCTION brain.record_memory_recall(uuid,uuid[]) STABLE`,
+			restore: `ALTER FUNCTION brain.record_memory_recall(uuid,uuid[]) VOLATILE`,
+		},
+		{
+			name:    "usage function public execute",
+			apply:   `GRANT EXECUTE ON FUNCTION brain.record_memory_recall(uuid,uuid[]) TO PUBLIC`,
+			restore: `REVOKE EXECUTE ON FUNCTION brain.record_memory_recall(uuid,uuid[]) FROM PUBLIC`,
+		},
+	} {
+		t.Run("readiness rejects "+drift.name+" drift", func(t *testing.T) {
+			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
+				t.Fatal(err)
+			}
+			driftErr := app.Ready(ctx)
+			if _, err := ownerDB.ExecContext(ctx, drift.restore); err != nil {
+				t.Fatal(err)
+			}
+			if driftErr == nil {
+				t.Fatalf("readiness accepted %s drift", drift.name)
+			}
+			if err := app.Ready(ctx); err != nil {
+				t.Fatalf("readiness did not recover after %s drift: %v", drift.name, err)
+			}
+		})
 	}
 }
 

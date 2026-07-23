@@ -108,6 +108,11 @@ func (d *Database) SearchMemory(ctx context.Context, raw MemorySearchRequest) (M
 	if err := tx.Commit(); err != nil {
 		return MemorySearchPage{}, errors.New("memory search transaction could not finish")
 	}
+	itemIDs := make([]string, 0, len(page.Results))
+	for _, result := range page.Results {
+		itemIDs = append(itemIDs, result.ItemID)
+	}
+	d.recordMemoryRecalls(ctx, projectID, itemIDs)
 	return page, nil
 }
 

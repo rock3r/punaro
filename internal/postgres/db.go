@@ -27,6 +27,10 @@ type Database struct {
 	brainDB                   *sql.DB
 	manifest                  Manifest
 	attachmentPhysicalGCSlots chan struct{}
+	memoryUsageWrites         chan memoryUsageWrite
+	memoryUsageStop           chan struct{}
+	memoryUsageDone           chan struct{}
+	memoryUsageStopOnce       sync.Once
 }
 
 // InstallationState identifies one installation timeline and its last change.
@@ -72,7 +76,15 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Database{db: db, relayDB: relayDB, brainDB: brainDB, manifest: CurrentManifest(), attachmentPhysicalGCSlots: make(chan struct{}, 1)}, nil
+	database := &Database{
+		db: db, relayDB: relayDB, brainDB: brainDB, manifest: CurrentManifest(),
+		attachmentPhysicalGCSlots: make(chan struct{}, 1),
+		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
+		memoryUsageStop:           make(chan struct{}),
+		memoryUsageDone:           make(chan struct{}),
+	}
+	go database.runMemoryUsageWriter(ctx)
+	return database, nil
 }
 
 func open(ctx context.Context, dsn string) (*sql.DB, error) {
@@ -97,6 +109,12 @@ func openPool(ctx context.Context, dsn string, maximumOpen, maximumIdle int) (*s
 
 // Close releases the general application and reserved relay/brain pools.
 func (d *Database) Close() error {
+	if d.memoryUsageStop != nil {
+		d.memoryUsageStopOnce.Do(func() {
+			close(d.memoryUsageStop)
+			<-d.memoryUsageDone
+		})
+	}
 	if d.relayDB == nil {
 		return d.db.Close()
 	}
@@ -1098,6 +1116,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL memory evidence expiry schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = evidenceExpiryObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 21 {
+		usageObjectsPresent, err := memoryUsageControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory usage schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = usageObjectsPresent
 	}
 	return snapshot, nil
 }

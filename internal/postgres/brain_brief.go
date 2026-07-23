@@ -171,6 +171,11 @@ WHERE state.singleton AND project.id=$1 AND project.merged_into IS NULL`, projec
 	if err := tx.Commit(); err != nil {
 		return MemoryPromptBrief{}, errors.New("memory prompt brief transaction could not finish")
 	}
+	itemIDs := make([]string, 0, len(brief.Entries))
+	for _, entry := range brief.Entries {
+		itemIDs = append(itemIDs, entry.ItemID)
+	}
+	d.recordMemoryRecalls(ctx, projectID, itemIDs)
 	return brief, nil
 }
 
