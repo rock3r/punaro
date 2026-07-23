@@ -274,6 +274,27 @@ overlapping recall visible only to the next report. Schema-21 application
 rollback to a schema-20 image requires the normal verified pre-update backup
 restore because that older manifest correctly rejects schema 21 as newer.
 
+Schema 22 adds the internal `memory.administer` reference reconciler. The
+request must name the direct active canonical project; an alias is not accepted
+as authority because its lookup row may be the object being repaired. The
+owner-controlled routine first repairs retired-project lookup rows only when
+the authoritative `relay.projects.merged_into` already equals that canonical
+project. It then deletes only `brain.memory_edges` whose exact target
+item/revision is absent. Aliases and edges share one 1-to-64 mutation bound,
+stable alias-ID then edge-ID order, and a resumable `more` result.
+
+Every non-empty batch is globally mutation-fenced, locks selected projects in
+opaque-ID order with project merge, advances canonical identity generation
+when aliases changed, advances content generation and the global sequence once,
+and records one content-free `memory.reconcile` audit event. A converged retry
+does not advance or audit. Missing/disabled authority, indirect or inactive
+project IDs, and cross-project requests remain indistinguishable from missing.
+Valid edges, live source coordinates, and proposal evidence/result coordinates
+are preserved even when their referenced source has been purged; those
+coordinates are durable provenance and readers already redact unavailable
+live sources. Schema-22 rollback requires the normal verified pre-update backup
+restore because a schema-21 image rejects the newer manifest.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

@@ -69,12 +69,13 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 21 || len(manifest.Migrations) != 21 {
-		t.Fatalf("manifest=%#v, want exact v10-v21 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 22 || len(manifest.Migrations) != 22 {
+		t.Fatalf("manifest=%#v, want exact v10-v22 compatibility window", manifest)
 	}
-	usage := manifest.Migrations[20]
-	if usage.Version != 21 || usage.Name != "021_memory_usage" || usage.CompatibilityFloor != 10 || !strings.Contains(usage.SQL, "CREATE TABLE brain.memory_usage") {
-		t.Fatalf("unexpected memory-usage migration: %#v", usage)
+	reconciliation := manifest.Migrations[21]
+	if reconciliation.Version != 22 || reconciliation.Name != "022_memory_reference_reconciliation" ||
+		reconciliation.CompatibilityFloor != 10 || !strings.Contains(reconciliation.SQL, "CREATE FUNCTION brain.reconcile_memory_references") {
+		t.Fatalf("unexpected memory-reconciliation migration: %#v", reconciliation)
 	}
 	for index, migration := range manifest.Migrations {
 		want := int64(index + 1)
@@ -87,7 +88,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20, 21:
+		case 14, 15, 16, 17, 18, 19, 20, 21, 22:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
@@ -149,7 +150,10 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 20}, manifest) {
 		t.Fatal("compatible v20 schema must still apply the pending v21 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 21}, manifest) {
-		t.Fatal("current v21 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 21}, manifest) {
+		t.Fatal("compatible v21 schema must still apply the pending v22 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 22}, manifest) {
+		t.Fatal("current v22 schema reported a pending migration")
 	}
 }
