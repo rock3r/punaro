@@ -201,6 +201,218 @@ func testMemoryEvidenceSchemaDriftIntegration(ctx context.Context, t *testing.T,
 	}
 }
 
+func testMemoryDuplicateDetectionIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "duplicate actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "duplicate reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID, aliasProjectID, otherProjectID string
+	for name, destination := range map[string]*string{
+		"duplicate canonical": &projectID,
+		"duplicate alias":     &aliasProjectID,
+		"duplicate other":     &otherProjectID,
+	} {
+		if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ($1,$2) RETURNING id::text`, name, actor.ID).Scan(destination); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, grant := range []struct {
+		principal, project string
+		capability         Capability
+	}{
+		{actor.ID, projectID, CapabilityMemoryWrite},
+		{actor.ID, projectID, CapabilityMemoryAdminister},
+		{actor.ID, aliasProjectID, CapabilityMemoryWrite},
+		{actor.ID, otherProjectID, CapabilityMemoryWrite},
+		{actor.ID, otherProjectID, CapabilityMemoryAdminister},
+		{reader.ID, projectID, CapabilityMemoryRead},
+	} {
+		if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, grant.principal, grant.project, grant.capability); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create := func(project, key, idempotency, document string) MemoryMutationResult {
+		t.Helper()
+		result, createErr := app.CreateMemory(ctx, MemoryCreateRequest{
+			PrincipalID: actor.ID, ProjectID: project, IdempotencyKey: idempotency,
+			LogicalKey: key, Kind: "fact", Trust: "curated", Document: json.RawMessage(document),
+		})
+		if createErr != nil {
+			t.Fatalf("create duplicate fixture %s: %v", key, createErr)
+		}
+		return result
+	}
+	duplicateDocument := `{"fact":"same","nested":{"order":1}}`
+	keeper := create(projectID, "duplicate.keeper", "21212121-2121-4121-8121-212121212111", duplicateDocument)
+	direct := create(projectID, "duplicate.direct", "21212121-2121-4121-8121-212121212112", duplicateDocument)
+	stale := create(projectID, "duplicate.stale", "21212121-2121-4121-8121-212121212113", duplicateDocument)
+	stale, err = app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: stale.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212114", ExpectedETag: stale.ETag,
+		LogicalKey: "duplicate.stale", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"fact":"changed"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := create(projectID, "duplicate.current", "21212121-2121-4121-8121-212121212115", `{"fact":"old"}`)
+	current, err = app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: current.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212116", ExpectedETag: current.ETag,
+		LogicalKey: "duplicate.current", Kind: "fact", Trust: "curated", Document: json.RawMessage(duplicateDocument),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived := create(projectID, "duplicate.archived", "21212121-2121-4121-8121-212121212117", duplicateDocument)
+	if _, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: archived.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212118", ExpectedETag: archived.ETag, Archived: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	quarantined := create(projectID, "duplicate.quarantined", "21212121-2121-4121-8121-212121212123", duplicateDocument)
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines
+(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,1,1,'sensitive-field','/fact',decode(repeat('77',32),'hex'),$2)`, quarantined.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	alias := create(aliasProjectID, "duplicate.alias", "21212121-2121-4121-8121-212121212119", duplicateDocument)
+	other := create(otherProjectID, "duplicate.other", "21212121-2121-4121-8121-212121212120", duplicateDocument)
+	collision := create(projectID, "duplicate.collision", "21212121-2121-4121-8121-212121212121", `{"fact":"different despite forged hash"}`)
+	var originalCollisionHash []byte
+	if err := ownerDB.QueryRowContext(ctx, `SELECT content_sha256 FROM brain.memory_revisions WHERE item_id=$1 AND revision=1`, collision.ItemID).Scan(&originalCollisionHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions AS collision
+SET content_sha256=keeper.content_sha256
+FROM brain.memory_revisions AS keeper
+WHERE collision.item_id=$1 AND collision.revision=1 AND keeper.item_id=$2 AND keeper.revision=1`, collision.ItemID, keeper.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_items SET created_at='2020-01-01T00:00:00Z' WHERE id=$1`, keeper.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.project_lookup_aliases(alias_project_id,canonical_project_id) VALUES ($1,$2)`, aliasProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE relay.projects SET merged_into=$2,merged_at=statement_timestamp() WHERE id=$1`, aliasProjectID, projectID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := MemoryDuplicateRequest{PrincipalID: actor.ID, ProjectID: projectID, Limit: maxMemoryDuplicateCandidates}
+	page, err := app.DetectExactMemoryDuplicates(ctx, request)
+	if err != nil || page.More || len(page.Candidates) != 3 {
+		t.Fatalf("duplicate page=%#v err=%v", page, err)
+	}
+	wantDuplicates := map[string]int64{direct.ItemID: 1, current.ItemID: 2, alias.ItemID: 1}
+	for _, candidate := range page.Candidates {
+		wantRevision, ok := wantDuplicates[candidate.DuplicateItemID]
+		if !ok || candidate.KeeperItemID != keeper.ItemID || candidate.KeeperRevision != 1 || candidate.DuplicateRevision != wantRevision || candidate.ContentSHA256 == "" {
+			t.Fatalf("unexpected duplicate candidate=%#v", candidate)
+		}
+		delete(wantDuplicates, candidate.DuplicateItemID)
+	}
+	if len(wantDuplicates) != 0 {
+		t.Fatalf("missing duplicate candidates=%v", wantDuplicates)
+	}
+	bounded, err := app.DetectExactMemoryDuplicates(ctx, MemoryDuplicateRequest{PrincipalID: actor.ID, ProjectID: projectID, Limit: 2})
+	if err != nil || len(bounded.Candidates) != 2 || !bounded.More {
+		t.Fatalf("bounded duplicate page=%#v err=%v", bounded, err)
+	}
+	repeated, err := app.DetectExactMemoryDuplicates(ctx, MemoryDuplicateRequest{PrincipalID: actor.ID, ProjectID: aliasProjectID, Limit: 2})
+	if err != nil || len(repeated.Candidates) != len(bounded.Candidates) || repeated.More != bounded.More {
+		t.Fatalf("alias duplicate page=%#v err=%v", repeated, err)
+	}
+	for index := range bounded.Candidates {
+		if repeated.Candidates[index] != bounded.Candidates[index] {
+			t.Fatalf("duplicate order changed: first=%#v repeated=%#v", bounded, repeated)
+		}
+	}
+	if _, err := app.DetectExactMemoryDuplicates(ctx, MemoryDuplicateRequest{PrincipalID: reader.ID, ProjectID: projectID, Limit: 1}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-admin duplicate detection error=%v", err)
+	}
+	otherPage, err := app.DetectExactMemoryDuplicates(ctx, MemoryDuplicateRequest{PrincipalID: actor.ID, ProjectID: otherProjectID, Limit: 5})
+	if err != nil || len(otherPage.Candidates) != 0 || otherPage.More {
+		t.Fatalf("cross-project duplicate leak page=%#v other=%s err=%v", otherPage, other.ItemID, err)
+	}
+	quarantined, err = app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: quarantined.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212124", ExpectedETag: quarantined.ETag,
+		LogicalKey: "duplicate.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(duplicateDocument),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasedPage, err := app.DetectExactMemoryDuplicates(ctx, request)
+	if err != nil || len(releasedPage.Candidates) != 4 {
+		t.Fatalf("duplicate page after quarantine release=%#v err=%v", releasedPage, err)
+	}
+	releasedCandidate := false
+	for _, candidate := range releasedPage.Candidates {
+		if candidate.DuplicateItemID == quarantined.ItemID && candidate.DuplicateRevision == 2 {
+			releasedCandidate = true
+		}
+	}
+	if !releasedCandidate {
+		t.Fatalf("released quarantined duplicate missing from page=%#v", releasedPage)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: quarantined.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212125", ExpectedETag: quarantined.ETag,
+		LogicalKey: "duplicate.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"fact":"released and changed"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=$2 WHERE item_id=$1 AND revision=1`, collision.ItemID, originalCollisionHash); err != nil {
+		t.Fatal(err)
+	}
+	snapshotTx, err := app.brainPool().BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotBefore, err := detectExactMemoryDuplicatesInTx(ctx, snapshotTx, projectID, maxMemoryDuplicateCandidates)
+	if err != nil || len(snapshotBefore.Candidates) != 3 {
+		_ = snapshotTx.Rollback()
+		t.Fatalf("duplicate snapshot before update=%#v err=%v", snapshotBefore, err)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, ItemID: direct.ItemID,
+		IdempotencyKey: "21212121-2121-4121-8121-212121212122", ExpectedETag: direct.ETag,
+		LogicalKey: "duplicate.direct", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"fact":"no longer duplicate"}`),
+	}); err != nil {
+		_ = snapshotTx.Rollback()
+		t.Fatal(err)
+	}
+	snapshotAfter, err := detectExactMemoryDuplicatesInTx(ctx, snapshotTx, projectID, maxMemoryDuplicateCandidates)
+	if err != nil || len(snapshotAfter.Candidates) != len(snapshotBefore.Candidates) {
+		_ = snapshotTx.Rollback()
+		t.Fatalf("duplicate snapshot after concurrent update=%#v err=%v", snapshotAfter, err)
+	}
+	for index := range snapshotBefore.Candidates {
+		if snapshotAfter.Candidates[index] != snapshotBefore.Candidates[index] {
+			_ = snapshotTx.Rollback()
+			t.Fatalf("repeatable-read duplicate snapshot changed: before=%#v after=%#v", snapshotBefore, snapshotAfter)
+		}
+	}
+	if err := snapshotTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := app.DetectExactMemoryDuplicates(ctx, request)
+	if err != nil || len(fresh.Candidates) != 2 {
+		t.Fatalf("fresh duplicate page after concurrent update=%#v err=%v", fresh, err)
+	}
+	for _, candidate := range fresh.Candidates {
+		if candidate.DuplicateItemID == direct.ItemID {
+			t.Fatalf("fresh duplicate page retained updated item=%#v", candidate)
+		}
+	}
+}
+
 func testMemoryProposalSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
 	for _, drift := range []struct {

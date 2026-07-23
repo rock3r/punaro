@@ -239,6 +239,18 @@ behind permanent project lookup aliases under the same bounded pass. Ordinary
 evidence reads require the item to remain active, so expired evidence leaves
 prompt/search paths without destructive cleanup.
 
+Deterministic exact-content duplicate detection adds no schema. A
+`memory.administer` caller receives at most 64 content-free candidate rows from
+one repeatable-read snapshot of active current, non-quarantined revisions. The
+report includes the SHA-256, opaque item IDs, revision numbers, and layers; it
+never returns documents and never mutates, proposes, archives, or merges. Equal
+hashes must also have equal JSONB documents. The oldest item by creation time
+and opaque ID is only a stable reporting anchor. Canonical project detection
+covers scopes retained behind permanent lookup aliases, while an alias remains
+neither authority nor a writable target. The isolated two-connection brain
+pool and a two-second SQL statement deadline bound report work so it cannot
+starve mail. Application rollback needs no database change.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

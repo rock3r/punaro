@@ -39,7 +39,7 @@ unmounted, and their binaries are absent from production packaging. Their
 code, tests, RFCs, and vectors remain historical experimental evidence. The current
 executable release conditions are in
 [`docs/security-release-gates.md`](docs/security-release-gates.md).
-PostgreSQL schema 19 also contains the dark canonical Big Brain store and its
+PostgreSQL schema 20 also contains the dark canonical Big Brain store and its
 operator-approved proposal authority. A writer can stage one immutable,
 bounded create, update, archive, merge, or split proposal; an administrator
 can approve or reject its exact pending ETag. Approval locks every referenced
@@ -100,6 +100,21 @@ path, profile path, or credential value. Profiles and MCP mode do not add
 retry, queue, cache, Git discovery, project registry, fallback local brain,
 enrollment recovery, semantic retrieval, remote MCP/OAuth, or Compose Pi
 behavior.
+
+Schema 20 adds optional expiry only for explicit evidence. A bounded
+`memory.administer` maintenance transaction archives due active evidence,
+copies its exact revision-bound provenance, and covers historical scopes behind
+permanent project lookup aliases. Ordinary evidence reads require active state;
+expiry is reversible archive, not content deletion. Exact duplicate detection
+adds no schema: it is a
+read-only, repeatable-read administrator report over active current revisions,
+excluding active quarantine and including permanent-alias scopes. It verifies
+JSONB equality in addition to the hash grouping, returns only hashes, opaque
+item IDs, revisions, and layers, and caps each report at 64 duplicate
+candidates. The deterministic oldest item is a reporting anchor only:
+detection never merges, archives, proposes, or rewrites content. A two-second
+SQL deadline and the isolated two-connection brain pool bound its effect on the
+rest of the service.
 
 ## Goals
 
