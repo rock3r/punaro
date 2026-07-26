@@ -313,6 +313,24 @@ The operation performs no repair, reindex, generation/audit advancement, or
 schema mutation; rollback therefore removes only application code. Physical
 derived-generation cleanup and rebuild remain the M-19/M-20 boundary.
 
+Schema 23 begins that derived-data boundary without enabling semantic retrieval.
+An owner-created immutable active embedding generation pins a bounded model
+identity, model revision, and vector dimensionality. Each later immutable
+memory-revision insert coalesces one content-free work row for that generation
+and item in the same transaction. The row contains only generation/item/revision
+coordinates and the canonical SHA-256; it carries no document text, snippets,
+provider credentials, or caller authority. A newer revision replaces the
+pending coordinate and increments its fence, so a future worker cannot publish
+an older revision/hash after a concurrent write. With no active generation,
+canonical writes, lexical retrieval, prompt briefs, and mail are unchanged.
+
+The application role can inspect but cannot directly create, modify, or delete
+generation/work rows; the security-definer enqueue trigger is the only M19A
+writer. Provider calls, chunking, vector publication, retry diagnostics,
+semantic ranking, generation rebuild, and ANN remain disabled pending later
+M-19/M-20 slices. Schema-23 rollback requires the normal verified pre-update
+backup restore because a schema-22 image correctly refuses this newer schema.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns
