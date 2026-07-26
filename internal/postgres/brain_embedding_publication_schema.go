@@ -95,7 +95,7 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
           AND attribute.attacl IS NOT NULL
     ) AS exact
 ), table_acl AS (
-    SELECT count(*)=8 AND bool_and(NOT entry.is_grantable)
+    SELECT count(*)=9 AND bool_and(NOT entry.is_grantable)
        AND bool_and(role.rolname='punaro_owner' OR (role.rolname='punaro_app' AND entry.privilege_type='SELECT')) AS exact
     FROM pg_class AS relation
     CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS entry
