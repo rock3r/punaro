@@ -19,14 +19,17 @@ const (
 
 var memoryEmbeddingRevisionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]{0,63}$`)
 
-// MemoryEmbeddingGenerationState is the closed state for the one M19A
-// generation that may receive revision-bound work. M20 extends this with a
-// building state and atomic activation; M19A rows are otherwise immutable.
+// MemoryEmbeddingGenerationState is the closed state for an immutable derived
+// generation. M20A introduces a building generation beside the active one;
+// later M20 slices add caught-up validation and atomic activation.
 type MemoryEmbeddingGenerationState string
 
 const (
 	// MemoryEmbeddingGenerationActive accepts work for one pinned model.
 	MemoryEmbeddingGenerationActive MemoryEmbeddingGenerationState = "active"
+	// MemoryEmbeddingGenerationBuilding receives rebuild work but does not serve
+	// semantic retrieval until a later fenced activation slice validates it.
+	MemoryEmbeddingGenerationBuilding MemoryEmbeddingGenerationState = "building"
 )
 
 // MemoryEmbeddingGeneration pins the non-secret identity and dimensionality of
@@ -44,7 +47,7 @@ type MemoryEmbeddingGeneration struct {
 func (g MemoryEmbeddingGeneration) Validate() error {
 	if !validOpaqueID(g.ID) || !validMemoryToken(g.Model) || !memoryEmbeddingRevisionPattern.MatchString(g.Revision) ||
 		g.Dimensions < 1 || g.Dimensions > maxMemoryEmbeddingDimensions ||
-		g.State != MemoryEmbeddingGenerationActive {
+		g.State != MemoryEmbeddingGenerationActive && g.State != MemoryEmbeddingGenerationBuilding {
 		return errors.New("invalid memory embedding generation")
 	}
 	return nil

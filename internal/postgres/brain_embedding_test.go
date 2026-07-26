@@ -16,6 +16,11 @@ func TestMemoryEmbeddingGenerationValidation(t *testing.T) {
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid generation rejected: %v", err)
 	}
+	building := valid
+	building.State = MemoryEmbeddingGenerationBuilding
+	if err := building.Validate(); err != nil {
+		t.Fatalf("valid building generation rejected: %v", err)
+	}
 
 	for name, generation := range map[string]MemoryEmbeddingGeneration{
 		"friendly ID":          {ID: "friendly", Model: valid.Model, Revision: valid.Revision, Dimensions: valid.Dimensions, State: valid.State},

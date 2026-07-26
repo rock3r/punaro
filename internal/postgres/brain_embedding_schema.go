@@ -13,6 +13,7 @@ WITH objects AS (
     SELECT to_regclass('brain.embedding_generations') AS generations_oid,
            to_regclass('brain.embedding_jobs') AS jobs_oid,
            to_regclass('brain.embedding_generations_one_active') AS active_index_oid,
+		   to_regclass('brain.embedding_generations_one_building') AS building_index_oid,
            to_regclass('brain.embedding_jobs_claim_order') AS claim_index_oid,
            to_regclass('brain.embedding_jobs_expired_lease') AS expired_index_oid,
            to_regprocedure('brain.queue_embedding_revision()') AS queue_oid,
@@ -41,6 +42,8 @@ WITH objects AS (
       ('brain.embedding_jobs','completed_at','timestamp with time zone',false)
     UNION ALL
     SELECT 'brain.embedding_jobs','available_at','timestamp with time zone',true WHERE $1 >= 24
+	UNION ALL
+	SELECT 'brain.embedding_generations','start_change_sequence','bigint',false WHERE $1 >= 26
 ), actual_columns AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull
     FROM pg_attribute AS attribute,objects
@@ -57,6 +60,13 @@ WITH objects AS (
 ), index_safety AS (
     SELECT active_index_oid IS NOT NULL AND claim_index_oid IS NOT NULL AND expired_index_oid IS NOT NULL
       AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=active_index_oid AND indisunique AND indisvalid AND indisready)
+	  AND ($1 < 26 OR (building_index_oid IS NOT NULL
+	      AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=active_index_oid AND indisunique AND indisvalid AND indisready
+	          AND indkey='0'::int2vector AND pg_get_expr(indexprs,indrelid)='true'
+	          AND pg_get_expr(indpred,indrelid)='(state = ''active''::text)')
+	      AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=building_index_oid AND indisunique AND indisvalid AND indisready
+	          AND indkey='0'::int2vector AND pg_get_expr(indexprs,indrelid)='true'
+	          AND pg_get_expr(indpred,indrelid)='(state = ''building''::text)')))
       AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=claim_index_oid AND NOT indisunique AND indisvalid AND indisready
           AND pg_get_expr(indpred,indrelid)='(state = ''queued''::text)'
           AND (($1 < 24 AND indkey='1 12 2'::int2vector) OR ($1 >= 24 AND indkey='1 15 12 2'::int2vector)))
