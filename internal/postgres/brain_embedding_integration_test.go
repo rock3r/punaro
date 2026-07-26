@@ -51,33 +51,44 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 func testMemoryEmbeddingPublicationReturnTypeDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
 	const signature = "brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb)"
+	ownerConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerConn.Close() }()
 	var definition string
-	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef($1::regprocedure)`, signature).Scan(&definition); err != nil {
+	if err := ownerConn.QueryRowContext(ctx, `SELECT pg_get_functiondef($1::regprocedure)`, signature).Scan(&definition); err != nil {
 		t.Fatal(err)
 	}
 	altered := strings.Replace(definition, "RETURNS boolean", "RETURNS uuid", 1)
 	if altered == definition {
 		t.Fatal("publication routine definition did not contain its boolean return type")
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+	if _, err := ownerConn.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, altered); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+	if _, err := ownerConn.ExecContext(ctx, `SET check_function_bodies=off`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+	if _, err := ownerConn.ExecContext(ctx, altered); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `RESET check_function_bodies`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
 		t.Fatal(err)
 	}
 	if err := app.Ready(ctx); err == nil {
 		t.Fatal("readiness accepted publication routine return-type drift")
 	}
-	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+	if _, err := ownerConn.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, definition); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+	if _, err := ownerConn.ExecContext(ctx, definition); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+	if _, err := ownerConn.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
 		t.Fatal(err)
 	}
 	if err := app.Ready(ctx); err != nil {
