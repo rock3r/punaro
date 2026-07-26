@@ -456,6 +456,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testMemoryUsageAndArchiveCandidatesIntegration(ctx, t, app, ownerDB)
 	testMemoryReferenceReconciliationIntegration(ctx, t, app, ownerDB)
 	testMemoryReferenceReconciliationRaces(ctx, t, app, ownerDB)
+	testMemoryConsistencyIntegration(ctx, t, app, ownerDB)
 	testMemoryEvidenceIntegration(ctx, t, app, ownerDB)
 	testMemoryProposalIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
