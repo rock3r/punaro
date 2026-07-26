@@ -23,6 +23,9 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
 		{"publication write", `GRANT INSERT ON brain.embedding_chunks TO punaro_app`, `REVOKE INSERT ON brain.embedding_chunks FROM punaro_app`},
 		{"publication routine ACL", `REVOKE EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) TO punaro_app`},
+		{"publication routine public ACL", `GRANT EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) FROM PUBLIC`},
+		{"publication chunk revision reference", `ALTER TABLE brain.embedding_chunks DROP CONSTRAINT embedding_chunks_item_id_revision_fkey`, `ALTER TABLE brain.embedding_chunks ADD CONSTRAINT embedding_chunks_item_id_revision_fkey FOREIGN KEY (item_id,revision) REFERENCES brain.memory_revisions(item_id,revision) ON DELETE CASCADE`},
+		{"publication chunk range check", `ALTER TABLE brain.embedding_chunks DROP CONSTRAINT embedding_chunks_check`, `ALTER TABLE brain.embedding_chunks ADD CONSTRAINT embedding_chunks_check CHECK (end_offset > start_offset AND end_offset <= 262144)`},
 	} {
 		t.Run(drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
@@ -164,5 +167,45 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	if err := app.PublishMemoryEmbeddingWork(ctx, publication); !errors.Is(err, ErrStaleEmbeddingLease) {
 		t.Fatalf("replayed embedding publication error=%v", err)
+	}
+	leaseExpired := create("19191919-1919-4191-8191-191919191919", "expired publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191920", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != leaseExpired.ItemID {
+		t.Fatalf("expired publication claim=%#v err=%v", claimed, err)
+	}
+	expiredLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET lease_until=statement_timestamp()-interval '1 second' WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191921", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != leaseExpired.ItemID || claimed[0].Token == expiredLease.Token || claimed[0].LeaseGeneration <= expiredLease.LeaseGeneration {
+		t.Fatalf("reclaimed publication work=%#v expired=%#v err=%v", claimed, expiredLease, err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, MemoryEmbeddingPublication{Lease: expiredLease, Chunks: publication.Chunks}); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("expired embedding publication error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("expired embedding state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("expired embedding chunks=%d err=%v", count, err)
+	}
+	superseded := create("19191919-1919-4191-8191-191919191922", "superseded publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191923", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != superseded.ItemID {
+		t.Fatalf("superseded publication claim=%#v err=%v", claimed, err)
+	}
+	supersededLease := claimed[0]
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: superseded.ItemID, IdempotencyKey: "19191919-1919-4191-8191-191919191924", ExpectedETag: superseded.ETag, LogicalKey: "embedding-19191919-1919-4191-8191-191919191922", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"superseded publication revised"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, MemoryEmbeddingPublication{Lease: supersededLease, Chunks: publication.Chunks}); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("superseded embedding publication error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT revision,state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&job.Revision, &state); err != nil || job.Revision != supersededLease.Revision+1 || state != "queued" {
+		t.Fatalf("superseded embedding job revision=%d state=%q err=%v", job.Revision, state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("superseded embedding chunks=%d err=%v", count, err)
 	}
 }
