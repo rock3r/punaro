@@ -252,13 +252,18 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	if err != nil {
 		t.Fatal(err)
 	}
-	disconnectTx, err := disconnectConn.BeginTx(ctx, nil)
+	disconnectCtx, cancelDisconnect := context.WithCancel(ctx)
+	disconnectTx, err := disconnectConn.BeginTx(disconnectCtx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	validChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12}]`
-	if err := disconnectTx.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, disconnectLease.GenerationID, disconnectLease.ItemID, disconnectLease.Revision, disconnectLease.ContentSHA256, disconnectLease.Token, disconnectLease.LeaseGeneration, validChunks).Scan(&published); err != nil || !published {
+	if err := disconnectTx.QueryRowContext(disconnectCtx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, disconnectLease.GenerationID, disconnectLease.ItemID, disconnectLease.Revision, disconnectLease.ContentSHA256, disconnectLease.Token, disconnectLease.LeaseGeneration, validChunks).Scan(&published); err != nil || !published {
 		t.Fatalf("uncommitted publication=%t err=%v", published, err)
+	}
+	cancelDisconnect()
+	if err := disconnectTx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		t.Fatal(err)
 	}
 	if err := disconnectConn.Close(); err != nil {
 		t.Fatal(err)
