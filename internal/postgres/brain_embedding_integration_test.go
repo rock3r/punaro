@@ -158,6 +158,38 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 		{Ordinal: 0, ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StartOffset: 0, EndOffset: 12},
 		{Ordinal: 1, ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", StartOffset: 12, EndOffset: 28},
 	}}
+	rollback := create("19191919-1919-4191-8191-191919191925", "rollback publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191926", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != rollback.ItemID {
+		t.Fatalf("rollback publication claim=%#v err=%v", claimed, err)
+	}
+	rollbackLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset) VALUES ($1,$2,$3,0,decode($4,'hex'),0,12)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err != nil {
+		t.Fatal(err)
+	}
+	rollbackConn, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12},{"ordinal":0,"content_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","start_offset":12,"end_offset":28}]`
+	var published bool
+	err = rollbackConn.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, invalidChunks).Scan(&published)
+	if closeErr := rollbackConn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err == nil {
+		t.Fatalf("duplicate-ordinal publication succeeded: published=%t", published)
+	}
+	var rollbackState, rollbackToken, rollbackDigest string
+	var rollbackLeaseGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,lease_token::text,encode(content_sha256,'hex'),lease_generation FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, rollbackLease.GenerationID, rollbackLease.ItemID).Scan(&rollbackState, &rollbackToken, &rollbackDigest, &rollbackLeaseGeneration); err != nil || rollbackState != "running" || rollbackToken != rollbackLease.Token || rollbackDigest != rollbackLease.ContentSHA256 || rollbackLeaseGeneration != rollbackLease.LeaseGeneration {
+		t.Fatalf("failed publication changed embedding job state=%q token=%q digest=%q generation=%d err=%v", rollbackState, rollbackToken, rollbackDigest, rollbackLeaseGeneration, err)
+	}
+	var rollbackOrdinal, rollbackStart, rollbackEnd int
+	var rollbackChunkDigest string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT ordinal,encode(content_sha256,'hex'),start_offset,end_offset FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision).Scan(&rollbackOrdinal, &rollbackChunkDigest, &rollbackStart, &rollbackEnd); err != nil || rollbackOrdinal != 0 || rollbackChunkDigest != "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" || rollbackStart != 0 || rollbackEnd != 12 {
+		t.Fatalf("failed publication changed embedding chunk ordinal=%d digest=%q range=[%d,%d] err=%v", rollbackOrdinal, rollbackChunkDigest, rollbackStart, rollbackEnd, err)
+	}
 	if err := app.PublishMemoryEmbeddingWork(ctx, publication); err != nil {
 		t.Fatalf("embedding publication: %v", err)
 	}
