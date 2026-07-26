@@ -1,6 +1,9 @@
 package postgres
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestMemoryEmbeddingGenerationValidation(t *testing.T) {
 	valid := MemoryEmbeddingGeneration{
@@ -75,6 +78,32 @@ func TestMemoryEmbeddingClaimValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := request.normalized(); err == nil {
 				t.Fatalf("invalid claim accepted: %#v", request)
+			}
+		})
+	}
+}
+
+func TestMemoryEmbeddingPublicationValidation(t *testing.T) {
+	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{
+		GenerationID:  "11111111-1111-4111-8111-111111111111",
+		ItemID:        "22222222-2222-4222-8222-222222222222",
+		Revision:      1,
+		ContentSHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now()}
+	valid := MemoryEmbeddingPublication{Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 0, ContentSHA256: lease.ContentSHA256, StartOffset: 0, EndOffset: 32}}}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid embedding publication rejected: %v", err)
+	}
+	for name, publication := range map[string]MemoryEmbeddingPublication{
+		"no chunks":         {Lease: lease},
+		"nonzero first":     {Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 1, ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
+		"invalid digest":    {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: "bad", EndOffset: 32}}},
+		"empty range":       {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 0}}},
+		"overlapping range": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := publication.Validate(); err == nil {
+				t.Fatalf("invalid embedding publication accepted: %#v", publication)
 			}
 		})
 	}

@@ -338,6 +338,13 @@ chunks, vectors, successful publication, semantic ranking, generation rebuild,
 or ANN is enabled. Schema-24 rollback requires the normal verified pre-update
 backup restore because a schema-23 image correctly refuses this newer schema.
 
+Schema 25 permits only fenced success publication: a worker supplies bounded,
+ordered, non-overlapping, content-free chunk digest/offset coordinates. The
+owner routine persists them and changes the exact live lease to `succeeded` in
+one transaction; stale or replayed publications alter neither rows nor job.
+Chunk text, vectors, indexes, provider configuration, and semantic retrieval
+remain out of scope.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

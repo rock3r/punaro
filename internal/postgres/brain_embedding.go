@@ -1,7 +1,9 @@
 package postgres
 
 import (
+	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"time"
@@ -10,6 +12,7 @@ import (
 const (
 	maxMemoryEmbeddingDimensions = 4096
 	maxMemoryEmbeddingClaimBatch = 32
+	maxMemoryEmbeddingChunks     = 64
 	memoryEmbeddingMinLease      = 5 * time.Second
 	memoryEmbeddingMaxLease      = 5 * time.Minute
 )
@@ -55,6 +58,78 @@ type MemoryEmbeddingWork struct {
 	ItemID        string
 	Revision      int64
 	ContentSHA256 string
+}
+
+// MemoryEmbeddingChunk is content-free, revision-bound output metadata for
+// one derived fragment. The actual fragment and vector are deliberately not
+// stored in this M19C control-plane slice.
+type MemoryEmbeddingChunk struct {
+	Ordinal       int    `json:"ordinal"`
+	ContentSHA256 string `json:"content_sha256"`
+	StartOffset   int    `json:"start_offset"`
+	EndOffset     int    `json:"end_offset"`
+}
+
+func (chunk MemoryEmbeddingChunk) valid() bool {
+	if chunk.Ordinal < 0 || chunk.StartOffset < 0 || chunk.EndOffset <= chunk.StartOffset || chunk.EndOffset > 262144 || len(chunk.ContentSHA256) != 64 {
+		return false
+	}
+	digest, err := hex.DecodeString(chunk.ContentSHA256)
+	return err == nil && len(digest) == 32 && hex.EncodeToString(digest) == chunk.ContentSHA256
+}
+
+// MemoryEmbeddingPublication atomically stores bounded derived coordinates
+// and completes the exact lease that produced them.
+type MemoryEmbeddingPublication struct {
+	Lease  MemoryEmbeddingLease
+	Chunks []MemoryEmbeddingChunk
+}
+
+// Validate rejects malformed, unbounded, unordered, or overlapping derived
+// chunk coordinates before they reach the owner publication routine.
+func (publication MemoryEmbeddingPublication) Validate() error {
+	if !publication.Lease.valid() || len(publication.Chunks) < 1 || len(publication.Chunks) > maxMemoryEmbeddingChunks {
+		return errors.New("invalid embedding publication")
+	}
+	end := 0
+	for ordinal, chunk := range publication.Chunks {
+		if !chunk.valid() || chunk.Ordinal != ordinal || chunk.StartOffset < end {
+			return errors.New("invalid embedding publication")
+		}
+		end = chunk.EndOffset
+	}
+	return nil
+}
+
+// PublishMemoryEmbeddingWork atomically records derived chunk coordinates and
+// completes the exact running lease. A stale or superseded lease never alters
+// persisted derived metadata.
+func (d *Database) PublishMemoryEmbeddingWork(ctx context.Context, publication MemoryEmbeddingPublication) error {
+	if err := publication.Validate(); err != nil {
+		return err
+	}
+	chunks, err := json.Marshal(publication.Chunks)
+	if err != nil {
+		return errors.New("embedding publication cannot be encoded")
+	}
+	digest, _ := hex.DecodeString(publication.Lease.ContentSHA256)
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return mutationStartError(err, "embedding publication transaction cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	var changed bool
+	err = tx.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,$4,$5,$6,$7::jsonb)`, publication.Lease.GenerationID, publication.Lease.ItemID, publication.Lease.Revision, digest, publication.Lease.Token, publication.Lease.LeaseGeneration, chunks).Scan(&changed)
+	if err != nil {
+		return errors.New("embedding work could not be published")
+	}
+	if !changed {
+		return ErrStaleEmbeddingLease
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("embedding publication transaction could not commit")
+	}
+	return nil
 }
 
 // MemoryEmbeddingClaimRequest is the bounded, provider-free worker claim

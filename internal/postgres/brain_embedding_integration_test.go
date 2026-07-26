@@ -21,6 +21,8 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"worker routine ACL", `REVOKE EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) TO punaro_app`},
 		{"worker routine public ACL", `GRANT EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) FROM PUBLIC`},
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
+		{"publication write", `GRANT INSERT ON brain.embedding_chunks TO punaro_app`, `REVOKE INSERT ON brain.embedding_chunks FROM punaro_app`},
+		{"publication routine ACL", `REVOKE EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) TO punaro_app`},
 	} {
 		t.Run(drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
@@ -141,5 +143,26 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	var state, errorCode string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state,last_error_code FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, created.ItemID).Scan(&state, &errorCode); err != nil || state != "failed" || errorCode != "provider_terminal" {
 		t.Fatalf("terminal embedding state=%q code=%q err=%v", state, errorCode, err)
+	}
+	publishable := create("19191919-1919-4191-8191-191919191917", "publish chunks")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191918", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != publishable.ItemID {
+		t.Fatalf("publishable embedding claim=%#v err=%v", claimed, err)
+	}
+	publication := MemoryEmbeddingPublication{Lease: claimed[0], Chunks: []MemoryEmbeddingChunk{
+		{Ordinal: 0, ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StartOffset: 0, EndOffset: 12},
+		{Ordinal: 1, ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", StartOffset: 12, EndOffset: 28},
+	}}
+	if err := app.PublishMemoryEmbeddingWork(ctx, publication); err != nil {
+		t.Fatalf("embedding publication: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, publishable.ItemID).Scan(&state); err != nil || state != "succeeded" {
+		t.Fatalf("published embedding state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, generationID, publishable.ItemID, publication.Lease.Revision).Scan(&count); err != nil || count != len(publication.Chunks) {
+		t.Fatalf("published embedding chunks=%d err=%v", count, err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, publication); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("replayed embedding publication error=%v", err)
 	}
 }
