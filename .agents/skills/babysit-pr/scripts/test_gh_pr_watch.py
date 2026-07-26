@@ -142,6 +142,15 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(ready)
 
+    def test_is_pr_ready_to_merge_blocks_when_head_is_behind_base(self):
+        pr = self._base_pr()
+        pr["merge_state_status"] = "BEHIND"
+        self.assertFalse(watch.is_pr_ready_to_merge(
+            pr=pr,
+            checks_summary={"all_terminal": True, "failed_count": 0, "pending_count": 0, "passed_count": 2},
+            new_review_items=[], checks_terminal_elapsed=120, blocking_review_items=[],
+        ))
+
     def test_is_blocking_review_item_blocks_when_thread_resolution_is_unknown(self):
         created_at = "2026-01-01T00:00:00Z"
         created_at_seconds = watch.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()
