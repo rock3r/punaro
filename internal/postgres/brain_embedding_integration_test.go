@@ -242,6 +242,33 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	if err := ownerDB.QueryRowContext(ctx, `SELECT ordinal,encode(content_sha256,'hex'),start_offset,end_offset FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision).Scan(&rollbackOrdinal, &rollbackChunkDigest, &rollbackStart, &rollbackEnd); err != nil || rollbackOrdinal != 0 || rollbackChunkDigest != "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" || rollbackStart != 0 || rollbackEnd != 12 {
 		t.Fatalf("failed publication changed embedding chunk ordinal=%d digest=%q range=[%d,%d] err=%v", rollbackOrdinal, rollbackChunkDigest, rollbackStart, rollbackEnd, err)
 	}
+	disconnected := create("19191919-1919-4191-8191-191919191927", "disconnect publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191928", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != disconnected.ItemID {
+		t.Fatalf("disconnect publication claim=%#v err=%v", claimed, err)
+	}
+	disconnectLease := claimed[0]
+	disconnectConn, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disconnectTx, err := disconnectConn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12}]`
+	if err := disconnectTx.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, disconnectLease.GenerationID, disconnectLease.ItemID, disconnectLease.Revision, disconnectLease.ContentSHA256, disconnectLease.Token, disconnectLease.LeaseGeneration, validChunks).Scan(&published); err != nil || !published {
+		t.Fatalf("uncommitted publication=%t err=%v", published, err)
+	}
+	if err := disconnectConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, disconnectLease.GenerationID, disconnectLease.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("disconnect changed state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, disconnectLease.GenerationID, disconnectLease.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("disconnect chunks=%d err=%v", count, err)
+	}
 	if err := app.PublishMemoryEmbeddingWork(ctx, publication); err != nil {
 		t.Fatalf("embedding publication: %v", err)
 	}
