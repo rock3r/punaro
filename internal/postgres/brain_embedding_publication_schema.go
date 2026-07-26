@@ -87,10 +87,17 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
 ), routine_acl AS (
     SELECT NOT EXISTS (SELECT * FROM expected_routine_acl EXCEPT SELECT * FROM actual_routine_acl)
        AND NOT EXISTS (SELECT * FROM actual_routine_acl EXCEPT SELECT * FROM expected_routine_acl) AS exact
+), column_acl AS (
+    SELECT NOT EXISTS (
+        SELECT 1
+        FROM pg_attribute AS attribute,objects
+        WHERE attribute.attrelid=chunks_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
+          AND attribute.attacl IS NOT NULL
+    ) AS exact
 )
 SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact AND fence_safety.exact
-   AND routine_safety.exact AND routine_acl.exact
+   AND routine_safety.exact AND routine_acl.exact AND column_acl.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND NOT EXISTS (SELECT * FROM expected_relational_constraints EXCEPT SELECT * FROM actual_relational_constraints)
@@ -99,6 +106,6 @@ SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT N
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
    AND has_table_privilege('punaro_app',chunks_oid,'SELECT')
    AND NOT has_table_privilege('punaro_app',chunks_oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl`).Scan(&available)
+FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl`).Scan(&available)
 	return available, err
 }

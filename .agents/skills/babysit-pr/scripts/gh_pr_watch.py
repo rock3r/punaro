@@ -1051,14 +1051,10 @@ def is_blocking_review_item(item, head_sha, now_seconds=None):
         return False
     if str(item.get("kind") or "") != "review_comment":
         return False
-    commit_id = str(item.get("commit_id") or "")
-    if not commit_id or not head_sha or commit_id != head_sha:
-        return False
-
-    age_seconds = item_age_seconds(item, now_seconds=now_seconds)
-    if age_seconds is None:
-        return True
-    return age_seconds <= BLOCKING_REVIEW_ITEM_FRESH_SECONDS
+    # A failed GraphQL lookup leaves the thread's resolution state unknown.
+    # Do not infer resolution from the comment age or commit: an unresolved
+    # comment can outlive several pushes and must keep the merge gate closed.
+    return True
 
 
 def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):

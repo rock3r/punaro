@@ -123,7 +123,7 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(ready)
 
-    def test_is_blocking_review_item_ignores_stale_comments(self):
+    def test_is_blocking_review_item_blocks_when_thread_resolution_is_unknown(self):
         created_at = "2026-01-01T00:00:00Z"
         created_at_seconds = watch.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()
         stale_now = created_at_seconds + watch.BLOCKING_REVIEW_ITEM_FRESH_SECONDS + 1
@@ -133,7 +133,7 @@ class RetryEligibilityTests(unittest.TestCase):
             "created_at": created_at,
         }
 
-        self.assertFalse(
+        self.assertTrue(
             watch.is_blocking_review_item(item, head_sha="abc123", now_seconds=stale_now)
         )
 
@@ -663,7 +663,7 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertEqual(normalized[0]["updated_at"], "2026-01-01T01:00:00Z")
 
-    def test_fetch_new_review_items_fallback_heuristic_when_unresolved_lookup_errors(self):
+    def test_fetch_new_review_items_blocks_when_unresolved_lookup_errors(self):
         pr = {
             "repo": "ADUX-sandbox/Compose-Pi",
             "number": 716,
@@ -706,7 +706,8 @@ class RetryEligibilityTests(unittest.TestCase):
                 authenticated_login="octocat",
             )
 
-        self.assertEqual(blocking_items, [])
+        self.assertEqual(len(blocking_items), 1)
+        self.assertEqual(blocking_items[0]["id"], "42")
 
     def test_hung_checks_from_checks_flags_never_started_pending_checks(self):
         checks = [
