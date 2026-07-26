@@ -269,6 +269,37 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, disconnectLease.GenerationID, disconnectLease.ItemID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("disconnect chunks=%d err=%v", count, err)
 	}
+	unauthorized := create("19191919-1919-4191-8191-191919191929", "unauthorized publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191930", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != unauthorized.ItemID {
+		t.Fatalf("unauthorized publication claim=%#v err=%v", claimed, err)
+	}
+	unauthorizedLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `CREATE ROLE embedding_publication_denied NOLOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = ownerDB.ExecContext(context.Background(), `DROP ROLE embedding_publication_denied`) }()
+	ownerConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `SET ROLE embedding_publication_denied`); err != nil {
+		t.Fatal(err)
+	}
+	err = ownerConn.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID, unauthorizedLease.Revision, unauthorizedLease.ContentSHA256, unauthorizedLease.Token, unauthorizedLease.LeaseGeneration, validChunks).Scan(&published)
+	_, _ = ownerConn.ExecContext(ctx, `RESET ROLE`)
+	if closeErr := ownerConn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if !isSQLState(err, "42501") {
+		t.Fatalf("unauthorized publication error=%v, want permission denied", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("unauthorized publication changed state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unauthorized publication chunks=%d err=%v", count, err)
+	}
 	if err := app.PublishMemoryEmbeddingWork(ctx, publication); err != nil {
 		t.Fatalf("embedding publication: %v", err)
 	}
