@@ -326,10 +326,17 @@ canonical writes, lexical retrieval, prompt briefs, and mail are unchanged.
 
 The application role can inspect but cannot directly create, modify, or delete
 generation/work rows; the security-definer enqueue trigger is the only M19A
-writer. Provider calls, chunking, vector publication, retry diagnostics,
-semantic ranking, generation rebuild, and ANN remain disabled pending later
-M-19/M-20 slices. Schema-23 rollback requires the normal verified pre-update
-backup restore because a schema-22 image correctly refuses this newer schema.
+writer. Schema 24 adds the only worker mutation path: bounded
+security-definer claim and retry routines. They first honor the global
+update/backup mutation fence, issue a fresh holder/token and
+monotonic lease generation, use database time and `SKIP LOCKED`, persist a
+bounded retry schedule, and require the exact generation/item/revision/hash and
+lease fence to release work. A stale, replayed, or superseded worker cannot
+alter newer work; the twenty-fifth failed attempt becomes a code-only terminal
+diagnostic. This remains a provider-free control plane: no document text,
+chunks, vectors, successful publication, semantic ranking, generation rebuild,
+or ANN is enabled. Schema-24 rollback requires the normal verified pre-update
+backup restore because a schema-23 image correctly refuses this newer schema.
 
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
