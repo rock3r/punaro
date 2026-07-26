@@ -381,6 +381,17 @@ history fails closed at project-merge preview/approval rather than stranding or
 widening access.
 WebSocket reconnect never alters delivery cursors.
 
+Schema version 23 introduces an inert semantic-work frontier. An immutable
+owner-created active generation pins a bounded embedding model identity,
+revision, and vector dimension. Every later canonical revision insert
+coalesces a derived work coordinate containing only generation/item/revision
+and canonical SHA-256; no document text, credential, provider request, or
+semantic result is present in this slice. A newer revision supersedes queued
+work and advances its fence. With no active generation—or with no worker—the
+canonical, lexical, prompt-brief, authorization, and mail paths remain
+available. A later worker must recheck the exact generation, revision, hash,
+and lease before it may publish derived chunks.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the
