@@ -1389,6 +1389,13 @@ class CodeRabbitReviewSurfacingTests(unittest.TestCase):
         self.assertEqual(blocking_items[0]["id"], "555")
 
 
+class ReviewThreadGraphQLPayloadTests(unittest.TestCase):
+    def test_rejects_graphql_errors_instead_of_returning_no_blockers(self):
+        with patch.object(watch, "gh_json", return_value={"data": None, "errors": [{"message": "boom"}]}):
+            with self.assertRaises(watch.GhCommandError):
+                watch.get_unresolved_review_comment_ids("owner/repo", 1)
+
+
 class GetPrIssueReactionsTests(unittest.TestCase):
     def test_paginates_reactions_via_list_helper(self):
         """Reactions must be fetched across all pages: a bot's 👀 can land on a

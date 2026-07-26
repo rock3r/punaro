@@ -871,11 +871,19 @@ def get_unresolved_review_comment_ids(repo, pr_number):
         if not isinstance(payload, dict):
             raise GhCommandError("Unexpected GraphQL payload for review threads")
 
-        data = payload.get("data") or {}
-        repository = data.get("repository") or {}
-        pull_request = repository.get("pullRequest") or {}
-        review_threads = pull_request.get("reviewThreads") or {}
-        nodes = review_threads.get("nodes") or []
+        data = payload.get("data")
+        if payload.get("errors") or not isinstance(data, dict):
+            raise GhCommandError("GraphQL review-thread lookup returned errors or no data")
+        repository = data.get("repository")
+        if not isinstance(repository, dict):
+            raise GhCommandError("Unexpected GraphQL repository payload for review threads")
+        pull_request = repository.get("pullRequest")
+        if not isinstance(pull_request, dict):
+            raise GhCommandError("Unexpected GraphQL pull-request payload for review threads")
+        review_threads = pull_request.get("reviewThreads")
+        if not isinstance(review_threads, dict):
+            raise GhCommandError("Unexpected GraphQL reviewThreads payload")
+        nodes = review_threads.get("nodes")
 
         if not isinstance(nodes, list):
             raise GhCommandError("Unexpected reviewThreads.nodes payload")
