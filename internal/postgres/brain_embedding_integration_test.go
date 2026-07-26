@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,11 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"application read", `REVOKE SELECT ON brain.embedding_generations FROM punaro_app`, `GRANT SELECT ON brain.embedding_generations TO punaro_app`},
 		{"queue trigger", `ALTER TABLE brain.memory_revisions DISABLE TRIGGER memory_revision_embedding_queue`, `ALTER TABLE brain.memory_revisions ENABLE TRIGGER memory_revision_embedding_queue`},
 		{"claim index", `DROP INDEX brain.embedding_jobs_claim_order`, `CREATE INDEX embedding_jobs_claim_order ON brain.embedding_jobs (generation_id, available_at, created_at, item_id) WHERE state='queued'`},
+		{"building generation index", `DROP INDEX brain.embedding_generations_one_building`, `CREATE UNIQUE INDEX embedding_generations_one_building ON brain.embedding_generations ((true)) WHERE state='building'`},
+		{"building generation key expression", `DROP INDEX brain.embedding_generations_one_building; CREATE UNIQUE INDEX embedding_generations_one_building ON brain.embedding_generations (id) WHERE state='building'`, `DROP INDEX brain.embedding_generations_one_building; CREATE UNIQUE INDEX embedding_generations_one_building ON brain.embedding_generations ((true)) WHERE state='building'`},
+		{"generation state fence", `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_state_check; ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_state_check CHECK (state IS NOT NULL)`, `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_state_check; ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_state_check CHECK ((state = 'active' AND start_change_sequence IS NULL) OR (state = 'building' AND start_change_sequence >= 0))`},
+		{"legacy generation tuple uniqueness", `ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_model_model_revision_dimensions_key UNIQUE (model,model_revision,dimensions)`, `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_model_model_revision_dimensions_key`},
+		{"rebuild routine ACL", `GRANT EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) TO punaro_app`, `REVOKE EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) FROM punaro_app`},
 		{"worker routine ACL", `REVOKE EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) TO punaro_app`},
 		{"worker routine public ACL", `GRANT EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) FROM PUBLIC`},
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
@@ -48,6 +54,40 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		})
 	}
 	testMemoryEmbeddingPublicationReturnTypeDrift(ctx, t, app, ownerDB)
+	testMemoryEmbeddingRebuildRoutineACLDrift(ctx, t, app, ownerDB)
+}
+
+func testMemoryEmbeddingRebuildRoutineACLDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	const role = "embedding_rebuild_unexpected"
+	if _, err := ownerDB.ExecContext(ctx, `CREATE ROLE `+role+` NOLOGIN`); err != nil { // #nosec G202 -- fixed role name.
+		t.Fatal(err)
+	}
+	defer func() { _, _ = ownerDB.ExecContext(context.Background(), `DROP ROLE `+role) }()                                                        // #nosec G202 -- fixed role name.
+	if _, err := ownerDB.ExecContext(ctx, `GRANT EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) TO `+role); err != nil { // #nosec G202 -- fixed role name.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted unexpected rebuild routine grantee")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) FROM `+role); err != nil { // #nosec G202 -- fixed role name.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after rebuild routine ACL restoration: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) TO PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted public rebuild routine grantee")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) FROM PUBLIC`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after public rebuild routine ACL restoration: %v", err)
+	}
 }
 
 func testMemoryEmbeddingPublicationReturnTypeDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -354,5 +394,89 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("superseded embedding chunks=%d err=%v", count, err)
+	}
+}
+
+func testMemoryEmbeddingGenerationRebuildIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "embedding rebuild actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('embedding rebuild project',$1) RETURNING id::text`, actor.ID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, projectID, CapabilityMemoryWrite); err != nil {
+		t.Fatal(err)
+	}
+	create := func(key, title string) MemoryMutationResult {
+		t.Helper()
+		result, createErr := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: key, LogicalKey: "rebuild-" + key, Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":` + strconvQuote(title) + `}`)})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return result
+	}
+	before := create("19191919-1919-4191-8191-191919191941", "before rebuild")
+	var activeID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.embedding_generations WHERE state='active'`).Scan(&activeID); err != nil {
+		t.Fatalf("active generation: %v", err)
+	}
+	var beforeSequence, buildingSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT change_sequence FROM jobs.server_state WHERE singleton`).Scan(&beforeSequence); err != nil {
+		t.Fatal(err)
+	}
+	var buildingID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT generation_id::text,start_change_sequence FROM brain.start_embedding_generation($1,$2,$3)`, "local.e5-base", "2026-07-01", 768).Scan(&buildingID, &buildingSequence); err != nil {
+		t.Fatalf("start embedding rebuild: %v", err)
+	}
+	if buildingSequence != beforeSequence {
+		t.Fatalf("building watermark=%d want start sequence %d", buildingSequence, beforeSequence)
+	}
+	var state string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_generations WHERE id=$1`, buildingID).Scan(&state); err != nil || state != "building" {
+		t.Fatalf("building generation state=%q err=%v", state, err)
+	}
+	var revision int64
+	var beforeJobs int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, buildingID, before.ItemID).Scan(&beforeJobs); err != nil || beforeJobs != 0 {
+		t.Fatalf("unbounded rebuild snapshot jobs=%d err=%v", beforeJobs, err)
+	}
+	after := create("19191919-1919-4191-8191-191919191942", "after rebuild")
+	for _, generationID := range []string{activeID, buildingID} {
+		if err := ownerDB.QueryRowContext(ctx, `SELECT revision FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, after.ItemID).Scan(&revision); err != nil || revision != after.Revision {
+			t.Fatalf("generation %s post-start job revision=%d want=%d err=%v", generationID, revision, after.Revision, err)
+		}
+	}
+	updated, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: after.ItemID, IdempotencyKey: "19191919-1919-4191-8191-191919191943", ExpectedETag: after.ETag, LogicalKey: "rebuild-19191919-1919-4191-8191-191919191942", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"after rebuild revised"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, generationID := range []string{activeID, buildingID} {
+		if err := ownerDB.QueryRowContext(ctx, `SELECT revision FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, updated.ItemID).Scan(&revision); err != nil || revision != updated.Revision {
+			t.Fatalf("generation %s coalesced job revision=%d want=%d err=%v", generationID, revision, updated.Revision, err)
+		}
+	}
+	concurrentCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	concurrentResults := make(chan error, 8)
+	for i := 0; i < cap(concurrentResults); i++ {
+		i := i
+		go func() {
+			_, createErr := app.CreateMemory(concurrentCtx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: fmt.Sprintf("19191919-1919-4191-8191-%012d", 1944+i), LogicalKey: fmt.Sprintf("rebuild-concurrent-%d", i), Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"concurrent rebuild write"}`)})
+			concurrentResults <- createErr
+		}()
+	}
+	for i := 0; i < cap(concurrentResults); i++ {
+		if createErr := <-concurrentResults; createErr != nil {
+			t.Fatalf("concurrent embedding enqueue write %d: %v", i, createErr)
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `SELECT generation_id FROM brain.start_embedding_generation($1,$2,$3)`, "local.e5-xl", "2026-07-01", 1536); err == nil {
+		t.Fatal("second building generation succeeded")
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT generation_id FROM brain.start_embedding_generation($1,$2,$3)`, "local.e5-xl", "2026-07-01", 1536); err == nil {
+		t.Fatal("application role started an embedding rebuild")
 	}
 }

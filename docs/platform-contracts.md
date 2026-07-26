@@ -345,6 +345,22 @@ one transaction; stale or replayed publications alter neither rows nor job.
 Chunk text, vectors, indexes, provider configuration, and semantic retrieval
 remain out of scope.
 
+Schema 26 begins a fenced generation rebuild while keeping the active
+generation as the only serving generation. The owner-only start routine holds
+a transaction-scoped advisory fence before the installation change-sequence
+row lock, records the current sequence on a single immutable `building`
+generation, and returns without scanning canonical rows. The memory-revision
+enqueue trigger holds the same advisory fence before selecting active/building
+generations, so every later revision queues for both. Ordinary enqueues use
+the shared advisory lock while rebuild start retains its exclusive lock. The following
+rebuild-worker slice must scan revisions at or before the recorded watermark
+through a bounded, resumable cursor; start itself cannot block ordinary writes
+or allocate one derived job per corpus item. Application callers cannot start
+a rebuild or mutate generation rows directly. Worker execution, caught-up
+watermarking, validation, activation, vectors, semantic search, and RRF remain
+later slices; rollback again requires verified pre-update restore because the
+schema is additive derived control state.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

@@ -409,6 +409,20 @@ and terminally completes the exact unexpired lease only while the revision is
 current. It still stores no fragment text, provider credential, vector, index,
 or semantic result.
 
+Schema version 26 establishes the rebuild starting boundary without activating
+semantic retrieval. A schema-owner-only routine takes the same
+transaction-scoped advisory fence as revision enqueueing, then locks the
+installation change-sequence row and records that sequence on one immutable
+`building` generation. The revision enqueue trigger takes the shared form of
+that advisory fence,
+so every subsequent revision is atomically queued for both immutable active
+and building generations. The bounded, resumable scan of canonical revisions
+at or before that watermark remains the following rebuild-worker slice; start
+itself never scans an unbounded corpus. At most one building generation exists;
+the active generation remains the sole serving generation. There is still no
+provider, vector storage, caught-up watermark, activation, semantic ranking,
+or client-facing semantic surface.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the
