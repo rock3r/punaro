@@ -432,7 +432,7 @@ def summarize_checks(checks):
         bucket = str(check.get("bucket") or "").lower()
         if is_pending_check(check):
             pending_count += 1
-        elif bucket == "fail":
+        elif bucket in ("fail", "cancel"):
             failed_count += 1
         elif bucket == "pass":
             passed_count += 1

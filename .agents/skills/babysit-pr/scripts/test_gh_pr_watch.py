@@ -1245,14 +1245,16 @@ class SkippingChecksTests(unittest.TestCase):
         )
         self.assertIn("diagnose_skipping_checks", actions)
 
-    def test_summarize_checks_counts_skipping(self):
+    def test_summarize_checks_counts_skipping_and_cancelled_as_failures(self):
         checks = [
             {"bucket": "pass", "state": "SUCCESS"},
+            {"bucket": "cancel", "state": "CANCELLED"},
             {"bucket": "skipping", "state": "SKIPPING"},
             {"bucket": "neutral", "state": "NEUTRAL"},
         ]
         summary = watch.summarize_checks(checks)
         self.assertEqual(summary["passed_count"], 1)
+        self.assertEqual(summary["failed_count"], 1)
         self.assertEqual(summary["skipping_count"], 2)
         self.assertTrue(summary["all_terminal"])
 

@@ -94,10 +94,17 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
         WHERE attribute.attrelid=chunks_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
           AND attribute.attacl IS NOT NULL
     ) AS exact
+), table_acl AS (
+    SELECT count(*)=8 AND bool_and(NOT entry.is_grantable)
+       AND bool_and(role.rolname='punaro_owner' OR (role.rolname='punaro_app' AND entry.privilege_type='SELECT')) AS exact
+    FROM pg_class AS relation
+    CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,objects
+    WHERE relation.oid=chunks_oid
 )
 SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT NULL
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact AND fence_safety.exact
-   AND routine_safety.exact AND routine_acl.exact AND column_acl.exact
+   AND routine_safety.exact AND routine_acl.exact AND column_acl.exact AND table_acl.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND NOT EXISTS (SELECT * FROM expected_relational_constraints EXCEPT SELECT * FROM actual_relational_constraints)
@@ -106,6 +113,6 @@ SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT N
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
    AND has_table_privilege('punaro_app',chunks_oid,'SELECT')
    AND NOT has_table_privilege('punaro_app',chunks_oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl`).Scan(&available)
+FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl,table_acl`).Scan(&available)
 	return available, err
 }
