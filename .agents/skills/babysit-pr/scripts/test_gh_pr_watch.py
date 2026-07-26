@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,24 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 import gh_pr_watch as watch
+
+
+class PrChecksExitCodeTests(unittest.TestCase):
+    def test_get_pr_checks_parses_semantic_nonzero_exit_codes(self):
+        for exit_code, bucket in ((1, "fail"), (8, "pending")):
+            with self.subTest(exit_code=exit_code):
+                payload = json.dumps([{"bucket": bucket}])
+                error = subprocess.CalledProcessError(
+                    exit_code,
+                    ["gh", "pr", "checks"],
+                    output=payload,
+                    stderr="",
+                )
+                with patch.object(watch.subprocess, "run", side_effect=error):
+                    self.assertEqual(
+                        watch.get_pr_checks("62", repo="rock3r/punaro"),
+                        [{"bucket": bucket}],
+                    )
 
 
 class RetryEligibilityTests(unittest.TestCase):

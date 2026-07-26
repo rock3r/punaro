@@ -202,7 +202,7 @@ def _format_gh_error(cmd, err):
     return "\n".join(parts)
 
 
-def gh_text(args, repo=None):
+def gh_text(args, repo=None, allowed_exit_codes=(0,)):
     cmd = ["gh"]
     # `gh api` does not accept `-R/--repo` on all gh versions. The watcher's
     # API calls use explicit endpoints (e.g. repos/{owner}/{repo}/...), so the
@@ -215,12 +215,14 @@ def gh_text(args, repo=None):
     except FileNotFoundError as err:
         raise GhCommandError("`gh` command not found") from err
     except subprocess.CalledProcessError as err:
+        if err.returncode in allowed_exit_codes:
+            return err.stdout
         raise GhCommandError(_format_gh_error(cmd, err)) from err
     return proc.stdout
 
 
-def gh_json(args, repo=None):
-    raw = gh_text(args, repo=repo).strip()
+def gh_json(args, repo=None, allowed_exit_codes=(0,)):
+    raw = gh_text(args, repo=repo, allowed_exit_codes=allowed_exit_codes).strip()
     if not raw:
         return None
     try:
@@ -409,7 +411,11 @@ def get_pr_checks(pr_spec, repo):
     if parsed["value"] is not None:
         cmd.append(parsed["value"])
     cmd.extend(["--json", checks_fields()])
-    data = gh_json(cmd, repo=repo)
+    # `gh pr checks` deliberately exits 1 for failed checks and 8 for pending
+    # checks, while still writing the complete JSON status payload to stdout.
+    # These are watcher inputs, not command failures; every other gh call
+    # retains the fail-closed default of accepting exit code 0 only.
+    data = gh_json(cmd, repo=repo, allowed_exit_codes=(0, 1, 8))
     if data is None:
         return []
     if not isinstance(data, list):
