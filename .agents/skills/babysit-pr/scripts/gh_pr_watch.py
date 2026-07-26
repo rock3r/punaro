@@ -74,7 +74,6 @@ MERGE_CONFLICT_OR_BLOCKING_STATES = {
 # Merge state values that indicate a real content conflict which will not
 # self-resolve by waiting and should be surfaced immediately.
 MERGE_CONFLICT_STATES = {
-    "BEHIND",
     "DIRTY",
 }
 GREEN_STATE_MAX_POLL_SECONDS = 60
@@ -1311,6 +1310,10 @@ def is_merge_conflicted(pr):
     return merge_state_status in MERGE_CONFLICT_STATES
 
 
+def is_pr_behind(pr):
+    return str(pr.get("merge_state_status") or "") == "BEHIND"
+
+
 def pending_check_key(check):
     """Return a stable identity key for a pending check across snapshots."""
     name = str(check.get("name") or "")
@@ -1432,6 +1435,8 @@ def recommend_actions(
 
     if is_merge_conflicted(pr):
         actions.append("diagnose_merge_conflict")
+    if is_pr_behind(pr):
+        actions.append("diagnose_branch_behind")
 
     if is_pr_ready_to_merge(
         pr,
@@ -1814,6 +1819,8 @@ def should_stop_watching(actions):
     if "diagnose_skipping_checks" in action_set:
         return True
     if "diagnose_merge_conflict" in action_set and "wait_bugbot" not in action_set:
+        return True
+    if "diagnose_branch_behind" in action_set and "wait_bugbot" not in action_set:
         return True
     return False
 

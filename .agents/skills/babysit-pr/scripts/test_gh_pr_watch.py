@@ -195,6 +195,13 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertIn("diagnose_merge_conflict", actions)
 
+    def test_recommend_actions_surfaces_behind_branch_without_conflict(self):
+        pr = self._base_pr()
+        pr["merge_state_status"] = "BEHIND"
+        actions = watch.recommend_actions(pr=pr, checks_summary={"all_terminal": False, "failed_count": 0, "pending_count": 0, "passed_count": 0}, failed_runs=[], new_review_items=[], hung_checks=[], retries_used=0, max_retries=3)
+        self.assertIn("diagnose_branch_behind", actions)
+        self.assertNotIn("diagnose_merge_conflict", actions)
+
     def test_recommend_actions_hard_blocks_bugbot_non_success(self):
         actions = watch.recommend_actions(
             pr=self._base_pr(),
