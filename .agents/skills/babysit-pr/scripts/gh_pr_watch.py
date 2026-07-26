@@ -782,13 +782,19 @@ def summarize_coderabbit_gate(checks, reactions):
     # this covers a pending rerun appearing alongside an older completed entry,
     # regardless of their order in the `gh pr checks` output.
     check_pending = any(is_pending_check(check) for check in cr_checks)
+    reactions_unknown = reactions is None
     has_eyes = _bot_has_eyes_reaction(reactions, is_coderabbit_login)
     has_any_reaction = _bot_has_any_reaction(reactions, is_coderabbit_login)
 
     active = check_present or has_any_reaction
-    reviewing = check_pending or has_eyes
+    # Once CodeRabbit has an observed check, a failed reaction lookup cannot
+    # prove that its review reaction was removed. Preserve the Codex gate's
+    # fail-closed behavior until reactions can be read again.
+    reviewing = check_pending or has_eyes or (check_present and reactions_unknown)
 
-    if reviewing:
+    if reactions_unknown and check_present:
+        status = "unknown"
+    elif reviewing:
         status = "in_progress"
     elif active:
         status = "active"

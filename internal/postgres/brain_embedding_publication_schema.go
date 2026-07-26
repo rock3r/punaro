@@ -69,7 +69,7 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
 ), fence_safety AS (
     SELECT count(*)=1 AND bool_and(trigger_row.tgenabled='O' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=62) AS exact
     FROM pg_trigger AS trigger_row,objects
-    WHERE trigger_row.tgrelid=chunks_oid AND trigger_row.tgname='application_mutation_fence' AND NOT trigger_row.tgisinternal
+    WHERE trigger_row.tgrelid=chunks_oid AND NOT trigger_row.tgisinternal
 ), routine_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proc.proowner)='punaro_owner' AND proc.prokind='f'
         AND proc.prorettype='boolean'::regtype AND NOT proc.proretset AND proc.prosecdef

@@ -1511,6 +1511,13 @@ class CodeRabbitGateTests(unittest.TestCase):
         self.assertFalse(gate["reviewing"])
         self.assertEqual(gate["status"], "active")
 
+    def test_gate_blocks_when_reactions_are_unknown_after_check_completion(self):
+        checks = [{"name": "CodeRabbit", "bucket": "pass", "state": "SUCCESS"}]
+        gate = watch.summarize_coderabbit_gate(checks, None)
+        self.assertTrue(gate["active"])
+        self.assertTrue(gate["reviewing"])
+        self.assertEqual(gate["status"], "unknown")
+
     def test_gate_reviewing_when_coderabbit_eyes_reaction_without_check(self):
         reactions = [{"content": "eyes", "user": {"login": "coderabbitai[bot]"}}]
         gate = watch.summarize_coderabbit_gate([], reactions)
