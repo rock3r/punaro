@@ -74,6 +74,7 @@ MERGE_CONFLICT_OR_BLOCKING_STATES = {
 # Merge state values that indicate a real content conflict which will not
 # self-resolve by waiting and should be surfaced immediately.
 MERGE_CONFLICT_STATES = {
+    "BEHIND",
     "DIRTY",
 }
 GREEN_STATE_MAX_POLL_SECONDS = 60
