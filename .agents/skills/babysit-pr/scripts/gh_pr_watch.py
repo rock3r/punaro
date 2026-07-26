@@ -739,7 +739,10 @@ def summarize_codex_gate(reactions):
     lookup failed).
     """
     if reactions is None:
-        return {"reviewing": False, "status": "unknown"}
+        # A transient reactions API failure must never be interpreted as proof
+        # that Codex removed its active review reaction. Keep the merge gate
+        # closed and let the next polling cycle retry the lookup.
+        return {"reviewing": True, "status": "unknown"}
     if _bot_has_eyes_reaction(reactions, is_codex_bot_login):
         return {"reviewing": True, "status": "in_progress"}
     return {"reviewing": False, "status": "idle"}

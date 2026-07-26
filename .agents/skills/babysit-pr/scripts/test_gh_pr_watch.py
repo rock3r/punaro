@@ -1153,6 +1153,29 @@ class CodexGateTests(unittest.TestCase):
         )
         self.assertTrue(ready)
 
+    def test_codex_unknown_blocks_merge_readiness(self):
+        pr = {
+            "closed": False,
+            "merged": False,
+            "mergeable": "MERGEABLE",
+            "merge_state_status": "CLEAN",
+            "review_decision": "APPROVED",
+        }
+        checks = {
+            "all_terminal": True,
+            "failed_count": 0,
+            "pending_count": 0,
+            "passed_count": 2,
+            "skipping_count": 0,
+        }
+        ready = watch.is_pr_ready_to_merge(
+            pr, checks, new_review_items=[], checks_terminal_elapsed=120,
+            blocking_review_items=[],
+            bugbot_gate={"required": True, "is_success": True},
+            codex_gate={"reviewing": True, "status": "unknown"},
+        )
+        self.assertFalse(ready)
+
     def test_recommend_actions_emits_wait_codex(self):
         pr = {
             "closed": False,
@@ -1385,7 +1408,7 @@ class CodexGateReactionTests(unittest.TestCase):
 
     def test_unknown_when_reactions_unavailable(self):
         gate = watch.summarize_codex_gate(None)
-        self.assertFalse(gate["reviewing"])
+        self.assertTrue(gate["reviewing"])
         self.assertEqual(gate["status"], "unknown")
 
 
