@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,6 +22,15 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"worker routine ACL", `REVOKE EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) TO punaro_app`},
 		{"worker routine public ACL", `GRANT EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) FROM PUBLIC`},
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
+		{"publication write", `GRANT INSERT ON brain.embedding_chunks TO punaro_app`, `REVOKE INSERT ON brain.embedding_chunks FROM punaro_app`},
+		{"publication column write", `GRANT UPDATE (content_sha256) ON brain.embedding_chunks TO punaro_app`, `REVOKE UPDATE (content_sha256) ON brain.embedding_chunks FROM punaro_app`},
+		{"publication public write", `GRANT UPDATE ON brain.embedding_chunks TO PUBLIC`, `REVOKE UPDATE ON brain.embedding_chunks FROM PUBLIC`},
+		{"publication routine ACL", `REVOKE EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) TO punaro_app`},
+		{"publication routine public ACL", `GRANT EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb) FROM PUBLIC`},
+		{"publication unexpected trigger", `CREATE TRIGGER embedding_chunks_unexpected_guard BEFORE UPDATE ON brain.embedding_chunks FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation()`, `DROP TRIGGER embedding_chunks_unexpected_guard ON brain.embedding_chunks`},
+		{"publication renamed fence", `ALTER TRIGGER application_mutation_fence ON brain.embedding_chunks RENAME TO embedding_chunks_renamed_fence`, `ALTER TRIGGER embedding_chunks_renamed_fence ON brain.embedding_chunks RENAME TO application_mutation_fence`},
+		{"publication chunk revision reference", `ALTER TABLE brain.embedding_chunks DROP CONSTRAINT embedding_chunks_item_id_revision_fkey`, `ALTER TABLE brain.embedding_chunks ADD CONSTRAINT embedding_chunks_item_id_revision_fkey FOREIGN KEY (item_id,revision) REFERENCES brain.memory_revisions(item_id,revision) ON DELETE CASCADE`},
+		{"publication chunk range check", `ALTER TABLE brain.embedding_chunks DROP CONSTRAINT embedding_chunks_check`, `ALTER TABLE brain.embedding_chunks ADD CONSTRAINT embedding_chunks_check CHECK (end_offset > start_offset AND end_offset <= 262144)`},
 	} {
 		t.Run(drift.name, func(t *testing.T) {
 			if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
@@ -36,6 +46,55 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 				t.Fatalf("readiness did not recover after embedding %s restoration: %v", drift.name, err)
 			}
 		})
+	}
+	testMemoryEmbeddingPublicationReturnTypeDrift(ctx, t, app, ownerDB)
+}
+
+func testMemoryEmbeddingPublicationReturnTypeDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	const signature = "brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb)"
+	ownerConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerConn.Close() }()
+	var definition string
+	if err := ownerConn.QueryRowContext(ctx, `SELECT pg_get_functiondef($1::regprocedure)`, signature).Scan(&definition); err != nil {
+		t.Fatal(err)
+	}
+	altered := strings.Replace(definition, "RETURNS boolean", "RETURNS uuid", 1)
+	if altered == definition {
+		t.Fatal("publication routine definition did not contain its boolean return type")
+	}
+	if _, err := ownerConn.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `SET check_function_bodies=off`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, altered); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `RESET check_function_bodies`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted publication routine return-type drift")
+	}
+	if _, err := ownerConn.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, definition); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after publication routine return-type restoration: %v", err)
 	}
 }
 
@@ -141,5 +200,159 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	var state, errorCode string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state,last_error_code FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, created.ItemID).Scan(&state, &errorCode); err != nil || state != "failed" || errorCode != "provider_terminal" {
 		t.Fatalf("terminal embedding state=%q code=%q err=%v", state, errorCode, err)
+	}
+	publishable := create("19191919-1919-4191-8191-191919191917", "publish chunks")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191918", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != publishable.ItemID {
+		t.Fatalf("publishable embedding claim=%#v err=%v", claimed, err)
+	}
+	publication := MemoryEmbeddingPublication{Lease: claimed[0], Chunks: []MemoryEmbeddingChunk{
+		{Ordinal: 0, ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StartOffset: 0, EndOffset: 12},
+		{Ordinal: 1, ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", StartOffset: 12, EndOffset: 28},
+	}}
+	rollback := create("19191919-1919-4191-8191-191919191925", "rollback publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191926", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != rollback.ItemID {
+		t.Fatalf("rollback publication claim=%#v err=%v", claimed, err)
+	}
+	rollbackLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset) VALUES ($1,$2,$3,0,decode($4,'hex'),0,12)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err != nil {
+		t.Fatal(err)
+	}
+	rollbackConn, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12},{"ordinal":0,"content_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","start_offset":12,"end_offset":28}]`
+	var published bool
+	err = rollbackConn.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, invalidChunks).Scan(&published)
+	if closeErr := rollbackConn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err == nil {
+		t.Fatalf("duplicate-ordinal publication succeeded: published=%t", published)
+	}
+	var rollbackState, rollbackToken, rollbackDigest string
+	var rollbackLeaseGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,lease_token::text,encode(content_sha256,'hex'),lease_generation FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, rollbackLease.GenerationID, rollbackLease.ItemID).Scan(&rollbackState, &rollbackToken, &rollbackDigest, &rollbackLeaseGeneration); err != nil || rollbackState != "running" || rollbackToken != rollbackLease.Token || rollbackDigest != rollbackLease.ContentSHA256 || rollbackLeaseGeneration != rollbackLease.LeaseGeneration {
+		t.Fatalf("failed publication changed embedding job state=%q token=%q digest=%q generation=%d err=%v", rollbackState, rollbackToken, rollbackDigest, rollbackLeaseGeneration, err)
+	}
+	var rollbackOrdinal, rollbackStart, rollbackEnd int
+	var rollbackChunkDigest string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT ordinal,encode(content_sha256,'hex'),start_offset,end_offset FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision).Scan(&rollbackOrdinal, &rollbackChunkDigest, &rollbackStart, &rollbackEnd); err != nil || rollbackOrdinal != 0 || rollbackChunkDigest != "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" || rollbackStart != 0 || rollbackEnd != 12 {
+		t.Fatalf("failed publication changed embedding chunk ordinal=%d digest=%q range=[%d,%d] err=%v", rollbackOrdinal, rollbackChunkDigest, rollbackStart, rollbackEnd, err)
+	}
+	disconnected := create("19191919-1919-4191-8191-191919191927", "disconnect publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191928", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != disconnected.ItemID {
+		t.Fatalf("disconnect publication claim=%#v err=%v", claimed, err)
+	}
+	disconnectLease := claimed[0]
+	disconnectConn, err := app.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disconnectTx, err := disconnectConn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12}]`
+	if err := disconnectTx.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, disconnectLease.GenerationID, disconnectLease.ItemID, disconnectLease.Revision, disconnectLease.ContentSHA256, disconnectLease.Token, disconnectLease.LeaseGeneration, validChunks).Scan(&published); err != nil || !published {
+		t.Fatalf("uncommitted publication=%t err=%v", published, err)
+	}
+	if err := disconnectTx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := disconnectConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, disconnectLease.GenerationID, disconnectLease.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("disconnect changed state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, disconnectLease.GenerationID, disconnectLease.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("disconnect chunks=%d err=%v", count, err)
+	}
+	unauthorized := create("19191919-1919-4191-8191-191919191929", "unauthorized publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191930", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != unauthorized.ItemID {
+		t.Fatalf("unauthorized publication claim=%#v err=%v", claimed, err)
+	}
+	unauthorizedLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `CREATE ROLE embedding_publication_denied NOLOGIN`); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = ownerDB.ExecContext(context.Background(), `DROP ROLE embedding_publication_denied`) }()
+	ownerConn, err := ownerDB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerConn.ExecContext(ctx, `SET ROLE embedding_publication_denied`); err != nil {
+		t.Fatal(err)
+	}
+	err = ownerConn.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID, unauthorizedLease.Revision, unauthorizedLease.ContentSHA256, unauthorizedLease.Token, unauthorizedLease.LeaseGeneration, validChunks).Scan(&published)
+	_, _ = ownerConn.ExecContext(ctx, `RESET ROLE`)
+	if closeErr := ownerConn.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if !isSQLState(err, "42501") {
+		t.Fatalf("unauthorized publication error=%v, want permission denied", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("unauthorized publication changed state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, unauthorizedLease.GenerationID, unauthorizedLease.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("unauthorized publication chunks=%d err=%v", count, err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, publication); err != nil {
+		t.Fatalf("embedding publication: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, publishable.ItemID).Scan(&state); err != nil || state != "succeeded" {
+		t.Fatalf("published embedding state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, generationID, publishable.ItemID, publication.Lease.Revision).Scan(&count); err != nil || count != len(publication.Chunks) {
+		t.Fatalf("published embedding chunks=%d err=%v", count, err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, publication); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("replayed embedding publication error=%v", err)
+	}
+	leaseExpired := create("19191919-1919-4191-8191-191919191919", "expired publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191920", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != leaseExpired.ItemID {
+		t.Fatalf("expired publication claim=%#v err=%v", claimed, err)
+	}
+	expiredLease := claimed[0]
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET lease_until=statement_timestamp()-interval '1 second' WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191921", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != leaseExpired.ItemID || claimed[0].Token == expiredLease.Token || claimed[0].LeaseGeneration <= expiredLease.LeaseGeneration {
+		t.Fatalf("reclaimed publication work=%#v expired=%#v err=%v", claimed, expiredLease, err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, MemoryEmbeddingPublication{Lease: expiredLease, Chunks: publication.Chunks}); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("expired embedding publication error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID).Scan(&state); err != nil || state != "running" {
+		t.Fatalf("expired embedding state=%q err=%v", state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, leaseExpired.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("expired embedding chunks=%d err=%v", count, err)
+	}
+	superseded := create("19191919-1919-4191-8191-191919191922", "superseded publication")
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191923", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil || len(claimed) != 1 || claimed[0].ItemID != superseded.ItemID {
+		t.Fatalf("superseded publication claim=%#v err=%v", claimed, err)
+	}
+	supersededLease := claimed[0]
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: superseded.ItemID, IdempotencyKey: "19191919-1919-4191-8191-191919191924", ExpectedETag: superseded.ETag, LogicalKey: "embedding-19191919-1919-4191-8191-191919191922", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"superseded publication revised"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.PublishMemoryEmbeddingWork(ctx, MemoryEmbeddingPublication{Lease: supersededLease, Chunks: publication.Chunks}); !errors.Is(err, ErrStaleEmbeddingLease) {
+		t.Fatalf("superseded embedding publication error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT revision,state FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&job.Revision, &state); err != nil || job.Revision != supersededLease.Revision+1 || state != "queued" {
+		t.Fatalf("superseded embedding job revision=%d state=%q err=%v", job.Revision, state, err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("superseded embedding chunks=%d err=%v", count, err)
 	}
 }

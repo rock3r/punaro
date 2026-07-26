@@ -1146,6 +1146,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = embeddingWorkerObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 25 {
+		embeddingPublicationObjectsPresent, err := memoryEmbeddingPublicationControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding publication schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingPublicationObjectsPresent
+	}
 	return snapshot, nil
 }
 

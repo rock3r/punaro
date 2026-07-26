@@ -402,6 +402,13 @@ attempt is terminal with a code-only diagnostic. No provider, chunk/vector
 storage, success publication, semantic ranking, or client-facing semantic
 surface is enabled yet.
 
+Schema version 25 adds a bounded content-free chunk coordinate for one
+generation and revision. The owner-only publication routine validates ordered
+non-overlapping offsets and digests, then atomically stores those coordinates
+and terminally completes the exact unexpired lease only while the revision is
+current. It still stores no fragment text, provider credential, vector, index,
+or semantic result.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the
