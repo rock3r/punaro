@@ -71,7 +71,8 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
     FROM pg_trigger AS trigger_row,objects
     WHERE trigger_row.tgrelid=chunks_oid AND trigger_row.tgname='application_mutation_fence' AND NOT trigger_row.tgisinternal
 ), routine_safety AS (
-    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proc.proowner)='punaro_owner' AND proc.prokind='f' AND proc.prosecdef
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proc.proowner)='punaro_owner' AND proc.prokind='f'
+        AND proc.prorettype='boolean'::regtype AND NOT proc.proretset AND proc.prosecdef
         AND proc.provolatile='v' AND proc.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
         AND proc.proconfig=ARRAY['search_path=pg_catalog']::text[]
         AND md5(btrim(proc.prosrc,E' \n\r\t'))='2a5bb540102e4944f41c63c31a5aed49') AS exact

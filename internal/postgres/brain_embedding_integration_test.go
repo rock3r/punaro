@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,6 +44,44 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 				t.Fatalf("readiness did not recover after embedding %s restoration: %v", drift.name, err)
 			}
 		})
+	}
+	testMemoryEmbeddingPublicationReturnTypeDrift(ctx, t, app, ownerDB)
+}
+
+func testMemoryEmbeddingPublicationReturnTypeDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	const signature = "brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb)"
+	var definition string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT pg_get_functiondef($1::regprocedure)`, signature).Scan(&definition); err != nil {
+		t.Fatal(err)
+	}
+	altered := strings.Replace(definition, "RETURNS boolean", "RETURNS uuid", 1)
+	if altered == definition {
+		t.Fatal("publication routine definition did not contain its boolean return type")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, altered); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err == nil {
+		t.Fatal("readiness accepted publication routine return-type drift")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP FUNCTION `+signature); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, definition); err != nil { // #nosec G202 -- definition is read from PostgreSQL immediately above.
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE ALL ON FUNCTION `+signature+` FROM PUBLIC; GRANT EXECUTE ON FUNCTION `+signature+` TO punaro_app`); err != nil { // #nosec G202 -- fixed signature.
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("readiness did not recover after publication routine return-type restoration: %v", err)
 	}
 }
 
