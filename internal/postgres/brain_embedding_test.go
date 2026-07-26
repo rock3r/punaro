@@ -55,3 +55,27 @@ func TestMemoryEmbeddingWorkValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryEmbeddingClaimValidation(t *testing.T) {
+	valid := MemoryEmbeddingClaimRequest{
+		WorkerID:      "33333333-3333-4333-8333-333333333333",
+		Limit:         8,
+		LeaseDuration: memoryEmbeddingMinLease,
+	}
+	if _, err := valid.normalized(); err != nil {
+		t.Fatalf("valid claim rejected: %v", err)
+	}
+	for name, request := range map[string]MemoryEmbeddingClaimRequest{
+		"friendly worker": {WorkerID: "worker", Limit: valid.Limit, LeaseDuration: valid.LeaseDuration},
+		"zero limit":      {WorkerID: valid.WorkerID, LeaseDuration: valid.LeaseDuration},
+		"oversize limit":  {WorkerID: valid.WorkerID, Limit: maxMemoryEmbeddingClaimBatch + 1, LeaseDuration: valid.LeaseDuration},
+		"short lease":     {WorkerID: valid.WorkerID, Limit: valid.Limit, LeaseDuration: memoryEmbeddingMinLease - 1},
+		"long lease":      {WorkerID: valid.WorkerID, Limit: valid.Limit, LeaseDuration: memoryEmbeddingMaxLease + 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := request.normalized(); err == nil {
+				t.Fatalf("invalid claim accepted: %#v", request)
+			}
+		})
+	}
+}

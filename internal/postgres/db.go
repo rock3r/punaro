@@ -1133,11 +1133,18 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = reconciliationObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 23 {
-		embeddingObjectsPresent, err := memoryEmbeddingControlsAvailable(ctx, q)
+		embeddingObjectsPresent, err := memoryEmbeddingControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL memory embedding schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = embeddingObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 24 {
+		embeddingWorkerObjectsPresent, err := memoryEmbeddingWorkerControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding worker schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingWorkerObjectsPresent
 	}
 	return snapshot, nil
 }

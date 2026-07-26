@@ -6,7 +6,7 @@ import "context"
 // frontier. Canonical memory remains usable when no generation exists, but a
 // migrated database must never silently accept a damaged queue or weakened
 // application-role boundary.
-func memoryEmbeddingControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func memoryEmbeddingControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -39,6 +39,8 @@ WITH objects AS (
       ('brain.embedding_jobs','created_at','timestamp with time zone',true),
       ('brain.embedding_jobs','updated_at','timestamp with time zone',true),
       ('brain.embedding_jobs','completed_at','timestamp with time zone',false)
+    UNION ALL
+    SELECT 'brain.embedding_jobs','available_at','timestamp with time zone',true WHERE $1 >= 24
 ), actual_columns AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull
     FROM pg_attribute AS attribute,objects
@@ -55,7 +57,9 @@ WITH objects AS (
 ), index_safety AS (
     SELECT active_index_oid IS NOT NULL AND claim_index_oid IS NOT NULL AND expired_index_oid IS NOT NULL
       AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=active_index_oid AND indisunique AND indisvalid AND indisready)
-      AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=claim_index_oid AND NOT indisunique AND indisvalid AND indisready AND pg_get_expr(indpred,indrelid)='(state = ''queued''::text)')
+      AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=claim_index_oid AND NOT indisunique AND indisvalid AND indisready
+          AND pg_get_expr(indpred,indrelid)='(state = ''queued''::text)'
+          AND (($1 < 24 AND indkey='1 12 2'::int2vector) OR ($1 >= 24 AND indkey='1 15 12 2'::int2vector)))
       AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=expired_index_oid AND NOT indisunique AND indisvalid AND indisready AND pg_get_expr(indpred,indrelid)='(state = ''running''::text)') AS exact
     FROM objects
 )
@@ -71,6 +75,6 @@ SELECT generations_oid IS NOT NULL AND jobs_oid IS NOT NULL AND queue_oid IS NOT
 	AND NOT has_table_privilege('punaro_app',jobs_oid,'INSERT')
 	AND NOT has_table_privilege('punaro_app',jobs_oid,'UPDATE')
 	AND NOT has_table_privilege('punaro_app',jobs_oid,'DELETE')
-FROM objects,table_safety,trigger_safety,index_safety`).Scan(&available)
+FROM objects,table_safety,trigger_safety,index_safety`, schemaVersion).Scan(&available)
 	return available, err
 }

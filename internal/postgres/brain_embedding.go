@@ -4,9 +4,15 @@ import (
 	"encoding/hex"
 	"errors"
 	"regexp"
+	"time"
 )
 
-const maxMemoryEmbeddingDimensions = 4096
+const (
+	maxMemoryEmbeddingDimensions = 4096
+	maxMemoryEmbeddingClaimBatch = 32
+	memoryEmbeddingMinLease      = 5 * time.Second
+	memoryEmbeddingMaxLease      = 5 * time.Minute
+)
 
 var memoryEmbeddingRevisionPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_.:-]{0,63}$`)
 
@@ -49,6 +55,23 @@ type MemoryEmbeddingWork struct {
 	ItemID        string
 	Revision      int64
 	ContentSHA256 string
+}
+
+// MemoryEmbeddingClaimRequest is the bounded, provider-free worker claim
+// input. Worker identity is an opaque lease holder, never an authorization
+// principal or a provider credential.
+type MemoryEmbeddingClaimRequest struct {
+	WorkerID      string
+	Limit         int
+	LeaseDuration time.Duration
+}
+
+func (r MemoryEmbeddingClaimRequest) normalized() (MemoryEmbeddingClaimRequest, error) {
+	if !validOpaqueID(r.WorkerID) || r.Limit < 1 || r.Limit > maxMemoryEmbeddingClaimBatch ||
+		r.LeaseDuration < memoryEmbeddingMinLease || r.LeaseDuration > memoryEmbeddingMaxLease {
+		return MemoryEmbeddingClaimRequest{}, errors.New("invalid memory embedding claim")
+	}
+	return r, nil
 }
 
 // Validate accepts only opaque IDs, a positive revision, and a canonical

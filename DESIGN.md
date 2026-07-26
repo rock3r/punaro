@@ -392,6 +392,16 @@ canonical, lexical, prompt-brief, authorization, and mail paths remain
 available. A later worker must recheck the exact generation, revision, hash,
 and lease before it may publish derived chunks.
 
+Schema version 24 adds only the fenced worker control plane. Owner routines
+first honor the global update/backup mutation fence, then claim bounded ready
+or expired coordinates with database-time leases, fresh
+opaque tokens, and monotonic generations; retry persists a bounded next-attempt
+time and requires the exact revision/hash/token/generation fence. A new
+canonical revision invalidates an outstanding lease, and the final permitted
+attempt is terminal with a code-only diagnostic. No provider, chunk/vector
+storage, success publication, semantic ranking, or client-facing semantic
+surface is enabled yet.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the

@@ -69,13 +69,13 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 23 || len(manifest.Migrations) != 23 {
-		t.Fatalf("manifest=%#v, want exact v10-v23 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 24 || len(manifest.Migrations) != 24 {
+		t.Fatalf("manifest=%#v, want exact v10-v24 compatibility window", manifest)
 	}
-	embedding := manifest.Migrations[22]
-	if embedding.Version != 23 || embedding.Name != "023_memory_embedding_frontier" ||
-		embedding.CompatibilityFloor != 10 || !strings.Contains(embedding.SQL, "CREATE FUNCTION brain.queue_embedding_revision") {
-		t.Fatalf("unexpected embedding-frontier migration: %#v", embedding)
+	embedding := manifest.Migrations[23]
+	if embedding.Version != 24 || embedding.Name != "024_memory_embedding_worker_control" ||
+		embedding.CompatibilityFloor != 10 || !strings.Contains(embedding.SQL, "CREATE FUNCTION brain.claim_embedding_jobs") {
+		t.Fatalf("unexpected embedding-worker migration: %#v", embedding)
 	}
 	for index, migration := range manifest.Migrations {
 		want := int64(index + 1)
@@ -88,7 +88,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23:
+		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
@@ -156,7 +156,10 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 22}, manifest) {
 		t.Fatal("compatible v22 schema must still apply the pending v23 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 23}, manifest) {
-		t.Fatal("current v23 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 23}, manifest) {
+		t.Fatal("compatible v23 schema must still apply the pending v24 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 24}, manifest) {
+		t.Fatal("current v24 schema reported a pending migration")
 	}
 }
