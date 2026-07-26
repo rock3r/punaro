@@ -144,6 +144,19 @@ evidence/result coordinates intentionally remain durable provenance and are
 never reconciliation targets. The operation does not discover or merge
 projects, rewrite memory, or repair derived indexes.
 
+The schema-neutral canonical consistency verifier completes deterministic
+memory maintenance. A direct active canonical project's `memory.administer`
+caller scans at most 64 current revisions per stable item-ID page across the
+canonical project and authoritative retired projects merged into it. One
+read-only repeatable-read snapshot compares the canonical document with its
+stored SHA-256 digest and synchronous generated lexical title/vector, and
+reports whether the exact lexical columns and access paths still satisfy
+readiness. Results contain only opaque item/revision coordinates and closed
+issue classes; they never return content, hashes, titles, vectors, snippets, or
+cross-project counts. The verifier does not repair, reindex, write audit, or
+advance generations. Embedding/chunk cleanup and side-by-side generation
+rebuilds remain later derived-index work.
+
 ## Goals
 
 - Durable, ordered delivery to an enrolled machine, even when it sleeps.

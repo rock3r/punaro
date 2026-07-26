@@ -295,6 +295,24 @@ coordinates are durable provenance and readers already redact unavailable
 live sources. Schema-22 rollback requires the normal verified pre-update backup
 restore because a schema-21 image rejects the newer manifest.
 
+The schema-neutral `memory.administer` consistency verifier is read-only and
+accepts only a direct active canonical project ID. In one repeatable-read,
+two-second isolated-pool transaction it checks at most 64 current revisions in
+stable item-ID order across the canonical project plus authoritative retired
+projects whose `merged_into` names it. Each row's canonical JSON text is
+compared with its stored SHA-256 digest and with the synchronous generated
+lexical title/vector expressions. The same report records whether the exact
+generated columns and title/GIN access paths still satisfy lexical readiness.
+
+Pages return a checked-row count, stable continuation cursor, `more`, the
+lexical-control boolean, and only opaque item/revision coordinates with closed
+`content_hash`, `lexical_title`, or `lexical_vector` issue classes. They never
+return documents, hashes, titles, vectors, snippets, or foreign-project counts.
+Lookup aliases do not grant verifier authority or define project membership.
+The operation performs no repair, reindex, generation/audit advancement, or
+schema mutation; rollback therefore removes only application code. Physical
+derived-generation cleanup and rebuild remain the M-19/M-20 boundary.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns
