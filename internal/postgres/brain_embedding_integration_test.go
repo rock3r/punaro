@@ -281,8 +281,8 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	dimensionMismatchChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12,"embedding":[0.25,0.5]}]`
 	err = app.db.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, dimensionMismatchChunks).Scan(&published)
-	if err == nil {
-		t.Fatalf("wrong-dimension publication succeeded: published=%t", published)
+	if err != nil || published {
+		t.Fatalf("wrong-dimension publication=%t err=%v, want unchanged false result", published, err)
 	}
 	var rollbackState, rollbackToken, rollbackDigest string
 	var rollbackLeaseGeneration int64
