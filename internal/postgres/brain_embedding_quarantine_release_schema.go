@@ -34,9 +34,8 @@ func memoryEmbeddingQuarantineReleaseControlsAvailable(ctx context.Context, q qu
     WHERE proc.oid=requeue_oid
     EXCEPT SELECT * FROM (VALUES ('punaro_owner','EXECUTE',false)) AS expected(grantee,privilege_type,is_grantable)) AS exact
 ), trigger_safety AS (
-    SELECT count(*)=1 AND bool_and(tgname='memory_quarantine_embedding_release' AND tgenabled='O'
-        AND tgfoid=requeue_oid AND tgtype=17)
-    FROM pg_trigger,objects WHERE tgrelid=quarantines_oid AND NOT tgisinternal
+    SELECT EXISTS (SELECT 1 FROM pg_trigger,objects WHERE tgrelid=quarantines_oid AND NOT tgisinternal
+        AND tgname='memory_quarantine_embedding_release' AND tgenabled='O' AND tgfoid=requeue_oid AND tgtype=17)
 )
 SELECT requeue_oid IS NOT NULL AND quarantines_oid IS NOT NULL AND routine_safety.exact AND routine_acl.exact AND trigger_safety.exact
 FROM objects,routine_safety,routine_acl,trigger_safety`, memoryEmbeddingQuarantineReleaseRoutineV32MD5).Scan(&available)
