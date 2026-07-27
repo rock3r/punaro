@@ -38,6 +38,8 @@ const (
 	MemorySearchMatchTitle MemorySearchMatch = "title"
 	// MemorySearchMatchLogicalKey marks an exact logical-key match.
 	MemorySearchMatchLogicalKey MemorySearchMatch = "logical_key"
+	// MemorySearchMatchSemantic marks a result selected only by semantic retrieval.
+	MemorySearchMatchSemantic MemorySearchMatch = "semantic"
 )
 
 // MemorySearchResult is a bounded summary of one authorized current revision.
