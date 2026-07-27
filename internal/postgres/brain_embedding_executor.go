@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const maxMemoryEmbeddingSourceBytes = 256 << 10
+const (
+	maxMemoryEmbeddingSourceBytes     = 256 << 10
+	memoryEmbeddingPublicationReserve = time.Second
+)
 
 // MemoryEmbeddingSourceChunk is bounded canonical text supplied to a provider.
 type MemoryEmbeddingSourceChunk struct {
@@ -196,7 +199,7 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 		}
 		return nil
 	}
-	providerCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil)
+	providerCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve))
 	defer cancel()
 	providerChunks := append([]MemoryEmbeddingSourceChunk(nil), chunks...)
 	vectors, embedErr := e.provider.Embed(providerCtx, generation, providerChunks)
