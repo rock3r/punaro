@@ -4,6 +4,7 @@ package config
 import (
 	"bufio"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -32,6 +33,8 @@ type Config struct {
 	DeviceAuthEnabled           bool
 	MemoryAPIEnabled            bool
 	MemoryMutationsEnabled      bool
+	MemoryOpenAIEmbeddingsURL   string
+	MemoryOpenAIAPIKeyFile      string
 	TrustedAttachmentsEnabled   bool
 	TrustedAttachmentBlobDir    string
 	CredentialTransitionEnabled bool
@@ -94,6 +97,8 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_MEMORY_MUTATIONS_ENABLED: %w", err)
 	}
+	memoryOpenAIEmbeddingsURL := value("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "")
+	memoryOpenAIAPIKeyFile := value("PUNARO_MEMORY_OPENAI_API_KEY_FILE", "")
 	trustedAttachmentsEnabled, err := strconv.ParseBool(value("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_TRUSTED_ATTACHMENTS_ENABLED: %w", err)
@@ -148,6 +153,18 @@ func Load(explicitEnvFile string) (Config, error) {
 	if memoryMutationsEnabled && !memoryAPIEnabled {
 		return Config{}, fmt.Errorf("memory mutations require PUNARO_MEMORY_API_ENABLED")
 	}
+	if (memoryOpenAIEmbeddingsURL == "") != (memoryOpenAIAPIKeyFile == "") {
+		return Config{}, fmt.Errorf("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL and PUNARO_MEMORY_OPENAI_API_KEY_FILE must be configured together")
+	}
+	if memoryOpenAIEmbeddingsURL != "" {
+		endpoint, err := url.Parse(memoryOpenAIEmbeddingsURL)
+		if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			return Config{}, fmt.Errorf("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL must be an HTTPS URL without credentials, query, or fragment")
+		}
+		if !postgresEnabled || !filepath.IsAbs(memoryOpenAIAPIKeyFile) {
+			return Config{}, fmt.Errorf("OpenAI-compatible embedding provider requires PostgreSQL and an absolute PUNARO_MEMORY_OPENAI_API_KEY_FILE")
+		}
+	}
 	if relayEnabled && relayMachines == "" {
 		return Config{}, fmt.Errorf("enabled relay requires PUNARO_RELAY_MACHINES_JSON")
 	}
@@ -172,7 +189,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func rejectRetiredAttachmentConfiguration() error {

@@ -38,6 +38,36 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadOpenAIEmbeddingProviderRequiresCompleteSafeConfiguration(t *testing.T) {
+	t.Setenv("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "https://embeddings.example/v1/embeddings")
+	if _, err := Load(""); err == nil {
+		t.Fatal("embedding endpoint accepted without credential file")
+	}
+	t.Setenv("PUNARO_MEMORY_OPENAI_API_KEY_FILE", "relative/key")
+	if _, err := Load(""); err == nil {
+		t.Fatal("embedding credential accepted a relative path")
+	}
+	t.Setenv("PUNARO_MEMORY_OPENAI_API_KEY_FILE", "/run/secrets/embedding-api-key")
+	t.Setenv("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "http://embeddings.example/v1/embeddings")
+	if _, err := Load(""); err == nil {
+		t.Fatal("embedding endpoint accepted plaintext HTTP")
+	}
+	t.Setenv("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "https://embeddings.example/v1/embeddings?token=leak")
+	if _, err := Load(""); err == nil {
+		t.Fatal("embedding endpoint accepted query data")
+	}
+	t.Setenv("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "https://embeddings.example/v1/embeddings")
+	if _, err := Load(""); err == nil {
+		t.Fatal("embedding provider accepted without PostgreSQL")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	cfg, err := Load("")
+	if err != nil || cfg.MemoryOpenAIEmbeddingsURL != "https://embeddings.example/v1/embeddings" || cfg.MemoryOpenAIAPIKeyFile != "/run/secrets/embedding-api-key" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+}
+
 func TestLoadRequiresAbsolutePostgresDSNFileWhenEnabled(t *testing.T) {
 	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
 	if _, err := Load(""); err == nil {
