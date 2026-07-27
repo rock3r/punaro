@@ -282,7 +282,9 @@ func validMemoryEmbeddingSource(lease MemoryEmbeddingLease, generation MemoryEmb
 }
 
 func (e *MemoryEmbeddingExecutor) retry(ctx context.Context, lease MemoryEmbeddingLease, code string, result *MemoryEmbeddingExecutionResult) error {
-	if err := e.store.RetryMemoryEmbeddingWork(ctx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: code, Delay: time.Second}); err != nil {
+	retryCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil)
+	defer cancel()
+	if err := e.store.RetryMemoryEmbeddingWork(retryCtx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: code, Delay: time.Second}); err != nil {
 		if errors.Is(err, ErrStaleEmbeddingLease) {
 			return nil
 		}
