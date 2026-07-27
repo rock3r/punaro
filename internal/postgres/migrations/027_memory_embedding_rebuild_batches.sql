@@ -15,6 +15,7 @@ ALTER TABLE brain.embedding_generations ENABLE TRIGGER USER;
 CREATE TABLE brain.embedding_rebuild_progress (
     generation_id uuid PRIMARY KEY REFERENCES brain.embedding_generations(id) ON DELETE CASCADE,
     timeline_id uuid NOT NULL,
+    timeline_watermark bigint NOT NULL CHECK (timeline_watermark >= 0),
     cursor_change_sequence bigint NOT NULL DEFAULT 0 CHECK (cursor_change_sequence >= 0),
     complete boolean NOT NULL DEFAULT false
 );
@@ -49,7 +50,7 @@ BEGIN
     INSERT INTO brain.embedding_generations (model,model_revision,dimensions,state,start_change_sequence,start_timeline_id)
     VALUES (requested_model,requested_model_revision,requested_dimensions,'building',captured_sequence,captured_timeline)
     RETURNING id INTO new_generation_id;
-    INSERT INTO brain.embedding_rebuild_progress(generation_id,timeline_id) VALUES (new_generation_id,captured_timeline);
+    INSERT INTO brain.embedding_rebuild_progress(generation_id,timeline_id,timeline_watermark) VALUES (new_generation_id,captured_timeline,captured_sequence);
     generation_id := new_generation_id;
     start_change_sequence := captured_sequence;
     RETURN NEXT;
@@ -68,6 +69,8 @@ DECLARE
     changed integer;
     next_cursor bigint;
     done boolean;
+    next_timeline uuid;
+    next_timeline_watermark bigint;
 BEGIN
     PERFORM jobs.assert_application_mutation();
     IF requested_generation IS NULL OR requested_limit IS NULL OR requested_limit < 1 OR requested_limit > 128 THEN
@@ -88,20 +91,11 @@ BEGIN
         WHERE progress.generation_id=requested_generation;
         enqueued := 0; complete := true; RETURN NEXT; RETURN;
     END IF;
-    WITH RECURSIVE timeline_chain(timeline_id,max_change_sequence) AS (
-        SELECT progress.timeline_id,watermark
-        FROM brain.embedding_rebuild_progress AS progress
-        WHERE progress.generation_id=requested_generation
-        UNION ALL
-        SELECT event.previous_timeline_id,event.restored_change_sequence
-        FROM jobs.restore_events AS event
-        JOIN timeline_chain ON event.restored_timeline_id=timeline_chain.timeline_id
-    ), changes AS MATERIALIZED (
+    WITH changes AS MATERIALIZED (
         SELECT change.change_sequence,change.item_id,change.revision
         FROM brain.embedding_rebuild_progress AS progress
-        JOIN timeline_chain ON true
-        JOIN brain.memory_changes AS change ON change.timeline_id=timeline_chain.timeline_id
-          AND change.change_sequence>progress.cursor_change_sequence AND change.change_sequence<=timeline_chain.max_change_sequence
+        JOIN brain.memory_changes AS change ON change.timeline_id=progress.timeline_id
+          AND change.change_sequence>progress.cursor_change_sequence AND change.change_sequence<=progress.timeline_watermark
         ORDER BY change.change_sequence
         LIMIT requested_limit
     ), candidates AS MATERIALIZED (
@@ -116,12 +110,27 @@ BEGIN
         WHERE brain.embedding_jobs.revision<EXCLUDED.revision
         RETURNING 1
     ), advanced AS (
-        SELECT count(*)::integer AS scanned,COALESCE(max(change_sequence),watermark) AS next_cursor FROM changes
+        SELECT count(*)::integer AS scanned,COALESCE(max(changes.change_sequence),progress.timeline_watermark) AS next_cursor
+        FROM changes CROSS JOIN brain.embedding_rebuild_progress AS progress
+        WHERE progress.generation_id=requested_generation
     ), applied AS (
         SELECT count(*) AS changed FROM queued
     )
     SELECT advanced.scanned,applied.changed,advanced.next_cursor,advanced.scanned<requested_limit INTO scanned,changed,next_cursor,done FROM advanced CROSS JOIN applied;
-    UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,complete=done WHERE generation_id=requested_generation;
+    IF done THEN
+        SELECT event.previous_timeline_id,event.restored_change_sequence INTO next_timeline,next_timeline_watermark
+        FROM jobs.restore_events AS event
+        JOIN brain.embedding_rebuild_progress AS progress ON event.restored_timeline_id=progress.timeline_id
+        WHERE progress.generation_id=requested_generation;
+        IF next_timeline IS NOT NULL THEN
+            UPDATE brain.embedding_rebuild_progress SET timeline_id=next_timeline,timeline_watermark=next_timeline_watermark,cursor_change_sequence=0 WHERE generation_id=requested_generation;
+            done := false; next_cursor := 0;
+        ELSE
+            UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,complete=true WHERE generation_id=requested_generation;
+        END IF;
+    ELSE
+        UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor WHERE generation_id=requested_generation;
+    END IF;
     enqueued := changed; cursor_change_sequence := next_cursor; complete := done; RETURN NEXT;
 END
 $function$;
