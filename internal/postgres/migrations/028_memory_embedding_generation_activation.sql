@@ -108,6 +108,10 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding rebuild generation is not caught up';
     END IF;
     PERFORM set_config('punaro.embedding_activation_old_generation', prior_generation::text, true);
+    PERFORM 1
+    FROM brain.embedding_jobs AS job
+    WHERE job.generation_id = prior_generation
+    FOR UPDATE;
     DELETE FROM brain.embedding_chunks AS chunk WHERE chunk.generation_id = prior_generation;
     DELETE FROM brain.embedding_jobs AS job WHERE job.generation_id = prior_generation;
     PERFORM set_config('punaro.embedding_activation_generation', prior_generation::text, true);

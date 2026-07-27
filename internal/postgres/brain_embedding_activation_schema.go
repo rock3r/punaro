@@ -39,7 +39,7 @@ FROM objects,routines,activation_acl,triggers`, memoryEmbeddingActivationRoutine
 }
 
 const (
-	memoryEmbeddingActivationRoutineMD5         = "1714e7ec63388aa89c3756ffa175316b"
+	memoryEmbeddingActivationRoutineMD5         = "514944767b34823edaabb23ae868dd16"
 	memoryEmbeddingChunkDeleteGuardRoutineMD5   = "8e425c1cc346a818814c2903f8d52786"
 	memoryEmbeddingGenerationMutationRoutineMD5 = "5ba945bbb850d7f58c7a7ce2cea1516d"
 )
