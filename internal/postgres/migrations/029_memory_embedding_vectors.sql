@@ -1,5 +1,11 @@
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
-ALTER EXTENSION vector SET SCHEMA public;
+DO $migration$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector' AND extnamespace <> 'public'::regnamespace) THEN
+        ALTER EXTENSION vector SET SCHEMA public;
+    END IF;
+END
+$migration$;
 ALTER EXTENSION vector UPDATE TO '0.8.2';
 
 -- v25-v28 output intentionally carried only chunk coordinates. They are
