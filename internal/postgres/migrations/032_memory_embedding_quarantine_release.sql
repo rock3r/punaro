@@ -24,7 +24,7 @@ BEGIN
             available_at=statement_timestamp(), last_error_code='quarantined', completed_at=NULL, updated_at=statement_timestamp()
         FROM released
         WHERE job.item_id=released.item_id AND job.state='running' AND job.attempts>0
-          AND job.lease_until <= statement_timestamp() AND job.lease_until >= released.quarantined_at
+          AND job.lease_until <= statement_timestamp()
     )
     SELECT EXISTS (SELECT 1 FROM released) INTO was_released;
     RETURN was_released;
