@@ -110,7 +110,7 @@ VALUES ($1,$2,$3,0,decode('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 		t.Fatalf("hybrid candidates=%#v err=%v", hybrid, err)
 	}
 	surface, err := app.SearchMemoryHybrid(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, GenerationID: generation.ID, Query: "semantic", Embedding: query, Limit: 2})
-	if err != nil || len(surface.Results) != 2 || surface.More || surface.SemanticStatus != MemoryHybridSearchSemanticReady ||
+	if err != nil || len(surface.Results) != 2 || !surface.More || surface.SemanticStatus != MemoryHybridSearchSemanticReady ||
 		surface.Results[0].ItemID != nearest.ItemID || surface.Results[0].Revision != nearest.Revision ||
 		surface.Results[0].Title != "nearest semantic result" || surface.Results[0].ETag != memoryETag(nearest.ItemID, nearest.Revision) ||
 		surface.Results[0].LexicalRank != 3 || surface.Results[0].SemanticRank != 1 || surface.Results[0].Match != MemorySearchMatchLexical {
