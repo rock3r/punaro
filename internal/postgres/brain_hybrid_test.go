@@ -4,8 +4,8 @@ import "testing"
 
 func TestFuseMemorySearchRanks(t *testing.T) {
 	lexical := []MemorySearchResult{
-		{ItemID: "11111111-1111-4111-8111-111111111111", Revision: 1},
-		{ItemID: "22222222-2222-4222-8222-222222222222", Revision: 2},
+		{ItemID: "11111111-1111-4111-8111-111111111111", Revision: 1, Match: MemorySearchMatchLexical},
+		{ItemID: "22222222-2222-4222-8222-222222222222", Revision: 2, Match: MemorySearchMatchLexical},
 	}
 	semantic := []MemorySemanticSearchResult{
 		{ItemID: "22222222-2222-4222-8222-222222222222", Revision: 2},
@@ -29,7 +29,7 @@ func TestFuseMemorySearchRanks(t *testing.T) {
 	if got[1].ItemID != lexical[0].ItemID || got[1].LexicalRank != 1 || got[1].SemanticRank != 3 {
 		t.Fatalf("second fused result=%#v", got[1])
 	}
-	if got[2].ItemID != semantic[1].ItemID || got[2].LexicalRank != 0 || got[2].SemanticRank != 2 {
+	if got[2].ItemID != semantic[1].ItemID || got[2].LexicalRank != 0 || got[2].SemanticRank != 2 || got[2].Match != MemorySearchMatchSemantic {
 		t.Fatalf("third fused result=%#v", got[2])
 	}
 }
@@ -89,6 +89,9 @@ func TestMemoryHybridCandidateWindowExceedsOutputPage(t *testing.T) {
 func TestMemoryHybridSearchTimeoutCoversBothStatements(t *testing.T) {
 	if memoryHybridSearchTimeout != 2*memorySearchTimeout {
 		t.Fatalf("hybrid timeout=%s", memoryHybridSearchTimeout)
+	}
+	if memoryHybridSurfaceTimeout != 3*memorySearchTimeout {
+		t.Fatalf("hybrid surface timeout=%s", memoryHybridSurfaceTimeout)
 	}
 }
 

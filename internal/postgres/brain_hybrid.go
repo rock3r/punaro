@@ -4,24 +4,28 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"sort"
+	"unicode/utf8"
 )
 
 const (
 	memorySearchRRFOffset      = 60
 	memoryHybridCandidateLimit = maxMemorySearchCandidates
 	memoryHybridSearchTimeout  = 2 * memorySearchTimeout
+	memoryHybridSurfaceTimeout = 3 * memorySearchTimeout
 )
 
 // MemoryHybridSearchResult records the deterministic reciprocal-rank fusion
 // coordinate for one current item. Zero means that retrieval mode did not
 // select the item.
 type MemoryHybridSearchResult struct {
-	ItemID       string  `json:"item_id"`
-	Revision     int64   `json:"revision"`
-	LexicalRank  int     `json:"lexical_rank"`
-	SemanticRank int     `json:"semantic_rank"`
-	Score        float64 `json:"score"`
+	ItemID       string            `json:"item_id"`
+	Revision     int64             `json:"revision"`
+	LexicalRank  int               `json:"lexical_rank"`
+	SemanticRank int               `json:"semantic_rank"`
+	Match        MemorySearchMatch `json:"match"`
+	Score        float64           `json:"score"`
 }
 
 // MemoryHybridSearchRequest combines a normalized lexical query and an
@@ -41,6 +45,32 @@ type MemoryHybridSearchPage struct {
 	Results        []MemoryHybridSearchResult       `json:"results"`
 	More           bool                             `json:"more"`
 	SemanticStatus MemoryHybridSearchSemanticStatus `json:"semantic_status"`
+}
+
+// MemoryHybridSearchSurfaceResult pairs a fused rank coordinate with the
+// bounded canonical summary from the same authorized snapshot.
+type MemoryHybridSearchSurfaceResult struct {
+	ItemID       string            `json:"item_id"`
+	LogicalKey   string            `json:"logical_key,omitempty"`
+	Kind         string            `json:"kind"`
+	Trust        string            `json:"trust"`
+	Layer        MemoryLayer       `json:"layer"`
+	Revision     int64             `json:"revision"`
+	ETag         string            `json:"etag"`
+	Title        string            `json:"title,omitempty"`
+	Summary      string            `json:"summary,omitempty"`
+	LexicalRank  int               `json:"lexical_rank"`
+	SemanticRank int               `json:"semantic_rank"`
+	Match        MemorySearchMatch `json:"match"`
+	Score        float64           `json:"score"`
+}
+
+// MemoryHybridSearchSurfacePage carries hybrid-ranked, bounded canonical
+// summaries without a total result count.
+type MemoryHybridSearchSurfacePage struct {
+	Results        []MemoryHybridSearchSurfaceResult `json:"results"`
+	More           bool                              `json:"more"`
+	SemanticStatus MemoryHybridSearchSemanticStatus  `json:"semantic_status"`
 }
 
 // SearchMemoryHybridLexicalCandidates returns authorized lexical candidate
@@ -72,7 +102,18 @@ func (d *Database) SearchMemoryHybridLexicalCandidates(ctx context.Context, raw 
 	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search timeout cannot be installed")
 	}
-	lexical, err := searchMemoryInTx(searchCtx, tx, projectID, request.Query, memoryHybridCandidateLimit, false, false)
+	page, err := searchMemoryHybridLexicalCandidatesInTx(searchCtx, tx, projectID, request)
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search transaction could not finish")
+	}
+	return page, nil
+}
+
+func searchMemoryHybridLexicalCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, request MemorySearchRequest) (MemoryHybridSearchPage, error) {
+	lexical, err := searchMemoryInTx(ctx, tx, projectID, request.Query, memoryHybridCandidateLimit, false, false)
 	if err != nil {
 		return MemoryHybridSearchPage{}, err
 	}
@@ -80,10 +121,51 @@ func (d *Database) SearchMemoryHybridLexicalCandidates(ctx context.Context, raw 
 	if err != nil {
 		return MemoryHybridSearchPage{}, errors.New("memory hybrid search candidates are unavailable")
 	}
-	if err := tx.Commit(); err != nil {
-		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search transaction could not finish")
-	}
 	return MemoryHybridSearchPage{Results: results, More: lexical.More || more, SemanticStatus: MemoryHybridSearchSemanticNotConfigured}, nil
+}
+
+// SearchMemoryHybridLexical returns lexical-only degraded hybrid results with
+// bounded canonical summaries. The candidates and summaries share one
+// authorization-filtered repeatable-read snapshot.
+func (d *Database) SearchMemoryHybridLexical(ctx context.Context, raw MemorySearchRequest) (MemoryHybridSearchSurfacePage, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, memoryHybridSearchTimeout)
+	defer cancel()
+	tx, err := d.brainPool().BeginTx(searchCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid lexical search transaction cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	projectID, err := resolveCanonicalActiveProject(searchCtx, tx, request.ProjectID)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, ErrNotFound
+	}
+	allowed, err := hasCapability(searchCtx, tx, request.PrincipalID, projectID, CapabilityMemorySearch)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	if !allowed {
+		return MemoryHybridSearchSurfacePage{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid lexical search timeout cannot be installed")
+	}
+	candidates, err := searchMemoryHybridLexicalCandidatesInTx(searchCtx, tx, projectID, request)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	results, err := projectMemoryHybridSearchResultsInTx(searchCtx, tx, projectID, candidates.Results)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid lexical search transaction could not finish")
+	}
+	d.recordMemoryRecalls(ctx, projectID, memoryHybridSearchSurfaceItemIDs(results))
+	return MemoryHybridSearchSurfacePage{Results: results, More: candidates.More, SemanticStatus: candidates.SemanticStatus}, nil
 }
 
 // PrepareMemoryHybridSearch authorizes one normalized query before a later
@@ -187,11 +269,22 @@ func (d *Database) SearchMemoryHybridCandidates(ctx context.Context, raw MemoryH
 	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return MemoryHybridSearchPage{}, errors.New("memory hybrid search timeout cannot be installed")
 	}
-	lexical, err := searchMemoryInTx(searchCtx, tx, projectID, request.Query, memoryHybridCandidateLimit, false, false)
+	page, err := searchMemoryHybridCandidatesInTx(searchCtx, tx, projectID, request)
 	if err != nil {
 		return MemoryHybridSearchPage{}, err
 	}
-	semantic, semanticErr := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, memoryHybridCandidateLimit, request.GenerationID)
+	if err := tx.Commit(); err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid search transaction could not finish")
+	}
+	return page, nil
+}
+
+func searchMemoryHybridCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, request MemoryHybridSearchRequest) (MemoryHybridSearchPage, error) {
+	lexical, err := searchMemoryInTx(ctx, tx, projectID, request.Query, memoryHybridCandidateLimit, false, false)
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	semantic, semanticErr := searchMemorySemanticCandidatesInTx(ctx, tx, projectID, request.Embedding, memoryHybridCandidateLimit, request.GenerationID)
 	status := MemoryHybridSearchSemanticReady
 	if errors.Is(semanticErr, ErrMemorySemanticNotConfigured) {
 		status = MemoryHybridSearchSemanticNotConfigured
@@ -203,10 +296,115 @@ func (d *Database) SearchMemoryHybridCandidates(ctx context.Context, raw MemoryH
 	if err != nil {
 		return MemoryHybridSearchPage{}, errors.New("memory hybrid search candidates are unavailable")
 	}
-	if err := tx.Commit(); err != nil {
-		return MemoryHybridSearchPage{}, errors.New("memory hybrid search transaction could not finish")
-	}
 	return MemoryHybridSearchPage{Results: results, More: lexical.More || semantic.More || fusedMore, SemanticStatus: status}, nil
+}
+
+// SearchMemoryHybrid returns authorized hybrid-ranked, bounded canonical
+// summaries from the same snapshot as candidate retrieval. It accepts an
+// already-derived fenced embedding and never calls an embedding provider.
+func (d *Database) SearchMemoryHybrid(ctx context.Context, raw MemoryHybridSearchRequest) (MemoryHybridSearchSurfacePage, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, memoryHybridSurfaceTimeout)
+	defer cancel()
+	tx, err := d.brainPool().BeginTx(searchCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid search transaction cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	projectID, err := resolveCanonicalActiveProject(searchCtx, tx, request.ProjectID)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, ErrNotFound
+	}
+	allowed, err := hasCapability(searchCtx, tx, request.PrincipalID, projectID, CapabilityMemorySearch)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	if !allowed {
+		return MemoryHybridSearchSurfacePage{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid search timeout cannot be installed")
+	}
+	candidates, err := searchMemoryHybridCandidatesInTx(searchCtx, tx, projectID, request)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	results, err := projectMemoryHybridSearchResultsInTx(searchCtx, tx, projectID, candidates.Results)
+	if err != nil {
+		return MemoryHybridSearchSurfacePage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryHybridSearchSurfacePage{}, errors.New("memory hybrid search transaction could not finish")
+	}
+	d.recordMemoryRecalls(ctx, projectID, memoryHybridSearchSurfaceItemIDs(results))
+	return MemoryHybridSearchSurfacePage{Results: results, More: candidates.More, SemanticStatus: candidates.SemanticStatus}, nil
+}
+
+func projectMemoryHybridSearchResultsInTx(ctx context.Context, tx *sql.Tx, projectID string, candidates []MemoryHybridSearchResult) ([]MemoryHybridSearchSurfaceResult, error) {
+	if len(candidates) == 0 {
+		return []MemoryHybridSearchSurfaceResult{}, nil
+	}
+	itemIDs := make([]string, 0, len(candidates))
+	revisions := make([]int64, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if !validOpaqueID(candidate.ItemID) || candidate.Revision < 1 || candidate.LexicalRank < 0 || candidate.SemanticRank < 0 || candidate.Score <= 0 || math.IsNaN(candidate.Score) || math.IsInf(candidate.Score, 0) ||
+			(candidate.LexicalRank == 0 && candidate.SemanticRank == 0) {
+			return nil, errors.New("memory hybrid search result is invalid")
+		}
+		if _, duplicate := seen[candidate.ItemID]; duplicate {
+			return nil, errors.New("memory hybrid search result is invalid")
+		}
+		seen[candidate.ItemID] = struct{}{}
+		itemIDs = append(itemIDs, candidate.ItemID)
+		revisions = append(revisions, candidate.Revision)
+	}
+	rows, err := tx.QueryContext(ctx, `WITH requested AS (
+    SELECT candidate.item_id,candidate.revision,candidate.ordinality
+    FROM unnest($2::uuid[],$3::bigint[]) WITH ORDINALITY AS candidate(item_id,revision,ordinality)
+)
+SELECT requested.ordinality,item.id::text,COALESCE(item.logical_key,''),item.kind,item.trust,item.layer,item.current_revision,
+       CASE WHEN jsonb_typeof(revision.document->'title')='string' THEN left(revision.document->>'title',$4) ELSE '' END,
+       CASE WHEN jsonb_typeof(revision.document->'summary')='string' THEN left(revision.document->>'summary',$5) ELSE '' END
+FROM requested
+JOIN brain.memory_items AS item ON item.id=requested.item_id AND item.current_revision=requested.revision AND item.state='active'
+JOIN brain.scopes AS scope ON scope.id=item.scope_id AND scope.project_id=$1
+JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
+WHERE NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL)
+ORDER BY requested.ordinality`, projectID, itemIDs, revisions, maxMemorySearchTitleRunes, maxMemorySearchSummaryRunes)
+	if err != nil {
+		return nil, errors.New("memory hybrid search projection is unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	results := make([]MemoryHybridSearchSurfaceResult, 0, len(candidates))
+	for rows.Next() {
+		var position int
+		var result MemoryHybridSearchSurfaceResult
+		if err := rows.Scan(&position, &result.ItemID, &result.LogicalKey, &result.Kind, &result.Trust, &result.Layer, &result.Revision, &result.Title, &result.Summary); err != nil ||
+			position != len(results)+1 || position > len(candidates) || result.ItemID != candidates[position-1].ItemID || result.Revision != candidates[position-1].Revision ||
+			!validOpaqueID(result.ItemID) || result.Revision < 1 || utf8.RuneCountInString(result.Title) > maxMemorySearchTitleRunes || utf8.RuneCountInString(result.Summary) > maxMemorySearchSummaryRunes {
+			return nil, errors.New("memory hybrid search projection is invalid")
+		}
+		candidate := candidates[position-1]
+		result.LexicalRank, result.SemanticRank, result.Match, result.Score = candidate.LexicalRank, candidate.SemanticRank, candidate.Match, candidate.Score
+		result.ETag = memoryETag(result.ItemID, result.Revision)
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil || len(results) != len(candidates) {
+		return nil, errors.New("memory hybrid search projection is unavailable")
+	}
+	return results, nil
+}
+
+func memoryHybridSearchSurfaceItemIDs(results []MemoryHybridSearchSurfaceResult) []string {
+	itemIDs := make([]string, 0, len(results))
+	for _, result := range results {
+		itemIDs = append(itemIDs, result.ItemID)
+	}
+	return itemIDs
 }
 
 // fuseMemorySearchRanks combines independently bounded, already-authorized
@@ -227,6 +425,7 @@ func fuseMemorySearchRanks(lexical []MemorySearchResult, semantic []MemorySemant
 		}
 		results[candidate.ItemID] = MemoryHybridSearchResult{
 			ItemID: candidate.ItemID, Revision: candidate.Revision, LexicalRank: index + 1,
+			Match: candidate.Match,
 			Score: 1.0 / float64(memorySearchRRFOffset+index+1),
 		}
 	}
@@ -244,6 +443,9 @@ func fuseMemorySearchRanks(lexical []MemorySearchResult, semantic []MemorySemant
 		result.ItemID = candidate.ItemID
 		result.Revision = candidate.Revision
 		result.SemanticRank = index + 1
+		if result.LexicalRank == 0 {
+			result.Match = MemorySearchMatchSemantic
+		}
 		result.Score += 1.0 / float64(memorySearchRRFOffset+index+1)
 		results[candidate.ItemID] = result
 	}
