@@ -27,11 +27,12 @@ type MemoryHybridSearchResult struct {
 // MemoryHybridSearchRequest combines a normalized lexical query and an
 // already-derived query embedding. It never invokes an embedding provider.
 type MemoryHybridSearchRequest struct {
-	PrincipalID string
-	ProjectID   string
-	Query       string
-	Embedding   []float64
-	Limit       int
+	PrincipalID  string
+	ProjectID    string
+	GenerationID string
+	Query        string
+	Embedding    []float64
+	Limit        int
 }
 
 // MemoryHybridSearchPage carries bounded fused candidate coordinates. A later
@@ -40,6 +41,50 @@ type MemoryHybridSearchPage struct {
 	Results        []MemoryHybridSearchResult       `json:"results"`
 	More           bool                             `json:"more"`
 	SemanticStatus MemoryHybridSearchSemanticStatus `json:"semantic_status"`
+}
+
+// PrepareMemoryHybridSearch authorizes one normalized query before a later
+// provider call and returns only the active generation's non-secret identity.
+// The caller must pass a vector for this exact generation to the subsequent
+// retrieval fence; a generation change is never silently accepted.
+func (d *Database) PrepareMemoryHybridSearch(ctx context.Context, raw MemorySearchRequest) (MemoryEmbeddingGeneration, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryEmbeddingGeneration{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, memorySearchTimeout)
+	defer cancel()
+	tx, err := d.brainPool().BeginTx(searchCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MemoryEmbeddingGeneration{}, errors.New("memory hybrid preparation transaction cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	projectID, err := resolveCanonicalActiveProject(searchCtx, tx, request.ProjectID)
+	if err != nil {
+		return MemoryEmbeddingGeneration{}, ErrNotFound
+	}
+	allowed, err := hasCapability(searchCtx, tx, request.PrincipalID, projectID, CapabilityMemorySearch)
+	if err != nil {
+		return MemoryEmbeddingGeneration{}, err
+	}
+	if !allowed {
+		return MemoryEmbeddingGeneration{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
+		return MemoryEmbeddingGeneration{}, errors.New("memory hybrid preparation timeout cannot be installed")
+	}
+	var generation MemoryEmbeddingGeneration
+	err = tx.QueryRowContext(searchCtx, `SELECT id::text,model,model_revision,dimensions,state FROM brain.embedding_generations WHERE state='active'`).Scan(&generation.ID, &generation.Model, &generation.Revision, &generation.Dimensions, &generation.State)
+	if errors.Is(err, sql.ErrNoRows) {
+		return MemoryEmbeddingGeneration{}, ErrMemorySemanticNotConfigured
+	}
+	if err != nil || generation.Validate() != nil || generation.State != MemoryEmbeddingGenerationActive {
+		return MemoryEmbeddingGeneration{}, errors.New("memory hybrid generation is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryEmbeddingGeneration{}, errors.New("memory hybrid preparation transaction could not finish")
+	}
+	return generation, nil
 }
 
 // MemoryHybridSearchSemanticStatus reports whether semantic candidates were
@@ -60,6 +105,9 @@ func (r MemoryHybridSearchRequest) normalized() (MemoryHybridSearchRequest, erro
 	}
 	semantic, err := (MemorySemanticSearchRequest{PrincipalID: r.PrincipalID, ProjectID: r.ProjectID, Embedding: r.Embedding, Limit: r.Limit}).normalized()
 	if err != nil {
+		return MemoryHybridSearchRequest{}, errors.New("invalid memory hybrid search request")
+	}
+	if !validOpaqueID(r.GenerationID) {
 		return MemoryHybridSearchRequest{}, errors.New("invalid memory hybrid search request")
 	}
 	r.PrincipalID, r.ProjectID, r.Query, r.Embedding, r.Limit = lexical.PrincipalID, lexical.ProjectID, lexical.Query, semantic.Embedding, lexical.Limit
@@ -100,7 +148,7 @@ func (d *Database) SearchMemoryHybridCandidates(ctx context.Context, raw MemoryH
 	if err != nil {
 		return MemoryHybridSearchPage{}, err
 	}
-	semantic, semanticErr := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, memoryHybridCandidateLimit)
+	semantic, semanticErr := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, memoryHybridCandidateLimit, request.GenerationID)
 	status := MemoryHybridSearchSemanticReady
 	if errors.Is(semanticErr, ErrMemorySemanticNotConfigured) {
 		status = MemoryHybridSearchSemanticNotConfigured

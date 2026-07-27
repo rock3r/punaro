@@ -13,6 +13,10 @@ import (
 // is available. Callers can continue with lexical retrieval.
 var ErrMemorySemanticNotConfigured = errors.New("memory semantic retrieval is not configured")
 
+// ErrMemorySemanticGenerationChanged reports that a prepared provider vector
+// no longer matches the currently active embedding generation.
+var ErrMemorySemanticGenerationChanged = errors.New("memory semantic generation changed")
+
 // MemorySemanticSearchRequest is the bounded, provider-free input to exact
 // semantic candidate retrieval. A later hybrid layer supplies the query
 // embedding; this primitive never invokes a provider.
@@ -92,7 +96,7 @@ func (d *Database) SearchMemorySemanticCandidates(ctx context.Context, raw Memor
 	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic search timeout cannot be installed")
 	}
-	page, err := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, request.Limit)
+	page, err := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, request.Limit, "")
 	if err != nil {
 		return MemorySemanticSearchPage{}, err
 	}
@@ -102,12 +106,16 @@ func (d *Database) SearchMemorySemanticCandidates(ctx context.Context, raw Memor
 	return page, nil
 }
 
-func searchMemorySemanticCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, embedding []float64, limit int) (MemorySemanticSearchPage, error) {
+func searchMemorySemanticCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, embedding []float64, limit int, expectedGenerationID string) (MemorySemanticSearchPage, error) {
+	var activeGenerationID string
 	var dimensions int
-	if err := tx.QueryRowContext(ctx, `SELECT dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&dimensions); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT id::text,dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&activeGenerationID, &dimensions); errors.Is(err, sql.ErrNoRows) {
 		return MemorySemanticSearchPage{}, ErrMemorySemanticNotConfigured
 	} else if err != nil || dimensions < 1 || dimensions > maxMemoryEmbeddingDimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic generation is unavailable")
+	}
+	if expectedGenerationID != "" && activeGenerationID != expectedGenerationID {
+		return MemorySemanticSearchPage{}, ErrMemorySemanticGenerationChanged
 	}
 	if len(embedding) != dimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic embedding dimensions do not match the active generation")

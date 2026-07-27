@@ -26,9 +26,12 @@ func testMemoryHybridDegradedIntegration(ctx context.Context, t *testing.T, app 
 	if _, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "27272727-2727-4272-8272-272727272701", LogicalKey: "hybrid-degradation", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"hybrid degradation lexical result"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	page, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "hybrid", Embedding: []float64{1}, Limit: 1})
+	page, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, GenerationID: "11111111-1111-4111-8111-111111111111", Query: "hybrid", Embedding: []float64{1}, Limit: 1})
 	if err != nil || len(page.Results) != 1 || page.SemanticStatus != MemoryHybridSearchSemanticNotConfigured {
 		t.Fatalf("degraded hybrid candidates=%#v err=%v", page, err)
+	}
+	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "hybrid", Limit: 1}); !errors.Is(err, ErrMemorySemanticNotConfigured) {
+		t.Fatalf("unconfigured hybrid preparation error=%v", err)
 	}
 }
 
@@ -50,6 +53,10 @@ func testMemorySemanticCandidateIntegration(ctx context.Context, t *testing.T, a
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text,dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&generationID, &dimensions); err != nil {
 		t.Fatal(err)
+	}
+	generation, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "semantic", Limit: 2})
+	if err != nil || generation.ID != generationID || generation.Dimensions != dimensions || generation.State != MemoryEmbeddingGenerationActive {
+		t.Fatalf("hybrid preparation=%#v err=%v", generation, err)
 	}
 	query := make([]float64, dimensions)
 	query[0] = 1
@@ -91,9 +98,12 @@ VALUES ($1,$2,$3,0,decode('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	if err != nil || len(page.Results) != 2 || page.Results[0].ItemID != nearest.ItemID || page.Results[1].ItemID != farthest.ItemID || page.Results[0].Distance != 0 || page.Results[1].Distance <= page.Results[0].Distance {
 		t.Fatalf("semantic candidates=%#v err=%v", page, err)
 	}
-	hybrid, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "semantic", Embedding: query, Limit: 2})
+	hybrid, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, GenerationID: generation.ID, Query: "semantic", Embedding: query, Limit: 2})
 	if err != nil || len(hybrid.Results) != 2 || hybrid.Results[0].ItemID != nearest.ItemID || hybrid.Results[0].LexicalRank != 3 || hybrid.Results[0].SemanticRank != 1 || hybrid.Results[0].Score <= 0 {
 		t.Fatalf("hybrid candidates=%#v err=%v", hybrid, err)
+	}
+	if _, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: actor.ID, ProjectID: projectID, GenerationID: "33333333-3333-4333-8333-333333333333", Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrMemorySemanticGenerationChanged) {
+		t.Fatalf("stale hybrid generation error=%v", err)
 	}
 	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "semantic candidate outsider")
 	if err != nil {
@@ -102,7 +112,10 @@ VALUES ($1,$2,$3,0,decode('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	if _, err := app.SearchMemorySemanticCandidates(ctx, MemorySemanticSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized semantic candidates error=%v", err)
 	}
-	if _, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
+	if _, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, GenerationID: generation.ID, Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized hybrid candidates error=%v", err)
+	}
+	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "semantic", Limit: 2}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized hybrid preparation error=%v", err)
 	}
 }
