@@ -25,6 +25,7 @@ type Database struct {
 	db                        *sql.DB
 	relayDB                   *sql.DB
 	brainDB                   *sql.DB
+	embeddingDB               *sql.DB
 	manifest                  Manifest
 	attachmentPhysicalGCSlots chan struct{}
 	memoryUsageWrites         chan memoryUsageWrite
@@ -76,8 +77,22 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	embeddingDB, err := openPool(ctx, dsn, 4, 1)
+	if err != nil {
+		_ = brainDB.Close()
+		_ = relayDB.Close()
+		_ = db.Close()
+		return nil, err
+	}
+	if err := verifyApplicationRole(ctx, embeddingDB); err != nil {
+		_ = embeddingDB.Close()
+		_ = brainDB.Close()
+		_ = relayDB.Close()
+		_ = db.Close()
+		return nil, err
+	}
 	database := &Database{
-		db: db, relayDB: relayDB, brainDB: brainDB, manifest: CurrentManifest(),
+		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(),
 		attachmentPhysicalGCSlots: make(chan struct{}, 1),
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
@@ -118,10 +133,14 @@ func (d *Database) Close() error {
 	if d.relayDB == nil {
 		return d.db.Close()
 	}
-	if d.brainDB == nil {
-		return errors.Join(d.relayDB.Close(), d.db.Close())
+	closers := []error{d.relayDB.Close(), d.db.Close()}
+	if d.brainDB != nil {
+		closers = append(closers, d.brainDB.Close())
 	}
-	return errors.Join(d.brainDB.Close(), d.relayDB.Close(), d.db.Close())
+	if d.embeddingDB != nil {
+		closers = append(closers, d.embeddingDB.Close())
+	}
+	return errors.Join(closers...)
 }
 
 // SchemaState inspects schema history, required objects, and role safety atomically.
@@ -1140,7 +1159,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = embeddingObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 24 {
-		embeddingWorkerObjectsPresent, err := memoryEmbeddingWorkerControlsAvailable(ctx, q)
+		embeddingWorkerObjectsPresent, err := memoryEmbeddingWorkerControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL memory embedding worker schema cannot be inspected")
 		}
@@ -1168,7 +1187,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = embeddingRebuildBatchObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 28 {
-		embeddingActivationObjectsPresent, err := memoryEmbeddingActivationControlsAvailable(ctx, q)
+		embeddingActivationObjectsPresent, err := memoryEmbeddingActivationControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL memory embedding activation schema cannot be inspected")
 		}
@@ -1180,6 +1199,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL memory embedding vector schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = embeddingVectorObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 32 {
+		embeddingQuarantineReleaseObjectsPresent, err := memoryEmbeddingQuarantineReleaseControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding quarantine-release schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingQuarantineReleaseObjectsPresent
 	}
 	return snapshot, nil
 }

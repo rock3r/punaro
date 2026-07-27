@@ -5,7 +5,11 @@ import "context"
 // memoryEmbeddingActivationControlsAvailable verifies the schema-v28 promotion
 // fence: only the owner may retire an active derived generation and activate a
 // fully rebuilt generation.
-func memoryEmbeddingActivationControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func memoryEmbeddingActivationControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
+	activationMD5 := memoryEmbeddingActivationRoutineV28MD5
+	if schemaVersion >= 31 {
+		activationMD5 = memoryEmbeddingActivationRoutineV31MD5
+	}
 	var available bool
 	err := q.QueryRowContext(ctx, `WITH objects AS (
     SELECT to_regprocedure('brain.activate_embedding_generation(uuid)') AS activate_oid,
@@ -34,12 +38,13 @@ func memoryEmbeddingActivationControlsAvailable(ctx context.Context, q queryer) 
 )
 SELECT activate_oid IS NOT NULL AND delete_guard_oid IS NOT NULL AND immutable_oid IS NOT NULL
    AND routines.exact AND activation_acl.exact AND triggers.exact
-FROM objects,routines,activation_acl,triggers`, memoryEmbeddingActivationRoutineMD5, memoryEmbeddingChunkDeleteGuardRoutineMD5, memoryEmbeddingGenerationMutationRoutineMD5).Scan(&available)
+FROM objects,routines,activation_acl,triggers`, activationMD5, memoryEmbeddingChunkDeleteGuardRoutineMD5, memoryEmbeddingGenerationMutationRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryEmbeddingActivationRoutineMD5         = "514944767b34823edaabb23ae868dd16"
+	memoryEmbeddingActivationRoutineV28MD5      = "514944767b34823edaabb23ae868dd16"
+	memoryEmbeddingActivationRoutineV31MD5      = "f427432d68f08abd6012be9a9cf6a37d"
 	memoryEmbeddingChunkDeleteGuardRoutineMD5   = "8e425c1cc346a818814c2903f8d52786"
 	memoryEmbeddingGenerationMutationRoutineMD5 = "5ba945bbb850d7f58c7a7ce2cea1516d"
 )

@@ -287,6 +287,9 @@ func (d *Database) DeleteMemory(ctx context.Context, request MemoryDeleteRequest
 		}
 		var scopeID, timelineID string
 		var revision, changeSequence int64
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, request.ItemID); err != nil {
+			return MemoryMutationResult{}, errors.New("memory purge fence is unavailable")
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT scope_id::text,revision,timeline_id::text,change_sequence
 FROM brain.purge_memory($1::uuid,$2::uuid,$3::uuid,$4)`, request.PrincipalID, locked.ProjectID, request.ItemID, locked.Revision).Scan(&scopeID, &revision, &timelineID, &changeSequence); err != nil {
 			return MemoryMutationResult{}, errors.New("memory item could not be purged")
@@ -377,6 +380,9 @@ ON CONFLICT (project_id) DO NOTHING RETURNING id::text`, projectID, principalID)
 }
 
 func insertMemoryRevision(ctx context.Context, tx *sql.Tx, itemID string, revision int64, document []byte, principalID string, operation MemoryChangeType) error {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, itemID); err != nil {
+		return errors.New("memory revision fence is unavailable")
+	}
 	var storedDocument string
 	if err := tx.QueryRowContext(ctx, `SELECT $1::jsonb::text`, string(document)).Scan(&storedDocument); err != nil || len(storedDocument) > maxMemoryDocumentBytes {
 		return errors.New("memory document could not be normalized")

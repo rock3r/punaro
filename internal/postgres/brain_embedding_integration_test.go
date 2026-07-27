@@ -200,6 +200,10 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 		t.Fatalf("claimed embedding work=%#v err=%v", claimed, err)
 	}
 	firstLease := claimed[0]
+	sourceGeneration, sourceChunks, err := app.LoadMemoryEmbeddingSource(ctx, firstLease)
+	if err != nil || sourceGeneration.ID != generationID || sourceGeneration.Dimensions != 3 || len(sourceChunks) != 1 || sourceChunks[0].Ordinal != 0 || sourceChunks[0].ContentSHA256 != firstLease.ContentSHA256 || sourceChunks[0].StartOffset != 0 || sourceChunks[0].EndOffset != len(sourceChunks[0].Text) || !strings.Contains(sourceChunks[0].Text, "queue first") {
+		t.Fatalf("embedding source generation=%#v chunks=%#v err=%v", sourceGeneration, sourceChunks, err)
+	}
 	if err := app.RetryMemoryEmbeddingWork(ctx, MemoryEmbeddingRetry{Lease: firstLease, ErrorCode: "provider_unavailable", Delay: time.Second}); err != nil {
 		t.Fatalf("embedding retry: %v", err)
 	}
@@ -410,6 +414,160 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2`, generationID, superseded.ItemID).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("superseded embedding chunks=%d err=%v", count, err)
+	}
+}
+
+func testMemoryEmbeddingQuarantineDeferralIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "embedding quarantine actor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('embedding quarantine project',$1) RETURNING id::text`, actor.ID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, projectID, CapabilityMemoryWrite); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "19191919-1919-4191-8191-191919191931", LogicalKey: "embedding-quarantine", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"deferred quarantine"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7f',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191932", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lease := range claimed {
+		if lease.ItemID == created.ItemID {
+			t.Fatal("claim leased an actively quarantined embedding job")
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, created.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191933", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lease MemoryEmbeddingLease
+	for _, candidate := range claimed {
+		if candidate.ItemID == created.ItemID {
+			lease = candidate
+			break
+		}
+	}
+	if !lease.valid() {
+		t.Fatalf("released quarantine was not claimable: %#v", claimed)
+	}
+	if err := app.RetryMemoryEmbeddingWork(ctx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: "quarantined", Delay: 0}); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	var attempts int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,attempts FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID).Scan(&state, &attempts); err != nil || state != "queued" || attempts != lease.Attempts {
+		t.Fatalf("unquarantined retry state=%q attempts=%d lease=%#v err=%v", state, attempts, lease, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET available_at=statement_timestamp() WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191935", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease = MemoryEmbeddingLease{}
+	for _, candidate := range claimed {
+		if candidate.ItemID == created.ItemID {
+			lease = candidate
+			break
+		}
+	}
+	if !lease.valid() {
+		t.Fatalf("unquarantined retry did not remain claimable: %#v", claimed)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7e',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.LoadMemoryEmbeddingSource(ctx, lease); !errors.Is(err, ErrMemoryEmbeddingQuarantined) {
+		t.Fatalf("quarantined embedding source error=%v", err)
+	}
+	if err := app.RetryMemoryEmbeddingWork(ctx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: "quarantined", Delay: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,attempts FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID).Scan(&state, &attempts); err != nil || state != "queued" || attempts != lease.Attempts-1 {
+		t.Fatalf("quarantine deferral state=%q attempts=%d lease=%#v err=%v", state, attempts, lease, err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191934", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range claimed {
+		if candidate.ItemID == created.ItemID {
+			t.Fatal("deferred quarantined job was claimed")
+		}
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET attempts=24 WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, created.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET available_at=statement_timestamp() WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191936", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease = MemoryEmbeddingLease{}
+	for _, candidate := range claimed {
+		if candidate.ItemID == created.ItemID {
+			lease = candidate
+			break
+		}
+	}
+	if !lease.valid() || lease.Attempts != 25 {
+		t.Fatalf("final-attempt quarantine lease=%#v", lease)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7d',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET lease_until=statement_timestamp()-interval '1 second' WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID); err != nil {
+		t.Fatal(err)
+	}
+	releaseTx, err := beginMutation(ctx, app.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err := releaseActiveMemoryQuarantine(ctx, releaseTx, actor.ID, created.ItemID)
+	if err != nil {
+		_ = releaseTx.Rollback()
+		t.Fatal(err)
+	}
+	if !released {
+		_ = releaseTx.Rollback()
+		t.Fatal("active quarantine was not released")
+	}
+	if err := releaseTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state,attempts FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID).Scan(&state, &attempts); err != nil || state != "queued" || attempts != 24 {
+		t.Fatalf("released expired quarantined lease state=%q attempts=%d err=%v", state, attempts, err)
+	}
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191937", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range claimed {
+		if candidate.ItemID == created.ItemID && candidate.Attempts != 25 {
+			t.Fatalf("released final-attempt lease=%#v", candidate)
+		}
 	}
 }
 

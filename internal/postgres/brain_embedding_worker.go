@@ -11,9 +11,16 @@ import (
 // which has expired, been reclaimed, or been superseded by a newer revision.
 var ErrStaleEmbeddingLease = errors.New("embedding lease is stale")
 
+// ErrMemoryEmbeddingQuarantined reports that a live lease cannot safely expose
+// its canonical content while the item is under an active quarantine.
+var ErrMemoryEmbeddingQuarantined = errors.New("memory embedding is quarantined")
+
 // MemoryEmbeddingLease is one exact, content-free worker lease coordinate.
 type MemoryEmbeddingLease struct {
 	MemoryEmbeddingWork
+	// Generation is the immutable model identity observed when this lease was
+	// claimed. The executor binds a fenced source to it before provider use.
+	Generation      MemoryEmbeddingGeneration
 	Attempts        int
 	Holder          string
 	Token           string
@@ -27,7 +34,8 @@ func (lease MemoryEmbeddingLease) valid() bool {
 }
 
 // MemoryEmbeddingRetry releases a leased coordinate after a bounded delay or
-// records a terminal diagnostic when its final attempt has been consumed.
+// records a terminal diagnostic when its final attempt has been consumed. The
+// quarantined code durably defers work without consuming an attempt.
 type MemoryEmbeddingRetry struct {
 	Lease     MemoryEmbeddingLease
 	ErrorCode string
@@ -50,7 +58,10 @@ func (d *Database) ClaimMemoryEmbeddingWork(ctx context.Context, raw MemoryEmbed
 		return nil, mutationStartError(err, "embedding claim transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(ctx, `SELECT generation_id::text,item_id::text,revision,encode(content_sha256,'hex'),attempts,lease_holder::text,lease_token::text,lease_generation,lease_until FROM brain.claim_embedding_jobs($1,$2,$3)`, request.WorkerID, request.Limit, request.LeaseDuration.Microseconds())
+	rows, err := tx.QueryContext(ctx, `SELECT claim.generation_id::text,claim.item_id::text,claim.revision,encode(claim.content_sha256,'hex'),claim.attempts,claim.lease_holder::text,claim.lease_token::text,claim.lease_generation,claim.lease_until,
+generation.model,generation.model_revision,generation.dimensions,generation.state
+FROM brain.claim_embedding_jobs($1,$2,$3) AS claim
+JOIN brain.embedding_generations AS generation ON generation.id=claim.generation_id`, request.WorkerID, request.Limit, request.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, errors.New("embedding work could not be claimed")
 	}
@@ -58,7 +69,14 @@ func (d *Database) ClaimMemoryEmbeddingWork(ctx context.Context, raw MemoryEmbed
 	leases := make([]MemoryEmbeddingLease, 0, request.Limit)
 	for rows.Next() {
 		var lease MemoryEmbeddingLease
-		if err := rows.Scan(&lease.GenerationID, &lease.ItemID, &lease.Revision, &lease.ContentSHA256, &lease.Attempts, &lease.Holder, &lease.Token, &lease.LeaseGeneration, &lease.LeaseUntil); err != nil || !lease.valid() {
+		var generationState MemoryEmbeddingGenerationState
+		if err := rows.Scan(&lease.GenerationID, &lease.ItemID, &lease.Revision, &lease.ContentSHA256, &lease.Attempts, &lease.Holder, &lease.Token, &lease.LeaseGeneration, &lease.LeaseUntil,
+			&lease.Generation.Model, &lease.Generation.Revision, &lease.Generation.Dimensions, &generationState); err != nil {
+			return nil, errors.New("claimed embedding work is malformed")
+		}
+		lease.Generation.ID = lease.GenerationID
+		lease.Generation.State = generationState
+		if !lease.valid() || lease.Generation.Validate() != nil {
 			return nil, errors.New("claimed embedding work is malformed")
 		}
 		leases = append(leases, lease)

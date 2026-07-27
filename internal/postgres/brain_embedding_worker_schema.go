@@ -4,7 +4,11 @@ import "context"
 
 // memoryEmbeddingWorkerControlsAvailable verifies that the only application
 // mutation path for embedding jobs remains the bounded owner routines.
-func memoryEmbeddingWorkerControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func memoryEmbeddingWorkerControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
+	claimMD5, retryMD5 := memoryEmbeddingClaimRoutineV24MD5, memoryEmbeddingRetryRoutineV24MD5
+	if schemaVersion >= 30 {
+		claimMD5, retryMD5 = memoryEmbeddingClaimRoutineV30MD5, memoryEmbeddingRetryRoutineV30MD5
+	}
 	var available bool
 	err := q.QueryRowContext(ctx, `WITH objects AS (
     SELECT to_regprocedure('brain.claim_embedding_jobs(uuid,integer,bigint)') AS claim_oid,
@@ -47,11 +51,13 @@ func memoryEmbeddingWorkerControlsAvailable(ctx context.Context, q queryer) (boo
     FROM pg_proc AS proc,objects WHERE proc.oid=ANY(ARRAY[claim_oid,retry_oid])
 )
 SELECT claim_oid IS NOT NULL AND retry_oid IS NOT NULL AND routine_safety.exact AND routine_acl.exact
-FROM objects,routine_safety,routine_acl`, memoryEmbeddingClaimRoutineMD5, memoryEmbeddingRetryRoutineMD5).Scan(&available)
+FROM objects,routine_safety,routine_acl`, claimMD5, retryMD5).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryEmbeddingClaimRoutineMD5 = "d211877029240bc95f35abb2b00df576"
-	memoryEmbeddingRetryRoutineMD5 = "06f3d49f9ba794dd42ccdfe0ddfd9e0a"
+	memoryEmbeddingClaimRoutineV24MD5 = "d211877029240bc95f35abb2b00df576"
+	memoryEmbeddingRetryRoutineV24MD5 = "06f3d49f9ba794dd42ccdfe0ddfd9e0a"
+	memoryEmbeddingClaimRoutineV30MD5 = "87ed4326d12c02c92a5ecc01e8518404"
+	memoryEmbeddingRetryRoutineV30MD5 = "4cadc2c5cbcd899d2a9ef5a8d380e110"
 )
