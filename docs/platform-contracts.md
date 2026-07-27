@@ -392,9 +392,12 @@ invalid dimensionality or numeric values leave both chunks and the job
 unchanged. Upgrade drops only prior coordinate-only chunk output and requeues
 previously succeeded or interrupted derived jobs, while preserving terminal
 failures as explicit degradation evidence. The application role remains unable
-to mutate vector rows, no provider configuration or text is stored, and no
-vector index, semantic query, route, client surface, hybrid ranking, or RRF is
-introduced.
+to mutate vector rows, and no provider configuration, fragment text, vector
+index, route, or client surface is introduced. The internal retrieval slice
+reads only active, succeeded, current, non-quarantined authorized coordinates
+and fuses separately bounded lexical and exact semantic lists in one
+repeatable-read snapshot with reciprocal-rank fusion at a fixed offset of 60;
+it returns ranks and opaque coordinates only.
 
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
