@@ -16,6 +16,7 @@ func memoryEmbeddingRebuildBatchControlsAvailable(ctx context.Context, q queryer
       ('brain.embedding_rebuild_progress','timeline_id','uuid',true,''),
       ('brain.embedding_rebuild_progress','timeline_watermark','bigint',true,''),
       ('brain.embedding_rebuild_progress','cursor_change_sequence','bigint',true,'0'),
+      ('brain.embedding_rebuild_progress','reported_progress','bigint',true,'0'),
       ('brain.embedding_rebuild_progress','complete','boolean',true,'false')
 ), actual_columns AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,format_type(attribute.atttypid,attribute.atttypmod),attribute.attnotnull,
@@ -44,6 +45,7 @@ func memoryEmbeddingRebuildBatchControlsAvailable(ctx context.Context, q queryer
 ), expected_checks(relation_name,constraint_name,expression) AS (
     VALUES
       ('brain.embedding_rebuild_progress','embedding_rebuild_progress_cursor_change_sequence_check','(cursor_change_sequence >= 0)'),
+      ('brain.embedding_rebuild_progress','embedding_rebuild_progress_reported_progress_check','(reported_progress >= 0)'),
       ('brain.embedding_rebuild_progress','embedding_rebuild_progress_timeline_watermark_check','(timeline_watermark >= 0)')
 ), actual_checks AS (
     SELECT constraint_row.conrelid::regclass::text,constraint_row.conname,pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
@@ -51,7 +53,7 @@ func memoryEmbeddingRebuildBatchControlsAvailable(ctx context.Context, q queryer
     WHERE constraint_row.conrelid=progress_oid AND constraint_row.contype='c'
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
 ), constraint_safety AS (
-    SELECT count(*)=4 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
+    SELECT count(*)=5 AND bool_and(constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred) AS exact
     FROM pg_constraint AS constraint_row,objects
     WHERE constraint_row.conrelid=progress_oid AND constraint_row.contype<>'n'
 ), routine_safety AS (
@@ -99,4 +101,4 @@ FROM objects,table_safety,constraint_safety,routine_safety,routine_acl,column_ac
 	return available, err
 }
 
-const memoryEmbeddingRebuildBatchRoutineMD5 = "f82a1bb5d75761b3ebef154c85e293b8"
+const memoryEmbeddingRebuildBatchRoutineMD5 = "0504e96e3ef59a16cf3607517a444a5a"

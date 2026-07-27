@@ -17,6 +17,7 @@ CREATE TABLE brain.embedding_rebuild_progress (
     timeline_id uuid NOT NULL,
     timeline_watermark bigint NOT NULL CHECK (timeline_watermark >= 0),
     cursor_change_sequence bigint NOT NULL DEFAULT 0 CHECK (cursor_change_sequence >= 0),
+    reported_progress bigint NOT NULL DEFAULT 0 CHECK (reported_progress >= 0),
     complete boolean NOT NULL DEFAULT false
 );
 
@@ -86,7 +87,7 @@ BEGIN
         RAISE EXCEPTION USING ERRCODE = '23514', MESSAGE = 'embedding rebuild generation is unavailable';
     END IF;
     IF done THEN
-        SELECT progress.cursor_change_sequence INTO cursor_change_sequence
+        SELECT progress.reported_progress INTO cursor_change_sequence
         FROM brain.embedding_rebuild_progress AS progress
         WHERE progress.generation_id=requested_generation;
         enqueued := 0; complete := true; RETURN NEXT; RETURN;
@@ -123,15 +124,16 @@ BEGIN
         JOIN brain.embedding_rebuild_progress AS progress ON event.restored_timeline_id=progress.timeline_id
         WHERE progress.generation_id=requested_generation;
         IF next_timeline IS NOT NULL THEN
-            UPDATE brain.embedding_rebuild_progress SET timeline_id=next_timeline,timeline_watermark=next_timeline_watermark,cursor_change_sequence=0 WHERE generation_id=requested_generation;
-            done := false; next_cursor := 0;
+            UPDATE brain.embedding_rebuild_progress SET timeline_id=next_timeline,timeline_watermark=next_timeline_watermark,cursor_change_sequence=0,reported_progress=reported_progress+scanned WHERE generation_id=requested_generation;
+            done := false;
         ELSE
-            UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,complete=true WHERE generation_id=requested_generation;
+            UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+scanned,complete=true WHERE generation_id=requested_generation;
         END IF;
     ELSE
-        UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor WHERE generation_id=requested_generation;
+        UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+scanned WHERE generation_id=requested_generation;
     END IF;
-    enqueued := changed; cursor_change_sequence := next_cursor; complete := done; RETURN NEXT;
+    SELECT progress.reported_progress INTO cursor_change_sequence FROM brain.embedding_rebuild_progress AS progress WHERE progress.generation_id=requested_generation;
+    enqueued := changed; complete := done; RETURN NEXT;
 END
 $function$;
 
