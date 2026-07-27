@@ -39,6 +39,7 @@ BEGIN
            OR ordinal < 0 OR ordinal >= chunk_count OR content_sha256 !~ '^[0-9a-f]{64}$'
            OR start_offset < 0 OR end_offset <= start_offset OR end_offset > 262144
            OR jsonb_typeof(embedding) <> 'array'
+           OR jsonb_array_length(embedding) < 1 OR jsonb_array_length(embedding) > 4096
            OR EXISTS (SELECT 1 FROM jsonb_array_elements(embedding) AS value WHERE jsonb_typeof(value) <> 'number')
     ) OR EXISTS (
         SELECT 1 FROM jsonb_to_recordset(requested_chunks) AS chunk(ordinal integer, content_sha256 text, start_offset integer, end_offset integer, embedding jsonb)
