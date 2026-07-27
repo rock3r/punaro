@@ -31,6 +31,7 @@ SET search_path = pg_catalog
 AS $function$
 DECLARE
     chunk_count integer;
+    expected_dimensions integer;
 BEGIN
     PERFORM jobs.assert_application_mutation();
     IF requested_generation IS NULL OR requested_item IS NULL OR requested_revision IS NULL OR requested_sha256 IS NULL
@@ -61,6 +62,24 @@ BEGIN
             SELECT start_offset,lag(end_offset) OVER (ORDER BY ordinal) AS previous_end
             FROM jsonb_to_recordset(requested_chunks) AS chunk(ordinal integer, content_sha256 text, start_offset integer, end_offset integer, embedding jsonb)
         ) AS ordered WHERE start_offset < previous_end
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid embedding publication';
+    END IF;
+    SELECT generation.dimensions INTO expected_dimensions
+    FROM brain.embedding_jobs AS job
+    JOIN brain.embedding_generations AS generation ON generation.id=job.generation_id
+    JOIN brain.memory_items AS item ON item.id=job.item_id AND item.current_revision=job.revision
+    WHERE job.generation_id=requested_generation AND job.item_id=requested_item AND job.revision=requested_revision
+      AND job.content_sha256=requested_sha256 AND job.state='running' AND job.lease_token=requested_token
+      AND job.lease_generation=requested_lease_generation AND job.lease_until > statement_timestamp()
+    FOR UPDATE OF job;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    IF EXISTS (
+        SELECT 1
+        FROM jsonb_to_recordset(requested_chunks) AS chunk(embedding jsonb)
+        WHERE jsonb_array_length(chunk.embedding) <> expected_dimensions
     ) THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid embedding publication';
     END IF;
