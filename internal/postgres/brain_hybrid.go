@@ -43,6 +43,49 @@ type MemoryHybridSearchPage struct {
 	SemanticStatus MemoryHybridSearchSemanticStatus `json:"semantic_status"`
 }
 
+// SearchMemoryHybridLexicalCandidates returns authorized lexical candidate
+// coordinates when semantic retrieval is unavailable. Like the hybrid path it
+// deliberately does not record recall usage; a presentation layer owns that.
+func (d *Database) SearchMemoryHybridLexicalCandidates(ctx context.Context, raw MemorySearchRequest) (MemoryHybridSearchPage, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	searchCtx, cancel := context.WithTimeout(ctx, memorySearchTimeout)
+	defer cancel()
+	tx, err := d.brainPool().BeginTx(searchCtx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search transaction cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	projectID, err := resolveCanonicalActiveProject(searchCtx, tx, request.ProjectID)
+	if err != nil {
+		return MemoryHybridSearchPage{}, ErrNotFound
+	}
+	allowed, err := hasCapability(searchCtx, tx, request.PrincipalID, projectID, CapabilityMemorySearch)
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	if !allowed {
+		return MemoryHybridSearchPage{}, ErrNotFound
+	}
+	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search timeout cannot be installed")
+	}
+	lexical, err := searchMemoryInTx(searchCtx, tx, projectID, request.Query, memoryHybridCandidateLimit, false, false)
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	results, more, err := fuseMemorySearchRanks(lexical.Results, nil, request.Limit)
+	if err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid search candidates are unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryHybridSearchPage{}, errors.New("memory hybrid lexical search transaction could not finish")
+	}
+	return MemoryHybridSearchPage{Results: results, More: lexical.More || more, SemanticStatus: MemoryHybridSearchSemanticNotConfigured}, nil
+}
+
 // PrepareMemoryHybridSearch authorizes one normalized query before a later
 // provider call and returns only the active generation's non-secret identity.
 // The caller must pass a vector for this exact generation to the subsequent
