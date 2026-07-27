@@ -40,7 +40,7 @@ func RequireInstalledPGVector(ctx context.Context, cfg Config) error {
     SELECT 1 FROM pg_extension AS ext
     WHERE ext.extname='vector' AND ext.extnamespace='public'::regnamespace
       AND ext.extversion=$1 AND pg_get_userbyid(ext.extowner)=current_user
-)`, requiredPGVectorVersion).Scan(&available)
+) AND '[0]'::public.vector IS NOT NULL`, requiredPGVectorVersion).Scan(&available)
 	if err != nil || !available {
 		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")
 	}
