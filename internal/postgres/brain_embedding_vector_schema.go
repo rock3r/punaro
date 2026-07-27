@@ -43,9 +43,13 @@ FROM pg_trigger AS trigger_row WHERE trigger_row.tgrelid='brain.embedding_chunks
 	}
 	if err := q.QueryRowContext(ctx, `SELECT NOT EXISTS (
     SELECT 1 FROM pg_index AS index_row
-    JOIN pg_attribute AS attribute ON attribute.attrelid=index_row.indrelid
-      AND attribute.attname='embedding' AND attribute.attnum=ANY(index_row.indkey::smallint[])
     WHERE index_row.indrelid='brain.embedding_chunks'::regclass
+      AND ((0=ANY(index_row.indkey::smallint[])
+            AND index_row.indexprs IS NOT NULL
+            AND pg_get_expr(index_row.indexprs,index_row.indrelid) ~ '(^|[^a-z_])embedding([^a-z_]|$)')
+           OR EXISTS (SELECT 1 FROM pg_attribute AS attribute
+                      WHERE attribute.attrelid=index_row.indrelid AND attribute.attname='embedding'
+                        AND attribute.attnum=ANY(index_row.indkey::smallint[])))
 )`).Scan(&exact); err != nil {
 		return false, err
 	}

@@ -108,6 +108,7 @@ func TestMemoryEmbeddingPublicationValidation(t *testing.T) {
 		"empty vector":           {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
 		"infinite vector":        {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.Inf(1)}}}},
 		"unrepresentable vector": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.MaxFloat64}}}},
+		"underflow vector":       {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.SmallestNonzeroFloat64}}}},
 		"overlapping range":      {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64, Vector: []float64{0.5}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
