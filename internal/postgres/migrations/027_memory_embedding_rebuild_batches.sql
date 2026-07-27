@@ -5,6 +5,10 @@ ADD COLUMN start_timeline_id uuid;
 -- watermark cannot be interpreted after restore or promotion. It is derived
 -- work only: discard it atomically before accepting timeline-bound rebuilds.
 ALTER TABLE brain.embedding_generations DISABLE TRIGGER USER;
+DELETE FROM brain.embedding_chunks
+WHERE generation_id IN (SELECT id FROM brain.embedding_generations WHERE state = 'building');
+DELETE FROM brain.embedding_jobs
+WHERE generation_id IN (SELECT id FROM brain.embedding_generations WHERE state = 'building');
 DELETE FROM brain.embedding_generations WHERE state = 'building';
 ALTER TABLE brain.embedding_generations ENABLE TRIGGER USER;
 
@@ -83,16 +87,19 @@ BEGIN
         WHERE progress.generation_id=requested_generation;
         enqueued := 0; complete := true; RETURN NEXT; RETURN;
     END IF;
-    WITH candidates AS MATERIALIZED (
-        SELECT change.change_sequence,item.id AS item_id,change.revision,revision.content_sha256
+    WITH changes AS MATERIALIZED (
+        SELECT change.change_sequence,change.item_id,change.revision
         FROM brain.embedding_rebuild_progress AS progress
         JOIN brain.memory_changes AS change ON change.timeline_id=progress.timeline_id
           AND change.change_sequence>progress.cursor_change_sequence AND change.change_sequence<=watermark
-        JOIN brain.memory_items AS item ON item.id=change.item_id AND item.current_revision=change.revision
-        JOIN brain.memory_revisions AS revision ON revision.item_id=change.item_id AND revision.revision=change.revision
         WHERE progress.generation_id=requested_generation
         ORDER BY change.change_sequence
         LIMIT requested_limit
+    ), candidates AS MATERIALIZED (
+        SELECT changes.change_sequence,item.id AS item_id,changes.revision,revision.content_sha256
+        FROM changes
+        JOIN brain.memory_items AS item ON item.id=changes.item_id AND item.current_revision=changes.revision
+        JOIN brain.memory_revisions AS revision ON revision.item_id=changes.item_id AND revision.revision=changes.revision
     ), queued AS (
         INSERT INTO brain.embedding_jobs(generation_id,item_id,revision,content_sha256)
         SELECT requested_generation,item_id,revision,content_sha256 FROM candidates
@@ -100,7 +107,7 @@ BEGIN
         WHERE brain.embedding_jobs.revision<EXCLUDED.revision
         RETURNING 1
     ), advanced AS (
-        SELECT count(*)::integer AS scanned,COALESCE(max(change_sequence),watermark) AS next_cursor FROM candidates
+        SELECT count(*)::integer AS scanned,COALESCE(max(change_sequence),watermark) AS next_cursor FROM changes
     ), applied AS (
         SELECT count(*) AS changed FROM queued
     )
