@@ -37,6 +37,7 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
                   SELECT 1
                   FROM pg_extension_update_paths('vector') AS path
                   WHERE path.source=ext.extversion AND path.target=$1
+                    AND path.path IS NOT NULL
               )
           )
     )`, requiredPGVectorVersion).Scan(&available)
