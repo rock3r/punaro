@@ -114,6 +114,19 @@ func TestMemoryEmbeddingExecutorRetainsSourceFenceThroughQuarantineRetry(t *test
 	}
 }
 
+func TestMemoryEmbeddingExecutorLetsExpiredSourceFenceLeaseReclaim(t *testing.T) {
+	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Generation: MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, Attempts: 25, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now()}
+	store := &fakeEmbeddingExecutorStore{leases: []MemoryEmbeddingLease{lease}}
+	executor, err := NewMemoryEmbeddingExecutor(store, fakeEmbeddingSource{err: errors.New("source fence unavailable")}, fakeEmbeddingProvider{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), MemoryEmbeddingClaimRequest{WorkerID: lease.Holder, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || result.Retried != 0 || len(store.retries) != 0 {
+		t.Fatalf("result=%#v retries=%#v err=%v", result, store.retries, err)
+	}
+}
+
 type fakeEmbeddingExecutorStore struct {
 	leases    []MemoryEmbeddingLease
 	published []MemoryEmbeddingPublication
