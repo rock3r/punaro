@@ -11,6 +11,8 @@ func TestMemoryEmbeddingExecutorPublishesAndRetriesBoundedly(t *testing.T) {
 	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Generation: MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
 	store := &fakeEmbeddingExecutorStore{leases: []MemoryEmbeddingLease{lease}}
 	source := fakeEmbeddingSource{generation: MemoryEmbeddingGeneration{ID: lease.GenerationID, Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, chunks: []MemoryEmbeddingSourceChunk{{Ordinal: 0, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", StartOffset: 0, EndOffset: 4, Text: "test"}}}
+	sourceDeadline := time.Time{}
+	source.deadline = &sourceDeadline
 	providerDeadline := time.Time{}
 	executor, err := NewMemoryEmbeddingExecutor(store, source, fakeEmbeddingProvider{vectors: [][]float64{{0.25, 0.75}}, deadline: &providerDeadline})
 	if err != nil {
@@ -22,6 +24,9 @@ func TestMemoryEmbeddingExecutorPublishesAndRetriesBoundedly(t *testing.T) {
 	}
 	if providerDeadline.IsZero() || providerDeadline.After(lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve)) {
 		t.Fatalf("provider deadline=%v lease until=%v", providerDeadline, lease.LeaseUntil)
+	}
+	if sourceDeadline.IsZero() || sourceDeadline.After(lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve)) {
+		t.Fatalf("source deadline=%v lease until=%v", sourceDeadline, lease.LeaseUntil)
 	}
 	store.leases = []MemoryEmbeddingLease{lease}
 	executor, err = NewMemoryEmbeddingExecutor(store, source, fakeEmbeddingProvider{vectors: [][]float64{{0.25}}})
@@ -143,13 +148,17 @@ type fakeEmbeddingSource struct {
 	generation MemoryEmbeddingGeneration
 	chunks     []MemoryEmbeddingSourceChunk
 	err        error
+	deadline   *time.Time
 }
 
 func (s fakeEmbeddingSource) LoadMemoryEmbeddingSource(context.Context, MemoryEmbeddingLease) (MemoryEmbeddingGeneration, []MemoryEmbeddingSourceChunk, error) {
 	return s.generation, s.chunks, s.err
 }
 
-func (s fakeEmbeddingSource) OpenMemoryEmbeddingSource(context.Context, MemoryEmbeddingLease) (MemoryEmbeddingGeneration, []MemoryEmbeddingSourceChunk, func(), error) {
+func (s fakeEmbeddingSource) OpenMemoryEmbeddingSource(ctx context.Context, _ MemoryEmbeddingLease) (MemoryEmbeddingGeneration, []MemoryEmbeddingSourceChunk, func(), error) {
+	if s.deadline != nil {
+		*s.deadline, _ = ctx.Deadline()
+	}
 	return s.generation, s.chunks, func() {}, s.err
 }
 

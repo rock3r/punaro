@@ -174,7 +174,10 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 	var chunks []MemoryEmbeddingSourceChunk
 	var release func()
 	var loadErr error
-	generation, chunks, release, loadErr = e.source.OpenMemoryEmbeddingSource(ctx, lease)
+	leaseDeadline := lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve)
+	sourceCtx, cancelSource := context.WithDeadline(ctx, leaseDeadline)
+	defer cancelSource()
+	generation, chunks, release, loadErr = e.source.OpenMemoryEmbeddingSource(sourceCtx, lease)
 	if loadErr == nil && release == nil {
 		loadErr = errors.New("memory embedding source fence is unavailable")
 	}
@@ -199,10 +202,8 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 		}
 		return nil
 	}
-	providerCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve))
-	defer cancel()
 	providerChunks := append([]MemoryEmbeddingSourceChunk(nil), chunks...)
-	vectors, embedErr := e.provider.Embed(providerCtx, generation, providerChunks)
+	vectors, embedErr := e.provider.Embed(sourceCtx, generation, providerChunks)
 	if embedErr != nil {
 		if err := e.retry(ctx, lease, "provider_unavailable", result); err != nil {
 			return err
