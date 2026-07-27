@@ -23,6 +23,11 @@ type memoryHybridQueryStore interface {
 	PrepareMemoryHybridSearch(context.Context, MemorySearchRequest) (MemoryEmbeddingGeneration, error)
 }
 
+type memoryHybridRetrievalStore interface {
+	memoryHybridQueryStore
+	SearchMemoryHybridCandidates(context.Context, MemoryHybridSearchRequest) (MemoryHybridSearchPage, error)
+}
+
 // MemoryHybridQueryExecutor authorizes before exposing a normalized query to a
 // provider and preserves the resulting generation fence for hybrid retrieval.
 type MemoryHybridQueryExecutor struct {
@@ -64,4 +69,38 @@ func (e *MemoryHybridQueryExecutor) Embed(ctx context.Context, raw MemorySearchR
 		return MemoryHybridQueryEmbedding{}, errors.New("memory query embedding is invalid")
 	}
 	return MemoryHybridQueryEmbedding{GenerationID: generation.ID, Vector: semantic.Embedding}, nil
+}
+
+// MemoryHybridRetrievalExecutor derives a fenced query vector and consumes it
+// immediately in the provider-free hybrid candidate boundary.
+type MemoryHybridRetrievalExecutor struct {
+	query     *MemoryHybridQueryExecutor
+	retrieval memoryHybridRetrievalStore
+}
+
+// NewMemoryHybridRetrievalExecutor constructs the complete internal
+// authorization, query-embedding, and hybrid-candidate sequence.
+func NewMemoryHybridRetrievalExecutor(store memoryHybridRetrievalStore, provider MemoryHybridQueryEmbeddingProvider) (*MemoryHybridRetrievalExecutor, error) {
+	query, err := NewMemoryHybridQueryExecutor(store, provider)
+	if err != nil {
+		return nil, err
+	}
+	return &MemoryHybridRetrievalExecutor{query: query, retrieval: store}, nil
+}
+
+// Search runs the fenced embedding sequence and retrieves hybrid candidate
+// coordinates. It neither configures a provider nor exposes a client route.
+func (e *MemoryHybridRetrievalExecutor) Search(ctx context.Context, raw MemorySearchRequest) (MemoryHybridSearchPage, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	embedding, err := e.query.Embed(ctx, request)
+	if err != nil {
+		return MemoryHybridSearchPage{}, err
+	}
+	return e.retrieval.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{
+		PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, GenerationID: embedding.GenerationID,
+		Query: request.Query, Embedding: embedding.Vector, Limit: request.Limit,
+	})
 }

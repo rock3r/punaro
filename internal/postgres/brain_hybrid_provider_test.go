@@ -62,6 +62,22 @@ func TestMemoryHybridQueryExecutorDoesNotCallProviderWhenPreparationFails(t *tes
 	}
 }
 
+func TestMemoryHybridRetrievalExecutorCarriesPreparedFenceIntoCandidates(t *testing.T) {
+	generation := MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-27", Dimensions: 2, State: MemoryEmbeddingGenerationActive}
+	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{generation: generation}, page: MemoryHybridSearchPage{SemanticStatus: MemoryHybridSearchSemanticReady}}
+	executor, err := NewMemoryHybridRetrievalExecutor(store, &fakeMemoryHybridQueryProvider{vector: []float64{0.25, 0.75}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := executor.Search(context.Background(), MemorySearchRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", ProjectID: "33333333-3333-4333-8333-333333333333", Query: "  release  ", Limit: 2})
+	if err != nil || page.SemanticStatus != MemoryHybridSearchSemanticReady {
+		t.Fatalf("page=%#v err=%v", page, err)
+	}
+	if store.hybridCalls != 1 || store.request.GenerationID != generation.ID || store.request.Query != "release" || len(store.request.Embedding) != generation.Dimensions {
+		t.Fatalf("hybrid calls=%d request=%#v", store.hybridCalls, store.request)
+	}
+}
+
 type fakeMemoryHybridQueryStore struct {
 	generation   MemoryEmbeddingGeneration
 	err          error
@@ -79,6 +95,20 @@ type fakeMemoryHybridQueryProvider struct {
 	vector     []float64
 	err        error
 	calls      int
+}
+
+type fakeMemoryHybridRetrievalStore struct {
+	fakeMemoryHybridQueryStore
+	request     MemoryHybridSearchRequest
+	page        MemoryHybridSearchPage
+	err         error
+	hybridCalls int
+}
+
+func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybridCandidates(_ context.Context, request MemoryHybridSearchRequest) (MemoryHybridSearchPage, error) {
+	s.hybridCalls++
+	s.request = request
+	return s.page, s.err
 }
 
 func (p *fakeMemoryHybridQueryProvider) EmbedMemoryQuery(_ context.Context, generation MemoryEmbeddingGeneration, query string) ([]float64, error) {
