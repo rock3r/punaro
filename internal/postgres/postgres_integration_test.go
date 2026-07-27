@@ -461,6 +461,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testMemoryConsistencyIntegration(ctx, t, app, ownerDB)
 	testMemoryEmbeddingQueueIntegration(ctx, t, app, ownerDB)
 	testMemoryEmbeddingGenerationRebuildIntegration(ctx, t, app, ownerDB)
+	testMemorySemanticCandidateIntegration(ctx, t, app, ownerDB)
 	testMemoryEvidenceIntegration(ctx, t, app, ownerDB)
 	testMemoryProposalIntegration(ctx, t, app, ownerDB)
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
