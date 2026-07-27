@@ -17,7 +17,7 @@ func memoryEmbeddingVectorControlsAvailable(ctx context.Context, q queryer) (boo
   AND EXISTS (
     SELECT 1 FROM pg_attribute AS attribute
     WHERE attribute.attrelid='brain.embedding_chunks'::regclass AND attribute.attname='embedding'
-      AND attribute.attnotnull AND format_type(attribute.atttypid,attribute.atttypmod)='vector' AND attribute.attacl IS NULL
+      AND attribute.attnotnull AND attribute.atttypid='public.vector'::regtype AND attribute.attacl IS NULL
 )`, requiredPGVectorVersion).Scan(&exact); err != nil || !exact {
 		return exact, err
 	}
