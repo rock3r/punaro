@@ -173,7 +173,7 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 
 	var generationID string
-	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.embedding_generations(model,model_revision,dimensions) VALUES ('local.e5-base','2026-07-01',768) RETURNING id::text`).Scan(&generationID); err != nil {
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.embedding_generations(model,model_revision,dimensions) VALUES ('local.e5-base','2026-07-01',3) RETURNING id::text`).Scan(&generationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_generations SET dimensions=1024 WHERE id=$1`, generationID); err == nil {
@@ -249,13 +249,13 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 		t.Fatalf("terminal embedding state=%q code=%q err=%v", state, errorCode, err)
 	}
 	publishable := create("19191919-1919-4191-8191-191919191917", "publish chunks")
-	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191918", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
+	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191918", Limit: 1, LeaseDuration: memoryEmbeddingMaxLease})
 	if err != nil || len(claimed) != 1 || claimed[0].ItemID != publishable.ItemID {
 		t.Fatalf("publishable embedding claim=%#v err=%v", claimed, err)
 	}
 	publication := MemoryEmbeddingPublication{Lease: claimed[0], Chunks: []MemoryEmbeddingChunk{
-		{Ordinal: 0, ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StartOffset: 0, EndOffset: 12},
-		{Ordinal: 1, ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", StartOffset: 12, EndOffset: 28},
+		{Ordinal: 0, ContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", StartOffset: 0, EndOffset: 12, Vector: []float64{0.25, 0.5, 0.75}},
+		{Ordinal: 1, ContentSHA256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", StartOffset: 12, EndOffset: 28, Vector: []float64{0.75, 0.5, 0.25}},
 	}}
 	rollback := create("19191919-1919-4191-8191-191919191925", "rollback publication")
 	claimed, err = app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191926", Limit: 1, LeaseDuration: memoryEmbeddingMinLease})
@@ -263,14 +263,14 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 		t.Fatalf("rollback publication claim=%#v err=%v", claimed, err)
 	}
 	rollbackLease := claimed[0]
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset) VALUES ($1,$2,$3,0,decode($4,'hex'),0,12)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset,embedding) VALUES ($1,$2,$3,0,decode($4,'hex'),0,12,'[0.25,0.5,0.75]'::vector)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"); err != nil {
 		t.Fatal(err)
 	}
 	rollbackConn, err := app.db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalidChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12},{"ordinal":0,"content_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","start_offset":12,"end_offset":28}]`
+	invalidChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12,"embedding":[0.25,0.5,0.75]},{"ordinal":0,"content_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","start_offset":12,"end_offset":28,"embedding":[0.75,0.5,0.25]}]`
 	var published bool
 	err = rollbackConn.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, invalidChunks).Scan(&published)
 	if closeErr := rollbackConn.Close(); closeErr != nil {
@@ -278,6 +278,11 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	if err == nil {
 		t.Fatalf("duplicate-ordinal publication succeeded: published=%t", published)
+	}
+	dimensionMismatchChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12,"embedding":[0.25,0.5]}]`
+	err = app.db.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, dimensionMismatchChunks).Scan(&published)
+	if err != nil || published {
+		t.Fatalf("wrong-dimension publication=%t err=%v, want unchanged false result", published, err)
 	}
 	var rollbackState, rollbackToken, rollbackDigest string
 	var rollbackLeaseGeneration int64
@@ -303,7 +308,7 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	if err != nil {
 		t.Fatal(err)
 	}
-	validChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12}]`
+	validChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12,"embedding":[0.25,0.5,0.75]}]`
 	if err := disconnectTx.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, disconnectLease.GenerationID, disconnectLease.ItemID, disconnectLease.Revision, disconnectLease.ContentSHA256, disconnectLease.Token, disconnectLease.LeaseGeneration, validChunks).Scan(&published); err != nil || !published {
 		t.Fatalf("uncommitted publication=%t err=%v", published, err)
 	}
@@ -358,6 +363,10 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3`, generationID, publishable.ItemID, publication.Lease.Revision).Scan(&count); err != nil || count != len(publication.Chunks) {
 		t.Fatalf("published embedding chunks=%d err=%v", count, err)
+	}
+	var storedVector string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT embedding::text FROM brain.embedding_chunks WHERE generation_id=$1 AND item_id=$2 AND revision=$3 AND ordinal=0`, generationID, publishable.ItemID, publication.Lease.Revision).Scan(&storedVector); err != nil || storedVector != "[0.25,0.5,0.75]" {
+		t.Fatalf("published embedding vector=%q err=%v", storedVector, err)
 	}
 	if err := app.PublishMemoryEmbeddingWork(ctx, publication); !errors.Is(err, ErrStaleEmbeddingLease) {
 		t.Fatalf("replayed embedding publication error=%v", err)

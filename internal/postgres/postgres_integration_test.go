@@ -795,8 +795,12 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 		FROM brain.embedding_generations AS generation
 		LEFT JOIN brain.embedding_jobs AS job ON job.generation_id=generation.id
 		LEFT JOIN brain.embedding_chunks AS chunk ON chunk.generation_id=generation.id
-	`).Scan(&active, &building, &activeJobs, &buildingJobs, &activeChunks, &buildingChunks); err != nil || active != 1 || building != 0 || activeJobs != 1 || buildingJobs != 0 || activeChunks != 1 || buildingChunks != 0 {
+	`).Scan(&active, &building, &activeJobs, &buildingJobs, &activeChunks, &buildingChunks); err != nil || active != 1 || building != 0 || activeJobs != 1 || buildingJobs != 0 || activeChunks != 0 || buildingChunks != 0 {
 		t.Fatalf("current generation cleanup active=%d building=%d active_jobs=%d building_jobs=%d active_chunks=%d building_chunks=%d err=%v", active, building, activeJobs, buildingJobs, activeChunks, buildingChunks, err)
+	}
+	var activeJobState string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs`).Scan(&activeJobState); err != nil || activeJobState != "queued" {
+		t.Fatalf("coordinate-only bridge job state=%q err=%v, want requeued", activeJobState, err)
 	}
 }
 
@@ -846,6 +850,9 @@ func seedV26EmbeddingRebuildDerivedWork(ctx context.Context, t *testing.T, owner
 		if _, err := tx.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset) VALUES ($1,$2,1,0,$3,0,1)`, generationID, itemID, contentSHA256); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE brain.embedding_jobs SET state='succeeded',completed_at=statement_timestamp(),updated_at=statement_timestamp() WHERE generation_id=$1`, activeGenerationID); err != nil {
+		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)

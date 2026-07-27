@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"regexp"
 	"time"
 )
@@ -63,19 +64,27 @@ type MemoryEmbeddingWork struct {
 	ContentSHA256 string
 }
 
-// MemoryEmbeddingChunk is content-free, revision-bound output metadata for
-// one derived fragment. The actual fragment and vector are deliberately not
-// stored in this M19C control-plane slice.
+// MemoryEmbeddingChunk is revision-bound derived output for one fragment. Its
+// vector is bounded worker output, never canonical content or provider state.
 type MemoryEmbeddingChunk struct {
-	Ordinal       int    `json:"ordinal"`
-	ContentSHA256 string `json:"content_sha256"`
-	StartOffset   int    `json:"start_offset"`
-	EndOffset     int    `json:"end_offset"`
+	Ordinal       int       `json:"ordinal"`
+	ContentSHA256 string    `json:"content_sha256"`
+	StartOffset   int       `json:"start_offset"`
+	EndOffset     int       `json:"end_offset"`
+	Vector        []float64 `json:"embedding"`
 }
 
 func (chunk MemoryEmbeddingChunk) valid() bool {
 	if chunk.Ordinal < 0 || chunk.StartOffset < 0 || chunk.EndOffset <= chunk.StartOffset || chunk.EndOffset > 262144 || len(chunk.ContentSHA256) != 64 {
 		return false
+	}
+	if len(chunk.Vector) < 1 || len(chunk.Vector) > maxMemoryEmbeddingDimensions {
+		return false
+	}
+	for _, value := range chunk.Vector {
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > math.MaxFloat32 || (value != 0 && float64(float32(value)) == 0) {
+			return false
+		}
 	}
 	digest, err := hex.DecodeString(chunk.ContentSHA256)
 	return err == nil && len(digest) == 32 && hex.EncodeToString(digest) == chunk.ContentSHA256
@@ -127,6 +136,21 @@ func (d *Database) PublishMemoryEmbeddingWork(ctx context.Context, publication M
 		return errors.New("embedding work could not be published")
 	}
 	if !changed {
+		var dimensions int
+		err = tx.QueryRowContext(ctx, `SELECT generation.dimensions
+FROM brain.embedding_jobs AS job
+JOIN brain.embedding_generations AS generation ON generation.id=job.generation_id
+JOIN brain.memory_items AS item ON item.id=job.item_id AND item.current_revision=job.revision
+WHERE job.generation_id=$1 AND job.item_id=$2 AND job.revision=$3
+  AND job.content_sha256=$4 AND job.state='running' AND job.lease_token=$5
+  AND job.lease_generation=$6 AND job.lease_until > statement_timestamp()`, publication.Lease.GenerationID, publication.Lease.ItemID, publication.Lease.Revision, digest, publication.Lease.Token, publication.Lease.LeaseGeneration).Scan(&dimensions)
+		if err == nil {
+			for _, chunk := range publication.Chunks {
+				if len(chunk.Vector) != dimensions {
+					return errors.New("invalid embedding publication")
+				}
+			}
+		}
 		return ErrStaleEmbeddingLease
 	}
 	if err := tx.Commit(); err != nil {

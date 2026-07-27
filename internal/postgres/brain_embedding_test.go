@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -95,16 +96,20 @@ func TestMemoryEmbeddingPublicationValidation(t *testing.T) {
 		Revision:      1,
 		ContentSHA256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 	}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now()}
-	valid := MemoryEmbeddingPublication{Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 0, ContentSHA256: lease.ContentSHA256, StartOffset: 0, EndOffset: 32}}}
+	valid := MemoryEmbeddingPublication{Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 0, ContentSHA256: lease.ContentSHA256, StartOffset: 0, EndOffset: 32, Vector: []float64{0.25, 0.5, 0.75}}}}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid embedding publication rejected: %v", err)
 	}
 	for name, publication := range map[string]MemoryEmbeddingPublication{
-		"no chunks":         {Lease: lease},
-		"nonzero first":     {Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 1, ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
-		"invalid digest":    {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: "bad", EndOffset: 32}}},
-		"empty range":       {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 0}}},
-		"overlapping range": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64}}},
+		"no chunks":              {Lease: lease},
+		"nonzero first":          {Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 1, ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}}},
+		"invalid digest":         {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: "bad", EndOffset: 32, Vector: []float64{0.25}}}},
+		"empty range":            {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 0, Vector: []float64{0.25}}}},
+		"empty vector":           {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
+		"infinite vector":        {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.Inf(1)}}}},
+		"unrepresentable vector": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.MaxFloat64}}}},
+		"underflow vector":       {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.SmallestNonzeroFloat64}}}},
+		"overlapping range":      {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64, Vector: []float64{0.5}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := publication.Validate(); err == nil {

@@ -19,6 +19,9 @@ var ErrMigrationNotAttempted = errors.New("PostgreSQL migration was not attempte
 // by PostgreSQL to one database, so a second session can observe it only when
 // both connections share that target.
 func MigratePristinePair(ctx context.Context, appConfig, ownerConfig Config) (SchemaState, error) {
+	if err := RequirePGVector(ctx, ownerConfig); err != nil {
+		return SchemaState{}, preMigrationError(err)
+	}
 	return withPristinePair(ctx, appConfig, ownerConfig, func(ownerConn *sql.Conn) (SchemaState, error) {
 		return migrateConn(ctx, ownerConn, CurrentManifest())
 	})

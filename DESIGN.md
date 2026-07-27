@@ -439,6 +439,15 @@ application role cannot activate a generation, and replay fails after the
 generation has ceased to be building. There is still no provider, vector
 storage, semantic ranking, or client-facing semantic surface.
 
+Schema version 29 records finite pgvector output for every bounded chunk only
+when the worker's exact leased-generation, revision, digest, and lease fence
+still holds. Each vector must exactly match the generation's pinned dimension.
+Coordinate-only successes from older schemas are derived data, so upgrade
+requeues them and clears their chunks; terminal failures remain diagnostics
+rather than being erased. There is no provider credential or fragment text in
+the database, no vector index, and still no semantic query, hybrid ranking, or
+client-facing surface.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the

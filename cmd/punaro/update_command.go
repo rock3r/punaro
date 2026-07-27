@@ -282,6 +282,9 @@ func (executor *commandUpdateExecutor) PreflightAndPull(ctx context.Context) err
 	if appErr != nil || ownerErr != nil || appIdentity != ownerIdentity || inspectErr != nil || owner.ID != executor.installation.OwnerPrincipalID {
 		return errors.New("installation database identity changed")
 	}
+	if err := punaropostgres.RequirePGVector(ctx, punaropostgres.Config{DSNFile: executor.installation.OwnerDSNFile}); err != nil {
+		return err
+	}
 	for _, path := range []string{executor.installation.DataDir, executor.installation.BackupDir} {
 		available, err := operator.UpdateAvailableBytes(path)
 		if err != nil || available < minimumUpdateFreeBytes {

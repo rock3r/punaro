@@ -383,6 +383,19 @@ the completed promotion fails because the requested generation is no longer
 building. Rollback remains the verified pre-update restore boundary for
 derived-only state.
 
+Schema 29 stores the first derived vector payload without enabling semantic
+retrieval. The pinned pgvector extension receives one finite vector for every
+ordered chunk, exactly matching the immutable leased generation's declared
+dimension. The existing publication routine keeps its generation, current
+revision, canonical-digest, unexpired-lease-token, and lease-generation fence;
+invalid dimensionality or numeric values leave both chunks and the job
+unchanged. Upgrade drops only prior coordinate-only chunk output and requeues
+previously succeeded or interrupted derived jobs, while preserving terminal
+failures as explicit degradation evidence. The application role remains unable
+to mutate vector rows, no provider configuration or text is stored, and no
+vector index, semantic query, route, client surface, hybrid ranking, or RRF is
+introduced.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns
