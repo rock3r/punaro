@@ -64,6 +64,7 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 	if err := pairDB.Close(); err != nil {
 		t.Fatal(err)
 	}
+	testV26EmbeddingRebuildUpgradeIntegration(ctx, t, pairOwnerDSN)
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -751,6 +752,113 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
 	}
+}
+
+func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T, ownerDSN string) {
+	t.Helper()
+	ownerDB, err := open(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerDB.Close() }()
+	current := CurrentManifest()
+	v26 := Manifest{MinSupported: 10, MaxSupported: 26, Migrations: append([]Migration(nil), current.Migrations[:26]...)}
+	if state, err := migrate(ctx, ownerDB, v26); err != nil || state.Classification != Compatible {
+		t.Fatalf("v26 bridge setup state=%#v err=%v", state, err)
+	}
+	var activeGenerationID, buildingGenerationID string
+	if err := ownerDB.QueryRowContext(ctx, `
+		WITH inserted AS (
+			INSERT INTO brain.embedding_generations(model,model_revision,dimensions,state)
+			VALUES ('bridge.active','2026-01',1,'active'),('bridge.building','2026-01',1,'building')
+			RETURNING id,state
+		)
+		SELECT max(id::text) FILTER (WHERE state='active'),max(id::text) FILTER (WHERE state='building')
+		FROM inserted`).Scan(&activeGenerationID, &buildingGenerationID); err != nil {
+		t.Fatal(err)
+	}
+	seedV26EmbeddingRebuildDerivedWork(ctx, t, ownerDB, activeGenerationID, buildingGenerationID)
+	conn := mustConn(t, ctx, ownerDB)
+	defer func() { _ = conn.Close() }()
+	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != 27 {
+		t.Fatalf("v27 bridge state=%#v err=%v", state, err)
+	}
+	var active, building, activeJobs, buildingJobs, activeChunks, buildingChunks int
+	if err := ownerDB.QueryRowContext(ctx, `
+		SELECT
+			count(*) FILTER (WHERE generation.state='active'),
+			count(*) FILTER (WHERE generation.state='building'),
+			count(job.item_id) FILTER (WHERE generation.state='active'),
+			count(job.item_id) FILTER (WHERE generation.state='building'),
+			count(chunk.item_id) FILTER (WHERE generation.state='active'),
+			count(chunk.item_id) FILTER (WHERE generation.state='building')
+		FROM brain.embedding_generations AS generation
+		LEFT JOIN brain.embedding_jobs AS job ON job.generation_id=generation.id
+		LEFT JOIN brain.embedding_chunks AS chunk ON chunk.generation_id=generation.id
+	`).Scan(&active, &building, &activeJobs, &buildingJobs, &activeChunks, &buildingChunks); err != nil || active != 1 || building != 0 || activeJobs != 1 || buildingJobs != 0 || activeChunks != 1 || buildingChunks != 0 {
+		t.Fatalf("v27 generation cleanup active=%d building=%d active_jobs=%d building_jobs=%d active_chunks=%d building_chunks=%d err=%v", active, building, activeJobs, buildingJobs, activeChunks, buildingChunks, err)
+	}
+}
+
+func seedV26EmbeddingRebuildDerivedWork(ctx context.Context, t *testing.T, ownerDB *sql.DB, activeGenerationID, buildingGenerationID string) {
+	t.Helper()
+	for _, table := range []string{"brain.scopes", "brain.memory_items", "brain.memory_revisions", "brain.embedding_chunks"} {
+		if _, err := ownerDB.ExecContext(ctx, "ALTER TABLE "+table+" DISABLE TRIGGER USER"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer func() {
+		for _, table := range []string{"brain.embedding_chunks", "brain.memory_revisions", "brain.memory_items", "brain.scopes"} {
+			if _, err := ownerDB.ExecContext(ctx, "ALTER TABLE "+table+" ENABLE TRIGGER USER"); err != nil {
+				t.Errorf("re-enable %s triggers: %v", table, err)
+			}
+		}
+	}()
+	tx, err := ownerDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var itemID string
+	var contentSHA256 []byte
+	if err := tx.QueryRowContext(ctx, `
+		WITH principal AS (
+			INSERT INTO auth.principals(kind,display_name) VALUES ('device','v26 rebuild bridge') RETURNING id
+		), project AS (
+			INSERT INTO relay.projects(display_name,created_by) SELECT 'v26 rebuild bridge',id FROM principal RETURNING id,created_by
+		), scope AS (
+			INSERT INTO brain.scopes(project_id,created_by) SELECT id,created_by FROM project RETURNING id,created_by
+		), item AS (
+			INSERT INTO brain.memory_items(scope_id,kind,trust,current_revision,created_by)
+			SELECT id,'bridge','curated',1,created_by FROM scope RETURNING id,created_by
+		), revision AS (
+			INSERT INTO brain.memory_revisions(item_id,revision,document,content_sha256,author_principal_id,operation)
+			SELECT id,1,'{}'::jsonb,decode(repeat('ab',32),'hex'),created_by,'create' FROM item
+			RETURNING item_id,content_sha256
+		)
+		SELECT item_id::text,content_sha256 FROM revision`).Scan(&itemID, &contentSHA256); err != nil {
+		t.Fatal(err)
+	}
+	for _, generationID := range []string{activeGenerationID, buildingGenerationID} {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO brain.embedding_jobs(generation_id,item_id,revision,content_sha256) VALUES ($1,$2,1,$3)`, generationID, itemID, contentSHA256); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset) VALUES ($1,$2,1,0,$3,0,1)`, generationID, itemID, contentSHA256); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustConn(t *testing.T, ctx context.Context, db *sql.DB) *sql.Conn {
+	t.Helper()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
 }
 
 func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
