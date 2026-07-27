@@ -189,7 +189,7 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 			if err := e.retry(ctx, lease, "quarantined", result); err != nil {
 				return err
 			}
-		} else if errors.Is(sourceCtx.Err(), context.DeadlineExceeded) {
+		} else if !time.Now().Before(leaseDeadline) {
 			// A held advisory fence can outlive this lease while a quarantine
 			// writer is still uncommitted. Leave the running lease for safe
 			// expiry/reclamation rather than terminally retrying it blind.
