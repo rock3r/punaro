@@ -778,7 +778,7 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 		t.Fatal(err)
 	}
 	seedV26EmbeddingRebuildDerivedWork(ctx, t, ownerDB, activeGenerationID, buildingGenerationID)
-	conn := mustConn(t, ctx, ownerDB)
+	conn := mustConn(ctx, t, ownerDB)
 	defer func() { _ = conn.Close() }()
 	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != 27 {
 		t.Fatalf("v27 bridge state=%#v err=%v", state, err)
@@ -852,7 +852,7 @@ func seedV26EmbeddingRebuildDerivedWork(ctx context.Context, t *testing.T, owner
 	}
 }
 
-func mustConn(t *testing.T, ctx context.Context, db *sql.DB) *sql.Conn {
+func mustConn(ctx context.Context, t *testing.T, db *sql.DB) *sql.Conn {
 	t.Helper()
 	conn, err := db.Conn(ctx)
 	if err != nil {
