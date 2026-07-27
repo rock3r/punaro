@@ -30,6 +30,9 @@ func testMemoryHybridDegradedIntegration(ctx context.Context, t *testing.T, app 
 	if err != nil || len(page.Results) != 1 || page.SemanticStatus != MemoryHybridSearchSemanticNotConfigured {
 		t.Fatalf("degraded hybrid candidates=%#v err=%v", page, err)
 	}
+	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "hybrid", Limit: 1}); !errors.Is(err, ErrMemorySemanticNotConfigured) {
+		t.Fatalf("unconfigured hybrid preparation error=%v", err)
+	}
 }
 
 func testMemorySemanticCandidateIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
@@ -50,6 +53,10 @@ func testMemorySemanticCandidateIntegration(ctx context.Context, t *testing.T, a
 	}
 	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text,dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&generationID, &dimensions); err != nil {
 		t.Fatal(err)
+	}
+	generation, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "semantic", Limit: 2})
+	if err != nil || generation.ID != generationID || generation.Dimensions != dimensions || generation.State != MemoryEmbeddingGenerationActive {
+		t.Fatalf("hybrid preparation=%#v err=%v", generation, err)
 	}
 	query := make([]float64, dimensions)
 	query[0] = 1
@@ -104,5 +111,8 @@ VALUES ($1,$2,$3,0,decode('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	}
 	if _, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized hybrid candidates error=%v", err)
+	}
+	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "semantic", Limit: 2}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized hybrid preparation error=%v", err)
 	}
 }
