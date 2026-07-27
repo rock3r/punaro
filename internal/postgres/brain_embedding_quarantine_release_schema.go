@@ -38,8 +38,8 @@ func memoryEmbeddingQuarantineReleaseControlsAvailable(ctx context.Context, q qu
         WHERE trigger.tgrelid=quarantines_oid AND NOT trigger.tgisinternal
           AND trigger.tgname='memory_quarantine_embedding_release' AND trigger.tgenabled='O'
           AND trigger.tgfoid=requeue_oid AND trigger.tgtype=17
-          AND trigger.tgattr=ARRAY[(SELECT attribute.attnum FROM pg_attribute AS attribute
-              WHERE attribute.attrelid=quarantines_oid AND attribute.attname='released_at' AND attribute.attnum>0 AND NOT attribute.attisdropped)]::int2vector
+          AND ARRAY(SELECT unnest(trigger.tgattr))=ARRAY[(SELECT attribute.attnum FROM pg_attribute AS attribute
+              WHERE attribute.attrelid=quarantines_oid AND attribute.attname='released_at' AND attribute.attnum>0 AND NOT attribute.attisdropped)]::int2[]
           AND pg_get_triggerdef(trigger.oid,true) ~
               'WHEN \(+old\.released_at IS NULL AND new\.released_at IS NOT NULL\)+ EXECUTE FUNCTION brain\.requeue_expired_quarantined_embedding_jobs\(\)') AS exact
 )
