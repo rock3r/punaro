@@ -5,8 +5,6 @@ import (
 	"errors"
 )
 
-const unconfiguredMemoryHybridGenerationID = "00000000-0000-4000-8000-000000000000"
-
 // MemoryHybridQueryEmbedding is a bounded provider result tied to the exact
 // generation authorized before the provider received the query.
 type MemoryHybridQueryEmbedding struct {
@@ -27,6 +25,7 @@ type memoryHybridQueryStore interface {
 
 type memoryHybridRetrievalStore interface {
 	memoryHybridQueryStore
+	SearchMemory(context.Context, MemorySearchRequest) (MemorySearchPage, error)
 	SearchMemoryHybridCandidates(context.Context, MemoryHybridSearchRequest) (MemoryHybridSearchPage, error)
 }
 
@@ -100,10 +99,15 @@ func (e *MemoryHybridRetrievalExecutor) Search(ctx context.Context, raw MemorySe
 	embedding, err := e.query.Embed(ctx, request)
 	if err != nil {
 		if errors.Is(err, ErrMemorySemanticNotConfigured) {
-			return e.retrieval.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{
-				PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, GenerationID: unconfiguredMemoryHybridGenerationID,
-				Query: request.Query, Embedding: []float64{1}, Limit: request.Limit,
-			})
+			lexical, lexicalErr := e.retrieval.SearchMemory(ctx, request)
+			if lexicalErr != nil {
+				return MemoryHybridSearchPage{}, lexicalErr
+			}
+			results, more, fuseErr := fuseMemorySearchRanks(lexical.Results, nil, request.Limit)
+			if fuseErr != nil {
+				return MemoryHybridSearchPage{}, errors.New("memory hybrid search candidates are unavailable")
+			}
+			return MemoryHybridSearchPage{Results: results, More: lexical.More || more, SemanticStatus: MemoryHybridSearchSemanticNotConfigured}, nil
 		}
 		return MemoryHybridSearchPage{}, err
 	}

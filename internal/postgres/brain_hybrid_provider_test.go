@@ -86,8 +86,8 @@ func TestMemoryHybridRetrievalExecutorDegradesWithoutConfiguredGeneration(t *tes
 		t.Fatal(err)
 	}
 	page, err := executor.Search(context.Background(), MemorySearchRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", ProjectID: "33333333-3333-4333-8333-333333333333", Query: "release", Limit: 2})
-	if err != nil || page.SemanticStatus != MemoryHybridSearchSemanticNotConfigured || provider.calls != 0 || store.hybridCalls != 1 {
-		t.Fatalf("page=%#v err=%v provider=%d hybrid=%d", page, err, provider.calls, store.hybridCalls)
+	if err != nil || page.SemanticStatus != MemoryHybridSearchSemanticNotConfigured || provider.calls != 0 || store.hybridCalls != 0 || store.lexicalCalls != 1 {
+		t.Fatalf("page=%#v err=%v provider=%d hybrid=%d lexical=%d", page, err, provider.calls, store.hybridCalls, store.lexicalCalls)
 	}
 }
 
@@ -112,10 +112,18 @@ type fakeMemoryHybridQueryProvider struct {
 
 type fakeMemoryHybridRetrievalStore struct {
 	fakeMemoryHybridQueryStore
-	request     MemoryHybridSearchRequest
-	page        MemoryHybridSearchPage
-	err         error
-	hybridCalls int
+	request      MemoryHybridSearchRequest
+	lexical      MemorySearchPage
+	lexicalErr   error
+	lexicalCalls int
+	page         MemoryHybridSearchPage
+	err          error
+	hybridCalls  int
+}
+
+func (s *fakeMemoryHybridRetrievalStore) SearchMemory(_ context.Context, _ MemorySearchRequest) (MemorySearchPage, error) {
+	s.lexicalCalls++
+	return s.lexical, s.lexicalErr
 }
 
 func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybridCandidates(_ context.Context, request MemoryHybridSearchRequest) (MemoryHybridSearchPage, error) {
