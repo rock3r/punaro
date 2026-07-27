@@ -20,12 +20,17 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
 	}
 	defer func() { _ = db.Close() }()
 	var available bool
-	err = db.QueryRowContext(ctx, `SELECT EXISTS (
-    SELECT 1 FROM pg_available_extension_versions
-    WHERE name='vector' AND version=$1
+	err = db.QueryRowContext(ctx, `SELECT (
+    EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector' AND extversion=$1)
+    OR NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector')
+       AND EXISTS (
+           SELECT 1 FROM pg_available_extensions
+           WHERE name='vector' AND default_version=$1
+       )
 ) AND NOT EXISTS (
     SELECT 1 FROM pg_extension AS ext
-    WHERE ext.extname='vector' AND pg_get_userbyid(ext.extowner) <> current_user
+    WHERE ext.extname='vector'
+      AND (ext.extversion <> $1 OR pg_get_userbyid(ext.extowner) <> current_user)
 )`, requiredPGVectorVersion).Scan(&available)
 	if err != nil || !available {
 		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")

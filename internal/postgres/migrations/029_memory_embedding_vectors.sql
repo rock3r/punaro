@@ -1,4 +1,4 @@
-CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public VERSION '0.8.2';
 DO $migration$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname='vector' AND extnamespace <> 'public'::regnamespace) THEN
