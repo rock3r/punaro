@@ -40,7 +40,7 @@ func memoryEmbeddingQuarantineReleaseControlsAvailable(ctx context.Context, q qu
           AND trigger.tgfoid=requeue_oid AND trigger.tgtype=17
           AND trigger.tgattr=ARRAY[(SELECT attribute.attnum FROM pg_attribute AS attribute
               WHERE attribute.attrelid=quarantines_oid AND attribute.attname='released_at' AND attribute.attnum>0 AND NOT attribute.attisdropped)]::int2vector
-          AND pg_get_expr(trigger.tgqual,trigger.tgrelid)='(old.released_at IS NULL) AND (new.released_at IS NOT NULL)') AS exact
+          AND position('WHEN ((old.released_at IS NULL) AND (new.released_at IS NOT NULL))' IN pg_get_triggerdef(trigger.oid,true))>0) AS exact
 )
 SELECT requeue_oid IS NOT NULL AND quarantines_oid IS NOT NULL AND routine_safety.exact AND routine_acl.exact AND trigger_safety.exact
 FROM objects,routine_safety,routine_acl,trigger_safety`, memoryEmbeddingQuarantineReleaseRoutineV32MD5).Scan(&available)
