@@ -445,8 +445,13 @@ still holds. Each vector must exactly match the generation's pinned dimension.
 Coordinate-only successes from older schemas are derived data, so upgrade
 requeues them and clears their chunks; terminal failures remain diagnostics
 rather than being erased. There is no provider credential or fragment text in
-the database, no vector index, and still no semantic query, hybrid ranking, or
-client-facing surface.
+the database, and no vector index. An internal exact cosine-candidate read may
+use only the active generation's succeeded chunks and the same project,
+`memory.search`, current-revision, active, and quarantine boundaries as
+lexical search. It accepts an already-derived, dimension-matched query vector;
+it never invokes a provider, exposes a route, changes core readiness, or fuses
+lexical and semantic ranks. With no active generation it reports semantic
+`not_configured`, so callers keep lexical retrieval available.
 
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
