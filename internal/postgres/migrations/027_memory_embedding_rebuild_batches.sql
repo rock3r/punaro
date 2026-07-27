@@ -110,9 +110,9 @@ BEGIN
         WHERE brain.embedding_jobs.revision<EXCLUDED.revision
         RETURNING 1
     ), advanced AS (
-        SELECT count(*)::integer AS scanned,COALESCE(max(changes.change_sequence),progress.timeline_watermark) AS next_cursor
-        FROM changes CROSS JOIN brain.embedding_rebuild_progress AS progress
-        WHERE progress.generation_id=requested_generation
+        SELECT count(*)::integer AS scanned,COALESCE(max(changes.change_sequence),
+            (SELECT progress.timeline_watermark FROM brain.embedding_rebuild_progress AS progress WHERE progress.generation_id=requested_generation)) AS next_cursor
+        FROM changes
     ), applied AS (
         SELECT count(*) AS changed FROM queued
     )

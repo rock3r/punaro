@@ -61,5 +61,5 @@ FROM objects,generation_state,generation_tuple,routines,start_signature,start_ac
 const (
 	memoryEmbeddingRebuildQueueRoutineMD5    = "b09c65e6d07819ec41948de85675de5c"
 	memoryEmbeddingRebuildStartRoutineV26MD5 = "ef8ca889c0937b89d9ea3406aff994c4"
-	memoryEmbeddingRebuildStartRoutineV27MD5 = "2dda6cbfeb8a25361c542b47c1657961"
+	memoryEmbeddingRebuildStartRoutineV27MD5 = "6f11b5d03617ee975cc59d50d4860282"
 )
