@@ -28,7 +28,7 @@ BEGIN
     IF requested_generation IS NULL OR requested_item IS NULL OR requested_revision IS NULL OR requested_sha256 IS NULL
        OR requested_token IS NULL OR requested_lease_generation IS NULL OR requested_chunks IS NULL
        OR requested_revision < 1 OR octet_length(requested_sha256) <> 32 OR requested_lease_generation < 1
-       OR jsonb_typeof(requested_chunks) <> 'array' THEN
+       OR jsonb_typeof(requested_chunks) <> 'array' OR pg_column_size(requested_chunks) > 8388608 THEN
         RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'invalid embedding publication';
     END IF;
     chunk_count := jsonb_array_length(requested_chunks);

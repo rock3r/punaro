@@ -52,4 +52,4 @@ FROM pg_trigger AS trigger_row WHERE trigger_row.tgrelid='brain.embedding_chunks
 	return exact, nil
 }
 
-const memoryEmbeddingVectorPublicationRoutineMD5 = "ee4e52dca2448dc87a17032745a869df"
+const memoryEmbeddingVectorPublicationRoutineMD5 = "b92b7ce20b55dff93b657461cee58de0"
