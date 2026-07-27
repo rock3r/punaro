@@ -124,13 +124,13 @@ BEGIN
         JOIN brain.embedding_rebuild_progress AS progress ON event.restored_timeline_id=progress.timeline_id
         WHERE progress.generation_id=requested_generation;
         IF next_timeline IS NOT NULL THEN
-            UPDATE brain.embedding_rebuild_progress SET timeline_id=next_timeline,timeline_watermark=next_timeline_watermark,cursor_change_sequence=0,reported_progress=reported_progress+scanned WHERE generation_id=requested_generation;
+            UPDATE brain.embedding_rebuild_progress SET timeline_id=next_timeline,timeline_watermark=next_timeline_watermark,cursor_change_sequence=0,reported_progress=reported_progress+GREATEST(scanned,1) WHERE generation_id=requested_generation;
             done := false;
         ELSE
-            UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+scanned,complete=true WHERE generation_id=requested_generation;
+            UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+GREATEST(scanned,1),complete=true WHERE generation_id=requested_generation;
         END IF;
     ELSE
-        UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+scanned WHERE generation_id=requested_generation;
+        UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,reported_progress=reported_progress+GREATEST(scanned,1) WHERE generation_id=requested_generation;
     END IF;
     SELECT progress.reported_progress INTO cursor_change_sequence FROM brain.embedding_rebuild_progress AS progress WHERE progress.generation_id=requested_generation;
     enqueued := changed; complete := done; RETURN NEXT;

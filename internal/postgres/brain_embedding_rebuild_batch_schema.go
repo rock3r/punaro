@@ -101,4 +101,4 @@ FROM objects,table_safety,constraint_safety,routine_safety,routine_acl,column_ac
 	return available, err
 }
 
-const memoryEmbeddingRebuildBatchRoutineMD5 = "0504e96e3ef59a16cf3607517a444a5a"
+const memoryEmbeddingRebuildBatchRoutineMD5 = "3ee4777558c46f798e81ffeb301ca3cb"
