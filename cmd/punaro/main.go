@@ -905,6 +905,11 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 			if err := verifyPristinePair(preflightCtx, request.AppDSNFile, request.OwnerDSNFile); err != nil {
 				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: err}
 			}
+			if manifest.SchemaVersion >= 29 {
+				if err := punaropostgres.RequirePGVector(preflightCtx, punaropostgres.Config{DSNFile: request.OwnerDSNFile}); err != nil {
+					return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: err}
+				}
+			}
 			return nil
 		},
 		RestoreDump: func(restoreCtx context.Context, dump io.Reader) error {
