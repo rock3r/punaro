@@ -82,7 +82,7 @@ func (chunk MemoryEmbeddingChunk) valid() bool {
 		return false
 	}
 	for _, value := range chunk.Vector {
-		if math.IsNaN(value) || math.IsInf(value, 0) {
+		if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > math.MaxFloat32 {
 			return false
 		}
 	}

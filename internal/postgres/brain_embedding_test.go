@@ -101,13 +101,14 @@ func TestMemoryEmbeddingPublicationValidation(t *testing.T) {
 		t.Fatalf("valid embedding publication rejected: %v", err)
 	}
 	for name, publication := range map[string]MemoryEmbeddingPublication{
-		"no chunks":         {Lease: lease},
-		"nonzero first":     {Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 1, ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}}},
-		"invalid digest":    {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: "bad", EndOffset: 32, Vector: []float64{0.25}}}},
-		"empty range":       {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 0, Vector: []float64{0.25}}}},
-		"empty vector":      {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
-		"infinite vector":   {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.Inf(1)}}}},
-		"overlapping range": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64, Vector: []float64{0.5}}}},
+		"no chunks":              {Lease: lease},
+		"nonzero first":          {Lease: lease, Chunks: []MemoryEmbeddingChunk{{Ordinal: 1, ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}}},
+		"invalid digest":         {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: "bad", EndOffset: 32, Vector: []float64{0.25}}}},
+		"empty range":            {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 0, Vector: []float64{0.25}}}},
+		"empty vector":           {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32}}},
+		"infinite vector":        {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.Inf(1)}}}},
+		"unrepresentable vector": {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{math.MaxFloat64}}}},
+		"overlapping range":      {Lease: lease, Chunks: []MemoryEmbeddingChunk{{ContentSHA256: lease.ContentSHA256, EndOffset: 32, Vector: []float64{0.25}}, {Ordinal: 1, ContentSHA256: lease.ContentSHA256, StartOffset: 31, EndOffset: 64, Vector: []float64{0.5}}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := publication.Validate(); err == nil {

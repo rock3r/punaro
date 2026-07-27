@@ -1,4 +1,5 @@
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+ALTER EXTENSION vector SET SCHEMA public;
 
 -- v25-v28 output intentionally carried only chunk coordinates. They are
 -- derived state, so requeue completed or interrupted work rather than ever
