@@ -230,6 +230,15 @@ func newTestHandler(store *fakeStore) http.Handler {
 	return New(store, policy, true)
 }
 
+type fakeHybridSearcher struct {
+	request postgres.MemorySearchRequest
+}
+
+func (s *fakeHybridSearcher) Search(_ context.Context, request postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error) {
+	s.request = request
+	return postgres.MemoryHybridSearchSurfacePage{Results: []postgres.MemoryHybridSearchSurfaceResult{{ItemID: testItemID, Revision: 2, ETag: `"memory:2"`, Kind: "decision", Trust: "curated", Layer: postgres.MemoryLayerCurated, Title: "Hybrid decision", Summary: "Bounded hybrid summary", LexicalRank: 1, SemanticRank: 2, Match: postgres.MemorySearchMatchLexical, Score: 0.03}}, SemanticStatus: postgres.MemoryHybridSearchSemanticReady}, nil
+}
+
 func request(method, path, body string) *http.Request {
 	r := httptest.NewRequestWithContext(context.Background(), method, "https://punaro.test"+path, strings.NewReader(body))
 	r.Header.Set("Authorization", "Bearer device-credential")
@@ -513,6 +522,22 @@ func TestHandlerBindsAuthenticatedPrincipalAcrossBoundedReadRoutes(t *testing.T)
 		if _, ok := proposal[field]; !ok {
 			t.Fatalf("proposal missing %s: %s", field, w.Body.String())
 		}
+	}
+}
+
+func TestHybridSearchRouteUsesConfiguredFencedSearcher(t *testing.T) {
+	store := newFakeStore()
+	searcher := &fakeHybridSearcher{}
+	policy := &ingress.Policy{Mode: ingress.LAN, ListenAddr: "127.0.0.1:8443", PublicURL: "https://punaro.test"}
+	handler := NewWithHybridSearch(store, policy, true, searcher)
+
+	w := serve(t, handler, request(http.MethodPost, "/v1/projects/"+testProjectID+"/memories/hybrid-search", `{"query":"needle","limit":3}`), http.StatusOK)
+	if searcher.request.PrincipalID != testPrincipalID || searcher.request.ProjectID != testProjectID || searcher.request.Query != "needle" || searcher.request.Limit != 3 {
+		t.Fatalf("hybrid request=%#v", searcher.request)
+	}
+	var page postgres.MemoryHybridSearchSurfacePage
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Results) != 1 || page.Results[0].Title != "Hybrid decision" || page.Results[0].SemanticRank != 2 || page.SemanticStatus != postgres.MemoryHybridSearchSemanticReady || strings.Contains(w.Body.String(), "document") {
+		t.Fatalf("hybrid projection=%#v err=%v body=%s", page, err, w.Body.String())
 	}
 }
 

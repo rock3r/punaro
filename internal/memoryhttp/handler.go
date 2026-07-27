@@ -47,8 +47,15 @@ type store interface {
 	RejectMemoryProposal(context.Context, postgres.MemoryProposalDecisionRequest) (postgres.MemoryProposalResult, error)
 }
 
+// HybridSearcher returns bounded, authorization-filtered hybrid summaries for
+// one already device-authenticated memory search request.
+type HybridSearcher interface {
+	Search(context.Context, postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error)
+}
+
 type handler struct {
 	store   store
+	hybrid  HybridSearcher
 	policy  *ingress.Policy
 	mux     *http.ServeMux
 	slots   chan struct{}
@@ -58,17 +65,31 @@ type handler struct {
 // New constructs the native memory handler. The caller independently decides
 // whether the dark read surface and its mutation extension are mounted.
 func New(database store, policy *ingress.Policy, mutationsEnabled bool) http.Handler {
-	return newHandler(database, policy, maxConcurrentOperations, operationTimeout, mutationsEnabled)
+	return newHandlerWithHybrid(database, policy, maxConcurrentOperations, operationTimeout, mutationsEnabled, nil)
+}
+
+// NewWithHybridSearch additionally mounts the explicit hybrid-search route.
+// Callers supply the fenced executor; the default handler keeps lexical search
+// behavior unchanged and does not mount this optional surface.
+func NewWithHybridSearch(database store, policy *ingress.Policy, mutationsEnabled bool, hybrid HybridSearcher) http.Handler {
+	return newHandlerWithHybrid(database, policy, maxConcurrentOperations, operationTimeout, mutationsEnabled, hybrid)
 }
 
 func newHandler(database store, policy *ingress.Policy, concurrency int, timeout time.Duration, mutationsEnabled bool) http.Handler {
+	return newHandlerWithHybrid(database, policy, concurrency, timeout, mutationsEnabled, nil)
+}
+
+func newHandlerWithHybrid(database store, policy *ingress.Policy, concurrency int, timeout time.Duration, mutationsEnabled bool, hybrid HybridSearcher) http.Handler {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	h := &handler{store: database, policy: policy, mux: http.NewServeMux(), slots: make(chan struct{}, concurrency), timeout: timeout}
+	h := &handler{store: database, hybrid: hybrid, policy: policy, mux: http.NewServeMux(), slots: make(chan struct{}, concurrency), timeout: timeout}
 	h.mux.HandleFunc("POST /v1/projects/resolve", h.resolveProject)
 	h.mux.HandleFunc("GET /v1/projects/{project}/memories/{item}", h.getMemory)
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/search", h.searchMemory)
+	if hybrid != nil {
+		h.mux.HandleFunc("POST /v1/projects/{project}/memories/hybrid-search", h.searchHybridMemory)
+	}
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/brief", h.promptBrief)
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/changes", h.memoryChanges)
 	h.mux.HandleFunc("GET /v1/projects/{project}/memory-proposals/{proposal}", h.getProposal)
@@ -386,6 +407,29 @@ func (h *handler) searchMemory(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	page, err := h.store.SearchMemory(request.Context(), postgres.MemorySearchRequest{PrincipalID: device.PrincipalID, ProjectID: projectID, Query: query, Limit: limit})
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, page)
+}
+
+func (h *handler) searchHybridMemory(response http.ResponseWriter, request *http.Request) {
+	device, projectID, ok := deviceProject(response, request)
+	if !ok {
+		return
+	}
+	fields, ok := readObject(response, request, "query", "limit")
+	if !ok {
+		return
+	}
+	var query string
+	var limit int
+	if !decodeString(fields["query"], &query) || !decodeInt(fields["limit"], &limit) || !validQuery(query) || limit < 1 || limit > 50 {
+		writeError(response, http.StatusBadRequest, "request is invalid")
+		return
+	}
+	page, err := h.hybrid.Search(request.Context(), postgres.MemorySearchRequest{PrincipalID: device.PrincipalID, ProjectID: projectID, Query: query, Limit: limit})
 	if err != nil {
 		writeStoreError(response, err)
 		return
