@@ -28,6 +28,7 @@ const (
 	maxProposalBytes        = 1 << 20
 	maxConcurrentOperations = 32
 	operationTimeout        = 5 * time.Second
+	hybridOperationTimeout  = 12 * time.Second
 )
 
 type store interface {
@@ -297,7 +298,11 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		unauthenticated(response)
 		return
 	}
-	operationCtx, cancel := context.WithTimeout(request.Context(), h.timeout)
+	timeout := h.timeout
+	if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/memories/hybrid-search") {
+		timeout = hybridOperationTimeout
+	}
+	operationCtx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()
 	device, err := h.store.AuthenticateDevice(operationCtx, credential)
 	if err != nil || !validID(device.PrincipalID) || !validID(device.LookupID) || device.Generation < 1 {

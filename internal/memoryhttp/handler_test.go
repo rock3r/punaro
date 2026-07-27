@@ -231,11 +231,13 @@ func newTestHandler(store *fakeStore) http.Handler {
 }
 
 type fakeHybridSearcher struct {
-	request postgres.MemorySearchRequest
+	request  postgres.MemorySearchRequest
+	deadline time.Time
 }
 
-func (s *fakeHybridSearcher) Search(_ context.Context, request postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error) {
+func (s *fakeHybridSearcher) Search(ctx context.Context, request postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error) {
 	s.request = request
+	s.deadline, _ = ctx.Deadline()
 	return postgres.MemoryHybridSearchSurfacePage{Results: []postgres.MemoryHybridSearchSurfaceResult{{ItemID: testItemID, Revision: 2, ETag: `"memory:2"`, Kind: "decision", Trust: "curated", Layer: postgres.MemoryLayerCurated, Title: "Hybrid decision", Summary: "Bounded hybrid summary", LexicalRank: 1, SemanticRank: 2, Match: postgres.MemorySearchMatchLexical, Score: 0.03}}, SemanticStatus: postgres.MemoryHybridSearchSemanticReady}, nil
 }
 
@@ -534,6 +536,9 @@ func TestHybridSearchRouteUsesConfiguredFencedSearcher(t *testing.T) {
 	w := serve(t, handler, request(http.MethodPost, "/v1/projects/"+testProjectID+"/memories/hybrid-search", `{"query":"needle","limit":3}`), http.StatusOK)
 	if searcher.request.PrincipalID != testPrincipalID || searcher.request.ProjectID != testProjectID || searcher.request.Query != "needle" || searcher.request.Limit != 3 {
 		t.Fatalf("hybrid request=%#v", searcher.request)
+	}
+	if searcher.deadline.IsZero() || time.Until(searcher.deadline) < 10*time.Second {
+		t.Fatalf("hybrid deadline=%s", searcher.deadline)
 	}
 	var page postgres.MemoryHybridSearchSurfacePage
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || len(page.Results) != 1 || page.Results[0].Title != "Hybrid decision" || page.Results[0].SemanticRank != 2 || page.SemanticStatus != postgres.MemoryHybridSearchSemanticReady || strings.Contains(w.Body.String(), "document") {
