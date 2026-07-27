@@ -28,3 +28,17 @@ func TestEvaluateMemoryHybridRanking(t *testing.T) {
 		t.Fatalf("evaluation=%#v", evaluation)
 	}
 }
+
+func TestEvaluateMemoryHybridRankingUsesResultCutoffForNDCG(t *testing.T) {
+	evaluation, err := EvaluateMemoryHybridRanking([]MemoryHybridRankingEvaluationCase{{
+		ID:      "66666666-6666-4666-8666-666666666666",
+		Results: []MemoryHybridSearchResult{{ItemID: "77777777-7777-4777-8777-777777777777", Revision: 1}},
+		Relevance: map[string]int{
+			"77777777-7777-4777-8777-777777777777": 3,
+			"88888888-8888-4888-8888-888888888888": 1,
+		},
+	}})
+	if err != nil || evaluation.NormalizedDiscountedCumulativeGain != 1 {
+		t.Fatalf("evaluation=%#v err=%v", evaluation, err)
+	}
+}

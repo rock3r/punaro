@@ -61,7 +61,7 @@ func EvaluateMemoryHybridRanking(cases []MemoryHybridRankingEvaluationCase) (Mem
 			}
 		}
 		var idealGain float64
-		for index, grade := range ideal {
+		for index, grade := range ideal[:min(len(ideal), len(fixture.Results))] {
 			idealGain += (math.Pow(2, float64(grade)) - 1) / math.Log2(float64(index+2))
 		}
 		evaluation.Queries++
