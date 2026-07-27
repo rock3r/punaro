@@ -9,14 +9,21 @@ import (
 	"errors"
 	"io"
 	"math"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/rock3r/punaro/internal/postgres"
 )
 
-const maxResponseBytes = 1 << 20
+const (
+	maxResponseBytes = 1 << 20
+	maxQueryBytes    = 1024
+	maxQueryRunes    = 256
+	maxJSONDepth     = 32
+)
 
 // OpenAICompatible implements the bounded embeddings request/response shape
 // used by OpenAI-compatible HTTPS services.
@@ -27,27 +34,34 @@ type OpenAICompatible struct {
 }
 
 // NewOpenAICompatible constructs a provider transport with an explicit HTTPS
-// endpoint and a caller-supplied credential. Credential-file loading remains
-// at the process configuration boundary.
+// endpoint and caller-supplied credential. Credential-file loading remains at
+// the process configuration boundary.
 func NewOpenAICompatible(endpoint, apiKey string, client *http.Client) (*OpenAICompatible, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.TrimSpace(apiKey) == "" || client == nil {
 		return nil, errors.New("OpenAI-compatible embedding provider is invalid")
 	}
-	return &OpenAICompatible{endpoint: endpoint, apiKey: apiKey, client: client}, nil
+	boundedClient := *client
+	boundedClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &OpenAICompatible{endpoint: endpoint, apiKey: apiKey, client: &boundedClient}, nil
 }
 
 // EmbedMemoryQuery derives exactly one finite vector for the active pinned
 // generation. Provider failures are deliberately content-free to callers.
 func (p *OpenAICompatible) EmbedMemoryQuery(ctx context.Context, generation postgres.MemoryEmbeddingGeneration, query string) ([]float64, error) {
-	if p == nil || generation.Validate() != nil || generation.State != postgres.MemoryEmbeddingGenerationActive || query == "" {
+	if p == nil || generation.Validate() != nil || generation.State != postgres.MemoryEmbeddingGenerationActive || !immutableProviderModel(generation.Model, generation.Revision) || query == "" || !utf8.ValidString(query) || len(query) > maxQueryBytes || utf8.RuneCountInString(query) > maxQueryRunes {
 		return nil, errors.New("embedding provider request is invalid")
+	}
+	var dimensions *int
+	if strings.HasPrefix(generation.Model, "text-embedding-3-") {
+		dimensions = &generation.Dimensions
 	}
 	body, err := json.Marshal(struct {
 		Model          string `json:"model"`
 		Input          string `json:"input"`
+		Dimensions     *int   `json:"dimensions,omitempty"`
 		EncodingFormat string `json:"encoding_format"`
-	}{Model: generation.Model, Input: query, EncodingFormat: "float"})
+	}{Model: generation.Model, Input: query, Dimensions: dimensions, EncodingFormat: "float"})
 	if err != nil {
 		return nil, errors.New("embedding provider request is unavailable")
 	}
@@ -65,20 +79,94 @@ func (p *OpenAICompatible) EmbedMemoryQuery(ctx context.Context, generation post
 	if response.StatusCode != http.StatusOK || response.ContentLength > maxResponseBytes {
 		return nil, errors.New("embedding provider is unavailable")
 	}
-	var decoded struct {
-		Data []struct {
-			Embedding []float64 `json:"embedding"`
-		} `json:"data"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes))
-	if decoder.Decode(&decoded) != nil || len(decoded.Data) != 1 || len(decoded.Data[0].Embedding) != generation.Dimensions {
+	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil || len(responseBody) > maxResponseBytes {
 		return nil, errors.New("embedding provider response is invalid")
 	}
-	vector := append([]float64(nil), decoded.Data[0].Embedding...)
-	for _, value := range vector {
-		if math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > math.MaxFloat32 || (value != 0 && float64(float32(value)) == 0) {
+	var decoded struct {
+		Model string `json:"model"`
+		Data  []struct {
+			Embedding []json.Number `json:"embedding"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.UseNumber()
+	if rejectDuplicateJSONMembers(responseBody) != nil || decoder.Decode(&decoded) != nil || decoded.Model != generation.Model || len(decoded.Data) != 1 || len(decoded.Data[0].Embedding) != generation.Dimensions {
+		return nil, errors.New("embedding provider response is invalid")
+	}
+	vector := make([]float64, len(decoded.Data[0].Embedding))
+	for index, number := range decoded.Data[0].Embedding {
+		value, err := number.Float64()
+		literal, ok := new(big.Rat).SetString(string(number))
+		if err != nil || !ok || (literal.Sign() != 0 && value == 0) || math.IsNaN(value) || math.IsInf(value, 0) || math.Abs(value) > math.MaxFloat32 || (value != 0 && float64(float32(value)) == 0) {
 			return nil, errors.New("embedding provider response is invalid")
 		}
+		vector[index] = value
 	}
 	return vector, nil
+}
+
+func immutableProviderModel(model, revision string) bool {
+	return strings.HasSuffix(model, ":"+revision)
+}
+
+func rejectDuplicateJSONMembers(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := consumeJSONValue(decoder, 1); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return errors.New("unexpected JSON value")
+	}
+	return nil
+}
+
+func consumeJSONValue(decoder *json.Decoder, depth int) error {
+	if depth > maxJSONDepth {
+		return errors.New("JSON nesting is too deep")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		members := make(map[string]struct{})
+		for decoder.More() {
+			member, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := member.(string)
+			if !ok {
+				return errors.New("JSON object member is invalid")
+			}
+			if name != strings.ToLower(name) {
+				return errors.New("JSON object member is noncanonical")
+			}
+			if _, exists := members[name]; exists {
+				return errors.New("JSON object has duplicate member")
+			}
+			members[name] = struct{}{}
+			if err := consumeJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	case '[':
+		for decoder.More() {
+			if err := consumeJSONValue(decoder, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = decoder.Token()
+		return err
+	default:
+		return errors.New("JSON delimiter is invalid")
+	}
 }

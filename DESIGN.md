@@ -467,6 +467,21 @@ identity. The provider result must carry that exact generation ID into hybrid
 retrieval; if activation changed it meanwhile, retrieval rejects it rather than
 comparing a vector against a different model's chunks.
 
+The OpenAI-compatible query provider is a bounded HTTPS-only adapter. Its
+endpoint has no userinfo, query, or fragment; redirects are never followed, and
+the API credential is sent only as a bearer Authorization header. It posts one
+strict JSON request with the pinned model, bounded query input, and float
+encoding; the configured provider model identifier must embed the pinned
+revision as a `:revision` suffix, and dimension selection is sent only for
+`text-embedding-3-*` models.
+Responses are limited to 1 MiB, must be one complete JSON value without
+duplicate or noncanonical object members with exactly one finite
+float32-representable vector
+of the pinned dimension, must have bounded JSON nesting, and must
+declare the exact pinned model. Provider failures are content-free and never
+log credentials, query text, or raw response data. Credential-file loading,
+provider selection, and daemon wiring remain separate deployment slices.
+
 The bounded embedding executor is provider-agnostic. It claims only existing
 fenced work, re-reads the exact live generation/item/revision/hash/lease before
 passing a bounded canonical JSON document to an injected provider, validates
