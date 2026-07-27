@@ -449,9 +449,13 @@ the database, and no vector index. An internal exact cosine-candidate read may
 use only the active generation's succeeded chunks and the same project,
 `memory.search`, current-revision, active, and quarantine boundaries as
 lexical search. It accepts an already-derived, dimension-matched query vector;
-it never invokes a provider, exposes a route, changes core readiness, or fuses
-lexical and semantic ranks. With no active generation it reports semantic
-`not_configured`, so callers keep lexical retrieval available.
+it never invokes a provider, exposes a route, or changes core readiness. An
+internal hybrid primitive reads both bounded candidate lists under one
+repeatable-read authorization snapshot and deterministically applies
+reciprocal-rank fusion with a fixed offset of 60; it returns only current item
+coordinates/ranks, not summaries or a client surface. With no active generation
+it reports semantic `not_configured`, so callers keep lexical retrieval
+available.
 
 The bounded embedding executor is provider-agnostic. It claims only existing
 fenced work, re-reads the exact live generation/item/revision/hash/lease before

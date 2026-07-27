@@ -92,16 +92,27 @@ func (d *Database) SearchMemorySemanticCandidates(ctx context.Context, raw Memor
 	if _, err := tx.ExecContext(searchCtx, `SET LOCAL statement_timeout = '2s'`); err != nil {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic search timeout cannot be installed")
 	}
+	page, err := searchMemorySemanticCandidatesInTx(searchCtx, tx, projectID, request.Embedding, request.Limit)
+	if err != nil {
+		return MemorySemanticSearchPage{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return MemorySemanticSearchPage{}, errors.New("memory semantic search transaction could not finish")
+	}
+	return page, nil
+}
+
+func searchMemorySemanticCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, embedding []float64, limit int) (MemorySemanticSearchPage, error) {
 	var dimensions int
-	if err := tx.QueryRowContext(searchCtx, `SELECT dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&dimensions); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&dimensions); errors.Is(err, sql.ErrNoRows) {
 		return MemorySemanticSearchPage{}, ErrMemorySemanticNotConfigured
 	} else if err != nil || dimensions < 1 || dimensions > maxMemoryEmbeddingDimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic generation is unavailable")
 	}
-	if len(request.Embedding) != dimensions {
+	if len(embedding) != dimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic embedding dimensions do not match the active generation")
 	}
-	rows, err := tx.QueryContext(searchCtx, `WITH active_generation AS MATERIALIZED (
+	rows, err := tx.QueryContext(ctx, `WITH active_generation AS MATERIALIZED (
     SELECT id FROM brain.embedding_generations WHERE state='active'
 ), candidates AS MATERIALIZED (
     SELECT item.id,item.current_revision,MIN(chunk.embedding <=> $2::public.vector) AS distance,item.updated_at
@@ -118,18 +129,18 @@ func (d *Database) SearchMemorySemanticCandidates(ctx context.Context, raw Memor
     ORDER BY distance ASC,item.updated_at DESC,item.id
     LIMIT $3
 )
-SELECT id::text,current_revision,distance FROM candidates ORDER BY distance ASC,updated_at DESC,id`, projectID, memorySemanticVector(request.Embedding), request.Limit+1)
+SELECT id::text,current_revision,distance FROM candidates ORDER BY distance ASC,updated_at DESC,id`, projectID, memorySemanticVector(embedding), limit+1)
 	if err != nil {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic search is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	page := MemorySemanticSearchPage{Results: make([]MemorySemanticSearchResult, 0, request.Limit)}
+	page := MemorySemanticSearchPage{Results: make([]MemorySemanticSearchResult, 0, limit)}
 	for rows.Next() {
 		var result MemorySemanticSearchResult
 		if err := rows.Scan(&result.ItemID, &result.Revision, &result.Distance); err != nil || !validOpaqueID(result.ItemID) || result.Revision < 1 || math.IsNaN(result.Distance) || math.IsInf(result.Distance, 0) || result.Distance < 0 {
 			return MemorySemanticSearchPage{}, errors.New("memory semantic search result is invalid")
 		}
-		if len(page.Results) == request.Limit {
+		if len(page.Results) == limit {
 			page.More = true
 			continue
 		}
@@ -137,9 +148,6 @@ SELECT id::text,current_revision,distance FROM candidates ORDER BY distance ASC,
 	}
 	if err := rows.Err(); err != nil {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic search is unavailable")
-	}
-	if err := tx.Commit(); err != nil {
-		return MemorySemanticSearchPage{}, errors.New("memory semantic search transaction could not finish")
 	}
 	return page, nil
 }
