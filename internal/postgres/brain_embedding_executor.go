@@ -234,7 +234,9 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 		}
 		return nil
 	}
-	if err := e.store.PublishMemoryEmbeddingWork(sourceCtx, publication); err == nil {
+	publicationCtx, cancelPublication := context.WithDeadline(ctx, lease.LeaseUntil)
+	defer cancelPublication()
+	if err := e.store.PublishMemoryEmbeddingWork(publicationCtx, publication); err == nil {
 		result.Published++
 	} else if !errors.Is(err, ErrStaleEmbeddingLease) {
 		if err := e.retry(ctx, lease, "publish_unavailable", result); err != nil {
