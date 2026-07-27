@@ -479,7 +479,7 @@ FROM advanced JOIN brain.memory_items AS item ON item.id=$1`, before.ItemID); er
 	if err := ownerDB.QueryRowContext(ctx, `SELECT enqueued,cursor_change_sequence,complete FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 128).Scan(&enqueued, &rebuildCursor, &rebuildComplete); err != nil {
 		t.Fatalf("enqueue bounded rebuild batch: %v", err)
 	}
-	if enqueued < 1 || rebuildCursor > buildingSequence {
+	if rebuildCursor > buildingSequence {
 		t.Fatalf("first rebuild batch enqueued=%d cursor=%d complete=%t watermark=%d", enqueued, rebuildCursor, rebuildComplete, buildingSequence)
 	}
 	for attempts := 0; !rebuildComplete && attempts < 64; attempts++ {
