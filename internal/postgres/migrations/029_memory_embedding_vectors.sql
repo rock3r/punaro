@@ -70,19 +70,23 @@ BEGIN
     ), checked AS MATERIALIZED (
         SELECT input.* FROM input CROSS JOIN locked
         WHERE jsonb_array_length(input.embedding)=locked.dimensions
+    ), validated AS MATERIALIZED (
+        SELECT 1
+        FROM locked
+        WHERE (SELECT count(*) FROM checked)=chunk_count
     ), cleared AS (
-        DELETE FROM brain.embedding_chunks AS chunk USING locked
+        DELETE FROM brain.embedding_chunks AS chunk USING locked,validated
         WHERE chunk.generation_id=locked.generation_id AND chunk.item_id=locked.item_id AND chunk.revision=locked.revision
     ), inserted AS (
         INSERT INTO brain.embedding_chunks(generation_id,item_id,revision,ordinal,content_sha256,start_offset,end_offset,embedding)
         SELECT locked.generation_id,locked.item_id,locked.revision,checked.ordinal,decode(checked.content_sha256,'hex'),checked.start_offset,checked.end_offset,checked.embedding::text::public.vector
-        FROM locked CROSS JOIN checked
+        FROM locked CROSS JOIN checked CROSS JOIN validated
         RETURNING 1
     )
     UPDATE brain.embedding_jobs AS job
     SET state='succeeded', lease_holder=NULL, lease_token=NULL, lease_until=NULL,
         last_error_code=NULL, completed_at=statement_timestamp(), updated_at=statement_timestamp()
-    FROM locked
+    FROM locked CROSS JOIN validated
     WHERE job.generation_id=locked.generation_id AND job.item_id=locked.item_id
       AND (SELECT count(*) FROM inserted)=chunk_count;
     RETURN FOUND;

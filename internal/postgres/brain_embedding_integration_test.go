@@ -279,6 +279,11 @@ func testMemoryEmbeddingQueueIntegration(ctx context.Context, t *testing.T, app 
 	if err == nil {
 		t.Fatalf("duplicate-ordinal publication succeeded: published=%t", published)
 	}
+	dimensionMismatchChunks := `[{"ordinal":0,"content_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","start_offset":0,"end_offset":12,"embedding":[0.25,0.5]}]`
+	err = app.db.QueryRowContext(ctx, `SELECT brain.publish_embedding_job($1,$2,$3,decode($4,'hex'),$5,$6,$7::jsonb)`, rollbackLease.GenerationID, rollbackLease.ItemID, rollbackLease.Revision, rollbackLease.ContentSHA256, rollbackLease.Token, rollbackLease.LeaseGeneration, dimensionMismatchChunks).Scan(&published)
+	if err == nil {
+		t.Fatalf("wrong-dimension publication succeeded: published=%t", published)
+	}
 	var rollbackState, rollbackToken, rollbackDigest string
 	var rollbackLeaseGeneration int64
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state,lease_token::text,encode(content_sha256,'hex'),lease_generation FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, rollbackLease.GenerationID, rollbackLease.ItemID).Scan(&rollbackState, &rollbackToken, &rollbackDigest, &rollbackLeaseGeneration); err != nil || rollbackState != "running" || rollbackToken != rollbackLease.Token || rollbackDigest != rollbackLease.ContentSHA256 || rollbackLeaseGeneration != rollbackLease.LeaseGeneration {
