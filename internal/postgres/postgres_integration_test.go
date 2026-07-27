@@ -780,8 +780,8 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 	seedV26EmbeddingRebuildDerivedWork(ctx, t, ownerDB, activeGenerationID, buildingGenerationID)
 	conn := mustConn(ctx, t, ownerDB)
 	defer func() { _ = conn.Close() }()
-	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != 27 {
-		t.Fatalf("v27 bridge state=%#v err=%v", state, err)
+	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
+		t.Fatalf("current bridge state=%#v err=%v", state, err)
 	}
 	var active, building, activeJobs, buildingJobs, activeChunks, buildingChunks int
 	if err := ownerDB.QueryRowContext(ctx, `
@@ -796,7 +796,7 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 		LEFT JOIN brain.embedding_jobs AS job ON job.generation_id=generation.id
 		LEFT JOIN brain.embedding_chunks AS chunk ON chunk.generation_id=generation.id
 	`).Scan(&active, &building, &activeJobs, &buildingJobs, &activeChunks, &buildingChunks); err != nil || active != 1 || building != 0 || activeJobs != 1 || buildingJobs != 0 || activeChunks != 1 || buildingChunks != 0 {
-		t.Fatalf("v27 generation cleanup active=%d building=%d active_jobs=%d building_jobs=%d active_chunks=%d building_chunks=%d err=%v", active, building, activeJobs, buildingJobs, activeChunks, buildingChunks, err)
+		t.Fatalf("current generation cleanup active=%d building=%d active_jobs=%d building_jobs=%d active_chunks=%d building_chunks=%d err=%v", active, building, activeJobs, buildingJobs, activeChunks, buildingChunks, err)
 	}
 }
 

@@ -427,9 +427,17 @@ jobs forward, so a revision dual-enqueued after start cannot be overwritten by
 the historical scan. A v26 building generation lacks the durable timeline
 identity needed for restore-safe scanning and is discarded as derived work
 during upgrade. At most one building generation exists; the active generation
-remains the sole serving generation. There is still no provider, vector
-storage, caught-up watermark, activation, semantic ranking, or client-facing
-semantic surface.
+remains the sole serving generation.
+
+Schema version 28 adds the owner-only activation transaction. It takes the
+same exclusive advisory fence, accepts only completed rebuild progress with no
+unfinished building job, removes the former active generation and its derived
+jobs/chunks, and promotes the requested building generation atomically. A
+revision on either side of that fence is therefore queued for a generation that
+is either proved complete before promotion or active after promotion. The
+application role cannot activate a generation, and replay fails after the
+generation has ceased to be building. There is still no provider, vector
+storage, semantic ranking, or client-facing semantic surface.
 
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,

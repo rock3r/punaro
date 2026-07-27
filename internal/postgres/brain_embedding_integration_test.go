@@ -28,6 +28,9 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"rebuild progress read", `GRANT SELECT ON brain.embedding_rebuild_progress TO punaro_app`, `REVOKE SELECT ON brain.embedding_rebuild_progress FROM punaro_app`},
 		{"rebuild batch routine ACL", `GRANT EXECUTE ON FUNCTION brain.enqueue_embedding_rebuild_batch(uuid,integer) TO punaro_app`, `REVOKE EXECUTE ON FUNCTION brain.enqueue_embedding_rebuild_batch(uuid,integer) FROM punaro_app`},
 		{"rebuild progress extra check", `ALTER TABLE brain.embedding_rebuild_progress ADD CONSTRAINT embedding_rebuild_progress_extra_check CHECK (complete OR NOT complete)`, `ALTER TABLE brain.embedding_rebuild_progress DROP CONSTRAINT embedding_rebuild_progress_extra_check`},
+		{"activation routine ACL", `GRANT EXECUTE ON FUNCTION brain.activate_embedding_generation(uuid) TO punaro_app`, `REVOKE EXECUTE ON FUNCTION brain.activate_embedding_generation(uuid) FROM punaro_app`},
+		{"activation immutable trigger", `ALTER TABLE brain.embedding_generations DISABLE TRIGGER embedding_generation_immutable`, `ALTER TABLE brain.embedding_generations ENABLE TRIGGER embedding_generation_immutable`},
+		{"activation chunk-delete fence", `ALTER TABLE brain.embedding_chunks DISABLE TRIGGER embedding_chunks_delete_fence`, `ALTER TABLE brain.embedding_chunks ENABLE TRIGGER embedding_chunks_delete_fence`},
 		{"worker routine ACL", `REVOKE EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) TO punaro_app`},
 		{"worker routine public ACL", `GRANT EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) FROM PUBLIC`},
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
@@ -542,5 +545,34 @@ FROM advanced JOIN brain.memory_items AS item ON item.id=$1`, before.ItemID); er
 	}
 	if _, err := app.db.ExecContext(ctx, `SELECT enqueued FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 1); err == nil {
 		t.Fatal("application role scanned an embedding rebuild")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `SELECT generation_id FROM brain.activate_embedding_generation($1)`, buildingID); err == nil {
+		t.Fatal("incomplete embedding rebuild activated")
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT generation_id FROM brain.activate_embedding_generation($1)`, buildingID); err == nil {
+		t.Fatal("application role activated an embedding rebuild")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET state='succeeded',completed_at=statement_timestamp(),updated_at=statement_timestamp() WHERE generation_id=$1`, buildingID); err != nil {
+		t.Fatalf("complete rebuilt jobs: %v", err)
+	}
+	var activatedID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT generation_id::text FROM brain.activate_embedding_generation($1)`, buildingID).Scan(&activatedID); err != nil || activatedID != buildingID {
+		t.Fatalf("activate rebuilt generation=%q want=%q err=%v", activatedID, buildingID, err)
+	}
+	var active, building, oldJobs, rebuildProgress int
+	if err := ownerDB.QueryRowContext(ctx, `
+		SELECT
+			(SELECT count(*) FROM brain.embedding_generations WHERE state='active'),
+			(SELECT count(*) FROM brain.embedding_generations WHERE state='building'),
+			(SELECT count(*) FROM brain.embedding_jobs WHERE generation_id=$1),
+			(SELECT count(*) FROM brain.embedding_rebuild_progress WHERE generation_id=$2)`, activeID, buildingID).Scan(&active, &building, &oldJobs, &rebuildProgress); err != nil || active != 1 || building != 0 || oldJobs != 0 || rebuildProgress != 0 {
+		t.Fatalf("activated generations active=%d building=%d old_jobs=%d rebuild_progress=%d err=%v", active, building, oldJobs, rebuildProgress, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `SELECT generation_id FROM brain.activate_embedding_generation($1)`, buildingID); err == nil {
+		t.Fatal("replayed embedding activation succeeded")
+	}
+	postActivation := create("19191919-1919-4191-8191-191919191952", "after activation")
+	if err := ownerDB.QueryRowContext(ctx, `SELECT revision FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, buildingID, postActivation.ItemID).Scan(&revision); err != nil || revision != postActivation.Revision {
+		t.Fatalf("activated generation post-write revision=%d want=%d err=%v", revision, postActivation.Revision, err)
 	}
 }

@@ -369,8 +369,19 @@ then atomically advances the cursor. It never replaces a newer job that the
 post-start dual enqueue already produced. A v26 building generation is derived
 state without a restore-safe timeline identity, so upgrade discards it before
 accepting a new timeline-bound rebuild. Application callers cannot read or
-advance rebuild progress. There is still no caught-up watermark, activation,
-provider, vectors, semantic search, or RRF.
+advance rebuild progress.
+
+Schema 28 adds the owner-only activation boundary without enabling a provider,
+vectors, semantic search, or RRF. The activation transaction takes the same
+exclusive enqueue fence, requires completed rebuild progress and no queued,
+running, or failed building work, then deletes the former active generation's
+jobs/chunks and promotes the building generation atomically. A post-start
+revision cannot race the promotion: it either dual-enqueues before the fence
+and must succeed first, or queues only for the newly active generation after
+the fence releases. The application role cannot invoke activation; replaying
+the completed promotion fails because the requested generation is no longer
+building. Rollback remains the verified pre-update restore boundary for
+derived-only state.
 
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
