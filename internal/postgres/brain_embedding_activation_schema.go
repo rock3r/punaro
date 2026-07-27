@@ -28,7 +28,8 @@ func memoryEmbeddingActivationControlsAvailable(ctx context.Context, q queryer) 
        AND NOT EXISTS (SELECT COALESCE(role.rolname,'PUBLIC'),entry.privilege_type,entry.is_grantable FROM pg_proc AS proc CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS entry LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,objects WHERE proc.oid=activate_oid
                        EXCEPT SELECT * FROM (VALUES ('punaro_owner','EXECUTE',false)) AS expected(grantee,privilege_type,is_grantable)) AS exact
 ), triggers AS (
-    SELECT EXISTS (SELECT 1 FROM pg_trigger,objects WHERE tgrelid=generations_oid AND tgname='embedding_generation_immutable' AND tgenabled='O' AND tgfoid=immutable_oid AND tgtype=27)
+    SELECT (SELECT count(*)=1 AND bool_and(tgname='embedding_generation_immutable' AND tgenabled='O' AND tgfoid=immutable_oid AND tgtype=27)
+            FROM pg_trigger,objects WHERE tgrelid=generations_oid AND NOT tgisinternal)
        AND EXISTS (SELECT 1 FROM pg_trigger,objects WHERE tgrelid=chunks_oid AND tgname='embedding_chunks_delete_fence' AND tgenabled='O' AND tgfoid=delete_guard_oid AND tgtype=11) AS exact
 )
 SELECT activate_oid IS NOT NULL AND delete_guard_oid IS NOT NULL AND immutable_oid IS NOT NULL
