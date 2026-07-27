@@ -11,6 +11,24 @@ ALTER EXTENSION vector UPDATE TO '0.8.2';
 -- v25-v28 output intentionally carried only chunk coordinates. They are
 -- derived state, so requeue completed or interrupted work rather than ever
 -- treating a coordinate-only success as a semantic result.
+DO $migration$
+DECLARE
+    existing_chunks bigint;
+    existing_chunk_bytes bigint;
+    reset_jobs bigint;
+BEGIN
+    SELECT count(*), COALESCE(sum(pg_column_size(chunk)), 0)
+    INTO existing_chunks, existing_chunk_bytes
+    FROM brain.embedding_chunks AS chunk;
+    SELECT count(*) INTO reset_jobs
+    FROM brain.embedding_jobs
+    WHERE state IN ('running','succeeded');
+    IF existing_chunks > 100000 OR existing_chunk_bytes > 268435456 OR reset_jobs > 100000 THEN
+        RAISE EXCEPTION USING ERRCODE = '54000', MESSAGE = 'memory embedding vector migration exceeds the inline migration ceiling';
+    END IF;
+END
+$migration$;
+
 DELETE FROM brain.embedding_chunks;
 
 UPDATE brain.embedding_jobs
