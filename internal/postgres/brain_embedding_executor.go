@@ -285,7 +285,7 @@ func (e *MemoryEmbeddingExecutor) retry(ctx context.Context, lease MemoryEmbeddi
 	retryCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil)
 	defer cancel()
 	if err := e.store.RetryMemoryEmbeddingWork(retryCtx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: code, Delay: time.Second}); err != nil {
-		if errors.Is(err, ErrStaleEmbeddingLease) {
+		if errors.Is(err, ErrStaleEmbeddingLease) || (!time.Now().Before(lease.LeaseUntil) && errors.Is(err, context.DeadlineExceeded)) {
 			return nil
 		}
 		return err
