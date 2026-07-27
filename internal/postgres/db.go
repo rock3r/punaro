@@ -1200,6 +1200,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = embeddingVectorObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 32 {
+		embeddingQuarantineReleaseObjectsPresent, err := memoryEmbeddingQuarantineReleaseControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding quarantine-release schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingQuarantineReleaseObjectsPresent
+	}
 	return snapshot, nil
 }
 
