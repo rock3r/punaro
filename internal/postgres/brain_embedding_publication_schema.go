@@ -25,7 +25,8 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer,
     ) AS base(relation_name,column_name,type_name,not_null,default_expression)
     UNION ALL SELECT 'brain.embedding_chunks','embedding','vector',true,'' WHERE $1 >= 29
 ), actual_columns AS (
-    SELECT attribute.attrelid::regclass::text,attribute.attname,format_type(attribute.atttypid,attribute.atttypmod),attribute.attnotnull,
+    SELECT attribute.attrelid::regclass::text,attribute.attname,
+           CASE WHEN attribute.atttypid='public.vector'::regtype THEN 'vector' ELSE format_type(attribute.atttypid,attribute.atttypmod) END,attribute.attnotnull,
            COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
     FROM pg_attribute AS attribute
     LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum,objects

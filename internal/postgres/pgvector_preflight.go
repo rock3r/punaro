@@ -23,6 +23,30 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
 	return nil
 }
 
+// RequireInstalledPGVector verifies that restore will use the pinned pgvector
+// implementation rather than pg_restore selecting a package-default version.
+func RequireInstalledPGVector(ctx context.Context, cfg Config) error {
+	dsn, err := ReadDSNFile(cfg.DSNFile)
+	if err != nil {
+		return err
+	}
+	db, err := open(ctx, dsn)
+	if err != nil {
+		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")
+	}
+	defer func() { _ = db.Close() }()
+	var available bool
+	err = db.QueryRowContext(ctx, `SELECT EXISTS (
+    SELECT 1 FROM pg_extension AS ext
+    WHERE ext.extname='vector' AND ext.extnamespace='public'::regnamespace
+      AND ext.extversion=$1 AND pg_get_userbyid(ext.extowner)=current_user
+)`, requiredPGVectorVersion).Scan(&available)
+	if err != nil || !available {
+		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")
+	}
+	return nil
+}
+
 func pgVectorAvailable(ctx context.Context, dsn string) (bool, error) {
 	db, err := open(ctx, dsn)
 	if err != nil {

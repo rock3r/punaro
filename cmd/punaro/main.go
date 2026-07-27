@@ -906,7 +906,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 				return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: err}
 			}
 			if manifest.SchemaVersion >= 29 {
-				if err := punaropostgres.RequirePGVector(preflightCtx, punaropostgres.Config{DSNFile: request.OwnerDSNFile}); err != nil {
+				if err := punaropostgres.RequireInstalledPGVector(preflightCtx, punaropostgres.Config{DSNFile: request.OwnerDSNFile}); err != nil {
 					return &punarobackup.OperationError{Phase: punarobackup.PhasePreflight, Err: err}
 				}
 			}
