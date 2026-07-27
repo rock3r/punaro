@@ -59,8 +59,9 @@ func (e *MemoryHybridQueryExecutor) Embed(ctx context.Context, raw MemorySearchR
 	if err != nil {
 		return MemoryHybridQueryEmbedding{}, errors.New("memory query embedding is unavailable")
 	}
-	if !validMemoryEmbeddingVector(vector, generation.Dimensions) {
+	semantic, err := (MemorySemanticSearchRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, Embedding: vector, Limit: request.Limit}).normalized()
+	if err != nil || len(semantic.Embedding) != generation.Dimensions {
 		return MemoryHybridQueryEmbedding{}, errors.New("memory query embedding is invalid")
 	}
-	return MemoryHybridQueryEmbedding{GenerationID: generation.ID, Vector: append([]float64(nil), vector...)}, nil
+	return MemoryHybridQueryEmbedding{GenerationID: generation.ID, Vector: semantic.Embedding}, nil
 }
