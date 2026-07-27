@@ -287,6 +287,9 @@ func (d *Database) DeleteMemory(ctx context.Context, request MemoryDeleteRequest
 		}
 		var scopeID, timelineID string
 		var revision, changeSequence int64
+		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, request.ItemID); err != nil {
+			return MemoryMutationResult{}, errors.New("memory purge fence is unavailable")
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT scope_id::text,revision,timeline_id::text,change_sequence
 FROM brain.purge_memory($1::uuid,$2::uuid,$3::uuid,$4)`, request.PrincipalID, locked.ProjectID, request.ItemID, locked.Revision).Scan(&scopeID, &revision, &timelineID, &changeSequence); err != nil {
 			return MemoryMutationResult{}, errors.New("memory item could not be purged")
