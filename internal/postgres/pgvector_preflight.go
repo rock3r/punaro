@@ -7,6 +7,8 @@ import (
 
 const requiredPGVectorVersion = "0.8.2"
 
+var pgVectorAvailableFn = pgVectorAvailable
+
 // RequirePGVector verifies the exact extension package is available before an
 // update crosses its irreversible migration boundary.
 func RequirePGVector(ctx context.Context, cfg Config) error {
@@ -14,9 +16,17 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	available, err := pgVectorAvailableFn(ctx, dsn)
+	if err != nil || !available {
+		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")
+	}
+	return nil
+}
+
+func pgVectorAvailable(ctx context.Context, dsn string) (bool, error) {
 	db, err := open(ctx, dsn)
 	if err != nil {
-		return errors.New("PostgreSQL pgvector prerequisite is unavailable")
+		return false, err
 	}
 	defer func() { _ = db.Close() }()
 	var available bool
@@ -25,6 +35,9 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
      AND EXISTS (
          SELECT 1 FROM pg_available_extension_versions
          WHERE name='vector' AND version=$1
+     )
+     AND EXISTS (
+         SELECT 1 FROM pg_roles WHERE rolname=current_user AND rolsuper
      ))
     OR EXISTS (
         SELECT 1
@@ -41,8 +54,5 @@ func RequirePGVector(ctx context.Context, cfg Config) error {
               )
           )
     )`, requiredPGVectorVersion).Scan(&available)
-	if err != nil || !available {
-		return errors.New("PostgreSQL pgvector 0.8.2 prerequisite is unavailable")
-	}
-	return nil
+	return available, err
 }
