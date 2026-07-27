@@ -25,8 +25,8 @@ type memoryHybridQueryStore interface {
 
 type memoryHybridRetrievalStore interface {
 	memoryHybridQueryStore
-	SearchMemoryHybridLexicalCandidates(context.Context, MemorySearchRequest) (MemoryHybridSearchPage, error)
-	SearchMemoryHybridCandidates(context.Context, MemoryHybridSearchRequest) (MemoryHybridSearchPage, error)
+	SearchMemoryHybridLexical(context.Context, MemorySearchRequest) (MemoryHybridSearchSurfacePage, error)
+	SearchMemoryHybrid(context.Context, MemoryHybridSearchRequest) (MemoryHybridSearchSurfacePage, error)
 }
 
 // MemoryHybridQueryExecutor authorizes before exposing a normalized query to a
@@ -73,14 +73,14 @@ func (e *MemoryHybridQueryExecutor) Embed(ctx context.Context, raw MemorySearchR
 }
 
 // MemoryHybridRetrievalExecutor derives a fenced query vector and consumes it
-// immediately in the provider-free hybrid candidate boundary.
+// immediately in the provider-free hybrid summary surface.
 type MemoryHybridRetrievalExecutor struct {
 	query     *MemoryHybridQueryExecutor
 	retrieval memoryHybridRetrievalStore
 }
 
 // NewMemoryHybridRetrievalExecutor constructs the complete internal
-// authorization, query-embedding, and hybrid-candidate sequence.
+// authorization, query-embedding, and hybrid summary sequence.
 func NewMemoryHybridRetrievalExecutor(store memoryHybridRetrievalStore, provider MemoryHybridQueryEmbeddingProvider) (*MemoryHybridRetrievalExecutor, error) {
 	query, err := NewMemoryHybridQueryExecutor(store, provider)
 	if err != nil {
@@ -89,21 +89,21 @@ func NewMemoryHybridRetrievalExecutor(store memoryHybridRetrievalStore, provider
 	return &MemoryHybridRetrievalExecutor{query: query, retrieval: store}, nil
 }
 
-// Search runs the fenced embedding sequence and retrieves hybrid candidate
-// coordinates. It neither configures a provider nor exposes a client route.
-func (e *MemoryHybridRetrievalExecutor) Search(ctx context.Context, raw MemorySearchRequest) (MemoryHybridSearchPage, error) {
+// Search runs the fenced embedding sequence and retrieves authorized hybrid
+// summaries. It neither configures a provider nor exposes a client route.
+func (e *MemoryHybridRetrievalExecutor) Search(ctx context.Context, raw MemorySearchRequest) (MemoryHybridSearchSurfacePage, error) {
 	request, err := raw.normalized()
 	if err != nil {
-		return MemoryHybridSearchPage{}, err
+		return MemoryHybridSearchSurfacePage{}, err
 	}
 	embedding, err := e.query.Embed(ctx, request)
 	if err != nil {
 		if errors.Is(err, ErrMemorySemanticNotConfigured) {
-			return e.retrieval.SearchMemoryHybridLexicalCandidates(ctx, request)
+			return e.retrieval.SearchMemoryHybridLexical(ctx, request)
 		}
-		return MemoryHybridSearchPage{}, err
+		return MemoryHybridSearchSurfacePage{}, err
 	}
-	return e.retrieval.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{
+	return e.retrieval.SearchMemoryHybrid(ctx, MemoryHybridSearchRequest{
 		PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, GenerationID: embedding.GenerationID,
 		Query: request.Query, Embedding: embedding.Vector, Limit: request.Limit,
 	})

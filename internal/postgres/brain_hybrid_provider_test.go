@@ -62,9 +62,9 @@ func TestMemoryHybridQueryExecutorDoesNotCallProviderWhenPreparationFails(t *tes
 	}
 }
 
-func TestMemoryHybridRetrievalExecutorCarriesPreparedFenceIntoCandidates(t *testing.T) {
+func TestMemoryHybridRetrievalExecutorCarriesPreparedFenceIntoSurface(t *testing.T) {
 	generation := MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-27", Dimensions: 2, State: MemoryEmbeddingGenerationActive}
-	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{generation: generation}, page: MemoryHybridSearchPage{SemanticStatus: MemoryHybridSearchSemanticReady}}
+	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{generation: generation}, page: MemoryHybridSearchSurfacePage{SemanticStatus: MemoryHybridSearchSemanticReady}}
 	executor, err := NewMemoryHybridRetrievalExecutor(store, &fakeMemoryHybridQueryProvider{vector: []float64{0.25, 0.75}})
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func TestMemoryHybridRetrievalExecutorCarriesPreparedFenceIntoCandidates(t *test
 }
 
 func TestMemoryHybridRetrievalExecutorDegradesWithoutConfiguredGeneration(t *testing.T) {
-	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{err: ErrMemorySemanticNotConfigured}, lexical: MemoryHybridSearchPage{SemanticStatus: MemoryHybridSearchSemanticNotConfigured}}
+	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{err: ErrMemorySemanticNotConfigured}, lexical: MemoryHybridSearchSurfacePage{SemanticStatus: MemoryHybridSearchSemanticNotConfigured}}
 	provider := &fakeMemoryHybridQueryProvider{vector: []float64{0.25, 0.75}}
 	executor, err := NewMemoryHybridRetrievalExecutor(store, provider)
 	if err != nil {
@@ -113,20 +113,20 @@ type fakeMemoryHybridQueryProvider struct {
 type fakeMemoryHybridRetrievalStore struct {
 	fakeMemoryHybridQueryStore
 	request      MemoryHybridSearchRequest
-	lexical      MemoryHybridSearchPage
+	lexical      MemoryHybridSearchSurfacePage
 	lexicalErr   error
 	lexicalCalls int
-	page         MemoryHybridSearchPage
+	page         MemoryHybridSearchSurfacePage
 	err          error
 	hybridCalls  int
 }
 
-func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybridLexicalCandidates(_ context.Context, _ MemorySearchRequest) (MemoryHybridSearchPage, error) {
+func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybridLexical(_ context.Context, _ MemorySearchRequest) (MemoryHybridSearchSurfacePage, error) {
 	s.lexicalCalls++
 	return s.lexical, s.lexicalErr
 }
 
-func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybridCandidates(_ context.Context, request MemoryHybridSearchRequest) (MemoryHybridSearchPage, error) {
+func (s *fakeMemoryHybridRetrievalStore) SearchMemoryHybrid(_ context.Context, request MemoryHybridSearchRequest) (MemoryHybridSearchSurfacePage, error) {
 	s.hybridCalls++
 	s.request = request
 	return s.page, s.err
