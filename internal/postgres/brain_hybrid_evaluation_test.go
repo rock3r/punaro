@@ -49,3 +49,13 @@ func TestEvaluateMemoryHybridRankingRejectsDuplicateCaseIDs(t *testing.T) {
 		t.Fatal("duplicate evaluation case ID accepted")
 	}
 }
+
+func TestEvaluateMemoryHybridRankingScoresEmptyResultsAsZero(t *testing.T) {
+	evaluation, err := EvaluateMemoryHybridRanking([]MemoryHybridRankingEvaluationCase{{
+		ID:        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+		Relevance: map[string]int{"cccccccc-cccc-4ccc-8ccc-cccccccccccc": 1},
+	}})
+	if err != nil || evaluation.NormalizedDiscountedCumulativeGain != 0 || math.IsNaN(evaluation.NormalizedDiscountedCumulativeGain) {
+		t.Fatalf("evaluation=%#v err=%v", evaluation, err)
+	}
+}

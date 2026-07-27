@@ -74,7 +74,9 @@ func EvaluateMemoryHybridRanking(cases []MemoryHybridRankingEvaluationCase) (Mem
 			evaluation.HitsAtOne++
 		}
 		evaluation.MeanReciprocalRank += reciprocalRank
-		evaluation.NormalizedDiscountedCumulativeGain += discountedGain / idealGain
+		if idealGain > 0 {
+			evaluation.NormalizedDiscountedCumulativeGain += discountedGain / idealGain
+		}
 	}
 	evaluation.MeanReciprocalRank /= float64(evaluation.Queries)
 	evaluation.NormalizedDiscountedCumulativeGain /= float64(evaluation.Queries)
