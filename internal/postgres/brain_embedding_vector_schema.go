@@ -10,7 +10,7 @@ func memoryEmbeddingVectorControlsAvailable(ctx context.Context, q queryer) (boo
 	if err := q.QueryRowContext(ctx, `SELECT EXISTS (
     SELECT 1 FROM pg_extension AS ext
     WHERE ext.extname='vector' AND ext.extnamespace='public'::regnamespace
-      AND pg_get_userbyid(ext.extowner)='punaro_owner' AND ext.extversion='0.8.2'
+      AND pg_get_userbyid(ext.extowner)='punaro_owner' AND ext.extversion=$1
 ) AND (SELECT array_agg(attribute.attname::text ORDER BY attribute.attnum)=ARRAY['generation_id','item_id','revision','ordinal','content_sha256','start_offset','end_offset','created_at','embedding']::text[]
          FROM pg_attribute AS attribute
          WHERE attribute.attrelid='brain.embedding_chunks'::regclass AND attribute.attnum>0 AND NOT attribute.attisdropped)
@@ -18,7 +18,7 @@ func memoryEmbeddingVectorControlsAvailable(ctx context.Context, q queryer) (boo
     SELECT 1 FROM pg_attribute AS attribute
     WHERE attribute.attrelid='brain.embedding_chunks'::regclass AND attribute.attname='embedding'
       AND attribute.attnotnull AND format_type(attribute.atttypid,attribute.atttypmod)='vector' AND attribute.attacl IS NULL
-)`).Scan(&exact); err != nil || !exact {
+)`, requiredPGVectorVersion).Scan(&exact); err != nil || !exact {
 		return exact, err
 	}
 	if err := q.QueryRowContext(ctx, `SELECT pg_get_userbyid(relation.relowner)='punaro_owner'
