@@ -8,7 +8,7 @@ import (
 )
 
 func TestMemoryEmbeddingExecutorPublishesAndRetriesBoundedly(t *testing.T) {
-	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
+	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Generation: MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
 	store := &fakeEmbeddingExecutorStore{leases: []MemoryEmbeddingLease{lease}}
 	source := fakeEmbeddingSource{generation: MemoryEmbeddingGeneration{ID: lease.GenerationID, Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, chunks: []MemoryEmbeddingSourceChunk{{Ordinal: 0, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", StartOffset: 0, EndOffset: 4, Text: "test"}}}
 	executor, err := NewMemoryEmbeddingExecutor(store, source, fakeEmbeddingProvider{vectors: [][]float64{{0.25, 0.75}}})
@@ -68,13 +68,25 @@ func TestMemoryEmbeddingExecutorPublishesAndRetriesBoundedly(t *testing.T) {
 		t.Fatalf("result=%#v calls=%d retries=%#v err=%v", result, calls, store.retries, err)
 	}
 	store.leases = []MemoryEmbeddingLease{lease}
+	source.generation = lease.Generation
+	source.generation.Model = "local.other"
+	calls = 0
+	executor, err = NewMemoryEmbeddingExecutor(store, source, fakeEmbeddingProvider{calls: &calls})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err = executor.Execute(context.Background(), MemoryEmbeddingClaimRequest{WorkerID: lease.Holder, Limit: 1, LeaseDuration: time.Minute})
+	if err != nil || calls != 0 || result.Retried != 1 || store.retries[len(store.retries)-1].ErrorCode != "provider_invalid" {
+		t.Fatalf("substituted generation result=%#v calls=%d retries=%#v err=%v", result, calls, store.retries, err)
+	}
+	store.leases = []MemoryEmbeddingLease{lease}
 	if _, err := executor.Execute(context.Background(), MemoryEmbeddingClaimRequest{WorkerID: lease.Holder, Limit: maxMemoryEmbeddingClaimBatch + 1, LeaseDuration: time.Minute}); err == nil || len(store.leases) != 1 {
 		t.Fatalf("unbounded executor request err=%v leases=%#v", err, store.leases)
 	}
 }
 
 func TestMemoryEmbeddingExecutorRetainsSourceFenceThroughQuarantineRetry(t *testing.T) {
-	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
+	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Generation: MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
 	released := false
 	store := &fakeEmbeddingExecutorStore{leases: []MemoryEmbeddingLease{lease}, onRetry: func() error {
 		if released {

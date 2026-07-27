@@ -249,7 +249,7 @@ func validMemoryEmbeddingVector(vector []float64, dimensions int) bool {
 }
 
 func validMemoryEmbeddingSource(lease MemoryEmbeddingLease, generation MemoryEmbeddingGeneration, chunks []MemoryEmbeddingSourceChunk) bool {
-	if generation.ID != lease.GenerationID || generation.Validate() != nil || len(chunks) < 1 || len(chunks) > maxMemoryEmbeddingChunks {
+	if lease.Generation.Validate() != nil || generation != lease.Generation || generation.ID != lease.GenerationID || len(chunks) < 1 || len(chunks) > maxMemoryEmbeddingChunks {
 		return false
 	}
 	end := 0
