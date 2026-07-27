@@ -100,10 +100,11 @@ BEGIN
         ORDER BY change.change_sequence
         LIMIT requested_limit
     ), candidates AS MATERIALIZED (
-        SELECT changes.change_sequence,item.id AS item_id,changes.revision,revision.content_sha256
+        SELECT DISTINCT ON (changes.item_id) changes.change_sequence,item.id AS item_id,changes.revision,revision.content_sha256
         FROM changes
         JOIN brain.memory_items AS item ON item.id=changes.item_id AND item.current_revision=changes.revision
         JOIN brain.memory_revisions AS revision ON revision.item_id=changes.item_id AND revision.revision=changes.revision
+        ORDER BY changes.item_id,changes.change_sequence DESC
     ), queued AS (
         INSERT INTO brain.embedding_jobs(generation_id,item_id,revision,content_sha256)
         SELECT requested_generation,item_id,revision,content_sha256 FROM candidates
