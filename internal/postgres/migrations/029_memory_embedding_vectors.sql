@@ -14,7 +14,7 @@ SET state='queued', attempts=0, lease_holder=NULL, lease_token=NULL,
 WHERE state IN ('running','succeeded');
 
 ALTER TABLE brain.embedding_chunks
-ADD COLUMN embedding vector NOT NULL;
+ADD COLUMN embedding public.vector NOT NULL;
 
 CREATE OR REPLACE FUNCTION brain.publish_embedding_job(requested_generation uuid, requested_item uuid, requested_revision bigint, requested_sha256 bytea, requested_token uuid, requested_lease_generation bigint, requested_chunks jsonb)
 RETURNS boolean
