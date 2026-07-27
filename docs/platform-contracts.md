@@ -361,6 +361,17 @@ watermarking, validation, activation, vectors, semantic search, and RRF remain
 later slices; rollback again requires verified pre-update restore because the
 schema is additive derived control state.
 
+Schema 27 makes that rebuild scan bounded and resumable. Start captures the
+installation timeline as well as its change-sequence watermark and creates an
+owner-only progress row. Each owner batch scans at most 128 current revisions
+from `brain.memory_changes` on that captured timeline through the watermark,
+then atomically advances the cursor. It never replaces a newer job that the
+post-start dual enqueue already produced. A v26 building generation is derived
+state without a restore-safe timeline identity, so upgrade discards it before
+accepting a new timeline-bound rebuild. Application callers cannot read or
+advance rebuild progress. There is still no caught-up watermark, activation,
+provider, vectors, semantic search, or RRF.
+
 The dark prompt-brief read adds no schema and exposes no route or client. It
 accepts the same bounded normalized query as lexical search, resolves the
 active canonical project, and requires only `memory.search` because it returns

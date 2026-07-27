@@ -25,6 +25,9 @@ func testMemoryEmbeddingSchemaDriftIntegration(ctx context.Context, t *testing.T
 		{"generation state fence", `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_state_check; ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_state_check CHECK (state IS NOT NULL)`, `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_state_check; ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_state_check CHECK ((state = 'active' AND start_change_sequence IS NULL) OR (state = 'building' AND start_change_sequence >= 0))`},
 		{"legacy generation tuple uniqueness", `ALTER TABLE brain.embedding_generations ADD CONSTRAINT embedding_generations_model_model_revision_dimensions_key UNIQUE (model,model_revision,dimensions)`, `ALTER TABLE brain.embedding_generations DROP CONSTRAINT embedding_generations_model_model_revision_dimensions_key`},
 		{"rebuild routine ACL", `GRANT EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) TO punaro_app`, `REVOKE EXECUTE ON FUNCTION brain.start_embedding_generation(text,text,integer) FROM punaro_app`},
+		{"rebuild progress read", `GRANT SELECT ON brain.embedding_rebuild_progress TO punaro_app`, `REVOKE SELECT ON brain.embedding_rebuild_progress FROM punaro_app`},
+		{"rebuild batch routine ACL", `GRANT EXECUTE ON FUNCTION brain.enqueue_embedding_rebuild_batch(uuid,integer) TO punaro_app`, `REVOKE EXECUTE ON FUNCTION brain.enqueue_embedding_rebuild_batch(uuid,integer) FROM punaro_app`},
+		{"rebuild progress extra check", `ALTER TABLE brain.embedding_rebuild_progress ADD CONSTRAINT embedding_rebuild_progress_extra_check CHECK (complete OR NOT complete)`, `ALTER TABLE brain.embedding_rebuild_progress DROP CONSTRAINT embedding_rebuild_progress_extra_check`},
 		{"worker routine ACL", `REVOKE EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) FROM punaro_app`, `GRANT EXECUTE ON FUNCTION brain.retry_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,bigint,text) TO punaro_app`},
 		{"worker routine public ACL", `GRANT EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) FROM PUBLIC`},
 		{"worker routine security", `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY INVOKER`, `ALTER FUNCTION brain.claim_embedding_jobs(uuid,integer,bigint) SECURITY DEFINER`},
@@ -443,6 +446,40 @@ func testMemoryEmbeddingGenerationRebuildIntegration(ctx context.Context, t *tes
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, buildingID, before.ItemID).Scan(&beforeJobs); err != nil || beforeJobs != 0 {
 		t.Fatalf("unbounded rebuild snapshot jobs=%d err=%v", beforeJobs, err)
 	}
+	beforeAfterStart, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: before.ItemID, IdempotencyKey: "19191919-1919-4191-8191-191919191940", ExpectedETag: before.ETag, LogicalKey: "rebuild-19191919-1919-4191-8191-191919191941", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"title":"before rebuild revised after start"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enqueued, rebuildCursor int64
+	var rebuildComplete bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT enqueued,cursor_change_sequence,complete FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 128).Scan(&enqueued, &rebuildCursor, &rebuildComplete); err != nil {
+		t.Fatalf("enqueue bounded rebuild batch: %v", err)
+	}
+	if enqueued < 1 || rebuildCursor > buildingSequence {
+		t.Fatalf("first rebuild batch enqueued=%d cursor=%d complete=%t watermark=%d", enqueued, rebuildCursor, rebuildComplete, buildingSequence)
+	}
+	for attempts := 0; !rebuildComplete && attempts < 64; attempts++ {
+		previousCursor := rebuildCursor
+		if err := ownerDB.QueryRowContext(ctx, `SELECT enqueued,cursor_change_sequence,complete FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 128).Scan(&enqueued, &rebuildCursor, &rebuildComplete); err != nil {
+			t.Fatalf("resume bounded rebuild batch: %v", err)
+		}
+		if rebuildCursor <= previousCursor {
+			t.Fatalf("bounded rebuild cursor did not advance: previous=%d current=%d", previousCursor, rebuildCursor)
+		}
+	}
+	if !rebuildComplete {
+		t.Fatal("bounded rebuild did not finish within 64 batches")
+	}
+	completedCursor := rebuildCursor
+	if err := ownerDB.QueryRowContext(ctx, `SELECT enqueued,cursor_change_sequence,complete FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 128).Scan(&enqueued, &rebuildCursor, &rebuildComplete); err != nil {
+		t.Fatalf("restart completed rebuild batch: %v", err)
+	}
+	if enqueued != 0 || !rebuildComplete || rebuildCursor != completedCursor {
+		t.Fatalf("completed rebuild restart enqueued=%d cursor=%d complete=%t want cursor=%d", enqueued, rebuildCursor, rebuildComplete, completedCursor)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT revision FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, buildingID, before.ItemID).Scan(&revision); err != nil || revision != beforeAfterStart.Revision {
+		t.Fatalf("bounded rebuild job revision=%d want=%d err=%v", revision, beforeAfterStart.Revision, err)
+	}
 	after := create("19191919-1919-4191-8191-191919191942", "after rebuild")
 	for _, generationID := range []string{activeID, buildingID} {
 		if err := ownerDB.QueryRowContext(ctx, `SELECT revision FROM brain.embedding_jobs WHERE generation_id=$1 AND item_id=$2`, generationID, after.ItemID).Scan(&revision); err != nil || revision != after.Revision {
@@ -478,5 +515,8 @@ func testMemoryEmbeddingGenerationRebuildIntegration(ctx context.Context, t *tes
 	}
 	if _, err := app.db.ExecContext(ctx, `SELECT generation_id FROM brain.start_embedding_generation($1,$2,$3)`, "local.e5-xl", "2026-07-01", 1536); err == nil {
 		t.Fatal("application role started an embedding rebuild")
+	}
+	if _, err := app.db.ExecContext(ctx, `SELECT enqueued FROM brain.enqueue_embedding_rebuild_batch($1,$2)`, buildingID, 1); err == nil {
+		t.Fatal("application role scanned an embedding rebuild")
 	}
 }

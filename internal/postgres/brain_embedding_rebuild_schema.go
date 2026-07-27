@@ -5,7 +5,11 @@ import "context"
 // memoryEmbeddingRebuildControlsAvailable verifies the schema-v26 boundary:
 // a schema-owner-only building generation may be created beside, but never
 // replaces, the immutable active generation in this slice.
-func memoryEmbeddingRebuildControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func memoryEmbeddingRebuildControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
+	startRoutineMD5 := memoryEmbeddingRebuildStartRoutineV26MD5
+	if schemaVersion >= 27 {
+		startRoutineMD5 = memoryEmbeddingRebuildStartRoutineV27MD5
+	}
 	var available bool
 	err := q.QueryRowContext(ctx, `WITH objects AS (
     SELECT to_regclass('brain.embedding_generations') AS generations_oid,
@@ -50,11 +54,12 @@ func memoryEmbeddingRebuildControlsAvailable(ctx context.Context, q queryer) (bo
 )
 SELECT generations_oid IS NOT NULL AND start_oid IS NOT NULL AND queue_oid IS NOT NULL
    AND generation_state.exact AND generation_tuple.exact AND routines.exact AND start_signature.exact AND start_acl.exact
-FROM objects,generation_state,generation_tuple,routines,start_signature,start_acl`, memoryEmbeddingRebuildQueueRoutineMD5, memoryEmbeddingRebuildStartRoutineMD5).Scan(&available)
+FROM objects,generation_state,generation_tuple,routines,start_signature,start_acl`, memoryEmbeddingRebuildQueueRoutineMD5, startRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryEmbeddingRebuildQueueRoutineMD5 = "b09c65e6d07819ec41948de85675de5c"
-	memoryEmbeddingRebuildStartRoutineMD5 = "ef8ca889c0937b89d9ea3406aff994c4"
+	memoryEmbeddingRebuildQueueRoutineMD5    = "b09c65e6d07819ec41948de85675de5c"
+	memoryEmbeddingRebuildStartRoutineV26MD5 = "ef8ca889c0937b89d9ea3406aff994c4"
+	memoryEmbeddingRebuildStartRoutineV27MD5 = "2dda6cbfeb8a25361c542b47c1657961"
 )
