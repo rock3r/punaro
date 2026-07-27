@@ -5,12 +5,13 @@ import "context"
 // memoryEmbeddingPublicationControlsAvailable verifies the exact schema-v25
 // derived-chunk authority. A migrated database must fail readiness if any
 // publication fence, referential boundary, or application privilege drifts.
-func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `WITH objects AS (
     SELECT to_regclass('brain.embedding_chunks') AS chunks_oid,
            to_regprocedure('brain.publish_embedding_job(uuid,uuid,bigint,bytea,uuid,bigint,jsonb)') AS publish_oid,
-           to_regprocedure('jobs.guard_application_mutation()') AS fence_oid
+           to_regprocedure('jobs.guard_application_mutation()') AS fence_oid,
+           to_regprocedure('brain.guard_embedding_chunk_delete()') AS delete_fence_oid
 ), expected_columns(relation_name,column_name,type_name,not_null,default_expression) AS (
     VALUES
       ('brain.embedding_chunks','generation_id','uuid',true,''),
@@ -67,7 +68,10 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
         AND index_row.indkey='1 2 3 4'::int2vector AND index_row.indexprs IS NULL AND index_row.indpred IS NULL) AS exact
     FROM pg_index AS index_row,objects WHERE index_row.indrelid=chunks_oid
 ), fence_safety AS (
-    SELECT count(*)=1 AND bool_and(trigger_row.tgname='application_mutation_fence' AND trigger_row.tgenabled='O' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=62) AS exact
+    SELECT (($1 < 28 AND count(*)=1 AND bool_and(trigger_row.tgname='application_mutation_fence' AND trigger_row.tgenabled='O' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=62))
+         OR ($1 >= 28 AND count(*)=2 AND bool_and(trigger_row.tgenabled='O')
+             AND bool_and((trigger_row.tgname='application_mutation_fence' AND trigger_row.tgfoid=fence_oid AND trigger_row.tgtype=54)
+                          OR (trigger_row.tgname='embedding_chunks_delete_fence' AND trigger_row.tgfoid=delete_fence_oid AND trigger_row.tgtype=11)))) AS exact
     FROM pg_trigger AS trigger_row,objects
     WHERE trigger_row.tgrelid=chunks_oid AND NOT trigger_row.tgisinternal
 ), routine_safety AS (
@@ -103,7 +107,7 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer)
     LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,objects
     WHERE relation.oid=chunks_oid
 )
-SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT NULL
+SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT NULL AND ($1 < 28 OR delete_fence_oid IS NOT NULL)
    AND table_safety.exact AND constraint_safety.exact AND index_safety.exact AND fence_safety.exact
    AND routine_safety.exact AND routine_acl.exact AND column_acl.exact AND table_acl.exact
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
@@ -114,6 +118,6 @@ SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT N
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
    AND has_table_privilege('punaro_app',chunks_oid,'SELECT')
    AND NOT has_table_privilege('punaro_app',chunks_oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl,table_acl`).Scan(&available)
+FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl,table_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

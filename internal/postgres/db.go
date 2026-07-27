@@ -1147,7 +1147,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = embeddingWorkerObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 25 {
-		embeddingPublicationObjectsPresent, err := memoryEmbeddingPublicationControlsAvailable(ctx, q)
+		embeddingPublicationObjectsPresent, err := memoryEmbeddingPublicationControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL memory embedding publication schema cannot be inspected")
 		}
@@ -1166,6 +1166,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL memory embedding rebuild batch schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = embeddingRebuildBatchObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 28 {
+		embeddingActivationObjectsPresent, err := memoryEmbeddingActivationControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding activation schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingActivationObjectsPresent
 	}
 	return snapshot, nil
 }
