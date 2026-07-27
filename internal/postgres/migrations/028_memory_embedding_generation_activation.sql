@@ -36,6 +36,32 @@ BEGIN
        AND current_setting('punaro.embedding_activation_old_generation', true) = OLD.generation_id::text THEN
         RETURN OLD;
     END IF;
+    IF session_user = 'punaro_owner'
+       AND EXISTS (
+        SELECT 1 FROM jobs.update_transactions
+        WHERE update_id::text = current_setting('punaro.update_id', true)
+          AND phase = 'migration_started'
+       ) THEN
+        RETURN OLD;
+    END IF;
+    IF session_user = 'punaro_owner'
+       AND EXISTS (
+        SELECT 1
+        FROM jobs.update_transactions AS txn
+        JOIN jobs.restore_events AS event
+          ON event.backup_id::text = current_setting('punaro.restore_backup_id', true)
+         AND event.installation_id = txn.installation_id
+         AND event.previous_timeline_id = txn.timeline_id
+        JOIN jobs.server_state AS state
+          ON state.singleton
+         AND state.installation_id = event.installation_id
+         AND state.timeline_id = event.previous_timeline_id
+         AND state.change_sequence = event.restored_change_sequence
+        WHERE txn.update_id::text = current_setting('punaro.restore_update_id', true)
+          AND txn.phase = 'writers_stopped'
+       ) THEN
+        RETURN OLD;
+    END IF;
     PERFORM jobs.assert_application_mutation();
     RETURN OLD;
 END
