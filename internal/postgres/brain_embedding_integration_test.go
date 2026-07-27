@@ -435,7 +435,7 @@ func testMemoryEmbeddingQuarantineDeferralIntegration(ctx context.Context, t *te
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
-VALUES ($1,$2,1,'embedding.test','/title',decode(repeat('7f',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7f',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	claimed, err := app.ClaimMemoryEmbeddingWork(ctx, MemoryEmbeddingClaimRequest{WorkerID: "19191919-1919-4191-8191-191919191932", Limit: 32, LeaseDuration: memoryEmbeddingMinLease})
@@ -490,7 +490,7 @@ VALUES ($1,$2,1,'embedding.test','/title',decode(repeat('7f',32),'hex'),$3)`, cr
 		t.Fatalf("unquarantined retry did not remain claimable: %#v", claimed)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
-VALUES ($1,$2,1,'embedding.test','/title',decode(repeat('7e',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7e',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := app.LoadMemoryEmbeddingSource(ctx, lease); !errors.Is(err, ErrMemoryEmbeddingQuarantined) {
@@ -535,7 +535,7 @@ VALUES ($1,$2,1,'embedding.test','/title',decode(repeat('7e',32),'hex'),$3)`, cr
 		t.Fatalf("final-attempt quarantine lease=%#v", lease)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
-VALUES ($1,$2,1,'embedding.test','/title',decode(repeat('7d',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
+VALUES ($1,$2,1,'private-key','/title',decode(repeat('7d',32),'hex'),$3)`, created.ItemID, created.Revision, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.embedding_jobs SET lease_until=statement_timestamp()-interval '1 second' WHERE generation_id=$1 AND item_id=$2`, lease.GenerationID, lease.ItemID); err != nil {

@@ -250,11 +250,16 @@ func releaseActiveMemoryQuarantine(ctx context.Context, tx *sql.Tx, principalID,
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, itemID); err != nil {
 		return false, errors.New("memory quarantine release is unavailable")
 	}
-	var released bool
-	if err := tx.QueryRowContext(ctx, `SELECT brain.release_memory_quarantine($1,$2)`, itemID, principalID).Scan(&released); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp()
+WHERE item_id=$1 AND released_at IS NULL`, itemID, principalID)
+	if err != nil {
 		return false, errors.New("memory quarantine could not be released")
 	}
-	return released, nil
+	count, err := result.RowsAffected()
+	if err != nil || count > 1 {
+		return false, errors.New("memory quarantine release is unavailable")
+	}
+	return count == 1, nil
 }
 
 // ReviewMemorySecretQuarantine explicitly exposes one active quarantined item to an administrator.
