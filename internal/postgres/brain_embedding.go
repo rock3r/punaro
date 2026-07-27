@@ -136,6 +136,21 @@ func (d *Database) PublishMemoryEmbeddingWork(ctx context.Context, publication M
 		return errors.New("embedding work could not be published")
 	}
 	if !changed {
+		var dimensions int
+		err = tx.QueryRowContext(ctx, `SELECT generation.dimensions
+FROM brain.embedding_jobs AS job
+JOIN brain.embedding_generations AS generation ON generation.id=job.generation_id
+JOIN brain.memory_items AS item ON item.id=job.item_id AND item.current_revision=job.revision
+WHERE job.generation_id=$1 AND job.item_id=$2 AND job.revision=$3
+  AND job.content_sha256=$4 AND job.state='running' AND job.lease_token=$5
+  AND job.lease_generation=$6 AND job.lease_until > statement_timestamp()`, publication.Lease.GenerationID, publication.Lease.ItemID, publication.Lease.Revision, digest, publication.Lease.Token, publication.Lease.LeaseGeneration).Scan(&dimensions)
+		if err == nil {
+			for _, chunk := range publication.Chunks {
+				if len(chunk.Vector) != dimensions {
+					return errors.New("invalid embedding publication")
+				}
+			}
+		}
 		return ErrStaleEmbeddingLease
 	}
 	if err := tx.Commit(); err != nil {
