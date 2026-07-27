@@ -25,7 +25,7 @@ type memoryHybridQueryStore interface {
 
 type memoryHybridRetrievalStore interface {
 	memoryHybridQueryStore
-	SearchMemory(context.Context, MemorySearchRequest) (MemorySearchPage, error)
+	SearchMemoryHybridLexicalCandidates(context.Context, MemorySearchRequest) (MemoryHybridSearchPage, error)
 	SearchMemoryHybridCandidates(context.Context, MemoryHybridSearchRequest) (MemoryHybridSearchPage, error)
 }
 
@@ -99,15 +99,7 @@ func (e *MemoryHybridRetrievalExecutor) Search(ctx context.Context, raw MemorySe
 	embedding, err := e.query.Embed(ctx, request)
 	if err != nil {
 		if errors.Is(err, ErrMemorySemanticNotConfigured) {
-			lexical, lexicalErr := e.retrieval.SearchMemory(ctx, request)
-			if lexicalErr != nil {
-				return MemoryHybridSearchPage{}, lexicalErr
-			}
-			results, more, fuseErr := fuseMemorySearchRanks(lexical.Results, nil, request.Limit)
-			if fuseErr != nil {
-				return MemoryHybridSearchPage{}, errors.New("memory hybrid search candidates are unavailable")
-			}
-			return MemoryHybridSearchPage{Results: results, More: lexical.More || more, SemanticStatus: MemoryHybridSearchSemanticNotConfigured}, nil
+			return e.retrieval.SearchMemoryHybridLexicalCandidates(ctx, request)
 		}
 		return MemoryHybridSearchPage{}, err
 	}
