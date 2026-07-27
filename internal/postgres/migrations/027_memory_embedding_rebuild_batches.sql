@@ -65,6 +65,7 @@ AS $function$
 DECLARE
     watermark bigint;
     scanned integer;
+    changed integer;
     next_cursor bigint;
     done boolean;
 BEGIN
@@ -87,12 +88,20 @@ BEGIN
         WHERE progress.generation_id=requested_generation;
         enqueued := 0; complete := true; RETURN NEXT; RETURN;
     END IF;
-    WITH changes AS MATERIALIZED (
+    WITH RECURSIVE timeline_chain(timeline_id,max_change_sequence) AS (
+        SELECT progress.timeline_id,watermark
+        FROM brain.embedding_rebuild_progress AS progress
+        WHERE progress.generation_id=requested_generation
+        UNION ALL
+        SELECT event.previous_timeline_id,event.restored_change_sequence
+        FROM jobs.restore_events AS event
+        JOIN timeline_chain ON event.restored_timeline_id=timeline_chain.timeline_id
+    ), changes AS MATERIALIZED (
         SELECT change.change_sequence,change.item_id,change.revision
         FROM brain.embedding_rebuild_progress AS progress
-        JOIN brain.memory_changes AS change ON change.timeline_id=progress.timeline_id
-          AND change.change_sequence>progress.cursor_change_sequence AND change.change_sequence<=watermark
-        WHERE progress.generation_id=requested_generation
+        JOIN timeline_chain ON true
+        JOIN brain.memory_changes AS change ON change.timeline_id=timeline_chain.timeline_id
+          AND change.change_sequence>progress.cursor_change_sequence AND change.change_sequence<=timeline_chain.max_change_sequence
         ORDER BY change.change_sequence
         LIMIT requested_limit
     ), candidates AS MATERIALIZED (
@@ -111,9 +120,9 @@ BEGIN
     ), applied AS (
         SELECT count(*) AS changed FROM queued
     )
-    SELECT advanced.scanned,advanced.next_cursor,advanced.scanned<requested_limit INTO scanned,next_cursor,done FROM advanced CROSS JOIN applied;
+    SELECT advanced.scanned,applied.changed,advanced.next_cursor,advanced.scanned<requested_limit INTO scanned,changed,next_cursor,done FROM advanced CROSS JOIN applied;
     UPDATE brain.embedding_rebuild_progress SET cursor_change_sequence=next_cursor,complete=done WHERE generation_id=requested_generation;
-    enqueued := scanned; cursor_change_sequence := next_cursor; complete := done; RETURN NEXT;
+    enqueued := changed; cursor_change_sequence := next_cursor; complete := done; RETURN NEXT;
 END
 $function$;
 
