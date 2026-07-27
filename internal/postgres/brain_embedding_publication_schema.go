@@ -13,7 +13,7 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer,
            to_regprocedure('jobs.guard_application_mutation()') AS fence_oid,
            to_regprocedure('brain.guard_embedding_chunk_delete()') AS delete_fence_oid
 ), expected_columns(relation_name,column_name,type_name,not_null,default_expression) AS (
-    VALUES
+    SELECT * FROM (VALUES
       ('brain.embedding_chunks','generation_id','uuid',true,''),
       ('brain.embedding_chunks','item_id','uuid',true,''),
       ('brain.embedding_chunks','revision','bigint',true,''),
@@ -22,6 +22,8 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer,
       ('brain.embedding_chunks','start_offset','integer',true,''),
       ('brain.embedding_chunks','end_offset','integer',true,''),
       ('brain.embedding_chunks','created_at','timestamp with time zone',true,'statement_timestamp()')
+    ) AS base(relation_name,column_name,type_name,not_null,default_expression)
+    UNION ALL SELECT 'brain.embedding_chunks','embedding','vector',true,'' WHERE $1 >= 29
 ), actual_columns AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,format_type(attribute.atttypid,attribute.atttypmod),attribute.attnotnull,
            COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
@@ -79,7 +81,7 @@ func memoryEmbeddingPublicationControlsAvailable(ctx context.Context, q queryer,
         AND proc.prorettype='boolean'::regtype AND NOT proc.proretset AND proc.prosecdef
         AND proc.provolatile='v' AND proc.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
         AND proc.proconfig=ARRAY['search_path=pg_catalog']::text[]
-        AND md5(btrim(proc.prosrc,E' \n\r\t'))='2a5bb540102e4944f41c63c31a5aed49') AS exact
+        AND md5(btrim(proc.prosrc,E' \n\r\t'))=CASE WHEN $1 < 29 THEN '2a5bb540102e4944f41c63c31a5aed49' ELSE $2 END) AS exact
     FROM pg_proc AS proc,objects WHERE proc.oid=publish_oid
 ), expected_routine_acl(grantee,privilege_type,is_grantable) AS (
     VALUES ('punaro_owner','EXECUTE',false),('punaro_app','EXECUTE',false)
@@ -118,6 +120,6 @@ SELECT chunks_oid IS NOT NULL AND publish_oid IS NOT NULL AND fence_oid IS NOT N
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
    AND has_table_privilege('punaro_app',chunks_oid,'SELECT')
    AND NOT has_table_privilege('punaro_app',chunks_oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl,table_acl`, schemaVersion).Scan(&available)
+FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl,column_acl,table_acl`, schemaVersion, memoryEmbeddingVectorPublicationRoutineMD5).Scan(&available)
 	return available, err
 }

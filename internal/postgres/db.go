@@ -1174,6 +1174,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = embeddingActivationObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 29 {
+		embeddingVectorObjectsPresent, err := memoryEmbeddingVectorControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory embedding vector schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = embeddingVectorObjectsPresent
+	}
 	return snapshot, nil
 }
 
