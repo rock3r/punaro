@@ -42,4 +42,4 @@ FROM objects,routine_safety,routine_acl,trigger_safety`, memoryEmbeddingQuaranti
 	return available, err
 }
 
-const memoryEmbeddingQuarantineReleaseRoutineV32MD5 = "08026175c35c150fff31a00d16127082"
+const memoryEmbeddingQuarantineReleaseRoutineV32MD5 = "5b469b462d0c7f10f70a4d0a50230d3c"
