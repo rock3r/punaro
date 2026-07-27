@@ -107,7 +107,7 @@ func (r MemoryHybridSearchRequest) normalized() (MemoryHybridSearchRequest, erro
 	if err != nil {
 		return MemoryHybridSearchRequest{}, errors.New("invalid memory hybrid search request")
 	}
-	if r.GenerationID != "" && !validOpaqueID(r.GenerationID) {
+	if !validOpaqueID(r.GenerationID) {
 		return MemoryHybridSearchRequest{}, errors.New("invalid memory hybrid search request")
 	}
 	r.PrincipalID, r.ProjectID, r.Query, r.Embedding, r.Limit = lexical.PrincipalID, lexical.ProjectID, lexical.Query, semantic.Embedding, lexical.Limit

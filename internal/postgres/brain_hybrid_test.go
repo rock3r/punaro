@@ -94,11 +94,12 @@ func TestMemoryHybridSearchTimeoutCoversBothStatements(t *testing.T) {
 
 func TestMemoryHybridSearchRequestValidation(t *testing.T) {
 	valid := MemoryHybridSearchRequest{
-		PrincipalID: "11111111-1111-4111-8111-111111111111",
-		ProjectID:   "22222222-2222-4222-8222-222222222222",
-		Query:       "release decision",
-		Embedding:   []float64{1, 0.5},
-		Limit:       2,
+		PrincipalID:  "11111111-1111-4111-8111-111111111111",
+		ProjectID:    "22222222-2222-4222-8222-222222222222",
+		GenerationID: "33333333-3333-4333-8333-333333333333",
+		Query:        "release decision",
+		Embedding:    []float64{1, 0.5},
+		Limit:        2,
 	}
 	if _, err := valid.normalized(); err != nil {
 		t.Fatalf("valid hybrid request rejected: %v", err)
@@ -106,5 +107,10 @@ func TestMemoryHybridSearchRequestValidation(t *testing.T) {
 	valid.Embedding = []float64{0, 0}
 	if _, err := valid.normalized(); err == nil {
 		t.Fatal("zero hybrid embedding accepted")
+	}
+	valid.Embedding = []float64{1, 0.5}
+	valid.GenerationID = ""
+	if _, err := valid.normalized(); err == nil {
+		t.Fatal("unfenced hybrid request accepted")
 	}
 }

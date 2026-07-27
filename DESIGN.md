@@ -457,6 +457,12 @@ coordinates/ranks, not summaries or a client surface. With no active generation
 it reports semantic `not_configured`, so callers keep lexical retrieval
 available.
 
+Before any provider may derive a query embedding, the server authorizes the
+caller for `memory.search` and returns only the active generation's non-secret
+identity. The provider result must carry that exact generation ID into hybrid
+retrieval; if activation changed it meanwhile, retrieval rejects it rather than
+comparing a vector against a different model's chunks.
+
 The bounded embedding executor is provider-agnostic. It claims only existing
 fenced work, re-reads the exact live generation/item/revision/hash/lease before
 passing a bounded canonical JSON document to an injected provider, validates
