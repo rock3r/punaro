@@ -107,14 +107,15 @@ func (d *Database) SearchMemorySemanticCandidates(ctx context.Context, raw Memor
 }
 
 func searchMemorySemanticCandidatesInTx(ctx context.Context, tx *sql.Tx, projectID string, embedding []float64, limit int, expectedGenerationID string) (MemorySemanticSearchPage, error) {
+	var activeGenerationID string
 	var dimensions int
-	if err := tx.QueryRowContext(ctx, `SELECT dimensions FROM brain.embedding_generations WHERE state='active' AND ($1='' OR id::text=$1)`, expectedGenerationID).Scan(&dimensions); errors.Is(err, sql.ErrNoRows) {
-		if expectedGenerationID != "" {
-			return MemorySemanticSearchPage{}, ErrMemorySemanticGenerationChanged
-		}
+	if err := tx.QueryRowContext(ctx, `SELECT id::text,dimensions FROM brain.embedding_generations WHERE state='active'`).Scan(&activeGenerationID, &dimensions); errors.Is(err, sql.ErrNoRows) {
 		return MemorySemanticSearchPage{}, ErrMemorySemanticNotConfigured
 	} else if err != nil || dimensions < 1 || dimensions > maxMemoryEmbeddingDimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic generation is unavailable")
+	}
+	if expectedGenerationID != "" && activeGenerationID != expectedGenerationID {
+		return MemorySemanticSearchPage{}, ErrMemorySemanticGenerationChanged
 	}
 	if len(embedding) != dimensions {
 		return MemorySemanticSearchPage{}, errors.New("memory semantic embedding dimensions do not match the active generation")
