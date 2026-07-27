@@ -30,10 +30,15 @@ func EvaluateMemoryHybridRanking(cases []MemoryHybridRankingEvaluationCase) (Mem
 		return MemoryHybridRankingEvaluation{}, errors.New("memory hybrid ranking evaluation is empty")
 	}
 	var evaluation MemoryHybridRankingEvaluation
+	seenCases := make(map[string]struct{}, len(cases))
 	for _, fixture := range cases {
 		if !validOpaqueID(fixture.ID) || len(fixture.Relevance) < 1 {
 			return MemoryHybridRankingEvaluation{}, errors.New("invalid memory hybrid ranking evaluation")
 		}
+		if _, duplicate := seenCases[fixture.ID]; duplicate {
+			return MemoryHybridRankingEvaluation{}, errors.New("invalid memory hybrid ranking evaluation")
+		}
+		seenCases[fixture.ID] = struct{}{}
 		ideal := make([]int, 0, len(fixture.Relevance))
 		for itemID, grade := range fixture.Relevance {
 			if !validOpaqueID(itemID) || grade < 1 || grade > 3 {

@@ -42,3 +42,10 @@ func TestEvaluateMemoryHybridRankingUsesResultCutoffForNDCG(t *testing.T) {
 		t.Fatalf("evaluation=%#v err=%v", evaluation, err)
 	}
 }
+
+func TestEvaluateMemoryHybridRankingRejectsDuplicateCaseIDs(t *testing.T) {
+	fixture := MemoryHybridRankingEvaluationCase{ID: "99999999-9999-4999-8999-999999999999", Relevance: map[string]int{"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa": 1}}
+	if _, err := EvaluateMemoryHybridRanking([]MemoryHybridRankingEvaluationCase{fixture, fixture}); err == nil {
+		t.Fatal("duplicate evaluation case ID accepted")
+	}
+}
