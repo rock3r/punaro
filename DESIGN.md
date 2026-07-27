@@ -416,12 +416,20 @@ installation change-sequence row and records that sequence on one immutable
 `building` generation. The revision enqueue trigger takes the shared form of
 that advisory fence,
 so every subsequent revision is atomically queued for both immutable active
-and building generations. The bounded, resumable scan of canonical revisions
-at or before that watermark remains the following rebuild-worker slice; start
-itself never scans an unbounded corpus. At most one building generation exists;
-the active generation remains the sole serving generation. There is still no
-provider, vector storage, caught-up watermark, activation, semantic ranking,
-or client-facing semantic surface.
+and building generations. Start itself never scans an unbounded corpus.
+
+Schema version 27 adds the owner-only, bounded rebuild scan. The start routine
+also records the installation timeline and creates a private progress row. Each
+batch advances that cursor through at most 128 current canonical revisions on
+the captured timeline at or before the start watermark; historical revisions
+that are no longer current do not create stale jobs. Conflict updates only move
+jobs forward, so a revision dual-enqueued after start cannot be overwritten by
+the historical scan. A v26 building generation lacks the durable timeline
+identity needed for restore-safe scanning and is discarded as derived work
+during upgrade. At most one building generation exists; the active generation
+remains the sole serving generation. There is still no provider, vector
+storage, caught-up watermark, activation, semantic ranking, or client-facing
+semantic surface.
 
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,

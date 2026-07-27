@@ -44,6 +44,8 @@ WITH objects AS (
     SELECT 'brain.embedding_jobs','available_at','timestamp with time zone',true WHERE $1 >= 24
 	UNION ALL
 	SELECT 'brain.embedding_generations','start_change_sequence','bigint',false WHERE $1 >= 26
+	UNION ALL
+	SELECT 'brain.embedding_generations','start_timeline_id','uuid',false WHERE $1 >= 27
 ), actual_columns AS (
     SELECT attribute.attrelid::regclass::text,attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull
     FROM pg_attribute AS attribute,objects
