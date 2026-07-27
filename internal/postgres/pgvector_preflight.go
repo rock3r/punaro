@@ -44,6 +44,8 @@ func pgVectorAvailable(ctx context.Context, dsn string) (bool, error) {
         FROM pg_extension AS ext
         WHERE ext.extname='vector'
           AND pg_get_userbyid(ext.extowner)=current_user
+          AND (ext.extnamespace='public'::regnamespace
+               OR has_schema_privilege(current_user, 'public', 'CREATE'))
           AND (
               ext.extversion=$1
               OR EXISTS (
