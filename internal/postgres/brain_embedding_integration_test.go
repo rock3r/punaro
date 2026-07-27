@@ -422,6 +422,27 @@ func testMemoryEmbeddingGenerationRebuildIntegration(ctx context.Context, t *tes
 		return result
 	}
 	before := create("19191919-1919-4191-8191-191919191941", "before rebuild")
+	var restoredTimeline string
+	if err := ownerDB.QueryRowContext(ctx, `WITH prior AS (
+    SELECT installation_id,timeline_id,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE
+), rotated AS (
+    UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),timeline_started_at=statement_timestamp()
+    WHERE singleton RETURNING installation_id,timeline_id,change_sequence
+), event AS (
+    INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence)
+    SELECT gen_random_uuid(),gen_random_uuid(),prior.installation_id,prior.timeline_id,rotated.timeline_id,prior.change_sequence FROM prior,rotated
+)
+SELECT timeline_id::text FROM rotated`).Scan(&restoredTimeline); err != nil {
+		t.Fatalf("rotate test restore timeline: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `WITH advanced AS (
+    UPDATE jobs.server_state SET change_sequence=change_sequence+1 WHERE singleton RETURNING timeline_id,change_sequence
+)
+INSERT INTO brain.memory_changes(timeline_id,change_sequence,scope_id,item_id,operation,revision)
+SELECT advanced.timeline_id,advanced.change_sequence,item.scope_id,item.id,'update',item.current_revision
+FROM advanced JOIN brain.memory_items AS item ON item.id=$1`, before.ItemID); err != nil {
+		t.Fatalf("add same-revision change: %v", err)
+	}
 	var activeID string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.embedding_generations WHERE state='active'`).Scan(&activeID); err != nil {
 		t.Fatalf("active generation: %v", err)
@@ -436,6 +457,9 @@ func testMemoryEmbeddingGenerationRebuildIntegration(ctx context.Context, t *tes
 	}
 	if buildingSequence != beforeSequence {
 		t.Fatalf("building watermark=%d want start sequence %d", buildingSequence, beforeSequence)
+	}
+	if restoredTimeline == "" {
+		t.Fatal("test restore timeline missing")
 	}
 	var state string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_generations WHERE id=$1`, buildingID).Scan(&state); err != nil || state != "building" {
