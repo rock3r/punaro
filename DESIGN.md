@@ -452,10 +452,14 @@ lexical search. It accepts an already-derived, dimension-matched query vector;
 it never invokes a provider, exposes a route, or changes core readiness. An
 internal hybrid primitive reads both bounded candidate lists under one
 repeatable-read authorization snapshot and deterministically applies
-reciprocal-rank fusion with a fixed offset of 60; it returns only current item
-coordinates/ranks, not summaries or a client surface. With no active generation
-it reports semantic `not_configured`, so callers keep lexical retrieval
-available.
+reciprocal-rank fusion with a fixed offset of 60. Its candidate primitive
+returns only current item coordinates/ranks. The provider-free summary surface
+then projects bounded canonical title/summary metadata for those coordinates
+from the same authorization-filtered repeatable-read snapshot and records
+recall only after that read commits. Both hybrid and lexical-only summary
+surfaces re-check the project `memory.search` boundary; with no active
+generation the lexical surface reports semantic `not_configured` so callers
+keep retrieval available without exposing a provider route.
 
 Before any provider may derive a query embedding, the server authorizes the
 caller for `memory.search` and returns only the active generation's non-secret

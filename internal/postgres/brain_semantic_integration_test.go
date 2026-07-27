@@ -37,6 +37,13 @@ func testMemoryHybridDegradedIntegration(ctx context.Context, t *testing.T, app 
 		surface.Results[0].Match != MemorySearchMatchLexical {
 		t.Fatalf("degraded hybrid surface=%#v err=%v", surface, err)
 	}
+	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "hybrid degradation outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.SearchMemoryHybridLexical(ctx, MemorySearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "hybrid", Limit: 1}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized degraded hybrid surface error=%v", err)
+	}
 	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: actor.ID, ProjectID: projectID, Query: "hybrid", Limit: 1}); !errors.Is(err, ErrMemorySemanticNotConfigured) {
 		t.Fatalf("unconfigured hybrid preparation error=%v", err)
 	}
@@ -128,6 +135,9 @@ VALUES ($1,$2,$3,0,decode('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 	}
 	if _, err := app.SearchMemoryHybridCandidates(ctx, MemoryHybridSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, GenerationID: generation.ID, Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized hybrid candidates error=%v", err)
+	}
+	if _, err := app.SearchMemoryHybrid(ctx, MemoryHybridSearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, GenerationID: generation.ID, Query: "semantic", Embedding: query, Limit: 2}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized hybrid surface error=%v", err)
 	}
 	if _, err := app.PrepareMemoryHybridSearch(ctx, MemorySearchRequest{PrincipalID: outsider.ID, ProjectID: projectID, Query: "semantic", Limit: 2}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unauthorized hybrid preparation error=%v", err)
