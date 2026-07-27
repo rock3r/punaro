@@ -3087,6 +3087,9 @@ func testMemoryLexicalSearchIntegration(ctx context.Context, t *testing.T, app *
 	if app.brainDB == nil || app.brainDB.Stats().MaxOpenConnections != 2 {
 		t.Fatalf("brain search pool is not independently capped: %#v", app.brainDB)
 	}
+	if app.embeddingDB == nil || app.embeddingDB.Stats().MaxOpenConnections != 4 {
+		t.Fatalf("embedding fence pool is not independently capped: %#v", app.embeddingDB)
+	}
 	actor, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "lexical memory actor")
 	if err != nil {
 		t.Fatal(err)

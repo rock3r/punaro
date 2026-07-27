@@ -11,6 +11,10 @@ import (
 // which has expired, been reclaimed, or been superseded by a newer revision.
 var ErrStaleEmbeddingLease = errors.New("embedding lease is stale")
 
+// ErrMemoryEmbeddingQuarantined reports that a live lease cannot safely expose
+// its canonical content while the item is under an active quarantine.
+var ErrMemoryEmbeddingQuarantined = errors.New("memory embedding is quarantined")
+
 // MemoryEmbeddingLease is one exact, content-free worker lease coordinate.
 type MemoryEmbeddingLease struct {
 	MemoryEmbeddingWork
@@ -27,7 +31,8 @@ func (lease MemoryEmbeddingLease) valid() bool {
 }
 
 // MemoryEmbeddingRetry releases a leased coordinate after a bounded delay or
-// records a terminal diagnostic when its final attempt has been consumed.
+// records a terminal diagnostic when its final attempt has been consumed. The
+// quarantined code durably defers work without consuming an attempt.
 type MemoryEmbeddingRetry struct {
 	Lease     MemoryEmbeddingLease
 	ErrorCode string

@@ -453,6 +453,22 @@ it never invokes a provider, exposes a route, changes core readiness, or fuses
 lexical and semantic ranks. With no active generation it reports semantic
 `not_configured`, so callers keep lexical retrieval available.
 
+The bounded embedding executor is provider-agnostic. It claims only existing
+fenced work, re-reads the exact live generation/item/revision/hash/lease before
+passing a bounded canonical JSON document to an injected provider, validates
+all source bounds, offsets, hashes, and generation metadata before the provider
+call, binds the reconstructed source bytes and generation to the claimed lease,
+then validates the returned chunk count and dimensions before using the existing
+fenced publication routine. Active quarantines are excluded both at claim and
+source-read time; a race into quarantine durably returns the exact lease to
+queued state without spending an attempt only when the owner routine confirms
+the active quarantine, so release makes its work claimable again. Stale source
+or publication leases are no-ops; source,
+provider, and publication outages become bounded code-only retries, and a
+failed retry write is surfaced to the executor caller. Provider selection,
+credentials, network configuration, and any public semantic route remain
+separate deployment and API slices.
+
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,
 idempotency result, or derived job can be written. Findings contain only the

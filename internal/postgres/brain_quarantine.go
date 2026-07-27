@@ -219,6 +219,9 @@ exception_generation=EXCLUDED.exception_generation,outcome=EXCLUDED.outcome,scan
 }
 
 func storeActiveMemoryQuarantine(ctx context.Context, tx *sql.Tx, principalID, itemID string, revision int64, finding secretguard.Finding) (bool, error) {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, itemID); err != nil {
+		return false, errors.New("memory quarantine is unavailable")
+	}
 	var activeID, ruleID, fieldPath string
 	var ruleVersion int64
 	var fingerprint []byte
@@ -244,6 +247,9 @@ VALUES ($1,$2,$3,$4,$5,$6,$7)`, itemID, revision, finding.RuleVersion, finding.R
 }
 
 func releaseActiveMemoryQuarantine(ctx context.Context, tx *sql.Tx, principalID, itemID string) (bool, error) {
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 801337))`, itemID); err != nil {
+		return false, errors.New("memory quarantine release is unavailable")
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp()
 WHERE item_id=$1 AND released_at IS NULL`, itemID, principalID)
 	if err != nil {
