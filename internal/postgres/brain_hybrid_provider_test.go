@@ -78,6 +78,19 @@ func TestMemoryHybridRetrievalExecutorCarriesPreparedFenceIntoCandidates(t *test
 	}
 }
 
+func TestMemoryHybridRetrievalExecutorDegradesWithoutConfiguredGeneration(t *testing.T) {
+	store := &fakeMemoryHybridRetrievalStore{fakeMemoryHybridQueryStore: fakeMemoryHybridQueryStore{err: ErrMemorySemanticNotConfigured}, page: MemoryHybridSearchPage{SemanticStatus: MemoryHybridSearchSemanticNotConfigured}}
+	provider := &fakeMemoryHybridQueryProvider{vector: []float64{0.25, 0.75}}
+	executor, err := NewMemoryHybridRetrievalExecutor(store, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := executor.Search(context.Background(), MemorySearchRequest{PrincipalID: "22222222-2222-4222-8222-222222222222", ProjectID: "33333333-3333-4333-8333-333333333333", Query: "release", Limit: 2})
+	if err != nil || page.SemanticStatus != MemoryHybridSearchSemanticNotConfigured || provider.calls != 0 || store.hybridCalls != 1 {
+		t.Fatalf("page=%#v err=%v provider=%d hybrid=%d", page, err, provider.calls, store.hybridCalls)
+	}
+}
+
 type fakeMemoryHybridQueryStore struct {
 	generation   MemoryEmbeddingGeneration
 	err          error
