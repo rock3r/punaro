@@ -185,16 +185,17 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 		defer release()
 	}
 	if loadErr != nil {
-		if errors.Is(loadErr, ErrMemoryEmbeddingQuarantined) {
+		switch {
+		case errors.Is(loadErr, ErrMemoryEmbeddingQuarantined):
 			if err := e.retry(ctx, lease, "quarantined", result); err != nil {
 				return err
 			}
-		} else if !time.Now().Before(leaseDeadline) {
+		case !time.Now().Before(leaseDeadline):
 			// A held advisory fence can outlive this lease while a quarantine
 			// writer is still uncommitted. Leave the running lease for safe
 			// expiry/reclamation rather than terminally retrying it blind.
 			return nil
-		} else if !errors.Is(loadErr, ErrStaleEmbeddingLease) {
+		case !errors.Is(loadErr, ErrStaleEmbeddingLease):
 			if err := e.retry(ctx, lease, "source_unavailable", result); err != nil {
 				return err
 			}
