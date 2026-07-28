@@ -22,6 +22,7 @@ import (
 	"github.com/rock3r/punaro/internal/access"
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/devicehttp"
+	"github.com/rock3r/punaro/internal/embeddingprovider"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/memoryhttp"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -128,6 +129,8 @@ var openPlatformDatabase = func(ctx context.Context, cfg punaropostgres.Config) 
 }
 
 var listenTCP = net.Listen
+
+var readEmbeddingAPIKey = embeddingprovider.ReadAPIKeyFile
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
@@ -291,6 +294,9 @@ func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, tr
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {
+	if err := validateEmbeddingProvider(cfg); err != nil {
+		return nil, err
+	}
 	if !cfg.MemoryAPIEnabled {
 		return nil, nil
 	}
@@ -308,6 +314,20 @@ func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Ha
 		return nil, errors.New("memory credential transport policy is invalid")
 	}
 	return memoryhttp.New(database, policy, cfg.MemoryMutationsEnabled), nil
+}
+
+func validateEmbeddingProvider(cfg config.Config) error {
+	if cfg.MemoryOpenAIEmbeddingsURL == "" {
+		return nil
+	}
+	key, err := readEmbeddingAPIKey(cfg.MemoryOpenAIAPIKeyFile)
+	if err != nil {
+		return errors.New("memory embedding provider credential is unavailable")
+	}
+	if _, err := embeddingprovider.NewOpenAICompatible(cfg.MemoryOpenAIEmbeddingsURL, key, &http.Client{}); err != nil {
+		return errors.New("memory embedding provider is unavailable")
+	}
+	return nil
 }
 
 func buildTrustedAttachmentHandler(cfg config.Config, platformDB platformDatabase) (*trustedAttachmentRuntime, error) {
