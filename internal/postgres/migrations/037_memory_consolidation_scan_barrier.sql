@@ -1,5 +1,5 @@
 CREATE OR REPLACE FUNCTION brain.read_memory_consolidation_documents(requested_scope uuid, requested_token uuid, requested_generation bigint)
-RETURNS TABLE(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,document jsonb,is_fence boolean)
+RETURNS TABLE(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,document jsonb,content_sha256 bytea,is_fence boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
 DECLARE
@@ -60,17 +60,8 @@ BEGIN
     ) THEN
         RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='consolidation source scan coverage is stale';
     END IF;
-    IF EXISTS (
-        SELECT 1
-        FROM jsonb_to_recordset(source_page) AS source(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,is_fence boolean)
-        LEFT JOIN brain.memory_revisions AS revision ON revision.item_id=source.item_id AND revision.revision=source.revision
-        WHERE source.item_id IS NOT NULL
-          AND (revision.document IS NULL OR revision.content_sha256 IS DISTINCT FROM public.digest(revision.document::text,'sha256'))
-    ) THEN
-        RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='consolidation source content hash is invalid';
-    END IF;
     RETURN QUERY
-    SELECT source.timeline_id,source.item_id,source.revision,source.change_sequence,revision.document,source.is_fence
+    SELECT source.timeline_id,source.item_id,source.revision,source.change_sequence,revision.document,revision.content_sha256,source.is_fence
     FROM jsonb_to_recordset(source_page) AS source(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,is_fence boolean)
     LEFT JOIN brain.memory_revisions AS revision ON revision.item_id=source.item_id AND revision.revision=source.revision
     ORDER BY source.change_sequence,source.item_id;

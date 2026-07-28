@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -77,7 +78,12 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if _, err := app.ReadMemoryConsolidationInput(ctx, first); err == nil {
 		t.Fatal("corrupt consolidation source hash allowed consolidation input")
 	}
-	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=public.digest(document::text,'sha256') WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision); err != nil {
+	var storedSecondDocument string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT document::text FROM brain.memory_revisions WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision).Scan(&storedSecondDocument); err != nil {
+		t.Fatal(err)
+	}
+	secondHash := sha256.Sum256([]byte(storedSecondDocument))
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=$3 WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision, secondHash[:]); err != nil {
 		t.Fatal(err)
 	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		t.Fatalf("restore consolidation source hash changed=%d err=%v", changed, err)

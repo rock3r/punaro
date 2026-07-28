@@ -59,9 +59,9 @@ WITH objects AS (
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$3)
         OR (routine.oid=documents_oid AND routine.proretset AND routine.prorettype='record'::regtype
             AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector
-            AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'jsonb'::regtype,'boolean'::regtype]::oid[]
-            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t']::"char"[]
-            AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','document','is_fence']::text[]
+            AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'jsonb'::regtype,'bytea'::regtype,'boolean'::regtype]::oid[]
+            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t','t']::"char"[]
+            AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','document','content_sha256','is_fence']::text[]
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$4))) AS exact
     FROM pg_proc AS routine,objects
     WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid,documents_oid])
@@ -114,7 +114,7 @@ const (
 	memoryConsolidationClaimRoutineMD5        = "121df7d09493be8662f4618208aaf342"
 	memoryConsolidationAdvanceRoutineMD5      = "5666d576e054c6b06999a0b6ce7b6c62"
 	memoryConsolidationSourcesRoutineMD5      = "2b180c012d8c1ae7332b81456845a8bf"
-	memoryConsolidationDocumentsRoutineMD5    = "9c73323daea6c4a1c9cbf8daaa79516a"
+	memoryConsolidationDocumentsRoutineMD5    = "0b284fa1e93f9b8cd62604d4e2a3821c"
 	memoryConsolidationV35DocumentsRoutineMD5 = "578fc76b7dd1ed66ccdd7895cd50e07c"
 	memoryConsolidationV36DocumentsRoutineMD5 = "8eac22d68c0b50c43de1f8892c925c55"
 	memoryConsolidationV33ClaimRoutineMD5     = "32e95c7fb6a9e73522c73b825bc3dcea"
