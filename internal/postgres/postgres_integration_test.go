@@ -65,6 +65,18 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	testV26EmbeddingRebuildUpgradeIntegration(ctx, t, pairOwnerDSN)
+	pairDB, err = open(ctx, pairOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+		_ = pairDB.Close()
+		t.Fatalf("auxiliary pair cleanup after v26 upgrade test failed: %v", err)
+	}
+	if err := pairDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	testV33ConsolidationSourcesUpgradeIntegration(ctx, t, pairOwnerDSN)
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -806,6 +818,65 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 	var activeJobState string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs`).Scan(&activeJobState); err != nil || activeJobState != "queued" {
 		t.Fatalf("coordinate-only bridge job state=%q err=%v, want requeued", activeJobState, err)
+	}
+}
+
+func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testing.T, ownerDSN string) {
+	t.Helper()
+	ownerDB, err := open(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerDB.Close() }()
+	current := CurrentManifest()
+	v33 := Manifest{MinSupported: 10, MaxSupported: 33, Migrations: append([]Migration(nil), current.Migrations[:33]...)}
+	if state, err := migrate(ctx, ownerDB, v33); err != nil || state.Classification != Compatible || state.Version != 33 {
+		t.Fatalf("v33 bridge setup state=%#v err=%v", state, err)
+	}
+	if controls, err := updateControlsAvailable(ctx, ownerDB); err != nil || !controls {
+		t.Fatalf("v33 update controls before v34 migration controls=%t err=%v", controls, err)
+	}
+	var actorID, projectID, installationID, rootTimeline, restoredTimeline, scopeID string
+	var rootSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals(kind,display_name) VALUES ('device','v33 restore checkpoint actor') RETURNING id::text`).Scan(&actorID); err != nil {
+		t.Fatalf("seed v33 restore actor: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('v33 restore checkpoint project',$1) RETURNING id::text`, actorID).Scan(&projectID); err != nil {
+		t.Fatalf("seed v33 restore project: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actorID).Scan(&scopeID); err != nil {
+		t.Fatalf("seed v33 restore scope: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE`).Scan(&installationID, &rootTimeline, &rootSequence); err != nil {
+		t.Fatalf("seed v33 restore state: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),change_sequence=7,timeline_started_at=statement_timestamp() WHERE singleton RETURNING timeline_id::text`).Scan(&restoredTimeline); err != nil {
+		t.Fatalf("seed v33 restored timeline: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence) VALUES (gen_random_uuid(),gen_random_uuid(),$1,$2,$3,$4)`, installationID, rootTimeline, restoredTimeline, rootSequence); err != nil {
+		t.Fatalf("seed v33 restore event: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id,change_sequence) VALUES ($1,$2,7)`, scopeID, restoredTimeline); err != nil {
+		t.Fatalf("seed v33 restored checkpoint: %v", err)
+	}
+	conn := mustConn(ctx, t, ownerDB)
+	defer func() { _ = conn.Close() }()
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := inspect(ctx, conn); err != nil || snapshot.CurrentObjectsPresent || Classify(snapshot, v33).Classification != Incompatible {
+		t.Fatalf("v33 consolidation drift snapshot=%#v state=%#v err=%v", snapshot, Classify(snapshot, v33), err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON brain.memory_consolidation_checkpoints FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
+		t.Fatalf("v33-to-current bridge state=%#v err=%v", state, err)
+	}
+	var checkpointTimeline string
+	var checkpointSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT timeline_id::text,change_sequence FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, scopeID).Scan(&checkpointTimeline, &checkpointSequence); err != nil || checkpointTimeline != rootTimeline || checkpointTimeline == restoredTimeline || checkpointSequence != 0 {
+		t.Fatalf("v33 restored checkpoint rebase timeline=%q sequence=%d root=%q restored=%q err=%v", checkpointTimeline, checkpointSequence, rootTimeline, restoredTimeline, err)
 	}
 }
 
@@ -2119,6 +2190,19 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	if _, err := app.AdvanceChange(ctx); err != nil {
 		t.Fatalf("mutation remained fenced after commit: %v", err)
 	}
+	var recoveryScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `WITH actor AS (
+    SELECT id FROM auth.principals ORDER BY id LIMIT 1
+), project AS (
+    INSERT INTO relay.projects(display_name,created_by) SELECT 'update recovery consolidation lease',id FROM actor RETURNING id,created_by
+)
+INSERT INTO brain.scopes(project_id,created_by) SELECT id,created_by FROM project RETURNING id::text`).Scan(&recoveryScopeID); err != nil {
+		t.Fatalf("recovery consolidation scope: %v", err)
+	}
+	recoveryLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, recoveryScopeID, "018f47f4-7b18-7cc2-98d6-31d4fb5ab745", memoryEmbeddingMaxLease)
+	if err != nil || !claimed {
+		t.Fatalf("live consolidation lease for update recovery lease=%#v claimed=%t err=%v", recoveryLease, claimed, err)
+	}
 
 	// A pre-update dump contains the durable row at writers_stopped, before the
 	// external verified-backup marker can be recorded. This is the exact shape
@@ -2158,6 +2242,14 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	restored, transaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
 	if err != nil || transaction.Phase != UpdateRecoveryRequired || restored.InstallationID != beforeRestore.InstallationID || restored.TimelineID == beforeRestore.TimelineID || restored.ChangeSequence != beforeRestore.ChangeSequence || transaction.BackupID != recoveryMarker.BackupID || transaction.BackupTimelineID != beforeRestore.TimelineID {
 		t.Fatalf("restored update state=%#v transaction=%#v err=%v", restored, transaction, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, recoveryLease); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("update-recovery consolidation lease remained live: %v", err)
+	}
+	var invalidatedToken sql.NullString
+	var invalidatedGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT lease_token::text,lease_generation FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, recoveryLease.ScopeID).Scan(&invalidatedToken, &invalidatedGeneration); err != nil || invalidatedToken.Valid || invalidatedGeneration <= recoveryLease.Generation {
+		t.Fatalf("update-recovery consolidation lease token=%#v generation=%d previous=%d err=%v", invalidatedToken, invalidatedGeneration, recoveryLease.Generation, err)
 	}
 	retriedState, retriedTransaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
 	if err != nil || retriedState != restored || retriedTransaction != transaction {
@@ -2427,6 +2519,14 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if err != nil {
 		t.Fatal(err)
 	}
+	var restoreScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes ORDER BY id LIMIT 1`).Scan(&restoreScopeID); err != nil {
+		t.Fatalf("consolidation scope for restore fence: %v", err)
+	}
+	recoveredLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, restoreScopeID, "018f47f4-7b18-7cc2-98d6-31d4fb5ab744", memoryEmbeddingMaxLease)
+	if err != nil || !claimed {
+		t.Fatalf("live consolidation lease for restore fence lease=%#v claimed=%t err=%v", recoveredLease, claimed, err)
+	}
 	admin, err := OpenAdministration(ctx, Config{DSNFile: ownerFile})
 	if err != nil {
 		t.Fatal(err)
@@ -2437,6 +2537,14 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	}
 	if err != nil || rotated.InstallationID != before.InstallationID || rotated.TimelineID == before.TimelineID || rotated.ChangeSequence != before.ChangeSequence {
 		t.Fatalf("timeline rotation before=%#v after=%#v err=%v", before, rotated, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, recoveredLease); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("restored consolidation lease remained live: %v", err)
+	}
+	var invalidatedToken sql.NullString
+	var invalidatedGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT lease_token::text,lease_generation FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, recoveredLease.ScopeID).Scan(&invalidatedToken, &invalidatedGeneration); err != nil || invalidatedToken.Valid || invalidatedGeneration <= recoveredLease.Generation {
+		t.Fatalf("restored consolidation lease token=%#v generation=%d previous=%d err=%v", invalidatedToken, invalidatedGeneration, recoveredLease.Generation, err)
 	}
 	admin, err = OpenAdministration(ctx, Config{DSNFile: ownerFile})
 	if err != nil {

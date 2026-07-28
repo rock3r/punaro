@@ -230,14 +230,15 @@ WITH objects AS (
 		   to_regprocedure('jobs.begin_update(uuid,text,text,text,text,bigint,bigint,bigint,bigint,bigint,integer,text,text,text)') AS begin_oid,
 		   to_regprocedure('jobs.advance_update(uuid,text,text,uuid,uuid,uuid,bigint,bigint,text,text,text,text)') AS advance_oid,
 			   to_regprocedure('jobs.restore_update_recovery(uuid,uuid,uuid,uuid,bigint,bigint,text,text,text,text)') AS restore_oid,
-	           to_regprocedure('jobs.maintenance_active()') AS active_oid
+	           to_regprocedure('jobs.maintenance_active()') AS active_oid,
+	           COALESCE((SELECT max(version) FROM jobs.schema_migrations WHERE status='applied'),0) AS schema_version
 	), expected_routines(oid, body_hash, language_name, volatility, result_type) AS (
 	    SELECT expected.* FROM objects, LATERAL (VALUES
 	        (assert_oid, 'fc7543952561f0d5bc5113fcdaf813f9', 'plpgsql', 'v'::"char", 'void'),
 			(guard_oid, 'fcc654b13cfd4866c5b1a0197a7271cf', 'plpgsql', 'v'::"char", 'trigger'),
 			(begin_oid, 'c92d3f718820c5dbedafd741d922c6c0', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
 			(advance_oid, 'c32ff93b1819d456830727dcc5193a57', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
-			(restore_oid, 'e472e244c2979791f0b7fbfafd4f9b69', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
+			(restore_oid, CASE WHEN schema_version >= 34 THEN '9de5aca7d709d91c28ae0f93c52ac3c6' ELSE 'e472e244c2979791f0b7fbfafd4f9b69' END, 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
 	        (active_oid, 'f653ca3bdcc9dd7109d848c20264b546', 'sql', 's'::"char", 'boolean')
 	    ) AS expected(oid, body_hash, language_name, volatility, result_type)
 	), expected_tables(oid) AS (

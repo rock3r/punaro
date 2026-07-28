@@ -66,6 +66,7 @@ var migrationCompatibilityFloors = map[int64]int64{
 	31: 10,
 	32: 10,
 	33: 10,
+	34: 10,
 }
 
 // CurrentManifest returns the immutable migrations embedded in this binary.

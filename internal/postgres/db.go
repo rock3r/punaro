@@ -909,7 +909,7 @@ WITH objects AS (
 		(cancel_oid, 'bfbe9c5f6f92a230acd0ff519167b60a', 'sql', 'v'::"char", true, 'boolean'),
 		(release_oid, 'bcbf6a051343bc3a368c986ae799a1ef', 'sql', 'v'::"char", true, 'boolean'),
 		(gc_oid, '73e11885930565575ee1c496b16749d7', 'sql', 's'::"char", true, 'boolean'),
-		(rotate_oid, 'bacc5a1a2184a80240f570b8624535ea', 'plpgsql', 'v'::"char", false, 'TABLE(installation_id uuid, timeline_id uuid, change_sequence bigint)')
+		(rotate_oid, CASE WHEN $1 < 34 THEN 'bacc5a1a2184a80240f570b8624535ea' ELSE '050e1ebae148fe9d31f6e4ad03d66e33' END, 'plpgsql', 'v'::"char", false, 'TABLE(installation_id uuid, timeline_id uuid, change_sequence bigint)')
 	) AS expected(oid, body_hash, language_name, volatility, security_definer, result_type)
 ), routine_safety AS (
 	SELECT count(*) = 7
@@ -1208,7 +1208,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = embeddingQuarantineReleaseObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 33 {
-		consolidationObjectsPresent, err := memoryConsolidationControlsAvailable(ctx, q)
+		consolidationObjectsPresent, err := memoryConsolidationControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL memory consolidation checkpoint schema cannot be inspected")
 		}
