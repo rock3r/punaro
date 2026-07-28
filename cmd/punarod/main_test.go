@@ -133,6 +133,15 @@ func (*unavailableMemoryDatabase) ApproveMemoryProposal(context.Context, punarop
 func (*unavailableMemoryDatabase) RejectMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error) {
 	return punaropostgres.MemoryProposalResult{}, errors.New("unused")
 }
+func (*unavailableMemoryDatabase) PrepareMemoryHybridSearch(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryEmbeddingGeneration, error) {
+	return punaropostgres.MemoryEmbeddingGeneration{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) SearchMemoryHybridLexical(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error) {
+	return punaropostgres.MemoryHybridSearchSurfacePage{}, errors.New("unused")
+}
+func (*unavailableMemoryDatabase) SearchMemoryHybrid(context.Context, punaropostgres.MemoryHybridSearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error) {
+	return punaropostgres.MemoryHybridSearchSurfacePage{}, errors.New("unused")
+}
 
 func TestBuildMemoryHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
 	database := &unavailableMemoryDatabase{readyErr: errors.New("schema 14 is unavailable")}
