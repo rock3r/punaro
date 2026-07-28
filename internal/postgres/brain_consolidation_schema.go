@@ -94,7 +94,7 @@ FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advan
 const (
 	memoryConsolidationClaimRoutineMD5      = "121df7d09493be8662f4618208aaf342"
 	memoryConsolidationAdvanceRoutineMD5    = "4a48013e770fe66019c00360ff79363d"
-	memoryConsolidationSourcesRoutineMD5    = "35141620c23a787abd857f1007c86132"
+	memoryConsolidationSourcesRoutineMD5    = "d7a2aa61cae9c52d04f5d18270cbcb86"
 	memoryConsolidationV33ClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
 	memoryConsolidationV33AdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
 )

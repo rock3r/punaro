@@ -20,7 +20,7 @@ BEGIN
     )
     SELECT fence.timeline_id,NULL::uuid,NULL::bigint,fence.change_sequence,true FROM fence
     UNION ALL
-    SELECT fence.timeline_id,CASE WHEN NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=change.item_id AND (quarantine.released_at IS NULL OR change.revision<=quarantine.detected_revision)) THEN change.item_id END,CASE WHEN NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=change.item_id AND (quarantine.released_at IS NULL OR change.revision<=quarantine.detected_revision)) THEN change.revision END,change.change_sequence,false
+    SELECT fence.timeline_id,CASE WHEN change.operation<>'delete' AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=change.item_id AND (quarantine.released_at IS NULL OR change.revision<=quarantine.detected_revision)) THEN change.item_id END,CASE WHEN change.operation<>'delete' AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=change.item_id AND (quarantine.released_at IS NULL OR change.revision<=quarantine.detected_revision)) THEN change.revision END,change.change_sequence,false
     FROM fence JOIN brain.memory_changes AS change ON change.scope_id=fence.scope_id AND change.timeline_id=fence.timeline_id
     WHERE change.change_sequence>fence.change_sequence
     UNION ALL
