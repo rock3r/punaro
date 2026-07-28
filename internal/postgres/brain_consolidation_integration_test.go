@@ -71,19 +71,23 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, quarantined.ItemID, quarantined.Revision, actor.ID); err != nil {
 		t.Fatal(err)
 	}
-	input, err = app.ReadMemoryConsolidationInput(ctx, second)
-	if err != nil || len(input.Sources) != 0 || input.NextSequence != quarantined.ChangeSequence {
-		t.Fatalf("quarantined consolidation input=%#v quarantined=%#v err=%v", input, quarantined, err)
-	}
-	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, input.NextSequence); err != nil {
-		t.Fatalf("advance quarantined consolidation checkpoint: %v", err)
-	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, quarantined.ItemID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
+	clean, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: quarantined.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111115", ExpectedETag: quarantined.ETag, LogicalKey: "consolidation.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"clean"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, second)
+	if err != nil || len(input.Sources) != 1 || input.NextSequence != clean.ChangeSequence || input.Sources[0].ItemID != clean.ItemID || input.Sources[0].Revision != clean.Revision {
+		t.Fatalf("released-quarantine consolidation input=%#v quarantined=%#v clean=%#v err=%v", input, quarantined, clean, err)
+	}
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, input.NextSequence); err != nil {
+		t.Fatalf("advance released-quarantine consolidation checkpoint: %v", err)
+	}
 	third, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "33333333-3333-4333-8333-333333333333", memoryEmbeddingMinLease)
-	if err != nil || !claimed || third.Sequence != quarantined.ChangeSequence || third.Generation <= second.Generation {
-		t.Fatalf("released-quarantine consolidation reclaim=%#v quarantined=%#v second=%#v claimed=%t err=%v", third, quarantined, second, claimed, err)
+	if err != nil || !claimed || third.Sequence != clean.ChangeSequence || third.Generation <= second.Generation {
+		t.Fatalf("released-quarantine consolidation reclaim=%#v clean=%#v second=%#v claimed=%t err=%v", third, clean, second, claimed, err)
 	}
 	input, err = app.ReadMemoryConsolidationInput(ctx, third)
 	if err != nil || len(input.Sources) != 0 || input.NextSequence != third.Sequence {
