@@ -30,7 +30,7 @@ WITH objects AS (
       AND ((routine.oid=claim_oid AND routine.proretset AND routine.prorettype='record'::regtype
             AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector
             AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'timestamp with time zone'::regtype]::oid[]
-            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t']::"char"[]
+            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t','t']::"char"[]
             AND routine.proargnames=ARRAY['requested_scope','requested_holder','requested_lease_micros','scope_id','timeline_id','change_sequence','lease_holder','lease_token','lease_generation','lease_until']::text[]
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$1)
         OR (routine.oid=advance_oid AND NOT routine.proretset AND routine.prorettype='boolean'::regtype
