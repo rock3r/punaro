@@ -457,8 +457,10 @@ ORDER BY source.ordinal FOR SHARE OF item,scan`, proposalID, projectID)
 }
 
 func consolidationProposalSourcesAvailable(ctx context.Context, tx *sql.Tx) (available, required bool, err error) {
-	err = tx.QueryRowContext(ctx, `SELECT to_regclass('brain.memory_consolidation_proposal_sources') IS NOT NULL,
-EXISTS (SELECT 1 FROM jobs.schema_migrations WHERE version>=38 AND status='applied')`).Scan(&available, &required)
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM jobs.schema_migrations WHERE version>=38 AND status='applied')`).Scan(&required); err != nil || !required {
+		return false, required, err
+	}
+	available, err = memoryConsolidationProposalSourcesAvailable(ctx, tx)
 	return available, required, err
 }
 
