@@ -43,10 +43,12 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
 BEGIN
     PERFORM jobs.assert_application_mutation();
-    UPDATE brain.memory_consolidation_checkpoints
+    UPDATE brain.memory_consolidation_checkpoints AS checkpoint
     SET timeline_id=requested_timeline,change_sequence=requested_sequence,lease_holder=NULL,lease_token=NULL,lease_until=NULL,updated_at=statement_timestamp()
-    WHERE scope_id=requested_scope AND lease_token=requested_token AND lease_generation=requested_generation
-      AND lease_until > statement_timestamp() AND requested_sequence >= change_sequence;
+    FROM jobs.server_state AS state
+    WHERE state.singleton AND checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token AND checkpoint.lease_generation=requested_generation
+      AND checkpoint.lease_until > statement_timestamp() AND requested_timeline=state.timeline_id
+      AND requested_sequence >= checkpoint.change_sequence AND requested_sequence <= state.change_sequence;
     RETURN FOUND;
 END
 $function$;
