@@ -563,10 +563,15 @@ Each scope has one durable consolidation checkpoint. A worker claims it only
 when unleased or expired and receives an opaque token plus monotonically
 increasing generation, timeline, and sequence. Advancement must present that
 exact live fence and may only move to the current server timeline and no later
-than its current change sequence; it atomically releases the lease. A crashed
-worker is reclaimed after expiry, and a stale worker cannot advance or release
-the checkpoint. Reprocessing after a crash or restore is allowed, but proposal
-creation remains idempotent and approval remains separately fenced.
+than its current change sequence; it atomically releases the lease. After a
+restore, an ancestral checkpoint instead drains each recorded restore edge up
+to that edge's watermark, then the next claim rebases it onto the immediate
+restored timeline at sequence zero. This repeats through the retained restore
+lineage before ordinary current-timeline advancement resumes, so no pending
+pre-restore changes are skipped. A crashed worker is reclaimed after expiry,
+and a stale worker cannot advance or release the checkpoint. Reprocessing
+after a crash or restore is allowed, but proposal creation remains idempotent
+and approval remains separately fenced.
 
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
