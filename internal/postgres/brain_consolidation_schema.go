@@ -177,7 +177,7 @@ FROM relation,application_privileges,public_acl_safety,trigger_safety,constraint
 }
 
 const (
-	memoryConsolidationProposalSourceGuardRoutineMD5 = "df081efa031414be22850049f25430b5"
+	memoryConsolidationProposalSourceGuardRoutineMD5 = "aaa45e19ae18202e97772cb7096ad117"
 	memoryConsolidationClaimRoutineMD5               = "121df7d09493be8662f4618208aaf342"
 	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
 	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
