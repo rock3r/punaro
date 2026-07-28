@@ -559,6 +559,15 @@ evidence revisions to each proposal, and run for at most 30 seconds. It has no
 direct canonical-mutation path; every output remains subject to the existing
 secret guard, proposal CAS, and explicit approval flow.
 
+Each scope has one durable consolidation checkpoint. A worker claims it only
+when unleased or expired and receives an opaque token plus monotonically
+increasing generation, timeline, and sequence. Advancement must present that
+exact live fence and may only move to the current server timeline and no later
+than its current change sequence; it atomically releases the lease. A crashed
+worker is reclaimed after expiry, and a stale worker cannot advance or release
+the checkpoint. Reprocessing after a crash or restore is allowed, but proposal
+creation remains idempotent and approval remains separately fenced.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes
