@@ -112,7 +112,7 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("stale consolidation advance error=%v", err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_holder=NULL,lease_token=NULL,lease_until=NULL WHERE scope_id=$1`, scopeID); err != nil {
 		t.Fatal(err)
 	}
 	fourth, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "44444444-4444-4444-8444-444444444444", memoryEmbeddingMinLease)
@@ -161,7 +161,7 @@ func testMemoryConsolidationRestoreLineageIntegration(ctx context.Context, t *te
 	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != rootSource.ItemID || input.NextSequence != rootSource.ChangeSequence {
 		t.Fatalf("root consolidation input=%#v source=%#v err=%v", input, rootSource, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_holder=NULL,lease_token=NULL,lease_until=NULL WHERE scope_id=$1`, scopeID); err != nil {
 		t.Fatal(err)
 	}
 	_, firstRestoredTimeline, firstRestoreSequence := rotateConsolidationTestTimeline(ctx, t, ownerDB)
@@ -188,7 +188,7 @@ func testMemoryConsolidationRestoreLineageIntegration(ctx context.Context, t *te
 	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != middleSource.ItemID || input.NextSequence != middleSource.ChangeSequence {
 		t.Fatalf("first restored consolidation input=%#v source=%#v err=%v", input, middleSource, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_holder=NULL,lease_token=NULL,lease_until=NULL WHERE scope_id=$1`, scopeID); err != nil {
 		t.Fatal(err)
 	}
 	_, secondRestoredTimeline, secondRestoreSequence := rotateConsolidationTestTimeline(ctx, t, ownerDB)
