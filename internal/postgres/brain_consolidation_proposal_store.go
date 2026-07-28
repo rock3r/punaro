@@ -150,9 +150,12 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 // the retrieval path's quarantine and scan-coverage fences at staging time.
 func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput) error {
 	rows, err := tx.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,content_sha256,is_fence
-FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, input.Lease.Token, input.Lease.Generation)
+	FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, input.Lease.Token, input.Lease.Generation)
 	if err != nil {
-		return ErrStaleMemoryConsolidationLease
+		if isSQLState(err, "55000") {
+			return ErrStaleMemoryConsolidationLease
+		}
+		return errors.New("consolidation proposal sources are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
 	index, next := 0, input.Lease.Sequence
@@ -186,7 +189,13 @@ FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, 
 		}
 		index++
 	}
-	if rows.Err() != nil || index != len(input.Sources) || next != input.NextSequence {
+	if err := rows.Err(); err != nil {
+		if isSQLState(err, "55000") {
+			return ErrStaleMemoryConsolidationLease
+		}
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if index != len(input.Sources) || next != input.NextSequence {
 		return ErrStaleMemoryConsolidationLease
 	}
 	return nil

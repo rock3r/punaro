@@ -657,8 +657,11 @@ WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$
 	if err := evidenceRows.Close(); err != nil {
 		return MemoryProposal{}, errors.New("memory proposal evidence cannot close")
 	}
-	available, _, err := consolidationProposalSourcesAvailable(ctx, tx)
+	available, required, err := consolidationProposalSourcesAvailable(ctx, tx)
 	if err != nil {
+		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+	}
+	if required && !available {
 		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
 	}
 	if available {
