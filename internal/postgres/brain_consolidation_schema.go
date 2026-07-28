@@ -69,6 +69,6 @@ FROM objects,routine_safety,constraint_safety`, memoryConsolidationClaimRoutineM
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationClaimRoutineMD5   = "a3493372823aa9d23b9b38e7d599fba3"
 	memoryConsolidationAdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
 )
