@@ -55,6 +55,12 @@ WITH objects AS (
     FROM pg_proc AS routine CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) AS entry
     LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects
     WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid])
+), table_acl_safety AS (
+    SELECT NOT EXISTS (
+        SELECT 1
+        FROM pg_class AS relation CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS entry,objects
+        WHERE relation.oid=table_oid AND entry.grantee<>relation.relowner
+    ) AS exact
 )
 SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NULL
    AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=table_oid)
@@ -64,9 +70,10 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND constraint_safety.exact
    AND NOT EXISTS (SELECT * FROM expected_acl EXCEPT SELECT * FROM actual_acl)
    AND NOT EXISTS (SELECT * FROM actual_acl EXCEPT SELECT * FROM expected_acl)
+   AND table_acl_safety.exact
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
-FROM objects,routine_safety,constraint_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5).Scan(&available)
+FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5).Scan(&available)
 	return available, err
 }
 
