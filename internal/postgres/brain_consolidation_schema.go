@@ -7,8 +7,12 @@ import "context"
 func memoryConsolidationControlsAvailable(ctx context.Context, q queryer, version int64) (bool, error) {
 	var available bool
 	claimMD5, advanceMD5 := memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5
+	documentsMD5 := memoryConsolidationDocumentsRoutineMD5
 	if version == 33 {
 		claimMD5, advanceMD5 = memoryConsolidationV33ClaimRoutineMD5, memoryConsolidationV33AdvanceRoutineMD5
+	}
+	if version == 35 {
+		documentsMD5 = memoryConsolidationV35DocumentsRoutineMD5
 	}
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -99,15 +103,16 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND table_acl_safety.exact
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
-FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advanceMD5, memoryConsolidationSourcesRoutineMD5, memoryConsolidationDocumentsRoutineMD5, version >= 34, version >= 35).Scan(&available)
+FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advanceMD5, memoryConsolidationSourcesRoutineMD5, documentsMD5, version >= 34, version >= 35).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5      = "121df7d09493be8662f4618208aaf342"
-	memoryConsolidationAdvanceRoutineMD5    = "5666d576e054c6b06999a0b6ce7b6c62"
-	memoryConsolidationSourcesRoutineMD5    = "2b180c012d8c1ae7332b81456845a8bf"
-	memoryConsolidationDocumentsRoutineMD5  = "8eac22d68c0b50c43de1f8892c925c55"
-	memoryConsolidationV33ClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
-	memoryConsolidationV33AdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
+	memoryConsolidationClaimRoutineMD5        = "121df7d09493be8662f4618208aaf342"
+	memoryConsolidationAdvanceRoutineMD5      = "5666d576e054c6b06999a0b6ce7b6c62"
+	memoryConsolidationSourcesRoutineMD5      = "2b180c012d8c1ae7332b81456845a8bf"
+	memoryConsolidationDocumentsRoutineMD5    = "8eac22d68c0b50c43de1f8892c925c55"
+	memoryConsolidationV35DocumentsRoutineMD5 = "578fc76b7dd1ed66ccdd7895cd50e07c"
+	memoryConsolidationV33ClaimRoutineMD5     = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationV33AdvanceRoutineMD5   = "cce038c3cca8f3c4f48da8b5e155443c"
 )
