@@ -149,7 +149,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 // page under the live lease. This preserves the exact source page and applies
 // the retrieval path's quarantine and scan-coverage fences at staging time.
 func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput) error {
-	rows, err := tx.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,is_fence
+	rows, err := tx.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,content_sha256,is_fence
 FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, input.Lease.Token, input.Lease.Generation)
 	if err != nil {
 		return ErrStaleMemoryConsolidationLease
@@ -160,8 +160,9 @@ FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, 
 		var timelineID string
 		var itemID, document sql.NullString
 		var revision, sequence sql.NullInt64
+		var contentHash []byte
 		var fence bool
-		if err := rows.Scan(&timelineID, &itemID, &revision, &sequence, &document, &fence); err != nil || timelineID != input.TimelineID || !sequence.Valid {
+		if err := rows.Scan(&timelineID, &itemID, &revision, &sequence, &document, &contentHash, &fence); err != nil || timelineID != input.TimelineID || !sequence.Valid {
 			return ErrStaleMemoryConsolidationLease
 		}
 		if fence {
@@ -179,7 +180,8 @@ FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, 
 		}
 		source := input.Sources[index]
 		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
-		if err != nil || source.ItemID != itemID.String || source.Revision != revision.Int64 || source.ChangeSequence != sequence.Int64 || !bytes.Equal(source.Document, canonical) {
+		digest := sha256.Sum256([]byte(document.String))
+		if err != nil || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) || source.ItemID != itemID.String || source.Revision != revision.Int64 || source.ChangeSequence != sequence.Int64 || !bytes.Equal(source.Document, canonical) {
 			return ErrStaleMemoryConsolidationLease
 		}
 		index++
