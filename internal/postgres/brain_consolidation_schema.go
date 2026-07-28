@@ -35,8 +35,8 @@ WITH objects AS (
     FROM pg_proc AS routine,objects WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid])
 ), constraint_safety AS (
     SELECT count(*)=5
-       AND count(*) FILTER (WHERE contype='p' AND conkey='1'::int2vector)=1
-       AND count(*) FILTER (WHERE contype='f' AND conkey='1'::int2vector AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
+       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[])=1
+       AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%change_sequence >= 0%')=1
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%lease_generation >= 0%')=1
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%lease_holder IS NULL%' AND pg_get_constraintdef(oid) LIKE '%lease_until IS NOT NULL%')=1 AS exact
