@@ -2,7 +2,7 @@ package postgres
 
 import "context"
 
-// memoryConsolidationControlsAvailable verifies the schema-v33 durable
+// memoryConsolidationControlsAvailable verifies the schema-v34 durable
 // checkpoint fence and its application-role boundary.
 func memoryConsolidationControlsAvailable(ctx context.Context, q queryer) (bool, error) {
 	var available bool

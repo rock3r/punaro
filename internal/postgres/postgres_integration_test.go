@@ -65,6 +65,18 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	testV26EmbeddingRebuildUpgradeIntegration(ctx, t, pairOwnerDSN)
+	pairDB, err = open(ctx, pairOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+		_ = pairDB.Close()
+		t.Fatalf("auxiliary pair cleanup after v26 upgrade test failed: %v", err)
+	}
+	if err := pairDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	testV33ConsolidationSourcesUpgradeIntegration(ctx, t, pairOwnerDSN)
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -806,6 +818,25 @@ func testV26EmbeddingRebuildUpgradeIntegration(ctx context.Context, t *testing.T
 	var activeJobState string
 	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.embedding_jobs`).Scan(&activeJobState); err != nil || activeJobState != "queued" {
 		t.Fatalf("coordinate-only bridge job state=%q err=%v, want requeued", activeJobState, err)
+	}
+}
+
+func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testing.T, ownerDSN string) {
+	t.Helper()
+	ownerDB, err := open(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerDB.Close() }()
+	current := CurrentManifest()
+	v33 := Manifest{MinSupported: 10, MaxSupported: 33, Migrations: append([]Migration(nil), current.Migrations[:33]...)}
+	if state, err := migrate(ctx, ownerDB, v33); err != nil || state.Classification != Compatible || state.Version != 33 {
+		t.Fatalf("v33 bridge setup state=%#v err=%v", state, err)
+	}
+	conn := mustConn(ctx, t, ownerDB)
+	defer func() { _ = conn.Close() }()
+	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
+		t.Fatalf("v33-to-current bridge state=%#v err=%v", state, err)
 	}
 }
 
