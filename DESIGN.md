@@ -582,6 +582,12 @@ document; a missing or malformed document invalidates the whole read. This
 internal provider boundary remains read-only and has no proposal, approval, or
 canonical-mutation authority.
 
+Schema version 37 additionally materializes only each item's current active
+revision as a consolidation source; superseded changes remain cursor gaps. A
+stale or non-clear scan for a selected source is a failed provider read rather
+than a cursor gap, so a worker cannot advance past a current revision until it
+is clear under the current scanner and exception state.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes
