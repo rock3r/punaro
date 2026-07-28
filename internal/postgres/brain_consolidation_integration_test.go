@@ -21,7 +21,7 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actor.ID).Scan(&scopeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, projectID, CapabilityMemoryWrite); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3),($1,'project',$2,$4)`, actor.ID, projectID, CapabilityMemoryWrite, CapabilityMemoryPurge); err != nil {
 		t.Fatal(err)
 	}
 	first, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "11111111-1111-4111-8111-111111111111", memoryEmbeddingMinLease)
@@ -93,6 +93,21 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if err != nil || len(input.Sources) != 0 || input.NextSequence != third.Sequence {
 		t.Fatalf("released quarantine replayed historical source=%#v err=%v", input, err)
 	}
+	purged, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111116", LogicalKey: "consolidation.purged", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"purged"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	purged, err = app.DeleteMemory(ctx, MemoryDeleteRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: purged.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111117", ExpectedETag: purged.ETag})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, third)
+	if err != nil || len(input.Sources) != 0 || input.NextSequence != purged.ChangeSequence {
+		t.Fatalf("purged revisions remained materializable=%#v purged=%#v err=%v", input, purged, err)
+	}
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, third, third.TimelineID, input.NextSequence); err != nil {
+		t.Fatalf("advance purged consolidation cursor: %v", err)
+	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("stale consolidation advance error=%v", err)
 	}
@@ -100,8 +115,8 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 		t.Fatal(err)
 	}
 	fourth, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "44444444-4444-4444-8444-444444444444", memoryEmbeddingMinLease)
-	if err != nil || !claimed || fourth.Generation <= third.Generation || fourth.Sequence != third.Sequence {
-		t.Fatalf("expired consolidation reclaim=%#v third=%#v claimed=%t err=%v", fourth, third, claimed, err)
+	if err != nil || !claimed || fourth.Generation <= third.Generation || fourth.Sequence != input.NextSequence {
+		t.Fatalf("expired consolidation reclaim=%#v input=%#v claimed=%t err=%v", fourth, input, claimed, err)
 	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
