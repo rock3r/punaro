@@ -65,7 +65,7 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		if err := tx.QueryRowContext(ctx, `SELECT scope.project_id::text,COALESCE(alias.canonical_project_id,scope.project_id)::text
 FROM brain.scopes AS scope
 LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
-WHERE scope.id=$1 FOR SHARE OF scope`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonicalScopeProjectID); err != nil || canonicalScopeProjectID != project.ID {
+WHERE scope.id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonicalScopeProjectID); err != nil || canonicalScopeProjectID != project.ID {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
 		body, payloadSHA := memoryProposalPayloadSHA(scopeProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
