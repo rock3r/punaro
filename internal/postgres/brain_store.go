@@ -265,6 +265,7 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 		}
 		secretScanOutcome := "clear"
 		becameQuarantined := false
+		releasedQuarantine := false
 		if target == MemoryActive {
 			finding, err := firstUnexceptedMemorySecretFinding(ctx, tx, locked.ProjectID, locked.Document)
 			if err != nil {
@@ -276,9 +277,11 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 					return MemoryMutationResult{}, err
 				}
 				secretScanOutcome = "quarantined"
-			}
-			if err := recordMemorySecretScan(ctx, tx, locked.ProjectID, request.ItemID, next, request.PrincipalID, secretScanOutcome); err != nil {
-				return MemoryMutationResult{}, err
+			} else {
+				releasedQuarantine, err = releaseActiveMemoryQuarantine(ctx, tx, request.PrincipalID, request.ItemID)
+				if err != nil {
+					return MemoryMutationResult{}, err
+				}
 			}
 		}
 		state, err := commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, change, action)
@@ -288,6 +291,17 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 		if becameQuarantined {
 			state, err = commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, MemoryChangeQuarantine, AuditMemoryQuarantine)
 			if err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
+		if releasedQuarantine {
+			state, err = commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, MemoryChangeQuarantineRelease, AuditMemoryQuarantineRelease)
+			if err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
+		if target == MemoryActive {
+			if err := recordMemorySecretScan(ctx, tx, locked.ProjectID, request.ItemID, next, request.PrincipalID, secretScanOutcome); err != nil {
 				return MemoryMutationResult{}, err
 			}
 		}

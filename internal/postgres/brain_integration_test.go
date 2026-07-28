@@ -3824,9 +3824,32 @@ WHERE item_id=$1 AND revision=1`, second.ItemID, secondLegacyDocument, secondLeg
 	if page, err := app.SearchMemory(ctx, MemorySearchRequest{PrincipalID: readerID, ProjectID: projectID, Query: "legacy.secret", Limit: 2}); err != nil || len(page.Results) != 0 {
 		t.Fatalf("requarantined memory search=%#v err=%v", page, err)
 	}
+	if _, err := app.ApproveMemorySecretException(ctx, MemorySecretExceptionRequest{
+		PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "16161616-1616-4616-8616-161616161615",
+		RuleID: review.Finding.RuleID, FieldPath: review.Finding.FieldPath, RuleVersion: review.Finding.RuleVersion, Fingerprint: review.Finding.Fingerprint,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	archivedAgain, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161616", ExpectedETag: restored.ETag, Archived: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredAfterException, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{
+		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161617", ExpectedETag: archivedAgain.ETag, Archived: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item, err := app.GetMemory(ctx, readerID, projectID, created.ItemID); err != nil || item.Revision != restoredAfterException.Revision {
+		t.Fatalf("excepted restore left memory quarantined item=%#v err=%v", item, err)
+	}
 	cleaned, err := app.UpdateMemory(ctx, MemoryUpdateRequest{
 		PrincipalID: actorID, ProjectID: projectID, ItemID: created.ItemID,
-		IdempotencyKey: "16161616-1616-4616-8616-161616161609", ExpectedETag: restored.ETag,
+		IdempotencyKey: "16161616-1616-4616-8616-161616161609", ExpectedETag: restoredAfterException.ETag,
 		LogicalKey: "legacy.secret", Kind: "preference", Trust: "curated", Document: json.RawMessage(`{"title":"clean replacement"}`),
 	})
 	if err != nil {

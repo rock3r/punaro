@@ -77,7 +77,7 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if _, err := app.ReadMemoryConsolidationInput(ctx, first); err == nil {
 		t.Fatal("corrupt consolidation source hash allowed consolidation input")
 	}
-	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=public.digest(convert_to(document::text,'UTF8'),'sha256') WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision); err != nil {
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=public.digest(document::text,'sha256') WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision); err != nil {
 		t.Fatal(err)
 	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		t.Fatalf("restore consolidation source hash changed=%d err=%v", changed, err)

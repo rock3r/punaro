@@ -65,7 +65,7 @@ BEGIN
         FROM jsonb_to_recordset(source_page) AS source(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,is_fence boolean)
         LEFT JOIN brain.memory_revisions AS revision ON revision.item_id=source.item_id AND revision.revision=source.revision
         WHERE source.item_id IS NOT NULL
-          AND (revision.document IS NULL OR revision.content_sha256 IS DISTINCT FROM public.digest(convert_to(revision.document::text,'UTF8'),'sha256'))
+          AND (revision.document IS NULL OR revision.content_sha256 IS DISTINCT FROM public.digest(revision.document::text,'sha256'))
     ) THEN
         RAISE EXCEPTION USING ERRCODE='55000', MESSAGE='consolidation source content hash is invalid';
     END IF;
