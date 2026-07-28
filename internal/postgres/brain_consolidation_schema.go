@@ -187,6 +187,14 @@ WITH relation AS (
     FROM pg_constraint AS constraint_row,relation
     WHERE constraint_row.conrelid=relation.oid AND constraint_row.contype='c'
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
+), expected_lock_guard_acl(grantee,privilege_type,is_grantable) AS (
+    VALUES ('punaro_owner','EXECUTE',false),('punaro_app','EXECUTE',false)
+), actual_lock_guard_acl AS (
+    SELECT role.rolname,entry.privilege_type,entry.is_grantable
+    FROM pg_proc AS routine
+    CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE routine.oid=lock_guard_oid
 ), guard_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
@@ -196,7 +204,8 @@ WITH relation AS (
       AND NOT proretset AND prorettype='void'::regtype AND pronargs=0
       AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$2
-      AND has_function_privilege('punaro_app',pg_proc.oid,'EXECUTE') AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
+      AND NOT EXISTS (SELECT * FROM expected_lock_guard_acl EXCEPT SELECT * FROM actual_lock_guard_acl)
+      AND NOT EXISTS (SELECT * FROM actual_lock_guard_acl EXCEPT SELECT * FROM expected_lock_guard_acl)) AS exact
     FROM pg_proc,relation WHERE pg_proc.oid=lock_guard_oid
 )
 SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL AND relation.lock_guard_oid IS NOT NULL
