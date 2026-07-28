@@ -35,6 +35,7 @@ func newEmbeddingRuntime(executor embeddingExecutor, workerID string, interval t
 		defer close(runtime.done)
 		pass := func() {
 			passCtx, passCancel := context.WithTimeout(ctx, embeddingRuntimePassTimeout)
+			passCtx = punaropostgres.WithMemoryEmbeddingCleanupContext(passCtx, ctx)
 			_, _ = executor.Execute(passCtx, punaropostgres.MemoryEmbeddingClaimRequest{WorkerID: workerID, Limit: embeddingRuntimeBatch, LeaseDuration: embeddingRuntimeLease})
 			passCancel()
 		}

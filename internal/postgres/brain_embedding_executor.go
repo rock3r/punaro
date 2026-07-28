@@ -48,6 +48,24 @@ type MemoryEmbeddingExecutor struct {
 // MemoryEmbeddingExecutionResult reports one bounded executor pass.
 type MemoryEmbeddingExecutionResult struct{ Claimed, Published, Retried int }
 
+type memoryEmbeddingCleanupContextKey struct{}
+
+// WithMemoryEmbeddingCleanupContext attaches the long-lived runtime context
+// used for lease-bound durable cleanup after a shorter execution pass expires.
+func WithMemoryEmbeddingCleanupContext(ctx, cleanupCtx context.Context) context.Context {
+	if cleanupCtx == nil {
+		cleanupCtx = ctx
+	}
+	return context.WithValue(ctx, memoryEmbeddingCleanupContextKey{}, cleanupCtx)
+}
+
+func memoryEmbeddingCleanupContext(ctx context.Context) context.Context {
+	if cleanupCtx, ok := ctx.Value(memoryEmbeddingCleanupContextKey{}).(context.Context); ok && cleanupCtx != nil {
+		return cleanupCtx
+	}
+	return ctx
+}
+
 // LoadMemoryEmbeddingSource reads only the exact, live lease coordinate. It
 // returns one bounded canonical-document chunk; later chunking policies can
 // refine this derived boundary without changing the lease fence.
@@ -174,6 +192,7 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 	var chunks []MemoryEmbeddingSourceChunk
 	var release func()
 	var loadErr error
+	cleanupCtx := memoryEmbeddingCleanupContext(ctx)
 	leaseDeadline := lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve)
 	sourceCtx, cancelSource := context.WithDeadline(ctx, leaseDeadline)
 	defer cancelSource()
@@ -237,7 +256,7 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 	// Publication is the other lease-bound durable cleanup path. A completed
 	// provider result remains publishable until the exact lease expires even if
 	// the runtime's per-pass budget has elapsed.
-	publicationCtx, cancelPublication := context.WithDeadline(context.Background(), lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve))
+	publicationCtx, cancelPublication := context.WithDeadline(cleanupCtx, lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve))
 	defer cancelPublication()
 	if err := e.store.PublishMemoryEmbeddingWork(publicationCtx, publication); err == nil {
 		result.Published++
@@ -284,11 +303,11 @@ func validMemoryEmbeddingSource(lease MemoryEmbeddingLease, generation MemoryEmb
 	return hex.EncodeToString(digest[:]) == lease.ContentSHA256
 }
 
-func (e *MemoryEmbeddingExecutor) retry(_ context.Context, lease MemoryEmbeddingLease, code string, result *MemoryEmbeddingExecutionResult) error {
+func (e *MemoryEmbeddingExecutor) retry(ctx context.Context, lease MemoryEmbeddingLease, code string, result *MemoryEmbeddingExecutionResult) error {
 	// Retry is the lease's durable cleanup path. It cannot inherit a pass
 	// deadline that has already fired, but it remains strictly bounded by the
 	// exact lease that authorized this worker mutation.
-	retryCtx, cancel := context.WithDeadline(context.Background(), lease.LeaseUntil)
+	retryCtx, cancel := context.WithDeadline(memoryEmbeddingCleanupContext(ctx), lease.LeaseUntil)
 	defer cancel()
 	if err := e.store.RetryMemoryEmbeddingWork(retryCtx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: code, Delay: time.Second}); err != nil {
 		if errors.Is(err, ErrStaleEmbeddingLease) || !time.Now().Before(lease.LeaseUntil) {
