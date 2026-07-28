@@ -28,7 +28,7 @@ WITH objects AS (
     LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
     WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), routine_safety AS (
-    SELECT count(*)=CASE WHEN sources_required THEN 3 ELSE 2 END AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
+    SELECT count(*)=(CASE WHEN sources_required THEN 3 ELSE 2 END) AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
       AND routine.prokind='f' AND routine.prosecdef AND routine.provolatile='v'
       AND routine.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND routine.proconfig=ARRAY['search_path=pg_catalog']::text[] AND NOT routine.proisstrict
