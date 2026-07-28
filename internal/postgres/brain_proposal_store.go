@@ -405,7 +405,7 @@ func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx
 	// Match the read boundary: approval must hold the mutable scan coverage
 	// relations through commit, otherwise a concurrent rescan or exception
 	// update could invalidate a source after this transaction validates it.
-	if _, err := tx.ExecContext(ctx, `LOCK TABLE brain.memory_secret_scans,brain.secret_guard_state,brain.secret_project_state IN SHARE MODE`); err != nil {
+	if _, err := tx.ExecContext(ctx, `LOCK TABLE brain.secret_guard_state,brain.secret_project_state IN SHARE MODE`); err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,revision.document::text,revision.content_sha256,
@@ -417,10 +417,10 @@ JOIN brain.memory_items AS item ON item.id=source.item_id
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 JOIN brain.secret_guard_state AS guard ON true
-LEFT JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
+JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
 LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=scope.project_id
 WHERE source.proposal_id=$1 AND scope.project_id=$2
-ORDER BY source.ordinal FOR SHARE OF item`, proposalID, projectID)
+ORDER BY source.ordinal FOR SHARE OF item,scan`, proposalID, projectID)
 	if err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
