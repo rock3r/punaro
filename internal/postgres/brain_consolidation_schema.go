@@ -18,8 +18,9 @@ WITH objects AS (
       ('lease_until','timestamp with time zone',false,''),('updated_at','timestamp with time zone',true,'statement_timestamp()')
 ), actual_columns AS (
     SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
-    FROM pg_attribute AS attribute,objects
-    LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
+    FROM pg_attribute AS attribute
+    LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum,
+         objects
     WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), routine_safety AS (
     SELECT count(*)=2 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
