@@ -48,6 +48,20 @@ GRANT SELECT ON brain.memory_consolidation_proposal_sources TO punaro_app;
 GRANT INSERT (proposal_id, ordinal, timeline_id, item_id, revision, change_sequence)
     ON brain.memory_consolidation_proposal_sources TO punaro_app;
 
+CREATE FUNCTION brain.lock_memory_consolidation_source_guards()
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+BEGIN
+    LOCK TABLE brain.secret_guard_state IN SHARE MODE;
+    LOCK TABLE brain.secret_project_state IN SHARE MODE;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION brain.lock_memory_consolidation_source_guards() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION brain.lock_memory_consolidation_source_guards() TO punaro_app;
+
 -- Consolidation is restricted to the curated canonical layer. Evidence is
 -- immutable, revision-bound supporting material and cannot be applied by an
 -- ordinary consolidation proposal. Preserve it as a non-actionable gap in

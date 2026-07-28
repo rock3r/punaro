@@ -408,7 +408,7 @@ func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx
 	// Match the read boundary: approval must hold the mutable scan coverage
 	// relations through commit, otherwise a concurrent rescan or exception
 	// update could invalidate a source after this transaction validates it.
-	if _, err := tx.ExecContext(ctx, `LOCK TABLE brain.secret_guard_state,brain.secret_project_state IN SHARE MODE`); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT brain.lock_memory_consolidation_source_guards()`); err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,revision.document::text,revision.content_sha256,
