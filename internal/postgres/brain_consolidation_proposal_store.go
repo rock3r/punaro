@@ -19,7 +19,10 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return MemoryProposalResult{}, err
 	}
 	proposal := request.Proposal
-	body, payloadSHA := memoryProposalPayloadSHA(proposal.ProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
+	// The request body fences idempotency before the lease transaction. The
+	// stored proposal payload is derived later from the scope's physical project
+	// ID so it remains reproducible after that project becomes an alias.
+	idempotencyPayload, _ := memoryProposalPayloadSHA(proposal.ProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
 	type sourceDigest struct {
 		ItemID         string            `json:"item_id"`
 		Revision       int64             `json:"revision"`
@@ -35,7 +38,7 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		Timeline string          `json:"timeline"`
 		Sequence int64           `json:"sequence"`
 		Sources  []sourceDigest  `json:"sources"`
-	}{Proposal: body, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: sources})
+	}{Proposal: idempotencyPayload, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: sources})
 	if err != nil {
 		return MemoryProposalResult{}, errors.New("consolidation proposal cannot be encoded")
 	}
@@ -68,13 +71,14 @@ WHERE scope_id=$1 AND lease_token=$2 AND lease_generation=$3 AND lease_until>sta
 		if err != nil {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
-		var scopeProjectID string
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(alias.canonical_project_id,scope.project_id)::text
+		var scopeProjectID, canonicalScopeProjectID string
+		if err := tx.QueryRowContext(ctx, `SELECT scope.project_id::text,COALESCE(alias.canonical_project_id,scope.project_id)::text
 FROM brain.scopes AS scope
 LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
-WHERE scope.id=$1 FOR SHARE OF scope`, request.Input.Lease.ScopeID).Scan(&scopeProjectID); err != nil || scopeProjectID != project.ID {
+WHERE scope.id=$1 FOR SHARE OF scope`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonicalScopeProjectID); err != nil || canonicalScopeProjectID != project.ID {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
+		body, payloadSHA := memoryProposalPayloadSHA(scopeProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
 		allowed, err := lockCapability(ctx, tx, proposal.PrincipalID, project.ID, CapabilityMemoryPropose)
 		if err != nil || !allowed {
 			return IdempotencyOutcome{}, ErrNotFound

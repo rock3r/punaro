@@ -585,7 +585,7 @@ func readMemoryProposal(ctx context.Context, tx *sql.Tx, projectID, proposalID s
 	var proposal MemoryProposal
 	var decidedBy sql.NullString
 	var decidedAt sql.NullTime
-	query := `SELECT proposal.id::text,proposal.scope_id::text,COALESCE(alias.canonical_project_id,scope.project_id)::text,proposal.action,proposal.state,proposal.proposed_by::text,proposal.decided_by::text,proposal.created_at,proposal.decided_at,proposal.expires_at,proposal.payload_sha256,proposal.payload
+	query := `SELECT proposal.id::text,proposal.scope_id::text,scope.project_id::text,proposal.action,proposal.state,proposal.proposed_by::text,proposal.decided_by::text,proposal.created_at,proposal.decided_at,proposal.expires_at,proposal.payload_sha256,proposal.payload
 FROM brain.memory_proposals AS proposal
 JOIN brain.scopes AS scope ON scope.id=proposal.scope_id
 LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
