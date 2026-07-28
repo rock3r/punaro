@@ -1,4 +1,9 @@
-CREATE OR REPLACE FUNCTION brain.read_memory_consolidation_documents(requested_scope uuid, requested_token uuid, requested_generation bigint)
+-- PostgreSQL cannot change a function's OUT parameter list with CREATE OR
+-- REPLACE. The v36 routine lacks content_sha256, so replace it atomically
+-- within this migration before creating the v37 signature.
+DROP FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint);
+
+CREATE FUNCTION brain.read_memory_consolidation_documents(requested_scope uuid, requested_token uuid, requested_generation bigint)
 RETURNS TABLE(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,document jsonb,content_sha256 bytea,is_fence boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
@@ -67,3 +72,6 @@ BEGIN
     ORDER BY source.change_sequence,source.item_id;
 END
 $function$;
+
+REVOKE ALL ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) TO punaro_app;
