@@ -75,6 +75,10 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, quarantined.ItemID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, second)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != quarantined.ItemID || input.Sources[0].Revision != quarantined.Revision || input.NextSequence != quarantined.ChangeSequence {
+		t.Fatalf("same-revision released-quarantine consolidation input=%#v quarantined=%#v err=%v", input, quarantined, err)
+	}
 	clean, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: quarantined.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111115", ExpectedETag: quarantined.ETag, LogicalKey: "consolidation.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"clean"}`)})
 	if err != nil {
 		t.Fatal(err)
