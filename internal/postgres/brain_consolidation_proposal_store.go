@@ -19,7 +19,14 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return MemoryProposalResult{}, err
 	}
 	proposal := request.Proposal
-	body, payloadSHA := memoryProposalPayloadSHA(proposal.ProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
+	// Proposals persist under the scope's physical project ID. The caller may
+	// authorize through a canonical alias, but payload verification later reads
+	// the physical scope project and must reproduce this exact digest.
+	var scopeProjectID string
+	if err := d.db.QueryRowContext(ctx, `SELECT project_id::text FROM brain.scopes WHERE id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID); err != nil {
+		return MemoryProposalResult{}, ErrNotFound
+	}
+	body, payloadSHA := memoryProposalPayloadSHA(scopeProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
 	type sourceDigest struct {
 		ItemID         string            `json:"item_id"`
 		Revision       int64             `json:"revision"`
