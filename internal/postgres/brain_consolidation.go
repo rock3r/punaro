@@ -37,6 +37,7 @@ type MemoryConsolidationLease struct {
 	Until      time.Time
 }
 
+// ErrStaleMemoryConsolidationLease reports a failed consolidation fence.
 var ErrStaleMemoryConsolidationLease = errors.New("consolidation lease is stale")
 
 func (lease MemoryConsolidationLease) valid() bool {
@@ -60,6 +61,7 @@ func (d *Database) ClaimMemoryConsolidationCheckpoint(ctx context.Context, scope
 	return lease, true, nil
 }
 
+// AdvanceMemoryConsolidationCheckpoint atomically advances and releases one lease.
 func (d *Database) AdvanceMemoryConsolidationCheckpoint(ctx context.Context, lease MemoryConsolidationLease, timelineID string, sequence int64) error {
 	if !lease.valid() || !validOpaqueID(timelineID) || sequence < 0 {
 		return errors.New("invalid consolidation checkpoint")

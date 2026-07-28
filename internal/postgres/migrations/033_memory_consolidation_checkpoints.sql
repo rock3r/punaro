@@ -17,6 +17,7 @@ CREATE FUNCTION brain.claim_memory_consolidation_checkpoint(requested_scope uuid
 RETURNS TABLE(scope_id uuid,timeline_id uuid,change_sequence bigint,lease_holder uuid,lease_token uuid,lease_generation bigint,lease_until timestamptz)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
+#variable_conflict use_column
 BEGIN
     PERFORM jobs.assert_application_mutation();
     IF requested_scope IS NULL OR requested_holder IS NULL OR requested_lease_micros < 5000000 OR requested_lease_micros > 300000000 THEN
