@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -20,9 +21,28 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actor.ID).Scan(&scopeID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, projectID, CapabilityMemoryWrite); err != nil {
+		t.Fatal(err)
+	}
 	first, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "11111111-1111-4111-8111-111111111111", memoryEmbeddingMinLease)
 	if err != nil || !claimed || first.TimelineID == "" || first.Sequence != 0 {
 		t.Fatalf("first consolidation claim=%#v claimed=%t err=%v", first, claimed, err)
+	}
+	input, err := app.ReadMemoryConsolidationInput(ctx, first)
+	if err != nil || input.Lease != first || input.TimelineID != first.TimelineID || input.NextSequence != first.Sequence || len(input.Sources) != 0 {
+		t.Fatalf("initial consolidation input=%#v err=%v", input, err)
+	}
+	created := make([]MemoryMutationResult, 0, 2)
+	for index := 0; index < 2; index++ {
+		result, createErr := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: []string{"11111111-1111-4111-8111-111111111112", "11111111-1111-4111-8111-111111111113"}[index], LogicalKey: []string{"consolidation.first", "consolidation.second"}[index], Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":true}`)})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		created = append(created, result)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, first)
+	if err != nil || len(input.Sources) != len(created) || input.NextSequence != created[len(created)-1].ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision {
+		t.Fatalf("post-claim consolidation input=%#v created=%#v err=%v", input, created, err)
 	}
 	if _, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease); err != nil || claimed {
 		t.Fatalf("duplicate consolidation claim claimed=%t err=%v", claimed, err)
@@ -35,6 +55,9 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 2); err != nil {
 		t.Fatalf("advance consolidation checkpoint: %v", err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, first); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("released consolidation input error=%v", err)
 	}
 	second, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease)
 	if err != nil || !claimed || second.TimelineID != first.TimelineID || second.Sequence != 2 || second.Generation <= first.Generation {
