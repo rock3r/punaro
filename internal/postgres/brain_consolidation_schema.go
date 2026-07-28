@@ -200,7 +200,7 @@ WITH relation AS (
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
     FROM pg_proc,relation WHERE pg_proc.oid=guard_oid
 ), lock_guard_safety AS (
-    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef AND provolatile='v'
       AND NOT proretset AND prorettype='void'::regtype AND pronargs=0
       AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$2
