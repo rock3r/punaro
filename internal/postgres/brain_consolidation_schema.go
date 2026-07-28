@@ -29,6 +29,9 @@ WITH objects AS (
       AND NOT routine.proleakproof AND routine.proparallel='u' AND routine.provariadic=0
       AND ((routine.oid=claim_oid AND routine.proretset AND routine.prorettype='record'::regtype
             AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector
+            AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'timestamp with time zone'::regtype]::oid[]
+            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t']::"char"[]
+            AND routine.proargnames=ARRAY['requested_scope','requested_holder','requested_lease_micros','scope_id','timeline_id','change_sequence','lease_holder','lease_token','lease_generation','lease_until']::text[]
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$1)
         OR (routine.oid=advance_oid AND NOT routine.proretset AND routine.prorettype='boolean'::regtype
             AND routine.pronargs=5 AND routine.proargtypes='2950 2950 20 2950 20'::oidvector
@@ -68,6 +71,6 @@ FROM objects,routine_safety,constraint_safety`, memoryConsolidationClaimRoutineM
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5   = "a3493372823aa9d23b9b38e7d599fba3"
+	memoryConsolidationClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
 	memoryConsolidationAdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
 )
