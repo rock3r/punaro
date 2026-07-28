@@ -116,8 +116,14 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 		input.Sources = append(input.Sources, source)
 		input.NextSequence = source.ChangeSequence
 	}
-	if err := rows.Err(); err != nil || !live || !input.valid() {
+	if err := rows.Err(); err != nil {
+		return MemoryConsolidationInput{}, errors.New("consolidation sources are unavailable")
+	}
+	if !live {
 		return MemoryConsolidationInput{}, ErrStaleMemoryConsolidationLease
+	}
+	if !input.valid() {
+		return MemoryConsolidationInput{}, errors.New("consolidation sources are malformed")
 	}
 	return input, nil
 }
