@@ -6,6 +6,10 @@ import "context"
 // checkpoint fence and its application-role boundary.
 func memoryConsolidationControlsAvailable(ctx context.Context, q queryer, version int64) (bool, error) {
 	var available bool
+	claimMD5, advanceMD5 := memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5
+	if version == 33 {
+		claimMD5, advanceMD5 = memoryConsolidationV33ClaimRoutineMD5, memoryConsolidationV33AdvanceRoutineMD5
+	}
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('brain.memory_consolidation_checkpoints') AS table_oid,
@@ -83,12 +87,14 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND table_acl_safety.exact
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
-FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5, memoryConsolidationSourcesRoutineMD5, version >= 34).Scan(&available)
+FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advanceMD5, memoryConsolidationSourcesRoutineMD5, version >= 34).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5   = "56d64bc951f0d69120d1577c143ed99a"
-	memoryConsolidationAdvanceRoutineMD5 = "65222b114bb0b7e47d5c3ef39679c5c8"
-	memoryConsolidationSourcesRoutineMD5 = "f66128f58a482c330b4620f15f1cbf75"
+	memoryConsolidationClaimRoutineMD5      = "56d64bc951f0d69120d1577c143ed99a"
+	memoryConsolidationAdvanceRoutineMD5    = "65222b114bb0b7e47d5c3ef39679c5c8"
+	memoryConsolidationSourcesRoutineMD5    = "f66128f58a482c330b4620f15f1cbf75"
+	memoryConsolidationV33ClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationV33AdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
 )
