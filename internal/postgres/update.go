@@ -237,7 +237,7 @@ WITH objects AS (
 			(guard_oid, 'fcc654b13cfd4866c5b1a0197a7271cf', 'plpgsql', 'v'::"char", 'trigger'),
 			(begin_oid, 'c92d3f718820c5dbedafd741d922c6c0', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
 			(advance_oid, 'c32ff93b1819d456830727dcc5193a57', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
-			(restore_oid, 'e472e244c2979791f0b7fbfafd4f9b69', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
+			(restore_oid, '9de5aca7d709d91c28ae0f93c52ac3c6', 'plpgsql', 'v'::"char", 'SETOF jobs.update_transactions'),
 	        (active_oid, 'f653ca3bdcc9dd7109d848c20264b546', 'sql', 's'::"char", 'boolean')
 	    ) AS expected(oid, body_hash, language_name, volatility, result_type)
 	), expected_tables(oid) AS (

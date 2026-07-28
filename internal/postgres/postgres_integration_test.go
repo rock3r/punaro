@@ -2186,6 +2186,19 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	if _, err := app.AdvanceChange(ctx); err != nil {
 		t.Fatalf("mutation remained fenced after commit: %v", err)
 	}
+	var recoveryScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `WITH actor AS (
+    SELECT id FROM auth.principals ORDER BY id LIMIT 1
+), project AS (
+    INSERT INTO relay.projects(display_name,created_by) SELECT 'update recovery consolidation lease',id FROM actor RETURNING id,created_by
+)
+INSERT INTO brain.scopes(project_id,created_by) SELECT id,created_by FROM project RETURNING id::text`).Scan(&recoveryScopeID); err != nil {
+		t.Fatalf("recovery consolidation scope: %v", err)
+	}
+	recoveryLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, recoveryScopeID, "018f47f4-7b18-7cc2-98d6-31d4fb5ab745", memoryEmbeddingMaxLease)
+	if err != nil || !claimed {
+		t.Fatalf("live consolidation lease for update recovery lease=%#v claimed=%t err=%v", recoveryLease, claimed, err)
+	}
 
 	// A pre-update dump contains the durable row at writers_stopped, before the
 	// external verified-backup marker can be recorded. This is the exact shape
@@ -2225,6 +2238,14 @@ func testTransactionalUpdateFenceIntegration(ctx context.Context, t *testing.T, 
 	restored, transaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
 	if err != nil || transaction.Phase != UpdateRecoveryRequired || restored.InstallationID != beforeRestore.InstallationID || restored.TimelineID == beforeRestore.TimelineID || restored.ChangeSequence != beforeRestore.ChangeSequence || transaction.BackupID != recoveryMarker.BackupID || transaction.BackupTimelineID != beforeRestore.TimelineID {
 		t.Fatalf("restored update state=%#v transaction=%#v err=%v", restored, transaction, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, recoveryLease); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("update-recovery consolidation lease remained live: %v", err)
+	}
+	var invalidatedToken sql.NullString
+	var invalidatedGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT lease_token::text,lease_generation FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, recoveryLease.ScopeID).Scan(&invalidatedToken, &invalidatedGeneration); err != nil || invalidatedToken.Valid || invalidatedGeneration <= recoveryLease.Generation {
+		t.Fatalf("update-recovery consolidation lease token=%#v generation=%d previous=%d err=%v", invalidatedToken, invalidatedGeneration, recoveryLease.Generation, err)
 	}
 	retriedState, retriedTransaction, err := admin.RestoreUpdateRecovery(ctx, recoveryMarker)
 	if err != nil || retriedState != restored || retriedTransaction != transaction {

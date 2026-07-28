@@ -48,6 +48,145 @@ BEGIN
     LIMIT 129;
 END
 $function$;
+
+CREATE OR REPLACE FUNCTION jobs.restore_update_recovery(
+    requested_id uuid,
+    requested_backup_id uuid,
+    requested_installation_id uuid,
+    requested_timeline_id uuid,
+    requested_change_sequence bigint,
+    requested_source_schema bigint,
+    requested_target_release text,
+    requested_target_image_digest text,
+    requested_snapshot_id text,
+    requested_manifest_sha256 text
+)
+RETURNS SETOF jobs.update_transactions
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    active jobs.update_transactions%ROWTYPE;
+    next_timeline uuid;
+BEGIN
+    IF session_user <> 'punaro_owner'
+       OR requested_id IS NULL OR requested_backup_id IS NULL
+       OR requested_installation_id IS NULL OR requested_timeline_id IS NULL
+       OR requested_change_sequence IS NULL OR requested_change_sequence < 0
+       OR requested_source_schema IS NULL OR requested_source_schema < 1
+       OR requested_source_schema <> COALESCE((SELECT max(version) FROM jobs.schema_migrations WHERE status = 'applied'), 0)
+       OR requested_target_release IS NULL
+       OR requested_target_image_digest IS NULL
+       OR requested_snapshot_id IS NULL
+       OR requested_manifest_sha256 IS NULL
+       OR requested_target_release !~ '^[A-Za-z0-9][A-Za-z0-9._+\-]{0,127}$'
+       OR requested_target_image_digest !~ '^sha256:[0-9a-f]{64}$'
+       OR requested_snapshot_id !~ '^[0-9A-Z-]{1,200}$'
+       OR requested_manifest_sha256 !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'restored update authority is unavailable';
+    END IF;
+    PERFORM pg_advisory_xact_lock(579001230607);
+    SELECT * INTO active FROM jobs.update_transactions
+    WHERE update_id = requested_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'restored update is unavailable';
+    END IF;
+
+    SELECT event.restored_timeline_id INTO next_timeline
+    FROM jobs.restore_events AS event
+    WHERE event.backup_id = requested_backup_id
+      AND event.installation_id = requested_installation_id
+      AND event.previous_timeline_id = requested_timeline_id
+      AND event.restored_change_sequence = requested_change_sequence;
+    IF FOUND THEN
+        IF active.phase = 'recovery_required'
+           AND active.installation_id = requested_installation_id
+           AND active.timeline_id = next_timeline
+           AND active.source_schema = requested_source_schema
+           AND active.target_release = requested_target_release
+           AND split_part(active.target_image, '@', 2) = requested_target_image_digest
+           AND active.backup_id = requested_backup_id
+           AND active.backup_installation_id = requested_installation_id
+           AND active.backup_timeline_id = requested_timeline_id
+           AND active.backup_change_sequence = requested_change_sequence
+           AND active.backup_source_schema = requested_source_schema
+           AND active.backup_snapshot_id = requested_snapshot_id
+           AND active.backup_manifest_sha256 = requested_manifest_sha256
+           AND EXISTS (
+               SELECT 1 FROM jobs.server_state AS state
+               WHERE state.singleton
+                 AND state.installation_id = requested_installation_id
+                 AND state.timeline_id = next_timeline
+                 AND state.change_sequence = requested_change_sequence
+           ) THEN
+            RETURN NEXT active;
+            RETURN;
+        END IF;
+        RAISE EXCEPTION 'restored update retry evidence does not match';
+    END IF;
+
+    IF active.phase <> 'writers_stopped'
+       OR active.installation_id <> requested_installation_id
+       OR active.timeline_id <> requested_timeline_id
+       OR active.source_schema <> requested_source_schema
+       OR active.target_release <> requested_target_release
+       OR split_part(active.target_image, '@', 2) <> requested_target_image_digest
+       OR active.backup_id IS NOT NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM jobs.server_state AS state
+           WHERE state.singleton
+             AND state.installation_id = requested_installation_id
+             AND state.timeline_id = requested_timeline_id
+             AND state.change_sequence = requested_change_sequence
+       ) THEN
+        RAISE EXCEPTION 'restored update boundary does not match';
+    END IF;
+
+    next_timeline := gen_random_uuid();
+    INSERT INTO jobs.restore_events (
+        restore_id, backup_id, installation_id, previous_timeline_id,
+        restored_timeline_id, restored_change_sequence
+    ) VALUES (
+        gen_random_uuid(), requested_backup_id, requested_installation_id,
+        requested_timeline_id, next_timeline, requested_change_sequence
+    );
+    PERFORM set_config('punaro.restore_update_id', requested_id::text, true);
+    PERFORM set_config('punaro.restore_backup_id', requested_backup_id::text, true);
+    UPDATE jobs.server_state AS state
+    SET timeline_id = next_timeline,
+        timeline_started_at = statement_timestamp()
+    WHERE state.singleton
+      AND state.installation_id = requested_installation_id
+      AND state.timeline_id = requested_timeline_id
+      AND state.change_sequence = requested_change_sequence;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'restored timeline changed during recovery';
+    END IF;
+    UPDATE brain.memory_consolidation_checkpoints AS checkpoint
+    SET lease_holder=NULL,lease_token=NULL,lease_generation=checkpoint.lease_generation+1,lease_until=NULL,updated_at=statement_timestamp()
+    WHERE checkpoint.lease_until IS NOT NULL;
+    UPDATE jobs.update_transactions
+    SET timeline_id = next_timeline,
+        phase = 'recovery_required',
+        backup_id = requested_backup_id,
+        backup_installation_id = requested_installation_id,
+        backup_timeline_id = requested_timeline_id,
+        backup_change_sequence = requested_change_sequence,
+        backup_source_schema = requested_source_schema,
+        backup_snapshot_id = requested_snapshot_id,
+        backup_manifest_sha256 = requested_manifest_sha256,
+        updated_at = statement_timestamp(),
+        completed_at = NULL
+    WHERE update_id = requested_id AND phase = 'writers_stopped'
+    RETURNING * INTO active;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'restored update changed during recovery';
+    END IF;
+    RETURN NEXT active;
+END
+$function$;
 REVOKE ALL ON FUNCTION brain.read_memory_consolidation_sources(uuid,uuid,bigint) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_sources(uuid,uuid,bigint) TO punaro_app;
 
