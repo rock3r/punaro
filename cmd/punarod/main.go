@@ -72,6 +72,9 @@ type memoryDatabase interface {
 	ProposeMemory(context.Context, punaropostgres.MemoryProposalCreateRequest) (punaropostgres.MemoryProposalResult, error)
 	ApproveMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error)
 	RejectMemoryProposal(context.Context, punaropostgres.MemoryProposalDecisionRequest) (punaropostgres.MemoryProposalResult, error)
+	PrepareMemoryHybridSearch(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryEmbeddingGeneration, error)
+	SearchMemoryHybridLexical(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error)
+	SearchMemoryHybrid(context.Context, punaropostgres.MemoryHybridSearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error)
 }
 
 type credentialTransitionDatabase interface {
@@ -313,7 +316,22 @@ func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Ha
 	if err := policy.Validate(); err != nil {
 		return nil, errors.New("memory credential transport policy is invalid")
 	}
-	return memoryhttp.New(database, policy, cfg.MemoryMutationsEnabled), nil
+	if cfg.MemoryOpenAIEmbeddingsURL == "" {
+		return memoryhttp.New(database, policy, cfg.MemoryMutationsEnabled), nil
+	}
+	key, err := readEmbeddingAPIKey(cfg.MemoryOpenAIAPIKeyFile)
+	if err != nil {
+		return nil, errors.New("memory embedding provider credential is unavailable")
+	}
+	provider, err := embeddingprovider.NewOpenAICompatible(cfg.MemoryOpenAIEmbeddingsURL, key, &http.Client{})
+	if err != nil {
+		return nil, errors.New("memory embedding provider is unavailable")
+	}
+	hybrid, err := punaropostgres.NewMemoryHybridRetrievalExecutor(database, provider)
+	if err != nil {
+		return nil, errors.New("memory hybrid retrieval is unavailable")
+	}
+	return memoryhttp.NewWithHybrid(database, policy, cfg.MemoryMutationsEnabled, hybrid), nil
 }
 
 func validateEmbeddingProvider(cfg config.Config) error {

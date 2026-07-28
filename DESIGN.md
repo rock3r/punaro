@@ -504,8 +504,23 @@ the active quarantine, so release makes its work claimable again. Stale source
 or publication leases are no-ops; source,
 provider, and publication outages become bounded code-only retries, and a
 failed retry write is surfaced to the executor caller. Provider selection,
-credentials, network configuration, and any public semantic route remain
-separate deployment and API slices.
+credentials, and network configuration remain separate deployment slices.
+
+The optional native hybrid-search surface is mounted only when the dark memory
+API is enabled and daemon startup has successfully constructed the bounded
+OpenAI-compatible query provider and hybrid retrieval executor. It is a
+device-authenticated `POST /v1/projects/{project}/memories/hybrid-search`
+route with the same strict `query` and 1--50 `limit` bounds as lexical search.
+Authentication and project `memory.search` authorization occur before any
+provider invocation; denied, missing, and revoked credentials therefore never
+send a query to the provider. Its 15-second end-to-end request budget covers
+the independently bounded preparation, embedding, and retrieval phases. The
+response is the existing bounded title/summary hybrid surface and reports a
+semantic status: retrieval remains available with lexical-only
+`not_configured` degradation when no active generation exists. If the provider
+endpoint is not configured, the route is unmounted; invalid provider
+configuration prevents daemon startup rather than accepting a request or
+exposing provider configuration.
 
 Schema version 15 places one deterministic secret guard inside the authorized
 create/update transaction before any scope, revision, change, audit,

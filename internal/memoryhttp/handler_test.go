@@ -62,6 +62,17 @@ type fakeStore struct {
 	entered chan struct{}
 }
 
+type fakeHybridSearcher struct {
+	request postgres.MemorySearchRequest
+	calls   int
+}
+
+func (searcher *fakeHybridSearcher) Search(_ context.Context, request postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error) {
+	searcher.request = request
+	searcher.calls++
+	return postgres.MemoryHybridSearchSurfacePage{SemanticStatus: postgres.MemoryHybridSearchSemanticNotConfigured}, nil
+}
+
 func (s *fakeStore) mutationResult(item string, state postgres.MemoryState) postgres.MemoryMutationResult {
 	return postgres.MemoryMutationResult{ItemID: item, Revision: 3, ETag: testMemoryETag, State: state, ChangeSequence: 10}
 }
@@ -516,6 +527,31 @@ func TestHandlerBindsAuthenticatedPrincipalAcrossBoundedReadRoutes(t *testing.T)
 	}
 }
 
+func TestHybridSearchBindsAuthenticatedPrincipalAndIsDarkWithoutCapability(t *testing.T) {
+	store := newFakeStore()
+	path := "/v1/projects/" + testProjectID + "/memories/hybrid-search"
+	darkRequest := request(http.MethodPost, path, `{"query":"needle","limit":3}`)
+	response := httptest.NewRecorder()
+	newTestHandler(store).ServeHTTP(response, darkRequest)
+	if response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("dark route status=%d", response.Code)
+	}
+
+	hybrid := &fakeHybridSearcher{}
+	policy := &ingress.Policy{Mode: ingress.LAN, ListenAddr: "127.0.0.1:8443", PublicURL: "https://punaro.test"}
+	handler := NewWithHybrid(store, policy, false, hybrid)
+	unauthorized := request(http.MethodPost, path, `{"query":"needle","limit":3}`)
+	unauthorized.Header.Del("Authorization")
+	serve(t, handler, unauthorized, http.StatusUnauthorized)
+	if hybrid.calls != 0 {
+		t.Fatalf("unauthorized hybrid search reached provider: calls=%d", hybrid.calls)
+	}
+	response = serve(t, handler, request(http.MethodPost, path, `{"query":"needle","limit":3}`), http.StatusOK)
+	if hybrid.calls != 1 || hybrid.request.PrincipalID != testPrincipalID || hybrid.request.ProjectID != testProjectID || hybrid.request.Query != "needle" || hybrid.request.Limit != 3 || !strings.Contains(response.Body.String(), `"semantic_status":"not_configured"`) {
+		t.Fatalf("hybrid request=%#v response=%s", hybrid.request, response.Body.String())
+	}
+}
+
 func TestHandlerRejectsAuthenticationTransportAndStrictInputBeforeStore(t *testing.T) {
 	store := newFakeStore()
 	handler := newTestHandler(store)
@@ -619,7 +655,7 @@ func TestHandlerBoundsConcurrencyAndCancelsBlockedStoreWork(t *testing.T) {
 	store.block = make(chan struct{})
 	store.entered = make(chan struct{}, 1)
 	policy := &ingress.Policy{Mode: ingress.LAN, ListenAddr: "127.0.0.1:8443", PublicURL: "https://punaro.test"}
-	handler := newHandler(store, policy, 1, 20*time.Millisecond, true)
+	handler := newHandler(store, policy, 1, 20*time.Millisecond, true, nil)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		w := httptest.NewRecorder()

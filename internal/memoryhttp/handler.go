@@ -28,6 +28,7 @@ const (
 	maxProposalBytes        = 1 << 20
 	maxConcurrentOperations = 32
 	operationTimeout        = 5 * time.Second
+	hybridOperationTimeout  = 15 * time.Second
 )
 
 type store interface {
@@ -47,28 +48,42 @@ type store interface {
 	RejectMemoryProposal(context.Context, postgres.MemoryProposalDecisionRequest) (postgres.MemoryProposalResult, error)
 }
 
+type hybridSearcher interface {
+	Search(context.Context, postgres.MemorySearchRequest) (postgres.MemoryHybridSearchSurfacePage, error)
+}
+
 type handler struct {
 	store   store
 	policy  *ingress.Policy
 	mux     *http.ServeMux
 	slots   chan struct{}
 	timeout time.Duration
+	hybrid  hybridSearcher
 }
 
 // New constructs the native memory handler. The caller independently decides
 // whether the dark read surface and its mutation extension are mounted.
 func New(database store, policy *ingress.Policy, mutationsEnabled bool) http.Handler {
-	return newHandler(database, policy, maxConcurrentOperations, operationTimeout, mutationsEnabled)
+	return NewWithHybrid(database, policy, mutationsEnabled, nil)
 }
 
-func newHandler(database store, policy *ingress.Policy, concurrency int, timeout time.Duration, mutationsEnabled bool) http.Handler {
+// NewWithHybrid constructs the native memory handler with an optional
+// authorization-first hybrid retrieval capability.
+func NewWithHybrid(database store, policy *ingress.Policy, mutationsEnabled bool, hybrid hybridSearcher) http.Handler {
+	return newHandler(database, policy, maxConcurrentOperations, operationTimeout, mutationsEnabled, hybrid)
+}
+
+func newHandler(database store, policy *ingress.Policy, concurrency int, timeout time.Duration, mutationsEnabled bool, hybrid hybridSearcher) http.Handler {
 	if concurrency < 1 {
 		concurrency = 1
 	}
-	h := &handler{store: database, policy: policy, mux: http.NewServeMux(), slots: make(chan struct{}, concurrency), timeout: timeout}
+	h := &handler{store: database, policy: policy, mux: http.NewServeMux(), slots: make(chan struct{}, concurrency), timeout: timeout, hybrid: hybrid}
 	h.mux.HandleFunc("POST /v1/projects/resolve", h.resolveProject)
 	h.mux.HandleFunc("GET /v1/projects/{project}/memories/{item}", h.getMemory)
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/search", h.searchMemory)
+	if hybrid != nil {
+		h.mux.HandleFunc("POST /v1/projects/{project}/memories/hybrid-search", h.searchHybridMemory)
+	}
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/brief", h.promptBrief)
 	h.mux.HandleFunc("POST /v1/projects/{project}/memories/changes", h.memoryChanges)
 	h.mux.HandleFunc("GET /v1/projects/{project}/memory-proposals/{proposal}", h.getProposal)
@@ -82,6 +97,29 @@ func newHandler(database store, policy *ingress.Policy, concurrency int, timeout
 		h.mux.HandleFunc("POST /v1/projects/{project}/memory-proposals/{proposal}/reject", h.rejectProposal)
 	}
 	return h
+}
+
+func (h *handler) searchHybridMemory(response http.ResponseWriter, request *http.Request) {
+	device, projectID, ok := deviceProject(response, request)
+	if !ok {
+		return
+	}
+	fields, ok := readObject(response, request, "query", "limit")
+	if !ok {
+		return
+	}
+	var query string
+	var limit int
+	if !decodeString(fields["query"], &query) || !decodeInt(fields["limit"], &limit) || !validQuery(query) || limit < 1 || limit > 50 {
+		writeError(response, http.StatusBadRequest, "request is invalid")
+		return
+	}
+	page, err := h.hybrid.Search(request.Context(), postgres.MemorySearchRequest{PrincipalID: device.PrincipalID, ProjectID: projectID, Query: query, Limit: limit})
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, page)
 }
 
 type memoryWriteBody struct {
@@ -276,7 +314,7 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		unauthenticated(response)
 		return
 	}
-	operationCtx, cancel := context.WithTimeout(request.Context(), h.timeout)
+	operationCtx, cancel := context.WithTimeout(request.Context(), h.timeoutFor(request))
 	defer cancel()
 	device, err := h.store.AuthenticateDevice(operationCtx, credential)
 	if err != nil || !validID(device.PrincipalID) || !validID(device.LookupID) || device.Generation < 1 {
@@ -284,6 +322,13 @@ func (h *handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	h.mux.ServeHTTP(response, request.WithContext(context.WithValue(operationCtx, authenticatedDeviceKey{}, device)))
+}
+
+func (h *handler) timeoutFor(request *http.Request) time.Duration {
+	if h.hybrid != nil && request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/memories/hybrid-search") {
+		return hybridOperationTimeout
+	}
+	return h.timeout
 }
 
 type authenticatedDeviceKey struct{}
