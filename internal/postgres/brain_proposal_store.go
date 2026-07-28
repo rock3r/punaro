@@ -389,13 +389,16 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 // Ordinary proposals have no rows here and retain their existing semantics.
 func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx, projectID, proposalID, scopeID string) error {
 	var expected int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1`, proposalID).Scan(&expected); err != nil || expected == 0 {
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1`, proposalID).Scan(&expected); err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if expected == 0 {
+		return nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,
 EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL),
-scan.revision=source.revision AND scan.rule_version=guard.rule_version AND scan.rule_digest=guard.rule_digest
-  AND scan.exception_generation=COALESCE(project_state.exception_generation,0) AND scan.outcome='clear'
+COALESCE(scan.revision=source.revision AND scan.rule_version=guard.rule_version AND scan.rule_digest=guard.rule_digest
+  AND scan.exception_generation=COALESCE(project_state.exception_generation,0) AND scan.outcome='clear',false)
 FROM brain.memory_consolidation_proposal_sources AS source
 JOIN brain.memory_items AS item ON item.id=source.item_id
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
