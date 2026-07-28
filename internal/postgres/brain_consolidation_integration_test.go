@@ -133,6 +133,96 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
 	}
+	testMemoryConsolidationRestoreLineageIntegration(ctx, t, app, ownerDB, actor.ID, projectID)
+}
+
+func testMemoryConsolidationRestoreLineageIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, actorID, projectID string) {
+	t.Helper()
+	var scopeID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actorID).Scan(&scopeID); err != nil {
+		t.Fatal(err)
+	}
+	rootSource, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111120", LogicalKey: "consolidation.restore.root", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"root"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "55555555-5555-4555-8555-555555555555", memoryEmbeddingMinLease)
+	if err != nil || !claimed {
+		t.Fatalf("root consolidation claim lease=%#v claimed=%t err=%v", rootLease, claimed, err)
+	}
+	input, err := app.ReadMemoryConsolidationInput(ctx, rootLease)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != rootSource.ItemID || input.NextSequence != rootSource.ChangeSequence {
+		t.Fatalf("root consolidation input=%#v source=%#v err=%v", input, rootSource, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
+		t.Fatal(err)
+	}
+	_, firstRestoredTimeline, firstRestoreSequence := rotateConsolidationTestTimeline(ctx, t, ownerDB)
+	rootReplay, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "66666666-6666-4666-8666-666666666666", memoryEmbeddingMinLease)
+	if err != nil || !claimed || rootReplay.TimelineID != rootLease.TimelineID || rootReplay.Sequence != 0 || rootReplay.Generation <= rootLease.Generation {
+		t.Fatalf("root crash reclaim lease=%#v prior=%#v claimed=%t err=%v", rootReplay, rootLease, claimed, err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, rootReplay)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != rootSource.ItemID || input.NextSequence != firstRestoreSequence {
+		t.Fatalf("single-hop replay input=%#v source=%#v restore_sequence=%d err=%v", input, rootSource, firstRestoreSequence, err)
+	}
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, rootReplay, rootReplay.TimelineID, input.NextSequence); err != nil {
+		t.Fatalf("drain root restore edge: %v", err)
+	}
+	firstLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "77777777-7777-4777-8777-777777777777", memoryEmbeddingMinLease)
+	if err != nil || !claimed || firstLease.TimelineID != firstRestoredTimeline || firstLease.Sequence != 0 {
+		t.Fatalf("single-hop rebase lease=%#v restored_timeline=%q claimed=%t err=%v", firstLease, firstRestoredTimeline, claimed, err)
+	}
+	middleSource, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111121", LogicalKey: "consolidation.restore.middle", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"middle"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, firstLease)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != middleSource.ItemID || input.NextSequence != middleSource.ChangeSequence {
+		t.Fatalf("first restored consolidation input=%#v source=%#v err=%v", input, middleSource, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
+		t.Fatal(err)
+	}
+	_, secondRestoredTimeline, secondRestoreSequence := rotateConsolidationTestTimeline(ctx, t, ownerDB)
+	firstReplay, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "88888888-8888-4888-8888-888888888888", memoryEmbeddingMinLease)
+	if err != nil || !claimed || firstReplay.TimelineID != firstRestoredTimeline || firstReplay.Sequence != 0 || firstReplay.Generation <= firstLease.Generation {
+		t.Fatalf("first restore crash reclaim lease=%#v prior=%#v claimed=%t err=%v", firstReplay, firstLease, claimed, err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, firstReplay)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != middleSource.ItemID || input.NextSequence != secondRestoreSequence {
+		t.Fatalf("multi-hop replay input=%#v source=%#v restore_sequence=%d err=%v", input, middleSource, secondRestoreSequence, err)
+	}
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, firstReplay, firstReplay.TimelineID, input.NextSequence); err != nil {
+		t.Fatalf("drain second restore edge: %v", err)
+	}
+	secondLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "99999999-9999-4999-8999-999999999999", memoryEmbeddingMinLease)
+	if err != nil || !claimed || secondLease.TimelineID != secondRestoredTimeline || secondLease.Sequence != 0 {
+		t.Fatalf("multi-hop rebase lease=%#v restored_timeline=%q claimed=%t err=%v", secondLease, secondRestoredTimeline, claimed, err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, secondLease)
+	if err != nil || len(input.Sources) != 0 || input.NextSequence != 0 {
+		t.Fatalf("second restored timeline retained replayed sources input=%#v err=%v", input, err)
+	}
+}
+
+func rotateConsolidationTestTimeline(ctx context.Context, t *testing.T, ownerDB *sql.DB) (string, string, int64) {
+	t.Helper()
+	var previousTimeline, restoredTimeline string
+	var restoreSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `WITH prior AS (
+    SELECT installation_id,timeline_id,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE
+), rotated AS (
+    UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),timeline_started_at=statement_timestamp()
+    WHERE singleton RETURNING timeline_id
+), event AS (
+    INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence)
+    SELECT gen_random_uuid(),gen_random_uuid(),prior.installation_id,prior.timeline_id,rotated.timeline_id,prior.change_sequence FROM prior,rotated
+)
+SELECT prior.timeline_id::text,rotated.timeline_id::text,prior.change_sequence FROM prior,rotated`).Scan(&previousTimeline, &restoredTimeline, &restoreSequence); err != nil {
+		t.Fatalf("seed restore lineage edge: %v", err)
+	}
+	return previousTimeline, restoredTimeline, restoreSequence
 }
 
 func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
