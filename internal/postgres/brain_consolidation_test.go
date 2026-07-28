@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -41,7 +42,7 @@ func TestMemoryConsolidationPolicyRejectsUnboundedOrMutatingPlans(t *testing.T) 
 
 func TestMemoryConsolidationInputRejectsUnfencedOrUnboundedPages(t *testing.T) {
 	lease := MemoryConsolidationLease{ScopeID: "11111111-1111-4111-8111-111111111111", Holder: "22222222-2222-4222-8222-222222222222", Token: "33333333-3333-4333-8333-333333333333", Generation: 1, Until: time.Now().Add(time.Minute)}
-	valid := MemoryConsolidationInput{Lease: lease, TimelineID: "44444444-4444-4444-8444-444444444444", NextSequence: 2, Sources: []MemoryConsolidationSource{{ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 2}}}
+	valid := MemoryConsolidationInput{Lease: lease, TimelineID: "44444444-4444-4444-8444-444444444444", NextSequence: 2, Sources: []MemoryConsolidationSource{{ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 2, Document: json.RawMessage(`{"source":true}`)}}}
 	if !valid.valid() {
 		t.Fatal("valid consolidation input rejected")
 	}
@@ -49,6 +50,7 @@ func TestMemoryConsolidationInputRejectsUnfencedOrUnboundedPages(t *testing.T) {
 		"missing lease":    func() MemoryConsolidationInput { value := valid; value.Lease.Token = ""; return value }(),
 		"foreign timeline": func() MemoryConsolidationInput { value := valid; value.TimelineID = ""; return value }(),
 		"unfenced source":  func() MemoryConsolidationInput { value := valid; value.Sources[0].Revision = 0; return value }(),
+		"missing document": func() MemoryConsolidationInput { value := valid; value.Sources[0].Document = nil; return value }(),
 		"cursor replay": func() MemoryConsolidationInput {
 			value := valid
 			value.Sources[0].ChangeSequence = value.Lease.Sequence

@@ -575,6 +575,13 @@ and approval remains separately fenced. Timeline rotation invalidates every
 live consolidation lease and advances its generation, so a token resurrected
 from a restored backup cannot act on the recovered checkpoint.
 
+Schema version 35 materializes each selected consolidation source's canonical
+JSON document in the same security-definer statement as the live lease fence
+and exact `(item, revision)` coordinate. Fence and cursor rows carry no
+document; a missing or malformed document invalidates the whole read. This
+internal provider boundary remains read-only and has no proposal, approval, or
+canonical-mutation authority.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes

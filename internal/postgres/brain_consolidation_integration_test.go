@@ -44,6 +44,10 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err != nil || len(input.Sources) != len(created) || input.NextSequence != created[len(created)-1].ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision {
 		t.Fatalf("post-claim consolidation input=%#v created=%#v err=%v", input, created, err)
 	}
+	var firstDocument, secondDocument map[string]bool
+	if json.Unmarshal(input.Sources[0].Document, &firstDocument) != nil || json.Unmarshal(input.Sources[1].Document, &secondDocument) != nil || !firstDocument["source"] || !secondDocument["source"] {
+		t.Fatalf("consolidation source documents=%#v", input.Sources)
+	}
 	initialSequence := input.NextSequence
 	if _, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease); err != nil || claimed {
 		t.Fatalf("duplicate consolidation claim claimed=%t err=%v", claimed, err)
@@ -241,6 +245,7 @@ func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testi
 	for _, drift := range []struct{ apply, restore string }{
 		{`GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`, `REVOKE SELECT ON brain.memory_consolidation_checkpoints FROM punaro_app`},
 		{`GRANT EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) FROM PUBLIC`},
+		{`GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) FROM PUBLIC`},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
 			t.Fatal(err)
