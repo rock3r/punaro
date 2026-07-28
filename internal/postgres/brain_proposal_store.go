@@ -395,13 +395,14 @@ func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx
 	if expected == 0 {
 		return nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,
+	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,revision.document::text,revision.content_sha256,
 EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL),
 COALESCE(scan.revision=source.revision AND scan.rule_version=guard.rule_version AND scan.rule_digest=guard.rule_digest
   AND scan.exception_generation=COALESCE(project_state.exception_generation,0) AND scan.outcome='clear',false)
 FROM brain.memory_consolidation_proposal_sources AS source
 JOIN brain.memory_items AS item ON item.id=source.item_id
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
+JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
 JOIN brain.secret_guard_state AS guard ON true
 LEFT JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
 LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=scope.project_id
@@ -418,10 +419,13 @@ ORDER BY source.ordinal FOR SHARE OF item`, proposalID, projectID)
 		var state MemoryState
 		var layer MemoryLayer
 		var quarantined, scanClear bool
-		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID, &quarantined, &scanClear); err != nil {
+		var document string
+		var contentHash []byte
+		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID, &document, &contentHash, &quarantined, &scanClear); err != nil {
 			return errors.New("consolidation proposal source is malformed")
 		}
-		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated || quarantined || !scanClear {
+		digest := sha256.Sum256([]byte(document))
+		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated || quarantined || !scanClear || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) {
 			return ErrStaleMemoryETag
 		}
 		seen++

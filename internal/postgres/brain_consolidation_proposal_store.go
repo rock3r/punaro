@@ -3,6 +3,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,13 +19,26 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return MemoryProposalResult{}, err
 	}
 	proposal := request.Proposal
+	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
+		return MemoryProposalResult{}, err
+	}
 	body, payloadSHA := memoryProposalPayloadSHA(proposal.ProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
+	type sourceDigest struct {
+		ItemID         string            `json:"item_id"`
+		Revision       int64             `json:"revision"`
+		ChangeSequence int64             `json:"change_sequence"`
+		ContentSHA256  [sha256.Size]byte `json:"content_sha256"`
+	}
+	sources := make([]sourceDigest, len(request.Input.Sources))
+	for index, source := range request.Input.Sources {
+		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(source.Document)}
+	}
 	inputBody, err := json.Marshal(struct {
-		Proposal json.RawMessage             `json:"proposal"`
-		Timeline string                      `json:"timeline"`
-		Sequence int64                       `json:"sequence"`
-		Sources  []MemoryConsolidationSource `json:"sources"`
-	}{Proposal: body, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: request.Input.Sources})
+		Proposal json.RawMessage `json:"proposal"`
+		Timeline string          `json:"timeline"`
+		Sequence int64           `json:"sequence"`
+		Sources  []sourceDigest  `json:"sources"`
+	}{Proposal: body, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: sources})
 	if err != nil {
 		return MemoryProposalResult{}, errors.New("consolidation proposal cannot be encoded")
 	}

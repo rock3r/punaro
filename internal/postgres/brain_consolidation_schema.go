@@ -156,7 +156,7 @@ WITH relation AS (
     FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
 ), guard_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
-      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
     FROM pg_proc,relation WHERE oid=guard_oid
 )
 SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
@@ -165,17 +165,18 @@ SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND application_privileges.selects AND application_privileges.inserts AND application_privileges.no_writes
    AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact
-FROM relation,application_privileges,trigger_safety,constraint_safety,guard_safety`).Scan(&available)
+FROM relation,application_privileges,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5        = "121df7d09493be8662f4618208aaf342"
-	memoryConsolidationAdvanceRoutineMD5      = "5666d576e054c6b06999a0b6ce7b6c62"
-	memoryConsolidationSourcesRoutineMD5      = "2b180c012d8c1ae7332b81456845a8bf"
-	memoryConsolidationDocumentsRoutineMD5    = "0b284fa1e93f9b8cd62604d4e2a3821c"
-	memoryConsolidationV35DocumentsRoutineMD5 = "578fc76b7dd1ed66ccdd7895cd50e07c"
-	memoryConsolidationV36DocumentsRoutineMD5 = "8eac22d68c0b50c43de1f8892c925c55"
-	memoryConsolidationV33ClaimRoutineMD5     = "32e95c7fb6a9e73522c73b825bc3dcea"
-	memoryConsolidationV33AdvanceRoutineMD5   = "cce038c3cca8f3c4f48da8b5e155443c"
+	memoryConsolidationProposalSourceGuardRoutineMD5 = "df081efa031414be22850049f25430b5"
+	memoryConsolidationClaimRoutineMD5               = "121df7d09493be8662f4618208aaf342"
+	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
+	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
+	memoryConsolidationDocumentsRoutineMD5           = "0b284fa1e93f9b8cd62604d4e2a3821c"
+	memoryConsolidationV35DocumentsRoutineMD5        = "578fc76b7dd1ed66ccdd7895cd50e07c"
+	memoryConsolidationV36DocumentsRoutineMD5        = "8eac22d68c0b50c43de1f8892c925c55"
+	memoryConsolidationV33ClaimRoutineMD5            = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationV33AdvanceRoutineMD5          = "cce038c3cca8f3c4f48da8b5e155443c"
 )
