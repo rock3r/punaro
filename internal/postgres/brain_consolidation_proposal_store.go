@@ -19,9 +19,6 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return MemoryProposalResult{}, err
 	}
 	proposal := request.Proposal
-	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
-		return MemoryProposalResult{}, err
-	}
 	body, payloadSHA := memoryProposalPayloadSHA(proposal.ProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
 	type sourceDigest struct {
 		ItemID         string            `json:"item_id"`
@@ -43,6 +40,14 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return MemoryProposalResult{}, errors.New("consolidation proposal cannot be encoded")
 	}
 	idempotency := IdempotencyRequest{PrincipalID: proposal.PrincipalID, Operation: "memory.consolidation.proposal.create", Key: proposal.IdempotencyKey, Body: inputBody}
+	if outcome, completed, err := completedIdempotencyOutcome(ctx, d.db, idempotency); err != nil {
+		return MemoryProposalResult{}, err
+	} else if completed {
+		return decodeMemoryProposalOutcome(outcome)
+	}
+	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
+		return MemoryProposalResult{}, err
+	}
 	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
 		return MemoryProposalResult{}, mutationStartError(err, "consolidation proposal transaction cannot start")
