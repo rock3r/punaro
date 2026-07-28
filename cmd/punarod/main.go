@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/access"
 	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/devicehttp"
@@ -75,6 +76,14 @@ type memoryDatabase interface {
 	PrepareMemoryHybridSearch(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryEmbeddingGeneration, error)
 	SearchMemoryHybridLexical(context.Context, punaropostgres.MemorySearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error)
 	SearchMemoryHybrid(context.Context, punaropostgres.MemoryHybridSearchRequest) (punaropostgres.MemoryHybridSearchSurfacePage, error)
+}
+
+type embeddingRuntimeDatabase interface {
+	CanonicalBrainRuntimeReady(context.Context) error
+	ClaimMemoryEmbeddingWork(context.Context, punaropostgres.MemoryEmbeddingClaimRequest) ([]punaropostgres.MemoryEmbeddingLease, error)
+	PublishMemoryEmbeddingWork(context.Context, punaropostgres.MemoryEmbeddingPublication) error
+	RetryMemoryEmbeddingWork(context.Context, punaropostgres.MemoryEmbeddingRetry) error
+	OpenMemoryEmbeddingSource(context.Context, punaropostgres.MemoryEmbeddingLease) (punaropostgres.MemoryEmbeddingGeneration, []punaropostgres.MemoryEmbeddingSourceChunk, func(), error)
 }
 
 type credentialTransitionDatabase interface {
@@ -250,6 +259,16 @@ func run(args []string, stderr io.Writer) int {
 		logger.Printf("health listener bind failed error=%v", err)
 		return 1
 	}
+	embeddingRuntime, err := buildEmbeddingRuntime(cfg, platformDB)
+	if err != nil {
+		_ = healthListener.Close()
+		_ = publicListener.Close()
+		_, _ = fmt.Fprintf(stderr, "punarod embedding worker configuration error: %v\n", err)
+		return 2
+	}
+	if embeddingRuntime != nil {
+		defer embeddingRuntime.Close()
+	}
 	type serverResult struct {
 		name string
 		err  error
@@ -332,6 +351,34 @@ func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Ha
 		return nil, errors.New("memory hybrid retrieval is unavailable")
 	}
 	return memoryhttp.NewWithHybrid(database, policy, cfg.MemoryMutationsEnabled, hybrid), nil
+}
+
+func buildEmbeddingRuntime(cfg config.Config, platformDB platformDatabase) (*embeddingRuntime, error) {
+	if cfg.MemoryOpenAIEmbeddingsURL == "" {
+		return nil, nil
+	}
+	database, ok := platformDB.(embeddingRuntimeDatabase)
+	if !ok {
+		return nil, errors.New("PostgreSQL embedding database authority is unavailable")
+	}
+	readinessCtx, readinessCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer readinessCancel()
+	if err := database.CanonicalBrainRuntimeReady(readinessCtx); err != nil {
+		return nil, errors.New("PostgreSQL canonical brain schema is unavailable")
+	}
+	key, err := readEmbeddingAPIKey(cfg.MemoryOpenAIAPIKeyFile)
+	if err != nil {
+		return nil, errors.New("memory embedding provider credential is unavailable")
+	}
+	provider, err := embeddingprovider.NewOpenAICompatible(cfg.MemoryOpenAIEmbeddingsURL, key, &http.Client{})
+	if err != nil {
+		return nil, errors.New("memory embedding provider is unavailable")
+	}
+	executor, err := punaropostgres.NewMemoryEmbeddingExecutor(database, database, provider)
+	if err != nil {
+		return nil, errors.New("memory embedding executor is unavailable")
+	}
+	return newEmbeddingRuntime(executor, uuid.NewString(), time.Minute), nil
 }
 
 func validateEmbeddingProvider(cfg config.Config) error {

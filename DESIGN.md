@@ -511,6 +511,13 @@ or publication leases are no-ops; source,
 provider, and publication outages become bounded code-only retries, and a
 failed retry write is surfaced to the executor caller. Provider selection,
 credentials, and network configuration remain separate deployment slices.
+When an embedding provider is explicitly configured, `punarod` starts one
+best-effort background worker with a fresh opaque holder ID. Each pass claims
+at most one minute-leased item; the executor preserves that lease's own
+deadline through durable retry/publication handling. Provider, database, or
+publication failures are retained in the fenced job lifecycle and never fail
+request serving or readiness. No provider configuration means no worker or
+provider call.
 
 The optional native hybrid-search surface is mounted only when the dark memory
 API is enabled and daemon startup has successfully constructed the bounded

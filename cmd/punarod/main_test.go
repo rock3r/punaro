@@ -82,6 +82,17 @@ func TestBuildMemoryHandlerFailsClosedWhenConfiguredProviderCredentialCannotLoad
 	}
 }
 
+func TestBuildEmbeddingRuntimeIsDarkWithoutProviderAndRequiresAuthority(t *testing.T) {
+	runtime, err := buildEmbeddingRuntime(config.Config{}, &refusingPlatformDatabase{})
+	if err != nil || runtime != nil {
+		t.Fatalf("disabled runtime=%v err=%v", runtime, err)
+	}
+	_, err = buildEmbeddingRuntime(config.Config{MemoryOpenAIEmbeddingsURL: "https://embeddings.example/v1/embeddings", MemoryOpenAIAPIKeyFile: "/run/secrets/provider-key"}, &refusingPlatformDatabase{})
+	if err == nil || !strings.Contains(err.Error(), "embedding database authority") {
+		t.Fatalf("incomplete authority error=%v", err)
+	}
+}
+
 type unavailableMemoryDatabase struct {
 	deviceDatabase
 	readyCalled bool

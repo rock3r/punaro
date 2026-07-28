@@ -127,12 +127,44 @@ func TestMemoryEmbeddingExecutorLetsExpiredSourceFenceLeaseReclaim(t *testing.T)
 	}
 }
 
+func TestMemoryEmbeddingExecutorRetryUsesRuntimeCleanupContext(t *testing.T) {
+	lease := MemoryEmbeddingLease{MemoryEmbeddingWork: MemoryEmbeddingWork{GenerationID: "11111111-1111-4111-8111-111111111111", ItemID: "22222222-2222-4222-8222-222222222222", Revision: 1, ContentSHA256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"}, Generation: MemoryEmbeddingGeneration{ID: "11111111-1111-4111-8111-111111111111", Model: "local.e5", Revision: "2026-07-01", Dimensions: 2, State: MemoryEmbeddingGenerationActive}, Attempts: 1, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", LeaseGeneration: 1, LeaseUntil: time.Now().Add(time.Minute)}
+	retryStarted := make(chan struct{})
+	store := &fakeEmbeddingExecutorStore{leases: []MemoryEmbeddingLease{lease}, onRetryContext: func(ctx context.Context) error {
+		close(retryStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	executor, err := NewMemoryEmbeddingExecutor(store, fakeEmbeddingSource{generation: lease.Generation, chunks: []MemoryEmbeddingSourceChunk{{Ordinal: 0, ContentSHA256: lease.ContentSHA256, EndOffset: 4, Text: "test"}}}, fakeEmbeddingProvider{err: errors.New("provider unavailable")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeCtx, stopRuntime := context.WithCancel(context.Background())
+	passCtx, stopPass := context.WithCancel(WithMemoryEmbeddingCleanupContext(context.Background(), runtimeCtx))
+	stopPass()
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.Execute(passCtx, MemoryEmbeddingClaimRequest{WorkerID: lease.Holder, Limit: 1, LeaseDuration: time.Minute})
+		result <- err
+	}()
+	select {
+	case <-retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("retry did not begin")
+	}
+	stopRuntime()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("retry should stop with runtime shutdown, got %v", err)
+	}
+}
+
 type fakeEmbeddingExecutorStore struct {
-	leases    []MemoryEmbeddingLease
-	published []MemoryEmbeddingPublication
-	retries   []MemoryEmbeddingRetry
-	retryErr  error
-	onRetry   func() error
+	leases         []MemoryEmbeddingLease
+	published      []MemoryEmbeddingPublication
+	retries        []MemoryEmbeddingRetry
+	retryErr       error
+	onRetry        func() error
+	onRetryContext func(context.Context) error
 }
 
 func (s *fakeEmbeddingExecutorStore) ClaimMemoryEmbeddingWork(context.Context, MemoryEmbeddingClaimRequest) ([]MemoryEmbeddingLease, error) {
@@ -144,12 +176,17 @@ func (s *fakeEmbeddingExecutorStore) PublishMemoryEmbeddingWork(_ context.Contex
 	s.published = append(s.published, value)
 	return nil
 }
-func (s *fakeEmbeddingExecutorStore) RetryMemoryEmbeddingWork(_ context.Context, value MemoryEmbeddingRetry) error {
+func (s *fakeEmbeddingExecutorStore) RetryMemoryEmbeddingWork(ctx context.Context, value MemoryEmbeddingRetry) error {
 	if s.retryErr != nil {
 		return s.retryErr
 	}
 	if s.onRetry != nil {
 		if err := s.onRetry(); err != nil {
+			return err
+		}
+	}
+	if s.onRetryContext != nil {
+		if err := s.onRetryContext(ctx); err != nil {
 			return err
 		}
 	}
