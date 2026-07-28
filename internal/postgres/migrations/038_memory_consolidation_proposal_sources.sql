@@ -6,9 +6,9 @@ CREATE TABLE brain.memory_consolidation_proposal_sources (
     revision bigint NOT NULL CONSTRAINT memory_consolidation_proposal_sources_revision_check CHECK (revision >= 1),
     change_sequence bigint NOT NULL CONSTRAINT memory_consolidation_proposal_sources_sequence_check CHECK (change_sequence >= 0),
     PRIMARY KEY (proposal_id, ordinal),
-    CONSTRAINT memory_consolidation_proposal_sources_item_key UNIQUE (proposal_id, item_id),
-    CONSTRAINT memory_consolidation_proposal_sources_revision_fkey FOREIGN KEY (item_id, revision)
-        REFERENCES brain.memory_revisions(item_id, revision)
+    CONSTRAINT memory_consolidation_proposal_sources_item_key UNIQUE (proposal_id, item_id)
+    -- Provenance retains opaque historical coordinates. It must not prevent
+    -- an authorized irreversible purge of the referenced item or revision.
 );
 
 CREATE INDEX memory_consolidation_proposal_sources_item_revision

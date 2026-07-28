@@ -388,29 +388,42 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 // proposal stale when any bound curated source is no longer its live revision.
 // Ordinary proposals have no rows here and retain their existing semantics.
 func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx, projectID, proposalID, scopeID string) error {
-	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text
+	var expected int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1`, proposalID).Scan(&expected); err != nil || expected == 0 {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,
+EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL),
+scan.revision=source.revision AND scan.rule_version=guard.rule_version AND scan.rule_digest=guard.rule_digest
+  AND scan.exception_generation=COALESCE(project_state.exception_generation,0) AND scan.outcome='clear'
 FROM brain.memory_consolidation_proposal_sources AS source
 JOIN brain.memory_items AS item ON item.id=source.item_id
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
+JOIN brain.secret_guard_state AS guard ON true
+LEFT JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
+LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=scope.project_id
 WHERE source.proposal_id=$1 AND scope.project_id=$2
 ORDER BY source.ordinal FOR SHARE OF item`, proposalID, projectID)
 	if err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
+	seen := 0
 	for rows.Next() {
 		var itemID, itemScopeID string
 		var revision, currentRevision int64
 		var state MemoryState
 		var layer MemoryLayer
-		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID); err != nil {
+		var quarantined, scanClear bool
+		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID, &quarantined, &scanClear); err != nil {
 			return errors.New("consolidation proposal source is malformed")
 		}
-		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated {
+		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated || quarantined || !scanClear {
 			return ErrStaleMemoryETag
 		}
+		seen++
 	}
-	if err := rows.Err(); err != nil {
+	if err := rows.Err(); err != nil || seen != expected {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	return nil

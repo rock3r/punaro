@@ -144,15 +144,14 @@ WITH relation AS (
     FROM relation
 ), trigger_safety AS (
     SELECT count(*)=2
-       AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid)=1
-       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62)=1 AS exact
+       AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O')=1
+       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O')=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=relation.oid AND NOT tgisinternal
 ), constraint_safety AS (
-    SELECT count(*)=7
+    SELECT count(*)=6
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[])=1
        AND count(*) FILTER (WHERE contype='u' AND conkey=ARRAY[1,4]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.memory_proposals'::regclass AND confdeltype='c')=1
-       AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[4,5]::smallint[] AND confrelid='brain.memory_revisions'::regclass)=1
        AND count(*) FILTER (WHERE contype='c')=3 AS exact
     FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
 ), guard_safety AS (

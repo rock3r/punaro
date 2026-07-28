@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -56,7 +57,7 @@ WHERE scope_id=$1 AND lease_token=$2 AND lease_generation=$3 AND lease_until>sta
 		if err != nil || !allowed {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
-		if err := lockAndValidateConsolidationInputSources(ctx, tx, project.ID, request.Input); err != nil {
+		if err := validateConsolidationInputSources(ctx, tx, request.Input); err != nil {
 			if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) {
 				return IdempotencyOutcome{}, ErrStaleMemoryConsolidationLease
 			}
@@ -125,25 +126,47 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 	return decodeMemoryProposalOutcome(outcome)
 }
 
-// lockAndValidateConsolidationInputSources rejects forged or superseded source
-// coordinates before they can become durable proposal provenance.
-func lockAndValidateConsolidationInputSources(ctx context.Context, tx *sql.Tx, projectID string, input MemoryConsolidationInput) error {
-	for _, source := range input.Sources {
-		var itemID string
-		err := tx.QueryRowContext(ctx, `SELECT item.id::text
-FROM brain.memory_changes AS change
-JOIN brain.memory_items AS item ON item.id=change.item_id
-JOIN brain.scopes AS scope ON scope.id=item.scope_id
-WHERE change.timeline_id=$1 AND change.change_sequence=$2 AND change.scope_id=$3
-  AND change.item_id=$4 AND change.revision=$5 AND scope.project_id=$6
-  AND item.current_revision=$5 AND item.state='active' AND item.layer='curated'
-FOR SHARE OF item`, input.TimelineID, source.ChangeSequence, input.Lease.ScopeID, source.ItemID, source.Revision, projectID).Scan(&itemID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrStaleMemoryETag
+// validateConsolidationInputSources re-reads the complete security-definer
+// page under the live lease. This preserves the exact source page and applies
+// the retrieval path's quarantine and scan-coverage fences at staging time.
+func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput) error {
+	rows, err := tx.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,is_fence
+FROM brain.read_memory_consolidation_documents($1,$2,$3)`, input.Lease.ScopeID, input.Lease.Token, input.Lease.Generation)
+	if err != nil {
+		return ErrStaleMemoryConsolidationLease
+	}
+	defer func() { _ = rows.Close() }()
+	index, next := 0, input.Lease.Sequence
+	for rows.Next() {
+		var timelineID string
+		var itemID, document sql.NullString
+		var revision, sequence sql.NullInt64
+		var fence bool
+		if err := rows.Scan(&timelineID, &itemID, &revision, &sequence, &document, &fence); err != nil || timelineID != input.TimelineID || !sequence.Valid {
+			return ErrStaleMemoryConsolidationLease
 		}
-		if err != nil || itemID != source.ItemID {
-			return errors.New("consolidation source cannot be validated")
+		if fence {
+			if sequence.Int64 != input.Lease.Sequence {
+				return ErrStaleMemoryConsolidationLease
+			}
+			continue
 		}
+		next = sequence.Int64
+		if !itemID.Valid {
+			continue
+		}
+		if index >= len(input.Sources) || !revision.Valid || !document.Valid {
+			return ErrStaleMemoryConsolidationLease
+		}
+		source := input.Sources[index]
+		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
+		if err != nil || source.ItemID != itemID.String || source.Revision != revision.Int64 || source.ChangeSequence != sequence.Int64 || !bytes.Equal(source.Document, canonical) {
+			return ErrStaleMemoryConsolidationLease
+		}
+		index++
+	}
+	if rows.Err() != nil || index != len(input.Sources) || next != input.NextSequence {
+		return ErrStaleMemoryConsolidationLease
 	}
 	return nil
 }
