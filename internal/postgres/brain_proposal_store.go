@@ -336,6 +336,12 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 		}
 		mutations := []MemoryMutationResult(nil)
 		if approve {
+			if err := lockAndValidateConsolidationProposalSources(ctx, tx, project.ID, proposal.ProposalID, proposal.ScopeID); err != nil {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) {
+					return IdempotencyOutcome{}, ErrStaleMemoryProposal
+				}
+				return IdempotencyOutcome{}, err
+			}
 			steps := proposalStepInputs(proposal.Steps)
 			evidence := proposalEvidenceInputs(proposal.Evidence)
 			items, err := lockAndValidateProposalItems(ctx, tx, project.ID, steps, evidence)
@@ -376,6 +382,38 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 		return MemoryProposalResult{}, errors.New("memory proposal decision cannot commit")
 	}
 	return decodeMemoryProposalOutcome(outcome)
+}
+
+// lockAndValidateConsolidationProposalSources makes a consolidation-derived
+// proposal stale when any bound curated source is no longer its live revision.
+// Ordinary proposals have no rows here and retain their existing semantics.
+func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx, projectID, proposalID, scopeID string) error {
+	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text
+FROM brain.memory_consolidation_proposal_sources AS source
+JOIN brain.memory_items AS item ON item.id=source.item_id
+JOIN brain.scopes AS scope ON scope.id=item.scope_id
+WHERE source.proposal_id=$1 AND scope.project_id=$2
+ORDER BY source.ordinal FOR SHARE OF item`, proposalID, projectID)
+	if err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var itemID, itemScopeID string
+		var revision, currentRevision int64
+		var state MemoryState
+		var layer MemoryLayer
+		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID); err != nil {
+			return errors.New("consolidation proposal source is malformed")
+		}
+		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated {
+			return ErrStaleMemoryETag
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	return nil
 }
 
 func lockAndValidateProposalItems(ctx context.Context, tx *sql.Tx, projectID string, steps []MemoryProposalStepInput, evidence []MemoryProposalEvidenceInput) (map[string]lockedProposalItem, error) {
@@ -571,6 +609,25 @@ WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$
 	}
 	if err := evidenceRows.Close(); err != nil {
 		return MemoryProposal{}, errors.New("memory proposal evidence cannot close")
+	}
+	sourceRows, err := tx.QueryContext(ctx, `SELECT ordinal,timeline_id::text,item_id::text,revision,change_sequence FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1 ORDER BY ordinal`, proposalID)
+	if err != nil {
+		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+	}
+	for sourceRows.Next() {
+		var source MemoryConsolidationProposalSource
+		if err := sourceRows.Scan(&source.Ordinal, &source.TimelineID, &source.ItemID, &source.Revision, &source.ChangeSequence); err != nil {
+			_ = sourceRows.Close()
+			return MemoryProposal{}, errors.New("memory proposal source is malformed")
+		}
+		proposal.Sources = append(proposal.Sources, source)
+	}
+	if err := sourceRows.Err(); err != nil {
+		_ = sourceRows.Close()
+		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+	}
+	if err := sourceRows.Close(); err != nil {
+		return MemoryProposal{}, errors.New("memory proposal sources cannot close")
 	}
 	resultRows, err := tx.QueryContext(ctx, `SELECT ordinal,item_id::text,revision FROM brain.memory_proposal_results WHERE proposal_id=$1 ORDER BY ordinal`, proposalID)
 	if err != nil {

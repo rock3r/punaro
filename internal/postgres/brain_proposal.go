@@ -122,6 +122,16 @@ type MemoryProposalEvidence struct {
 	MemoryProposalEvidenceInput
 }
 
+// MemoryConsolidationProposalSource is immutable provenance for a proposal
+// staged from a fenced consolidation page.
+type MemoryConsolidationProposalSource struct {
+	Ordinal        int    `json:"ordinal"`
+	TimelineID     string `json:"timeline_id"`
+	ItemID         string `json:"item_id"`
+	Revision       int64  `json:"revision"`
+	ChangeSequence int64  `json:"change_sequence"`
+}
+
 // MemoryProposalAppliedStep durably links one approved primitive to its canonical revision.
 type MemoryProposalAppliedStep struct {
 	Ordinal  int    `json:"ordinal"`
@@ -131,20 +141,21 @@ type MemoryProposalAppliedStep struct {
 
 // MemoryProposal is one authorized proposal and its immutable payload.
 type MemoryProposal struct {
-	ProposalID string                      `json:"proposal_id"`
-	ScopeID    string                      `json:"scope_id"`
-	ProjectID  string                      `json:"project_id"`
-	Action     MemoryProposalAction        `json:"action"`
-	State      MemoryProposalState         `json:"state"`
-	ETag       string                      `json:"etag"`
-	ProposedBy string                      `json:"proposed_by"`
-	DecidedBy  string                      `json:"decided_by,omitempty"`
-	CreatedAt  time.Time                   `json:"created_at"`
-	ExpiresAt  time.Time                   `json:"expires_at"`
-	DecidedAt  *time.Time                  `json:"decided_at,omitempty"`
-	Steps      []MemoryProposalStep        `json:"steps"`
-	Evidence   []MemoryProposalEvidence    `json:"evidence"`
-	Results    []MemoryProposalAppliedStep `json:"results,omitempty"`
+	ProposalID string                              `json:"proposal_id"`
+	ScopeID    string                              `json:"scope_id"`
+	ProjectID  string                              `json:"project_id"`
+	Action     MemoryProposalAction                `json:"action"`
+	State      MemoryProposalState                 `json:"state"`
+	ETag       string                              `json:"etag"`
+	ProposedBy string                              `json:"proposed_by"`
+	DecidedBy  string                              `json:"decided_by,omitempty"`
+	CreatedAt  time.Time                           `json:"created_at"`
+	ExpiresAt  time.Time                           `json:"expires_at"`
+	DecidedAt  *time.Time                          `json:"decided_at,omitempty"`
+	Steps      []MemoryProposalStep                `json:"steps"`
+	Evidence   []MemoryProposalEvidence            `json:"evidence"`
+	Sources    []MemoryConsolidationProposalSource `json:"sources,omitempty"`
+	Results    []MemoryProposalAppliedStep         `json:"results,omitempty"`
 	payloadSHA []byte
 	payload    []byte
 }
