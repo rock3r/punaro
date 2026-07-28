@@ -320,6 +320,7 @@ func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testi
 		{`GRANT UPDATE ON brain.memory_consolidation_proposal_sources TO punaro_app`, `REVOKE UPDATE ON brain.memory_consolidation_proposal_sources FROM punaro_app`},
 		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER memory_consolidation_proposal_source_insert_guard`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER memory_consolidation_proposal_source_insert_guard`},
 		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER application_mutation_fence`},
+		{`ALTER TABLE brain.memory_consolidation_proposal_sources SET UNLOGGED`, `ALTER TABLE brain.memory_consolidation_proposal_sources SET LOGGED`},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
 			t.Fatal(err)

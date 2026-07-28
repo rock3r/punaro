@@ -430,8 +430,11 @@ ORDER BY source.ordinal FOR SHARE OF item`, proposalID, projectID)
 		}
 		seen++
 	}
-	if err := rows.Err(); err != nil || seen != expected {
+	if err := rows.Err(); err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if seen != expected {
+		return ErrStaleMemoryETag
 	}
 	return nil
 }
