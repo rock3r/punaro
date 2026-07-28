@@ -126,7 +126,8 @@ func memoryConsolidationProposalSourcesAvailable(ctx context.Context, q queryer)
 	err := q.QueryRowContext(ctx, `
 WITH relation AS (
     SELECT to_regclass('brain.memory_consolidation_proposal_sources') AS oid,
-           to_regprocedure('brain.guard_memory_consolidation_proposal_source()') AS guard_oid
+           to_regprocedure('brain.guard_memory_consolidation_proposal_source()') AS guard_oid,
+           to_regprocedure('brain.lock_memory_consolidation_source_guards()') AS lock_guard_oid
 ), expected_columns(name,type_name,required) AS (
     VALUES ('proposal_id','uuid',true),('ordinal','smallint',true),('timeline_id','uuid',true),
            ('item_id','uuid',true),('revision','bigint',true),('change_sequence','bigint',true)
@@ -190,29 +191,37 @@ WITH relation AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
     FROM pg_proc,relation WHERE pg_proc.oid=guard_oid
+), lock_guard_safety AS (
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef
+      AND NOT proretset AND prorettype='void'::regtype AND pronargs=0
+      AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$2
+      AND has_function_privilege('punaro_app',pg_proc.oid,'EXECUTE') AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
+    FROM pg_proc,relation WHERE pg_proc.oid=lock_guard_oid
 )
-SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
+SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL AND relation.lock_guard_oid IS NOT NULL
    AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=relation.oid)
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND application_privileges.selects AND application_privileges.inserts AND application_privileges.no_writes
    AND table_acl_safety.exact AND column_acl_safety.exact
-   AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact
+   AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact AND lock_guard_safety.exact
    AND NOT EXISTS (SELECT * FROM expected_checks EXCEPT SELECT * FROM actual_checks)
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
-FROM relation,application_privileges,table_acl_safety,column_acl_safety,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
+FROM relation,application_privileges,table_acl_safety,column_acl_safety,trigger_safety,constraint_safety,guard_safety,lock_guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5, memoryConsolidationProposalSourceLockGuardRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
-	memoryConsolidationProposalSourceGuardRoutineMD5 = "aaa45e19ae18202e97772cb7096ad117"
-	memoryConsolidationClaimRoutineMD5               = "121df7d09493be8662f4618208aaf342"
-	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
-	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
-	memoryConsolidationDocumentsRoutineMD5           = "0b284fa1e93f9b8cd62604d4e2a3821c"
-	memoryConsolidationV38DocumentsRoutineMD5        = "d2d9593918a866b633499a2619609ce3"
-	memoryConsolidationV35DocumentsRoutineMD5        = "578fc76b7dd1ed66ccdd7895cd50e07c"
-	memoryConsolidationV36DocumentsRoutineMD5        = "8eac22d68c0b50c43de1f8892c925c55"
-	memoryConsolidationV33ClaimRoutineMD5            = "32e95c7fb6a9e73522c73b825bc3dcea"
-	memoryConsolidationV33AdvanceRoutineMD5          = "cce038c3cca8f3c4f48da8b5e155443c"
+	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
+	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
+	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"
+	memoryConsolidationAdvanceRoutineMD5                 = "5666d576e054c6b06999a0b6ce7b6c62"
+	memoryConsolidationSourcesRoutineMD5                 = "2b180c012d8c1ae7332b81456845a8bf"
+	memoryConsolidationDocumentsRoutineMD5               = "0b284fa1e93f9b8cd62604d4e2a3821c"
+	memoryConsolidationV38DocumentsRoutineMD5            = "d2d9593918a866b633499a2619609ce3"
+	memoryConsolidationV35DocumentsRoutineMD5            = "578fc76b7dd1ed66ccdd7895cd50e07c"
+	memoryConsolidationV36DocumentsRoutineMD5            = "8eac22d68c0b50c43de1f8892c925c55"
+	memoryConsolidationV33ClaimRoutineMD5                = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationV33AdvanceRoutineMD5              = "cce038c3cca8f3c4f48da8b5e155443c"
 )
