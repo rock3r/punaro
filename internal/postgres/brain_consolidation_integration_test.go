@@ -44,6 +44,7 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err != nil || len(input.Sources) != len(created) || input.NextSequence != created[len(created)-1].ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision {
 		t.Fatalf("post-claim consolidation input=%#v created=%#v err=%v", input, created, err)
 	}
+	initialSequence := input.NextSequence
 	if _, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease); err != nil || claimed {
 		t.Fatalf("duplicate consolidation claim claimed=%t err=%v", claimed, err)
 	}
@@ -53,14 +54,14 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 1<<60); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("future sequence advance error=%v", err)
 	}
-	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 2); err != nil {
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, initialSequence); err != nil {
 		t.Fatalf("advance consolidation checkpoint: %v", err)
 	}
 	if _, err := app.ReadMemoryConsolidationInput(ctx, first); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("released consolidation input error=%v", err)
 	}
 	second, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease)
-	if err != nil || !claimed || second.TimelineID != first.TimelineID || second.Sequence != 2 || second.Generation <= first.Generation {
+	if err != nil || !claimed || second.TimelineID != first.TimelineID || second.Sequence != initialSequence || second.Generation <= first.Generation {
 		t.Fatalf("durable consolidation reclaim=%#v first=%#v claimed=%t err=%v", second, first, claimed, err)
 	}
 	quarantined, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111114", LogicalKey: "consolidation.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"quarantined"}`)})
