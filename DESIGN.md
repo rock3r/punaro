@@ -589,7 +589,9 @@ than a cursor gap, so a worker cannot advance past a current revision until it
 is clear under the current scanner and exception state. The read holds its
 matching checkpoint lease fence through materialization, so a new generation
 cannot reclaim the checkpoint while the old generation is still being returned
-work.
+work. Restores record fresh clear scan coverage for their copied revision, and
+the provider boundary rejects any document whose stored content hash no longer
+matches its canonical bytes.
 
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled

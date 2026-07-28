@@ -263,6 +263,14 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 		if _, err := tx.ExecContext(ctx, `UPDATE brain.memory_items SET state=$2,current_revision=$3,updated_at=statement_timestamp() WHERE id=$1`, request.ItemID, target, next); err != nil {
 			return MemoryMutationResult{}, errors.New("memory archive state could not be updated")
 		}
+		if target == MemoryActive {
+			if err := guardMemoryDocument(ctx, tx, locked.ProjectID, locked.Document); err != nil {
+				return MemoryMutationResult{}, err
+			}
+			if err := recordMemorySecretScan(ctx, tx, locked.ProjectID, request.ItemID, next, request.PrincipalID, "clear"); err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
 		state, err := commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, change, action)
 		if err != nil {
 			return MemoryMutationResult{}, err
