@@ -294,7 +294,6 @@ func TestHTTPRelayReportsMaintenanceDuringAuthentication(t *testing.T) {
 }
 
 func TestHTTPNotificationsAuthenticatesAndEmitsOnlyWakeMetadata(t *testing.T) {
-	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

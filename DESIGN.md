@@ -553,6 +553,12 @@ binds the stored rule version/digest to the exact compiled scanner. Future
 proposal approval, import, consolidation, and attachment-text ingestion must
 call this same guard before publication or enqueue.
 
+Consolidation is proposal-only: a single pass may inspect at most 128 source
+changes, produce at most eight staged proposals, bind at most sixteen exact
+evidence revisions to each proposal, and run for at most 30 seconds. It has no
+direct canonical-mutation path; every output remains subject to the existing
+secret guard, proposal CAS, and explicit approval flow.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes
