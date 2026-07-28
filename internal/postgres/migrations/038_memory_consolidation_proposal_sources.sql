@@ -51,8 +51,9 @@ GRANT INSERT (proposal_id, ordinal, timeline_id, item_id, revision, change_seque
 
 -- Consolidation is restricted to the curated canonical layer. Evidence is
 -- immutable, revision-bound supporting material and cannot be applied by an
--- ordinary consolidation proposal. Filter it before building the fenced page
--- so a mixed change stream remains stageable and its cursor can advance.
+-- ordinary consolidation proposal. Preserve it as a non-actionable gap in
+-- the fenced page so a mixed change stream remains stageable and its cursor
+-- can advance.
 CREATE OR REPLACE FUNCTION brain.read_memory_consolidation_documents(requested_scope uuid, requested_token uuid, requested_generation bigint)
 RETURNS TABLE(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,document jsonb,content_sha256 bytea,is_fence boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
@@ -74,10 +75,7 @@ BEGIN
     LOCK TABLE brain.secret_guard_state IN SHARE MODE;
     LOCK TABLE brain.secret_project_state IN SHARE MODE;
     WITH raw_source AS MATERIALIZED (
-        SELECT source.*
-        FROM brain.read_memory_consolidation_sources(requested_scope,requested_token,requested_generation) AS source
-        LEFT JOIN brain.memory_items AS item ON item.id=source.item_id
-        WHERE source.is_fence OR item.layer='curated'
+        SELECT * FROM brain.read_memory_consolidation_sources(requested_scope,requested_token,requested_generation)
     ) SELECT COALESCE(jsonb_agg(jsonb_build_object('timeline_id',raw_source.timeline_id,'item_id',raw_source.item_id,'revision',raw_source.revision,'change_sequence',raw_source.change_sequence,'is_fence',raw_source.is_fence) ORDER BY raw_source.change_sequence,raw_source.item_id),'[]'::jsonb)
     INTO raw_page FROM raw_source;
     PERFORM 1
@@ -95,8 +93,8 @@ BEGIN
         SELECT * FROM jsonb_to_recordset(raw_page) AS record(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,is_fence boolean)
     ), source AS MATERIALIZED (
         SELECT raw.timeline_id,
-               CASE WHEN raw.item_id IS NOT NULL AND item.state='active' AND item.current_revision=raw.revision AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=raw.item_id AND (quarantine.released_at IS NULL OR raw.revision<>item.current_revision)) THEN raw.item_id END AS item_id,
-               CASE WHEN raw.item_id IS NOT NULL AND item.state='active' AND item.current_revision=raw.revision AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=raw.item_id AND (quarantine.released_at IS NULL OR raw.revision<>item.current_revision)) THEN raw.revision END AS revision,
+               CASE WHEN raw.item_id IS NOT NULL AND item.layer='curated' AND item.state='active' AND item.current_revision=raw.revision AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=raw.item_id AND (quarantine.released_at IS NULL OR raw.revision<>item.current_revision)) THEN raw.item_id END AS item_id,
+               CASE WHEN raw.item_id IS NOT NULL AND item.layer='curated' AND item.state='active' AND item.current_revision=raw.revision AND NOT EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=raw.item_id AND (quarantine.released_at IS NULL OR raw.revision<>item.current_revision)) THEN raw.revision END AS revision,
                raw.change_sequence,raw.is_fence
         FROM raw LEFT JOIN brain.memory_items AS item ON item.id=raw.item_id
     ) SELECT COALESCE(jsonb_agg(jsonb_build_object('timeline_id',source.timeline_id,'item_id',source.item_id,'revision',source.revision,'change_sequence',source.change_sequence,'is_fence',source.is_fence) ORDER BY source.change_sequence,source.item_id),'[]'::jsonb)

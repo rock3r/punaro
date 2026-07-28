@@ -183,7 +183,7 @@ const (
 	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
 	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
 	memoryConsolidationDocumentsRoutineMD5           = "0b284fa1e93f9b8cd62604d4e2a3821c"
-	memoryConsolidationV38DocumentsRoutineMD5        = "da1f0cf7611c37604f98fa33529748df"
+	memoryConsolidationV38DocumentsRoutineMD5        = "f34725c0ab56059bbaef422677f37357"
 	memoryConsolidationV35DocumentsRoutineMD5        = "578fc76b7dd1ed66ccdd7895cd50e07c"
 	memoryConsolidationV36DocumentsRoutineMD5        = "8eac22d68c0b50c43de1f8892c925c55"
 	memoryConsolidationV33ClaimRoutineMD5            = "32e95c7fb6a9e73522c73b825bc3dcea"
