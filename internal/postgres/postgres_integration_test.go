@@ -833,6 +833,28 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	if state, err := migrate(ctx, ownerDB, v33); err != nil || state.Classification != Compatible || state.Version != 33 {
 		t.Fatalf("v33 bridge setup state=%#v err=%v", state, err)
 	}
+	var rootTimeline, restoredTimeline, scopeID string
+	if err := ownerDB.QueryRowContext(ctx, `WITH principal AS (
+    INSERT INTO auth.principals(kind,display_name) VALUES ('device','v33 restore checkpoint actor') RETURNING id
+), project AS (
+    INSERT INTO relay.projects(display_name,created_by) SELECT 'v33 restore checkpoint project',id FROM principal RETURNING id,created_by
+), scope AS (
+    INSERT INTO brain.scopes(project_id,created_by) SELECT id,created_by FROM project RETURNING id
+), prior AS (
+    SELECT installation_id,timeline_id,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE
+), rotated AS (
+    UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),change_sequence=7,timeline_started_at=statement_timestamp()
+    WHERE singleton RETURNING timeline_id
+), event AS (
+    INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence)
+    SELECT gen_random_uuid(),gen_random_uuid(),prior.installation_id,prior.timeline_id,rotated.timeline_id,prior.change_sequence FROM prior,rotated
+), checkpoint AS (
+    INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id,change_sequence)
+    SELECT scope.id,rotated.timeline_id,7 FROM scope,rotated RETURNING scope_id
+)
+SELECT prior.timeline_id::text,rotated.timeline_id::text,checkpoint.scope_id::text FROM prior,rotated,checkpoint`).Scan(&rootTimeline, &restoredTimeline, &scopeID); err != nil {
+		t.Fatalf("seed v33 restored checkpoint: %v", err)
+	}
 	conn := mustConn(ctx, t, ownerDB)
 	defer func() { _ = conn.Close() }()
 	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`); err != nil {
@@ -846,6 +868,11 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	}
 	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
 		t.Fatalf("v33-to-current bridge state=%#v err=%v", state, err)
+	}
+	var checkpointTimeline string
+	var checkpointSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT timeline_id::text,change_sequence FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, scopeID).Scan(&checkpointTimeline, &checkpointSequence); err != nil || checkpointTimeline != rootTimeline || checkpointTimeline == restoredTimeline || checkpointSequence != 0 {
+		t.Fatalf("v33 restored checkpoint rebase timeline=%q sequence=%d root=%q restored=%q err=%v", checkpointTimeline, checkpointSequence, rootTimeline, restoredTimeline, err)
 	}
 }
 

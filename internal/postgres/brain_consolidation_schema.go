@@ -47,7 +47,7 @@ WITH objects AS (
             AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'boolean'::regtype]::oid[]
             AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t']::"char"[]
             AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','is_fence']::text[]
-            AND md5(btrim(routine.prosrc,E' \n\r\t'))=$3)) AS exact
+            AND md5(btrim(routine.prosrc,E' \n\r\t'))=$3))) AS exact
     FROM pg_proc AS routine,objects WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid])
 ), constraint_safety AS (
     SELECT count(*)=5

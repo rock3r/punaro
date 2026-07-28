@@ -1,3 +1,14 @@
+WITH RECURSIVE lineage(timeline_id) AS (
+  SELECT state.timeline_id FROM jobs.server_state AS state WHERE state.singleton
+  UNION
+  SELECT event.previous_timeline_id FROM jobs.restore_events AS event JOIN lineage ON event.restored_timeline_id=lineage.timeline_id
+), root AS (
+  SELECT candidate.timeline_id FROM lineage AS candidate
+  WHERE NOT EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.restored_timeline_id=candidate.timeline_id)
+)
+UPDATE brain.memory_consolidation_checkpoints AS checkpoint
+SET timeline_id=(SELECT timeline_id FROM root),change_sequence=0,lease_holder=NULL,lease_token=NULL,lease_generation=checkpoint.lease_generation+1,lease_until=NULL,updated_at=statement_timestamp();
+
 CREATE FUNCTION brain.read_memory_consolidation_sources(requested_scope uuid, requested_token uuid, requested_generation bigint)
 RETURNS TABLE(timeline_id uuid,item_id uuid,revision bigint,change_sequence bigint,is_fence boolean)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
