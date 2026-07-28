@@ -2,6 +2,8 @@ package embeddingprovider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +39,52 @@ func TestOpenAICompatibleProviderUsesPinnedGenerationModel(t *testing.T) {
 	vector, err := provider.EmbedMemoryQuery(context.Background(), generation, "release decision")
 	if err != nil || len(vector) != 2 || vector[0] != 0.25 || vector[1] != 0.75 {
 		t.Fatalf("vector=%v err=%v", vector, err)
+	}
+}
+
+func TestOpenAICompatibleProviderEmbedsOneFencedCanonicalChunk(t *testing.T) {
+	const document = `{"title":"release decision"}`
+	digest := sha256.Sum256([]byte(document))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model      string `json:"model"`
+			Input      string `json:"input"`
+			Dimensions int    `json:"dimensions"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Model != "text-embedding-3-small:2026-07-27" || request.Input != document || request.Dimensions != 2 {
+			t.Fatalf("request=%+v err=%v", request, err)
+		}
+		_, _ = w.Write([]byte(`{"model":"text-embedding-3-small:2026-07-27","data":[{"embedding":[0.25,0.75]}]}`))
+	}))
+	defer server.Close()
+	provider, err := NewOpenAICompatible(server.URL, "provider-key", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := activeGeneration()
+	generation.State = postgres.MemoryEmbeddingGenerationBuilding
+	vectors, err := provider.Embed(context.Background(), generation, []postgres.MemoryEmbeddingSourceChunk{{Ordinal: 0, ContentSHA256: hex.EncodeToString(digest[:]), StartOffset: 0, EndOffset: len(document), Text: document}})
+	if err != nil || len(vectors) != 1 || len(vectors[0]) != 2 || vectors[0][0] != 0.25 || vectors[0][1] != 0.75 {
+		t.Fatalf("vectors=%v err=%v", vectors, err)
+	}
+}
+
+func TestOpenAICompatibleProviderRejectsUnfencedWorkerChunksBeforeNetwork(t *testing.T) {
+	provider, err := NewOpenAICompatible("https://example.com/embeddings", "provider-key", &http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, chunks := range map[string][]postgres.MemoryEmbeddingSourceChunk{
+		"multiple":  {{}, {}},
+		"empty":     {{Ordinal: 0, ContentSHA256: strings.Repeat("0", 64), StartOffset: 0, EndOffset: 1, Text: ""}},
+		"bad hash":  {{Ordinal: 0, ContentSHA256: strings.Repeat("0", 64), StartOffset: 0, EndOffset: 1, Text: "x"}},
+		"oversized": {{Ordinal: 0, ContentSHA256: strings.Repeat("0", 64), StartOffset: 0, EndOffset: maxSourceBytes + 1, Text: strings.Repeat("x", maxSourceBytes+1)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := provider.Embed(context.Background(), activeGeneration(), chunks); err == nil {
+				t.Fatal("Embed accepted an unfenced worker chunk")
+			}
+		})
 	}
 }
 

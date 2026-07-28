@@ -5,6 +5,8 @@ package embeddingprovider
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,6 +24,7 @@ const (
 	maxResponseBytes = 1 << 20
 	maxQueryBytes    = 1024
 	maxQueryRunes    = 256
+	maxSourceBytes   = 256 << 10
 	maxJSONDepth     = 32
 )
 
@@ -52,6 +55,29 @@ func (p *OpenAICompatible) EmbedMemoryQuery(ctx context.Context, generation post
 	if p == nil || generation.Validate() != nil || generation.State != postgres.MemoryEmbeddingGenerationActive || !immutableProviderModel(generation.Model, generation.Revision) || query == "" || !utf8.ValidString(query) || len(query) > maxQueryBytes || utf8.RuneCountInString(query) > maxQueryRunes {
 		return nil, errors.New("embedding provider request is invalid")
 	}
+	return p.embed(ctx, generation, query)
+}
+
+// Embed derives one vector for the current single, fenced canonical-document
+// chunk. Later source chunking must extend this transport deliberately rather
+// than silently increasing a provider request's content or response bounds.
+func (p *OpenAICompatible) Embed(ctx context.Context, generation postgres.MemoryEmbeddingGeneration, chunks []postgres.MemoryEmbeddingSourceChunk) ([][]float64, error) {
+	if p == nil || generation.Validate() != nil || !immutableProviderModel(generation.Model, generation.Revision) || len(chunks) != 1 {
+		return nil, errors.New("embedding provider request is invalid")
+	}
+	chunk := chunks[0]
+	digest := sha256.Sum256([]byte(chunk.Text))
+	if chunk.Ordinal != 0 || chunk.StartOffset != 0 || chunk.EndOffset != len(chunk.Text) || chunk.EndOffset < 1 || len(chunk.Text) > maxSourceBytes || !utf8.ValidString(chunk.Text) || len(chunk.ContentSHA256) != 64 || hex.EncodeToString(digest[:]) != chunk.ContentSHA256 {
+		return nil, errors.New("embedding provider request is invalid")
+	}
+	vector, err := p.embed(ctx, generation, chunk.Text)
+	if err != nil {
+		return nil, err
+	}
+	return [][]float64{vector}, nil
+}
+
+func (p *OpenAICompatible) embed(ctx context.Context, generation postgres.MemoryEmbeddingGeneration, input string) ([]float64, error) {
 	var dimensions *int
 	if strings.HasPrefix(generation.Model, "text-embedding-3-") {
 		dimensions = &generation.Dimensions
@@ -61,7 +87,7 @@ func (p *OpenAICompatible) EmbedMemoryQuery(ctx context.Context, generation post
 		Input          string `json:"input"`
 		Dimensions     *int   `json:"dimensions,omitempty"`
 		EncodingFormat string `json:"encoding_format"`
-	}{Model: generation.Model, Input: query, Dimensions: dimensions, EncodingFormat: "float"})
+	}{Model: generation.Model, Input: input, Dimensions: dimensions, EncodingFormat: "float"})
 	if err != nil {
 		return nil, errors.New("embedding provider request is unavailable")
 	}

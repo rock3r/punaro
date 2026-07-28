@@ -481,6 +481,12 @@ of the pinned dimension, must have bounded JSON nesting, and must
 declare the exact pinned model. Provider failures are content-free and never
 log credentials, query text, or raw response data. Credential-file loading,
 provider selection, and daemon wiring remain separate deployment slices.
+The same transport also accepts the worker's current one fenced canonical
+document chunk for either validated active or building generation, preserving
+its exact SHA-256 and byte-range boundary before a provider request. It
+deliberately rejects multiple chunks: later chunking must add an explicitly
+bounded request and response contract rather than silently widening provider
+exposure.
 
 Provider API-key files use canonical absolute paths only. On Unix, every
 ancestor must be a non-symlinked directory owned by the daemon user or root
