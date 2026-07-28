@@ -1,8 +1,11 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -37,13 +40,14 @@ type MemoryConsolidationLease struct {
 	Until      time.Time
 }
 
-// MemoryConsolidationSource identifies one exact revision selected under a
-// live consolidation lease. Its document is intentionally deferred until a
-// later provider boundary; this selection record cannot itself create output.
+// MemoryConsolidationSource identifies one exact revision and its canonical
+// document selected under a live consolidation lease. It cannot itself create
+// output or change canonical memory.
 type MemoryConsolidationSource struct {
 	ItemID         string
 	Revision       int64
 	ChangeSequence int64
+	Document       json.RawMessage
 }
 
 // MemoryConsolidationInput is the bounded, lease-fenced source coordinate
@@ -68,7 +72,8 @@ func (input MemoryConsolidationInput) valid() bool {
 		return false
 	}
 	for _, source := range input.Sources {
-		if !validOpaqueID(source.ItemID) || source.Revision < 1 || source.ChangeSequence <= input.Lease.Sequence || source.ChangeSequence > input.NextSequence {
+		document, err := canonicalMemoryDocument(source.Document)
+		if !validOpaqueID(source.ItemID) || source.Revision < 1 || source.ChangeSequence <= input.Lease.Sequence || source.ChangeSequence > input.NextSequence || err != nil || !json.Valid(document) {
 			return false
 		}
 	}
@@ -83,7 +88,7 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 	if !lease.valid() {
 		return MemoryConsolidationInput{}, errors.New("invalid consolidation lease")
 	}
-	rows, err := d.db.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,is_fence FROM brain.read_memory_consolidation_sources($1,$2,$3)`, lease.ScopeID, lease.Token, lease.Generation)
+	rows, err := d.db.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,content_sha256,is_fence FROM brain.read_memory_consolidation_documents($1,$2,$3)`, lease.ScopeID, lease.Token, lease.Generation)
 	if err != nil {
 		return MemoryConsolidationInput{}, errors.New("consolidation sources are unavailable")
 	}
@@ -94,25 +99,32 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 		var timelineID string
 		var itemID sql.NullString
 		var revision, sequence sql.NullInt64
+		var document sql.NullString
+		var contentHash []byte
 		var fence bool
-		if err := rows.Scan(&timelineID, &itemID, &revision, &sequence, &fence); err != nil || timelineID != lease.TimelineID {
+		if err := rows.Scan(&timelineID, &itemID, &revision, &sequence, &document, &contentHash, &fence); err != nil || timelineID != lease.TimelineID {
 			return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
 		}
 		if fence {
-			if !sequence.Valid || sequence.Int64 != lease.Sequence {
+			if itemID.Valid || revision.Valid || document.Valid || len(contentHash) != 0 || !sequence.Valid || sequence.Int64 != lease.Sequence {
 				return MemoryConsolidationInput{}, ErrStaleMemoryConsolidationLease
 			}
 			live = true
 			continue
 		}
-		if !itemID.Valid || !revision.Valid || !sequence.Valid {
-			if itemID.Valid || revision.Valid || !sequence.Valid {
+		if !itemID.Valid || !revision.Valid || !document.Valid || !sequence.Valid {
+			if itemID.Valid || revision.Valid || document.Valid || len(contentHash) != 0 || !sequence.Valid {
 				return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
 			}
 			input.NextSequence = sequence.Int64
 			continue
 		}
-		source := MemoryConsolidationSource{ItemID: itemID.String, Revision: revision.Int64, ChangeSequence: sequence.Int64}
+		digest := sha256.Sum256([]byte(document.String))
+		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
+		if err != nil || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) {
+			return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
+		}
+		source := MemoryConsolidationSource{ItemID: itemID.String, Revision: revision.Int64, ChangeSequence: sequence.Int64, Document: canonical}
 		input.Sources = append(input.Sources, source)
 		input.NextSequence = source.ChangeSequence
 	}

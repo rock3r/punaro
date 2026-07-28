@@ -263,9 +263,47 @@ FROM jobs.server_state AS state WHERE state.singleton`, locked.ScopeID, request.
 		if _, err := tx.ExecContext(ctx, `UPDATE brain.memory_items SET state=$2,current_revision=$3,updated_at=statement_timestamp() WHERE id=$1`, request.ItemID, target, next); err != nil {
 			return MemoryMutationResult{}, errors.New("memory archive state could not be updated")
 		}
+		secretScanOutcome := "clear"
+		becameQuarantined := false
+		releasedQuarantine := false
+		if target == MemoryActive {
+			finding, err := firstUnexceptedMemorySecretFinding(ctx, tx, locked.ProjectID, locked.Document)
+			if err != nil {
+				return MemoryMutationResult{}, err
+			}
+			if finding != nil {
+				becameQuarantined, err = storeActiveMemoryQuarantine(ctx, tx, request.PrincipalID, request.ItemID, next, *finding)
+				if err != nil {
+					return MemoryMutationResult{}, err
+				}
+				secretScanOutcome = "quarantined"
+			} else {
+				releasedQuarantine, err = releaseActiveMemoryQuarantine(ctx, tx, request.PrincipalID, request.ItemID)
+				if err != nil {
+					return MemoryMutationResult{}, err
+				}
+			}
+		}
 		state, err := commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, change, action)
 		if err != nil {
 			return MemoryMutationResult{}, err
+		}
+		if becameQuarantined {
+			state, err = commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, MemoryChangeQuarantine, AuditMemoryQuarantine)
+			if err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
+		if releasedQuarantine {
+			state, err = commitMemoryChange(ctx, tx, control, request.PrincipalID, locked.ProjectID, locked.ScopeID, request.ItemID, next, MemoryChangeQuarantineRelease, AuditMemoryQuarantineRelease)
+			if err != nil {
+				return MemoryMutationResult{}, err
+			}
+		}
+		if target == MemoryActive {
+			if err := recordMemorySecretScan(ctx, tx, locked.ProjectID, request.ItemID, next, request.PrincipalID, secretScanOutcome); err != nil {
+				return MemoryMutationResult{}, err
+			}
 		}
 		return MemoryMutationResult{ItemID: request.ItemID, Revision: next, ETag: memoryETag(request.ItemID, next), State: target, ChangeSequence: state.ChangeSequence}, nil
 	})

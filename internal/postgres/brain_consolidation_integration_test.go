@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -40,9 +41,52 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 		}
 		created = append(created, result)
 	}
+	lagged, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111130", LogicalKey: "consolidation.lagged", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"before-update"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lagged, err = app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: lagged.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111131", ExpectedETag: lagged.ETag, LogicalKey: "consolidation.lagged", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"after-update"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	input, err = app.ReadMemoryConsolidationInput(ctx, first)
-	if err != nil || len(input.Sources) != len(created) || input.NextSequence != created[len(created)-1].ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision {
-		t.Fatalf("post-claim consolidation input=%#v created=%#v err=%v", input, created, err)
+	if err != nil || len(input.Sources) != len(created)+1 || input.NextSequence != lagged.ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision || input.Sources[2].ItemID != lagged.ItemID || input.Sources[2].Revision != lagged.Revision {
+		t.Fatalf("post-claim consolidation input=%#v created=%#v lagged=%#v err=%v", input, created, lagged, err)
+	}
+	var firstDocument, secondDocument map[string]bool
+	if json.Unmarshal(input.Sources[0].Document, &firstDocument) != nil || json.Unmarshal(input.Sources[1].Document, &secondDocument) != nil || !firstDocument["source"] || !secondDocument["source"] {
+		t.Fatalf("consolidation source documents=%#v", input.Sources)
+	}
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_secret_scans SET rule_version=rule_version+1 WHERE item_id=$1`, created[0].ItemID); err != nil {
+		t.Fatal(err)
+	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("stale consolidation scan seed changed=%d err=%v", changed, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, first); err == nil {
+		t.Fatal("stale secret scan coverage allowed consolidation input")
+	}
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_secret_scans SET rule_version=rule_version-1 WHERE item_id=$1`, created[0].ItemID); err != nil {
+		t.Fatal(err)
+	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("restore consolidation scan seed changed=%d err=%v", changed, err)
+	}
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=decode(repeat('00',32),'hex') WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision); err != nil {
+		t.Fatal(err)
+	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("corrupt consolidation source hash changed=%d err=%v", changed, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, first); err == nil {
+		t.Fatal("corrupt consolidation source hash allowed consolidation input")
+	}
+	var storedSecondDocument string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT document::text FROM brain.memory_revisions WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision).Scan(&storedSecondDocument); err != nil {
+		t.Fatal(err)
+	}
+	secondHash := sha256.Sum256([]byte(storedSecondDocument))
+	if result, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_revisions SET content_sha256=$3 WHERE item_id=$1 AND revision=$2`, created[1].ItemID, created[1].Revision, secondHash[:]); err != nil {
+		t.Fatal(err)
+	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		t.Fatalf("restore consolidation source hash changed=%d err=%v", changed, err)
 	}
 	initialSequence := input.NextSequence
 	if _, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease); err != nil || claimed {
@@ -137,6 +181,14 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
+	}
+	restored, err := app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: archived.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111132", ExpectedETag: archived.ETag, Archived: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, fourth)
+	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != restored.ItemID || input.Sources[0].Revision != restored.Revision || input.NextSequence != restored.ChangeSequence {
+		t.Fatalf("restored revision lacked consolidation scan coverage input=%#v restored=%#v err=%v", input, restored, err)
 	}
 	testMemoryConsolidationRestoreLineageIntegration(ctx, t, app, ownerDB, actor.ID)
 }
@@ -241,6 +293,7 @@ func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testi
 	for _, drift := range []struct{ apply, restore string }{
 		{`GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`, `REVOKE SELECT ON brain.memory_consolidation_checkpoints FROM punaro_app`},
 		{`GRANT EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) FROM PUBLIC`},
+		{`GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) FROM PUBLIC`},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
 			t.Fatal(err)
