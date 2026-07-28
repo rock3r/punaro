@@ -2494,13 +2494,13 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if err != nil {
 		t.Fatal(err)
 	}
-	var recoveredLease MemoryConsolidationLease
-	if err := ownerDB.QueryRowContext(ctx, `SELECT scope_id::text,timeline_id::text,change_sequence,lease_holder::text,lease_token::text,lease_generation,lease_until
-FROM brain.memory_consolidation_checkpoints
-WHERE lease_until > statement_timestamp()
-ORDER BY scope_id
-LIMIT 1`).Scan(&recoveredLease.ScopeID, &recoveredLease.TimelineID, &recoveredLease.Sequence, &recoveredLease.Holder, &recoveredLease.Token, &recoveredLease.Generation, &recoveredLease.Until); err != nil {
-		t.Fatalf("live consolidation lease for restore fence: %v", err)
+	var restoreScopeID string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes ORDER BY id LIMIT 1`).Scan(&restoreScopeID); err != nil {
+		t.Fatalf("consolidation scope for restore fence: %v", err)
+	}
+	recoveredLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, restoreScopeID, "018f47f4-7b18-7cc2-98d6-31d4fb5ab744", memoryEmbeddingMaxLease)
+	if err != nil || !claimed {
+		t.Fatalf("live consolidation lease for restore fence lease=%#v claimed=%t err=%v", recoveredLease, claimed, err)
 	}
 	admin, err := OpenAdministration(ctx, Config{DSNFile: ownerFile})
 	if err != nil {
