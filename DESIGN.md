@@ -482,6 +482,15 @@ declare the exact pinned model. Provider failures are content-free and never
 log credentials, query text, or raw response data. Credential-file loading,
 provider selection, and daemon wiring remain separate deployment slices.
 
+Provider API-key files use canonical absolute paths only. On Unix, every
+ancestor must be a non-symlinked directory owned by the daemon user or root
+and not writable by group or others; the key file itself must be a single-link,
+regular `0600`-or-stricter file owned by the daemon user and is opened with
+`O_NOFOLLOW` before its identity and permissions are rechecked. Keys are one
+bounded, non-empty header-safe line and are never included in diagnostics. On
+Windows, loading fails closed until equivalent ACL and reparse-point checks
+exist.
+
 The bounded embedding executor is provider-agnostic. It claims only existing
 fenced work, re-reads the exact live generation/item/revision/hash/lease before
 passing a bounded canonical JSON document to an injected provider, validates
