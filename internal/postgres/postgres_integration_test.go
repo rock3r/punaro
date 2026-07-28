@@ -836,26 +836,27 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	if controls, err := updateControlsAvailable(ctx, ownerDB); err != nil || !controls {
 		t.Fatalf("v33 update controls before v34 migration controls=%t err=%v", controls, err)
 	}
-	var rootTimeline, restoredTimeline, scopeID string
-	if err := ownerDB.QueryRowContext(ctx, `WITH principal AS (
-    INSERT INTO auth.principals(kind,display_name) VALUES ('device','v33 restore checkpoint actor') RETURNING id
-), project AS (
-    INSERT INTO relay.projects(display_name,created_by) SELECT 'v33 restore checkpoint project',id FROM principal RETURNING id,created_by
-), scope AS (
-    INSERT INTO brain.scopes(project_id,created_by) SELECT id,created_by FROM project RETURNING id
-), prior AS (
-    SELECT installation_id,timeline_id,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE
-), rotated AS (
-    UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),change_sequence=7,timeline_started_at=statement_timestamp()
-    WHERE singleton RETURNING timeline_id
-), event AS (
-    INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence)
-    SELECT gen_random_uuid(),gen_random_uuid(),prior.installation_id,prior.timeline_id,rotated.timeline_id,prior.change_sequence FROM prior,rotated
-), checkpoint AS (
-    INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id,change_sequence)
-    SELECT scope.id,rotated.timeline_id,7 FROM scope,rotated RETURNING scope_id
-)
-SELECT prior.timeline_id::text,rotated.timeline_id::text,checkpoint.scope_id::text FROM prior,rotated,checkpoint`).Scan(&rootTimeline, &restoredTimeline, &scopeID); err != nil {
+	var actorID, projectID, installationID, rootTimeline, restoredTimeline, scopeID string
+	var rootSequence int64
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals(kind,display_name) VALUES ('device','v33 restore checkpoint actor') RETURNING id::text`).Scan(&actorID); err != nil {
+		t.Fatalf("seed v33 restore actor: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('v33 restore checkpoint project',$1) RETURNING id::text`, actorID).Scan(&projectID); err != nil {
+		t.Fatalf("seed v33 restore project: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actorID).Scan(&scopeID); err != nil {
+		t.Fatalf("seed v33 restore scope: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT installation_id::text,timeline_id::text,change_sequence FROM jobs.server_state WHERE singleton FOR UPDATE`).Scan(&installationID, &rootTimeline, &rootSequence); err != nil {
+		t.Fatalf("seed v33 restore state: %v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `UPDATE jobs.server_state SET timeline_id=gen_random_uuid(),change_sequence=7,timeline_started_at=statement_timestamp() WHERE singleton RETURNING timeline_id::text`).Scan(&restoredTimeline); err != nil {
+		t.Fatalf("seed v33 restored timeline: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO jobs.restore_events(restore_id,backup_id,installation_id,previous_timeline_id,restored_timeline_id,restored_change_sequence) VALUES (gen_random_uuid(),gen_random_uuid(),$1,$2,$3,$4)`, installationID, rootTimeline, restoredTimeline, rootSequence); err != nil {
+		t.Fatalf("seed v33 restore event: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id,change_sequence) VALUES ($1,$2,7)`, scopeID, restoredTimeline); err != nil {
 		t.Fatalf("seed v33 restored checkpoint: %v", err)
 	}
 	conn := mustConn(ctx, t, ownerDB)
