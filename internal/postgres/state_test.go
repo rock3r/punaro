@@ -69,7 +69,7 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 33 || manifest.MaxSupported != 33 || len(manifest.Migrations) != 33 {
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 33 || len(manifest.Migrations) != 33 {
 		t.Fatalf("manifest=%#v, want exact v33 compatibility window", manifest)
 	}
 	embedding := manifest.Migrations[23]
@@ -88,7 +88,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32:
+		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {

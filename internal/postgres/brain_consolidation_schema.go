@@ -11,14 +11,15 @@ WITH objects AS (
     SELECT to_regclass('brain.memory_consolidation_checkpoints') AS table_oid,
            to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)') AS claim_oid,
            to_regprocedure('brain.advance_memory_consolidation_checkpoint(uuid,uuid,bigint,uuid,bigint)') AS advance_oid
-), expected_columns(name,type_name,required) AS (
+), expected_columns(name,type_name,required,default_expression) AS (
     VALUES
-      ('scope_id','uuid',true),('timeline_id','uuid',true),('change_sequence','bigint',true),
-      ('lease_holder','uuid',false),('lease_token','uuid',false),('lease_generation','bigint',true),
-      ('lease_until','timestamp with time zone',false),('updated_at','timestamp with time zone',true)
+      ('scope_id','uuid',true,''),('timeline_id','uuid',true,''),('change_sequence','bigint',true,'0'),
+      ('lease_holder','uuid',false,''),('lease_token','uuid',false,''),('lease_generation','bigint',true,'0'),
+      ('lease_until','timestamp with time zone',false,''),('updated_at','timestamp with time zone',true,'statement_timestamp()')
 ), actual_columns AS (
-    SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull
+    SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
     FROM pg_attribute AS attribute,objects
+    LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
     WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), routine_safety AS (
     SELECT count(*)=2 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
@@ -53,7 +54,7 @@ WITH objects AS (
     WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid])
 )
 SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NULL
-   AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner') FROM pg_class WHERE oid=table_oid)
+   AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=table_oid)
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND routine_safety.exact
