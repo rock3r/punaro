@@ -336,6 +336,12 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 		}
 		mutations := []MemoryMutationResult(nil)
 		if approve {
+			if err := lockAndValidateConsolidationProposalSources(ctx, tx, project.ID, proposal.ProposalID, proposal.ScopeID); err != nil {
+				if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) {
+					return IdempotencyOutcome{}, ErrStaleMemoryProposal
+				}
+				return IdempotencyOutcome{}, err
+			}
 			steps := proposalStepInputs(proposal.Steps)
 			evidence := proposalEvidenceInputs(proposal.Evidence)
 			items, err := lockAndValidateProposalItems(ctx, tx, project.ID, steps, evidence)
@@ -378,6 +384,86 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 	return decodeMemoryProposalOutcome(outcome)
 }
 
+// lockAndValidateConsolidationProposalSources makes a consolidation-derived
+// proposal stale when any bound curated source is no longer its live revision.
+// Ordinary proposals have no rows here and retain their existing semantics.
+func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx, projectID, proposalID, scopeID string) error {
+	available, required, err := consolidationProposalSourcesAvailable(ctx, tx)
+	if err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if !available {
+		if required {
+			return errors.New("consolidation proposal sources are unavailable")
+		}
+		return nil
+	}
+	var expected int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1`, proposalID).Scan(&expected); err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if expected == 0 {
+		return nil
+	}
+	// Match the read boundary: approval must hold the mutable scan coverage
+	// relations through commit, otherwise a concurrent rescan or exception
+	// update could invalidate a source after this transaction validates it.
+	if _, err := tx.ExecContext(ctx, `SELECT brain.lock_memory_consolidation_source_guards()`); err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT source.item_id::text,source.revision,item.current_revision,item.state,item.layer,scope.id::text,revision.document::text,revision.content_sha256,
+EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.item_id=item.id AND quarantine.released_at IS NULL),
+COALESCE(scan.revision=source.revision AND scan.rule_version=guard.rule_version AND scan.rule_digest=guard.rule_digest
+  AND scan.exception_generation=COALESCE(project_state.exception_generation,0) AND scan.outcome='clear',false)
+FROM brain.memory_consolidation_proposal_sources AS source
+JOIN brain.memory_items AS item ON item.id=source.item_id
+JOIN brain.scopes AS scope ON scope.id=item.scope_id
+JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
+JOIN brain.secret_guard_state AS guard ON true
+JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=COALESCE(alias.canonical_project_id,scope.project_id)
+WHERE source.proposal_id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$2
+ORDER BY source.ordinal FOR SHARE OF item,scan`, proposalID, projectID)
+	if err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	seen := 0
+	for rows.Next() {
+		var itemID, itemScopeID string
+		var revision, currentRevision int64
+		var state MemoryState
+		var layer MemoryLayer
+		var quarantined, scanClear bool
+		var document string
+		var contentHash []byte
+		if err := rows.Scan(&itemID, &revision, &currentRevision, &state, &layer, &itemScopeID, &document, &contentHash, &quarantined, &scanClear); err != nil {
+			return errors.New("consolidation proposal source is malformed")
+		}
+		digest := sha256.Sum256([]byte(document))
+		if !validOpaqueID(itemID) || itemScopeID != scopeID || revision != currentRevision || state != MemoryActive || layer != MemoryLayerCurated || quarantined || !scanClear || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) {
+			return ErrStaleMemoryETag
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("consolidation proposal sources are unavailable")
+	}
+	if seen != expected {
+		return ErrStaleMemoryETag
+	}
+	return nil
+}
+
+func consolidationProposalSourcesAvailable(ctx context.Context, tx *sql.Tx) (available, required bool, err error) {
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM jobs.schema_migrations WHERE version>=38 AND status='applied')`).Scan(&required); err != nil || !required {
+		return false, required, err
+	}
+	available, err = memoryConsolidationProposalSourcesAvailable(ctx, tx)
+	return available, required, err
+}
+
 func lockAndValidateProposalItems(ctx context.Context, tx *sql.Tx, projectID string, steps []MemoryProposalStepInput, evidence []MemoryProposalEvidenceInput) (map[string]lockedProposalItem, error) {
 	items := make(map[string]lockedProposalItem, len(steps)+len(evidence))
 	for _, itemID := range sortedMemoryProposalItemIDs(steps, evidence) {
@@ -388,7 +474,8 @@ EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.it
 FROM brain.memory_items AS item
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
-WHERE item.id=$1 AND scope.project_id=$2
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE item.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$2
 FOR SHARE OF item`, itemID, projectID).Scan(&item.ScopeID, &item.Revision, &item.State, &item.Layer, &item.Document, &item.ContentHash, &item.Quarantined)
 		if errors.Is(err, sql.ErrNoRows) || item.Quarantined {
 			return nil, ErrNotFound
@@ -571,6 +658,34 @@ WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$
 	}
 	if err := evidenceRows.Close(); err != nil {
 		return MemoryProposal{}, errors.New("memory proposal evidence cannot close")
+	}
+	available, required, err := consolidationProposalSourcesAvailable(ctx, tx)
+	if err != nil {
+		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+	}
+	if required && !available {
+		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+	}
+	if available {
+		sourceRows, err := tx.QueryContext(ctx, `SELECT ordinal,timeline_id::text,item_id::text,revision,change_sequence FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1 ORDER BY ordinal`, proposalID)
+		if err != nil {
+			return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+		}
+		for sourceRows.Next() {
+			var source MemoryConsolidationProposalSource
+			if err := sourceRows.Scan(&source.Ordinal, &source.TimelineID, &source.ItemID, &source.Revision, &source.ChangeSequence); err != nil {
+				_ = sourceRows.Close()
+				return MemoryProposal{}, errors.New("memory proposal source is malformed")
+			}
+			proposal.Sources = append(proposal.Sources, source)
+		}
+		if err := sourceRows.Err(); err != nil {
+			_ = sourceRows.Close()
+			return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
+		}
+		if err := sourceRows.Close(); err != nil {
+			return MemoryProposal{}, errors.New("memory proposal sources cannot close")
+		}
 	}
 	resultRows, err := tx.QueryContext(ctx, `SELECT ordinal,item_id::text,revision FROM brain.memory_proposal_results WHERE proposal_id=$1 ORDER BY ordinal`, proposalID)
 	if err != nil {

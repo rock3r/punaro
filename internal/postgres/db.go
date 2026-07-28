@@ -1214,6 +1214,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = consolidationObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 38 {
+		proposalSourceObjectsPresent, err := memoryConsolidationProposalSourcesAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL memory consolidation proposal-source schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = proposalSourceObjectsPresent
+	}
 	return snapshot, nil
 }
 

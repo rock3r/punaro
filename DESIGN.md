@@ -593,6 +593,15 @@ work. Restores rescan their copied revision and record current clear or
 quarantined coverage, and the provider boundary rejects any document whose
 stored content hash no longer matches its canonical bytes.
 
+Schema version 38 records the source page of each staged consolidation proposal
+as immutable `(timeline, item, revision, change-sequence)` bindings. Staging
+rechecks the exact live checkpoint token and generation inside its proposal
+transaction, requires ordinary `memory.propose` authority, and creates only a
+pending proposal: it neither advances the checkpoint nor changes canonical
+memory. Generic proposal evidence remains restricted to evidence-layer records;
+consolidation provenance is a separate scope-bound relation so curated source
+revisions remain auditable without weakening that invariant.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes

@@ -17,6 +17,9 @@ func memoryConsolidationControlsAvailable(ctx context.Context, q queryer, versio
 	if version == 36 {
 		documentsMD5 = memoryConsolidationV36DocumentsRoutineMD5
 	}
+	if version >= 38 {
+		documentsMD5 = memoryConsolidationV38DocumentsRoutineMD5
+	}
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('brain.memory_consolidation_checkpoints') AS table_oid,
@@ -116,13 +119,118 @@ FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advan
 	return available, err
 }
 
+// memoryConsolidationProposalSourcesAvailable verifies the v38 immutable
+// provenance relation and the narrow application-role boundary around it.
+func memoryConsolidationProposalSourcesAvailable(ctx context.Context, q queryer) (bool, error) {
+	var available bool
+	err := q.QueryRowContext(ctx, `
+WITH relation AS (
+    SELECT to_regclass('brain.memory_consolidation_proposal_sources') AS oid,
+           to_regprocedure('brain.guard_memory_consolidation_proposal_source()') AS guard_oid,
+           to_regprocedure('brain.lock_memory_consolidation_source_guards()') AS lock_guard_oid
+), expected_columns(name,type_name,required) AS (
+    VALUES ('proposal_id','uuid',true),('ordinal','smallint',true),('timeline_id','uuid',true),
+           ('item_id','uuid',true),('revision','bigint',true),('change_sequence','bigint',true)
+), actual_columns AS (
+    SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull
+    FROM pg_attribute AS attribute,relation
+    WHERE attribute.attrelid=relation.oid AND attribute.attnum>0 AND NOT attribute.attisdropped
+), application_privileges AS (
+    SELECT has_table_privilege('punaro_app',oid,'SELECT') AS selects,
+           has_column_privilege('punaro_app',oid,'proposal_id','INSERT')
+             AND has_column_privilege('punaro_app',oid,'ordinal','INSERT')
+             AND has_column_privilege('punaro_app',oid,'timeline_id','INSERT')
+             AND has_column_privilege('punaro_app',oid,'item_id','INSERT')
+             AND has_column_privilege('punaro_app',oid,'revision','INSERT')
+             AND has_column_privilege('punaro_app',oid,'change_sequence','INSERT') AS inserts,
+           NOT has_table_privilege('punaro_app',oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+             AND NOT has_any_column_privilege('punaro_app',oid,'UPDATE,REFERENCES') AS no_writes
+    FROM relation
+), expected_table_acl(grantee,privilege_type,is_grantable) AS (
+    VALUES
+      ('punaro_owner','SELECT',false),('punaro_owner','INSERT',false),('punaro_owner','UPDATE',false),
+      ('punaro_owner','DELETE',false),('punaro_owner','TRUNCATE',false),('punaro_owner','REFERENCES',false),
+      ('punaro_owner','TRIGGER',false),('punaro_app','SELECT',false)
+    UNION ALL SELECT 'punaro_owner','MAINTAIN',false WHERE current_setting('server_version_num')::integer >= 170000
+), actual_table_acl AS (
+    SELECT role.rolname,entry.privilege_type,entry.is_grantable
+    FROM pg_class AS table_row
+    CROSS JOIN LATERAL aclexplode(COALESCE(table_row.relacl,acldefault('r',table_row.relowner))) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE table_row.oid=relation.oid
+), table_acl_safety AS (
+    SELECT NOT EXISTS (SELECT * FROM expected_table_acl EXCEPT SELECT * FROM actual_table_acl)
+       AND NOT EXISTS (SELECT * FROM actual_table_acl EXCEPT SELECT * FROM expected_table_acl) AS exact
+), column_acl_safety AS (
+    SELECT count(*)=6 AND bool_and(role.rolname='punaro_app' AND entry.privilege_type='INSERT' AND NOT entry.is_grantable) AS exact
+    FROM pg_attribute AS attribute
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE attribute.attrelid=relation.oid AND attribute.attnum>0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
+), trigger_safety AS (
+    SELECT count(*)=2
+       AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1
+       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1 AS exact
+    FROM pg_trigger,relation WHERE tgrelid=relation.oid AND NOT tgisinternal
+), constraint_safety AS (
+    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[])=1
+       AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.memory_proposals'::regclass AND confdeltype='c')=1
+       AND count(*) FILTER (WHERE contype='c')=3 AS exact
+    FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
+), expected_checks(name,expression) AS (
+    VALUES ('memory_consolidation_proposal_sources_ordinal_check','((ordinal >= 0) AND (ordinal <= 127))'),
+           ('memory_consolidation_proposal_sources_revision_check','(revision >= 1)'),
+           ('memory_consolidation_proposal_sources_sequence_check','(change_sequence >= 0)')
+), actual_checks AS (
+    SELECT constraint_row.conname,pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
+    FROM pg_constraint AS constraint_row,relation
+    WHERE constraint_row.conrelid=relation.oid AND constraint_row.contype='c'
+      AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
+), expected_lock_guard_acl(grantee,privilege_type,is_grantable) AS (
+    VALUES ('punaro_owner','EXECUTE',false),('punaro_app','EXECUTE',false)
+), actual_lock_guard_acl AS (
+    SELECT role.rolname,entry.privilege_type,entry.is_grantable
+    FROM pg_proc AS routine
+    CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE routine.oid=lock_guard_oid
+), guard_safety AS (
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',pg_proc.oid,'EXECUTE')) AS exact
+    FROM pg_proc,relation WHERE pg_proc.oid=guard_oid
+), lock_guard_safety AS (
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef AND provolatile='v'
+      AND NOT proretset AND prorettype='void'::regtype AND pronargs=0
+      AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$2
+      AND NOT EXISTS (SELECT * FROM expected_lock_guard_acl EXCEPT SELECT * FROM actual_lock_guard_acl)
+      AND NOT EXISTS (SELECT * FROM actual_lock_guard_acl EXCEPT SELECT * FROM expected_lock_guard_acl)) AS exact
+    FROM pg_proc,relation WHERE pg_proc.oid=lock_guard_oid
+)
+SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL AND relation.lock_guard_oid IS NOT NULL
+   AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=relation.oid)
+   AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
+   AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
+   AND application_privileges.selects AND application_privileges.inserts AND application_privileges.no_writes
+   AND table_acl_safety.exact AND column_acl_safety.exact
+   AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact AND lock_guard_safety.exact
+   AND NOT EXISTS (SELECT * FROM expected_checks EXCEPT SELECT * FROM actual_checks)
+   AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
+FROM relation,application_privileges,table_acl_safety,column_acl_safety,trigger_safety,constraint_safety,guard_safety,lock_guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5, memoryConsolidationProposalSourceLockGuardRoutineMD5).Scan(&available)
+	return available, err
+}
+
 const (
-	memoryConsolidationClaimRoutineMD5        = "121df7d09493be8662f4618208aaf342"
-	memoryConsolidationAdvanceRoutineMD5      = "5666d576e054c6b06999a0b6ce7b6c62"
-	memoryConsolidationSourcesRoutineMD5      = "2b180c012d8c1ae7332b81456845a8bf"
-	memoryConsolidationDocumentsRoutineMD5    = "0b284fa1e93f9b8cd62604d4e2a3821c"
-	memoryConsolidationV35DocumentsRoutineMD5 = "578fc76b7dd1ed66ccdd7895cd50e07c"
-	memoryConsolidationV36DocumentsRoutineMD5 = "8eac22d68c0b50c43de1f8892c925c55"
-	memoryConsolidationV33ClaimRoutineMD5     = "32e95c7fb6a9e73522c73b825bc3dcea"
-	memoryConsolidationV33AdvanceRoutineMD5   = "cce038c3cca8f3c4f48da8b5e155443c"
+	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
+	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
+	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"
+	memoryConsolidationAdvanceRoutineMD5                 = "5666d576e054c6b06999a0b6ce7b6c62"
+	memoryConsolidationSourcesRoutineMD5                 = "2b180c012d8c1ae7332b81456845a8bf"
+	memoryConsolidationDocumentsRoutineMD5               = "0b284fa1e93f9b8cd62604d4e2a3821c"
+	memoryConsolidationV38DocumentsRoutineMD5            = "d2d9593918a866b633499a2619609ce3"
+	memoryConsolidationV35DocumentsRoutineMD5            = "578fc76b7dd1ed66ccdd7895cd50e07c"
+	memoryConsolidationV36DocumentsRoutineMD5            = "8eac22d68c0b50c43de1f8892c925c55"
+	memoryConsolidationV33ClaimRoutineMD5                = "32e95c7fb6a9e73522c73b825bc3dcea"
+	memoryConsolidationV33AdvanceRoutineMD5              = "cce038c3cca8f3c4f48da8b5e155443c"
 )

@@ -59,6 +59,14 @@ type MemoryConsolidationInput struct {
 	Sources      []MemoryConsolidationSource
 }
 
+// MemoryConsolidationProposalRequest stages one ordinary proposal together
+// with the immutable source page that produced it. It never approves or
+// directly changes canonical memory.
+type MemoryConsolidationProposalRequest struct {
+	Input    MemoryConsolidationInput
+	Proposal MemoryProposalCreateRequest
+}
+
 // ErrStaleMemoryConsolidationLease reports a failed consolidation fence.
 var ErrStaleMemoryConsolidationLease = errors.New("consolidation lease is stale")
 
@@ -78,6 +86,26 @@ func (input MemoryConsolidationInput) valid() bool {
 		}
 	}
 	return true
+}
+
+func (request MemoryConsolidationProposalRequest) normalized() (MemoryConsolidationProposalRequest, error) {
+	if !request.Input.valid() || len(request.Input.Sources) == 0 {
+		return MemoryConsolidationProposalRequest{}, errors.New("invalid consolidation proposal")
+	}
+	request.Input.Sources = append([]MemoryConsolidationSource(nil), request.Input.Sources...)
+	for index := range request.Input.Sources {
+		document, err := canonicalMemoryDocument(request.Input.Sources[index].Document)
+		if err != nil {
+			return MemoryConsolidationProposalRequest{}, errors.New("invalid consolidation proposal")
+		}
+		request.Input.Sources[index].Document = document
+	}
+	proposal, err := request.Proposal.normalized()
+	if err != nil {
+		return MemoryConsolidationProposalRequest{}, err
+	}
+	request.Proposal = proposal
+	return request, nil
 }
 
 // ReadMemoryConsolidationInput returns at most one bounded page of exact

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +23,7 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actor.ID).Scan(&scopeID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3),($1,'project',$2,$4)`, actor.ID, projectID, CapabilityMemoryWrite, CapabilityMemoryPurge); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3),($1,'project',$2,$4),($1,'project',$2,$5),($1,'project',$2,$6),($1,'project',$2,$7)`, actor.ID, projectID, CapabilityMemoryWrite, CapabilityMemoryPurge, CapabilityMemoryPropose, CapabilityMemoryRead, CapabilityMemoryAdminister); err != nil {
 		t.Fatal(err)
 	}
 	first, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "11111111-1111-4111-8111-111111111111", memoryEmbeddingMinLease)
@@ -41,6 +42,14 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 		}
 		created = append(created, result)
 	}
+	evidence, err := app.CreateMemoryEvidence(ctx, MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111139",
+		LogicalKey: "consolidation.evidence", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"source":"evidence"}`),
+		Sources: []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("12", 32)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	lagged, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111130", LogicalKey: "consolidation.lagged", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"before-update"}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +61,11 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	input, err = app.ReadMemoryConsolidationInput(ctx, first)
 	if err != nil || len(input.Sources) != len(created)+1 || input.NextSequence != lagged.ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision || input.Sources[2].ItemID != lagged.ItemID || input.Sources[2].Revision != lagged.Revision {
 		t.Fatalf("post-claim consolidation input=%#v created=%#v lagged=%#v err=%v", input, created, lagged, err)
+	}
+	for _, source := range input.Sources {
+		if source.ItemID == evidence.ItemID {
+			t.Fatalf("consolidation input included evidence source=%#v", source)
+		}
 	}
 	var firstDocument, secondDocument map[string]bool
 	if json.Unmarshal(input.Sources[0].Document, &firstDocument) != nil || json.Unmarshal(input.Sources[1].Document, &secondDocument) != nil || !firstDocument["source"] || !secondDocument["source"] {
@@ -88,6 +102,43 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	} else if changed, err := result.RowsAffected(); err != nil || changed != 1 {
 		t.Fatalf("restore consolidation source hash changed=%d err=%v", changed, err)
 	}
+	stagedRequest := MemoryConsolidationProposalRequest{Input: input, Proposal: MemoryProposalCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111133", Action: MemoryProposalCreate,
+		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "consolidation.brief", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":"staged"}`)}},
+	}}
+	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "consolidation proposal outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorized := stagedRequest
+	unauthorized.Proposal.PrincipalID = outsider.ID
+	unauthorized.Proposal.IdempotencyKey = "11111111-1111-4111-8111-111111111138"
+	var proposalsBefore int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, scopeID).Scan(&proposalsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.StageMemoryConsolidationProposal(ctx, unauthorized); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized consolidation proposal error=%v", err)
+	}
+	var proposalsAfter int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, scopeID).Scan(&proposalsAfter); err != nil || proposalsAfter != proposalsBefore {
+		t.Fatalf("unauthorized consolidation proposal created rows before=%d after=%d err=%v", proposalsBefore, proposalsAfter, err)
+	}
+	staged, err := app.StageMemoryConsolidationProposal(ctx, stagedRequest)
+	if err != nil || staged.State != MemoryProposalPending || staged.ProposalID == "" || len(staged.Mutations) != 0 {
+		t.Fatalf("stage consolidation proposal=%#v err=%v", staged, err)
+	}
+	if retry, err := app.StageMemoryConsolidationProposal(ctx, stagedRequest); err != nil || retry.ProposalID != staged.ProposalID || retry.State != staged.State || retry.ETag != staged.ETag || len(retry.Mutations) != 0 {
+		t.Fatalf("stage consolidation retry=%#v first=%#v err=%v", retry, staged, err)
+	}
+	var sourceCount int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_consolidation_proposal_sources WHERE proposal_id=$1`, staged.ProposalID).Scan(&sourceCount); err != nil || sourceCount != len(input.Sources) {
+		t.Fatalf("staged consolidation sources=%d want=%d err=%v", sourceCount, len(input.Sources), err)
+	}
+	storedProposal, err := app.GetMemoryProposal(ctx, actor.ID, projectID, staged.ProposalID)
+	if err != nil || len(storedProposal.Sources) != len(input.Sources) || storedProposal.Sources[0].ItemID != input.Sources[0].ItemID || storedProposal.Sources[0].Revision != input.Sources[0].Revision || storedProposal.Sources[0].TimelineID != input.TimelineID {
+		t.Fatalf("staged consolidation proposal provenance=%#v input=%#v err=%v", storedProposal.Sources, input, err)
+	}
 	initialSequence := input.NextSequence
 	if _, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "22222222-2222-4222-8222-222222222222", memoryEmbeddingMinLease); err != nil || claimed {
 		t.Fatalf("duplicate consolidation claim claimed=%t err=%v", claimed, err)
@@ -100,6 +151,10 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, initialSequence); err != nil {
 		t.Fatalf("advance consolidation checkpoint: %v", err)
+	}
+	stagedRequest.Proposal.IdempotencyKey = "11111111-1111-4111-8111-111111111134"
+	if _, err := app.StageMemoryConsolidationProposal(ctx, stagedRequest); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("stale consolidation proposal error=%v", err)
 	}
 	if _, err := app.ReadMemoryConsolidationInput(ctx, first); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("released consolidation input error=%v", err)
@@ -189,6 +244,17 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	input, err = app.ReadMemoryConsolidationInput(ctx, fourth)
 	if err != nil || len(input.Sources) != 1 || input.Sources[0].ItemID != restored.ItemID || input.Sources[0].Revision != restored.Revision || input.NextSequence != restored.ChangeSequence {
 		t.Fatalf("restored revision lacked consolidation scan coverage input=%#v restored=%#v err=%v", input, restored, err)
+	}
+	staleRequest := MemoryConsolidationProposalRequest{Input: input, Proposal: MemoryProposalCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111135", Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "consolidation.stale-brief", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":"stale"}`)}}}}
+	staleProposal, err := app.StageMemoryConsolidationProposal(ctx, staleRequest)
+	if err != nil {
+		t.Fatalf("stage stale-boundary proposal: %v", err)
+	}
+	if _, err := app.UpdateMemory(ctx, MemoryUpdateRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: input.Sources[0].ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111136", ExpectedETag: memoryETag(input.Sources[0].ItemID, input.Sources[0].Revision), LogicalKey: "consolidation.archived", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"changed-after-stage"}`)}); err != nil {
+		t.Fatalf("change staged source: %v", err)
+	}
+	if _, err := app.ApproveMemoryProposal(ctx, MemoryProposalDecisionRequest{PrincipalID: actor.ID, ProjectID: projectID, ProposalID: staleProposal.ProposalID, IdempotencyKey: "11111111-1111-4111-8111-111111111137", ExpectedETag: staleProposal.ETag}); !errors.Is(err, ErrStaleMemoryProposal) {
+		t.Fatalf("stale consolidation proposal approval error=%v", err)
 	}
 	testMemoryConsolidationRestoreLineageIntegration(ctx, t, app, ownerDB, actor.ID)
 }
@@ -294,6 +360,11 @@ func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testi
 		{`GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`, `REVOKE SELECT ON brain.memory_consolidation_checkpoints FROM punaro_app`},
 		{`GRANT EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) FROM PUBLIC`},
 		{`GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) FROM PUBLIC`},
+		{`GRANT UPDATE ON brain.memory_consolidation_proposal_sources TO punaro_app`, `REVOKE UPDATE ON brain.memory_consolidation_proposal_sources FROM punaro_app`},
+		{`GRANT SELECT ON brain.memory_consolidation_proposal_sources TO PUBLIC`, `REVOKE SELECT ON brain.memory_consolidation_proposal_sources FROM PUBLIC`},
+		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER memory_consolidation_proposal_source_insert_guard`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER memory_consolidation_proposal_source_insert_guard`},
+		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER application_mutation_fence`},
+		{`ALTER TABLE brain.memory_consolidation_proposal_sources SET UNLOGGED`, `ALTER TABLE brain.memory_consolidation_proposal_sources SET LOGGED`},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, drift.apply); err != nil {
 			t.Fatal(err)
