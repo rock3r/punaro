@@ -63,15 +63,41 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err != nil || !claimed || second.TimelineID != first.TimelineID || second.Sequence != 2 || second.Generation <= first.Generation {
 		t.Fatalf("durable consolidation reclaim=%#v first=%#v claimed=%t err=%v", second, first, claimed, err)
 	}
+	quarantined, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111114", LogicalKey: "consolidation.quarantined", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"quarantined"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO brain.memory_quarantines(item_id,detected_revision,rule_version,rule_id,field_path,value_fingerprint,quarantined_by)
+VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, quarantined.ItemID, quarantined.Revision, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, second)
+	if err != nil || len(input.Sources) != 0 || input.NextSequence != quarantined.ChangeSequence {
+		t.Fatalf("quarantined consolidation input=%#v quarantined=%#v err=%v", input, quarantined, err)
+	}
+	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, input.NextSequence); err != nil {
+		t.Fatalf("advance quarantined consolidation checkpoint: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_quarantines SET released_by=$2,released_at=statement_timestamp() WHERE item_id=$1 AND released_at IS NULL`, quarantined.ItemID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	third, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "33333333-3333-4333-8333-333333333333", memoryEmbeddingMinLease)
+	if err != nil || !claimed || third.Sequence != quarantined.ChangeSequence || third.Generation <= second.Generation {
+		t.Fatalf("released-quarantine consolidation reclaim=%#v quarantined=%#v second=%#v claimed=%t err=%v", third, quarantined, second, claimed, err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, third)
+	if err != nil || len(input.Sources) != 0 || input.NextSequence != third.Sequence {
+		t.Fatalf("released quarantine replayed historical source=%#v err=%v", input, err)
+	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, first, first.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("stale consolidation advance error=%v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE brain.memory_consolidation_checkpoints SET lease_until=statement_timestamp()-interval '1 second' WHERE scope_id=$1`, scopeID); err != nil {
 		t.Fatal(err)
 	}
-	third, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "33333333-3333-4333-8333-333333333333", memoryEmbeddingMinLease)
-	if err != nil || !claimed || third.Generation <= second.Generation || third.Sequence != 2 {
-		t.Fatalf("expired consolidation reclaim=%#v second=%#v claimed=%t err=%v", third, second, claimed, err)
+	fourth, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "44444444-4444-4444-8444-444444444444", memoryEmbeddingMinLease)
+	if err != nil || !claimed || fourth.Generation <= third.Generation || fourth.Sequence != third.Sequence {
+		t.Fatalf("expired consolidation reclaim=%#v third=%#v claimed=%t err=%v", fourth, third, claimed, err)
 	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
