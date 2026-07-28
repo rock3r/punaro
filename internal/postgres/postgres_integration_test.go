@@ -833,6 +833,9 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	if state, err := migrate(ctx, ownerDB, v33); err != nil || state.Classification != Compatible || state.Version != 33 {
 		t.Fatalf("v33 bridge setup state=%#v err=%v", state, err)
 	}
+	if controls, err := updateControlsAvailable(ctx, ownerDB); err != nil || !controls {
+		t.Fatalf("v33 update controls before v34 migration controls=%t err=%v", controls, err)
+	}
 	var rootTimeline, restoredTimeline, scopeID string
 	if err := ownerDB.QueryRowContext(ctx, `WITH principal AS (
     INSERT INTO auth.principals(kind,display_name) VALUES ('device','v33 restore checkpoint actor') RETURNING id
