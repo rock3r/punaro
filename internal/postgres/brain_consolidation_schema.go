@@ -145,21 +145,39 @@ WITH relation AS (
            NOT has_table_privilege('punaro_app',oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
              AND NOT has_any_column_privilege('punaro_app',oid,'UPDATE,REFERENCES') AS no_writes
     FROM relation
-), public_acl_safety AS (
-    SELECT NOT has_table_privilege('public',oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-       AND NOT has_any_column_privilege('public',oid,'SELECT,INSERT,UPDATE,REFERENCES') AS exact
-    FROM relation
+), table_acl_safety AS (
+    SELECT count(*)=9 AND bool_and(NOT entry.is_grantable)
+       AND bool_and(role.rolname='punaro_owner' OR (role.rolname='punaro_app' AND entry.privilege_type='SELECT')) AS exact
+    FROM pg_class AS table_row
+    CROSS JOIN LATERAL aclexplode(COALESCE(table_row.relacl,acldefault('r',table_row.relowner))) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE table_row.oid=relation.oid
+), column_acl_safety AS (
+    SELECT count(*)=6 AND bool_and(role.rolname='punaro_app' AND entry.privilege_type='INSERT' AND NOT entry.is_grantable) AS exact
+    FROM pg_attribute AS attribute
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE attribute.attrelid=relation.oid AND attribute.attnum>0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
 ), trigger_safety AS (
     SELECT count(*)=2
-       AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O')=1
-       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O')=1 AS exact
+       AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1
+       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=relation.oid AND NOT tgisinternal
 ), constraint_safety AS (
-    SELECT count(*)=5
+    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.memory_proposals'::regclass AND confdeltype='c')=1
        AND count(*) FILTER (WHERE contype='c')=3 AS exact
     FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
+), expected_checks(name,expression) AS (
+    VALUES ('memory_consolidation_proposal_sources_ordinal_check','((ordinal >= 0) AND (ordinal <= 127))'),
+           ('memory_consolidation_proposal_sources_revision_check','(revision >= 1)'),
+           ('memory_consolidation_proposal_sources_sequence_check','(change_sequence >= 0)')
+), actual_checks AS (
+    SELECT constraint_row.conname,pg_get_expr(constraint_row.conbin,constraint_row.conrelid)
+    FROM pg_constraint AS constraint_row,relation
+    WHERE constraint_row.conrelid=relation.oid AND constraint_row.contype='c'
+      AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
 ), guard_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
@@ -170,9 +188,11 @@ SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND application_privileges.selects AND application_privileges.inserts AND application_privileges.no_writes
-   AND public_acl_safety.exact
+   AND table_acl_safety.exact AND column_acl_safety.exact
    AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact
-FROM relation,application_privileges,public_acl_safety,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
+   AND NOT EXISTS (SELECT * FROM expected_checks EXCEPT SELECT * FROM actual_checks)
+   AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
+FROM relation,application_privileges,table_acl_safety,column_acl_safety,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
 	return available, err
 }
 
