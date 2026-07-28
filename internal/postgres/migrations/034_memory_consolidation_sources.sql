@@ -6,11 +6,15 @@ BEGIN
     IF requested_scope IS NULL OR requested_token IS NULL OR requested_generation < 1 THEN
         RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid consolidation source request';
     END IF;
-    RETURN QUERY WITH fence AS (
+    RETURN QUERY WITH RECURSIVE lineage(timeline_id) AS (
+      SELECT state.timeline_id FROM jobs.server_state AS state WHERE state.singleton
+      UNION
+      SELECT event.previous_timeline_id FROM jobs.restore_events AS event JOIN lineage ON event.restored_timeline_id=lineage.timeline_id
+    ), fence AS (
       SELECT checkpoint.timeline_id,checkpoint.scope_id,checkpoint.change_sequence,event.restored_change_sequence AS rebase_sequence
       FROM brain.memory_consolidation_checkpoints AS checkpoint
-      JOIN jobs.server_state AS state ON state.singleton
-      LEFT JOIN jobs.restore_events AS event ON event.previous_timeline_id=checkpoint.timeline_id AND event.restored_timeline_id=state.timeline_id
+      JOIN lineage ON lineage.timeline_id=checkpoint.timeline_id
+      LEFT JOIN jobs.restore_events AS event ON event.previous_timeline_id=checkpoint.timeline_id
       WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
         AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until > statement_timestamp()
         AND (checkpoint.timeline_id=state.timeline_id OR event.restore_id IS NOT NULL)
@@ -38,9 +42,9 @@ AS $function$
 BEGIN
     PERFORM jobs.assert_application_mutation();
     IF requested_scope IS NULL OR requested_holder IS NULL OR requested_lease_micros < 5000000 OR requested_lease_micros > 300000000 THEN RAISE EXCEPTION USING ERRCODE='22023', MESSAGE='invalid consolidation claim request'; END IF;
-    UPDATE brain.memory_consolidation_checkpoints AS checkpoint SET timeline_id=state.timeline_id,change_sequence=0,updated_at=statement_timestamp()
-    FROM jobs.server_state AS state JOIN jobs.restore_events AS event ON event.restored_timeline_id=state.timeline_id
-    WHERE state.singleton AND checkpoint.scope_id=requested_scope AND checkpoint.lease_until IS NULL
+    UPDATE brain.memory_consolidation_checkpoints AS checkpoint SET timeline_id=event.restored_timeline_id,change_sequence=0,updated_at=statement_timestamp()
+    FROM jobs.restore_events AS event
+    WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_until IS NULL
       AND event.previous_timeline_id=checkpoint.timeline_id AND checkpoint.change_sequence>=event.restored_change_sequence;
     INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id)
     SELECT scope.id,state.timeline_id FROM brain.scopes AS scope CROSS JOIN jobs.server_state AS state WHERE scope.id=requested_scope AND state.singleton ON CONFLICT (scope_id) DO NOTHING;
@@ -57,7 +61,7 @@ BEGIN
     UPDATE brain.memory_consolidation_checkpoints AS checkpoint SET timeline_id=requested_timeline,change_sequence=requested_sequence,lease_holder=NULL,lease_token=NULL,lease_until=NULL,updated_at=statement_timestamp()
     FROM jobs.server_state AS state
     WHERE state.singleton AND checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
-      AND requested_sequence>=checkpoint.change_sequence AND ((requested_timeline=state.timeline_id AND requested_sequence<=state.change_sequence) OR (requested_timeline=checkpoint.timeline_id AND EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.previous_timeline_id=checkpoint.timeline_id AND event.restored_timeline_id=state.timeline_id AND requested_sequence<=event.restored_change_sequence)));
+      AND requested_sequence>=checkpoint.change_sequence AND ((requested_timeline=state.timeline_id AND requested_sequence<=state.change_sequence) OR (requested_timeline=checkpoint.timeline_id AND EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.previous_timeline_id=checkpoint.timeline_id AND requested_sequence<=event.restored_change_sequence)));
     RETURN FOUND;
 END
 $function$;

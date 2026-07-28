@@ -92,9 +92,9 @@ FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advan
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5      = "56d64bc951f0d69120d1577c143ed99a"
-	memoryConsolidationAdvanceRoutineMD5    = "65222b114bb0b7e47d5c3ef39679c5c8"
-	memoryConsolidationSourcesRoutineMD5    = "f66128f58a482c330b4620f15f1cbf75"
+	memoryConsolidationClaimRoutineMD5      = "851f9769612a91befe42b0931f58a02b"
+	memoryConsolidationAdvanceRoutineMD5    = "4a48013e770fe66019c00360ff79363d"
+	memoryConsolidationSourcesRoutineMD5    = "e04089e8f5d116b2f0f4fa7afc67d0ee"
 	memoryConsolidationV33ClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
 	memoryConsolidationV33AdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
 )
