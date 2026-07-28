@@ -10,7 +10,8 @@ func memoryConsolidationControlsAvailable(ctx context.Context, q queryer) (bool,
 WITH objects AS (
     SELECT to_regclass('brain.memory_consolidation_checkpoints') AS table_oid,
            to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)') AS claim_oid,
-           to_regprocedure('brain.advance_memory_consolidation_checkpoint(uuid,uuid,bigint,uuid,bigint)') AS advance_oid
+           to_regprocedure('brain.advance_memory_consolidation_checkpoint(uuid,uuid,bigint,uuid,bigint)') AS advance_oid,
+           to_regprocedure('brain.read_memory_consolidation_sources(uuid,uuid,bigint)') AS sources_oid
 ), expected_columns(name,type_name,required,default_expression) AS (
     VALUES
       ('scope_id','uuid',true,''),('timeline_id','uuid',true,''),('change_sequence','bigint',true,'0'),
@@ -22,7 +23,7 @@ WITH objects AS (
     LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
     WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), routine_safety AS (
-    SELECT count(*)=2 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
+    SELECT count(*)=3 AND bool_and(pg_get_userbyid(routine.proowner)='punaro_owner'
       AND routine.prokind='f' AND routine.prosecdef AND routine.provolatile='v'
       AND routine.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND routine.proconfig=ARRAY['search_path=pg_catalog']::text[] AND NOT routine.proisstrict
@@ -35,8 +36,10 @@ WITH objects AS (
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$1)
         OR (routine.oid=advance_oid AND NOT routine.proretset AND routine.prorettype='boolean'::regtype
             AND routine.pronargs=5 AND routine.proargtypes='2950 2950 20 2950 20'::oidvector
-            AND md5(btrim(routine.prosrc,E' \n\r\t'))=$2))) AS exact
-    FROM pg_proc AS routine,objects WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid])
+            AND md5(btrim(routine.prosrc,E' \n\r\t'))=$2)
+        OR (routine.oid=sources_oid AND routine.proretset AND routine.prorettype='record'::regtype
+            AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector))) AS exact
+    FROM pg_proc AS routine,objects WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid])
 ), constraint_safety AS (
     SELECT count(*)=5
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[])=1
@@ -49,12 +52,14 @@ WITH objects AS (
     SELECT claim_oid,'punaro_owner','EXECUTE',false FROM objects UNION ALL
     SELECT claim_oid,'punaro_app','EXECUTE',false FROM objects UNION ALL
     SELECT advance_oid,'punaro_owner','EXECUTE',false FROM objects UNION ALL
-    SELECT advance_oid,'punaro_app','EXECUTE',false FROM objects
+    SELECT advance_oid,'punaro_app','EXECUTE',false FROM objects UNION ALL
+    SELECT sources_oid,'punaro_owner','EXECUTE',false FROM objects UNION ALL
+    SELECT sources_oid,'punaro_app','EXECUTE',false FROM objects
 ), actual_acl AS (
     SELECT routine.oid,COALESCE(grantee.rolname,'PUBLIC'),entry.privilege_type,entry.is_grantable
     FROM pg_proc AS routine CROSS JOIN LATERAL aclexplode(COALESCE(routine.proacl,acldefault('f',routine.proowner))) AS entry
     LEFT JOIN pg_roles AS grantee ON grantee.oid=entry.grantee,objects
-    WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid])
+    WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid])
 ), table_acl_safety AS (
     SELECT NOT EXISTS (
         SELECT 1
@@ -62,7 +67,7 @@ WITH objects AS (
         WHERE relation.oid=table_oid AND entry.grantee<>relation.relowner
     ) AS exact
 )
-SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NULL
+SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NULL AND sources_oid IS NOT NULL
    AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=table_oid)
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
