@@ -17,7 +17,9 @@ BEGIN
     UNION ALL
     SELECT fence.timeline_id,change.item_id,change.revision,change.change_sequence,false
     FROM fence JOIN brain.memory_changes AS change ON change.scope_id=fence.scope_id AND change.timeline_id=fence.timeline_id
+    LEFT JOIN brain.memory_quarantines AS quarantine ON quarantine.item_id=change.item_id AND quarantine.released_at IS NULL
     WHERE change.change_sequence>fence.change_sequence
+      AND quarantine.item_id IS NULL
     ORDER BY 4,2
     LIMIT 128;
 END

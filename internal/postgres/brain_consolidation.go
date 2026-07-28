@@ -99,6 +99,9 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 			return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
 		}
 		if fence {
+			if !sequence.Valid || sequence.Int64 != lease.Sequence {
+				return MemoryConsolidationInput{}, ErrStaleMemoryConsolidationLease
+			}
 			live = true
 			continue
 		}
