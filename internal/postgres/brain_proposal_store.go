@@ -469,7 +469,8 @@ EXISTS (SELECT 1 FROM brain.memory_quarantines AS quarantine WHERE quarantine.it
 FROM brain.memory_items AS item
 JOIN brain.scopes AS scope ON scope.id=item.scope_id
 JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision.revision=item.current_revision
-WHERE item.id=$1 AND scope.project_id=$2
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE item.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$2
 FOR SHARE OF item`, itemID, projectID).Scan(&item.ScopeID, &item.Revision, &item.State, &item.Layer, &item.Document, &item.ContentHash, &item.Quarantined)
 		if errors.Is(err, sql.ErrNoRows) || item.Quarantined {
 			return nil, ErrNotFound
