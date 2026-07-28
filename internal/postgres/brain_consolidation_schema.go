@@ -181,7 +181,7 @@ WITH relation AS (
 ), guard_safety AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND md5(btrim(prosrc,E' \n\r\t'))=$1 AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
-    FROM pg_proc,relation WHERE oid=guard_oid
+    FROM pg_proc,relation WHERE pg_proc.oid=guard_oid
 )
 SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
    AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=relation.oid)
