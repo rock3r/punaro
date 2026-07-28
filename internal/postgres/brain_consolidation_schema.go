@@ -88,7 +88,7 @@ FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolida
 }
 
 const (
-	memoryConsolidationClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
-	memoryConsolidationAdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
-	memoryConsolidationSourcesRoutineMD5 = "64d82b3dfa8e2ae6e590b071649b59f9"
+	memoryConsolidationClaimRoutineMD5   = "56d64bc951f0d69120d1577c143ed99a"
+	memoryConsolidationAdvanceRoutineMD5 = "65222b114bb0b7e47d5c3ef39679c5c8"
+	memoryConsolidationSourcesRoutineMD5 = "f66128f58a482c330b4620f15f1cbf75"
 )
