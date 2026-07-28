@@ -188,7 +188,7 @@ WITH relation AS (
     WHERE constraint_row.conrelid=relation.oid AND constraint_row.contype='c'
       AND constraint_row.convalidated AND NOT constraint_row.condeferrable AND NOT constraint_row.condeferred
 ), expected_lock_guard_acl(grantee,privilege_type,is_grantable) AS (
-    VALUES ('punaro_app','EXECUTE',false)
+    VALUES ('punaro_owner','EXECUTE',false),('punaro_app','EXECUTE',false)
 ), actual_lock_guard_acl AS (
     SELECT role.rolname,entry.privilege_type,entry.is_grantable
     FROM pg_proc AS routine
