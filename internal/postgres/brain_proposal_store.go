@@ -419,7 +419,8 @@ JOIN brain.memory_revisions AS revision ON revision.item_id=item.id AND revision
 JOIN brain.secret_guard_state AS guard ON true
 JOIN brain.memory_secret_scans AS scan ON scan.item_id=item.id
 LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=scope.project_id
-WHERE source.proposal_id=$1 AND scope.project_id=$2
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE source.proposal_id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$2
 ORDER BY source.ordinal FOR SHARE OF item,scan`, proposalID, projectID)
 	if err != nil {
 		return errors.New("consolidation proposal sources are unavailable")

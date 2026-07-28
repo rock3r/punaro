@@ -69,7 +69,10 @@ WHERE scope_id=$1 AND lease_token=$2 AND lease_generation=$3 AND lease_until>sta
 			return IdempotencyOutcome{}, ErrNotFound
 		}
 		var scopeProjectID string
-		if err := tx.QueryRowContext(ctx, `SELECT project_id::text FROM brain.scopes WHERE id=$1 FOR SHARE`, request.Input.Lease.ScopeID).Scan(&scopeProjectID); err != nil || scopeProjectID != project.ID {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(alias.canonical_project_id,scope.project_id)::text
+FROM brain.scopes AS scope
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE scope.id=$1 FOR SHARE OF scope`, request.Input.Lease.ScopeID).Scan(&scopeProjectID); err != nil || scopeProjectID != project.ID {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
 		allowed, err := lockCapability(ctx, tx, proposal.PrincipalID, project.ID, CapabilityMemoryPropose)
