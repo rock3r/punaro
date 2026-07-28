@@ -145,13 +145,21 @@ WITH relation AS (
            NOT has_table_privilege('punaro_app',oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
              AND NOT has_any_column_privilege('punaro_app',oid,'UPDATE,REFERENCES') AS no_writes
     FROM relation
-), table_acl_safety AS (
-    SELECT count(*)=9 AND bool_and(NOT entry.is_grantable)
-       AND bool_and(role.rolname='punaro_owner' OR (role.rolname='punaro_app' AND entry.privilege_type='SELECT')) AS exact
+), expected_table_acl(grantee,privilege_type,is_grantable) AS (
+    VALUES
+      ('punaro_owner','SELECT',false),('punaro_owner','INSERT',false),('punaro_owner','UPDATE',false),
+      ('punaro_owner','DELETE',false),('punaro_owner','TRUNCATE',false),('punaro_owner','REFERENCES',false),
+      ('punaro_owner','TRIGGER',false),('punaro_app','SELECT',false)
+    UNION ALL SELECT 'punaro_owner','MAINTAIN',false WHERE current_setting('server_version_num')::integer >= 170000
+), actual_table_acl AS (
+    SELECT role.rolname,entry.privilege_type,entry.is_grantable
     FROM pg_class AS table_row
     CROSS JOIN LATERAL aclexplode(COALESCE(table_row.relacl,acldefault('r',table_row.relowner))) AS entry
     LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
     WHERE table_row.oid=relation.oid
+), table_acl_safety AS (
+    SELECT NOT EXISTS (SELECT * FROM expected_table_acl EXCEPT SELECT * FROM actual_table_acl)
+       AND NOT EXISTS (SELECT * FROM actual_table_acl EXCEPT SELECT * FROM expected_table_acl) AS exact
 ), column_acl_safety AS (
     SELECT count(*)=6 AND bool_and(role.rolname='punaro_app' AND entry.privilege_type='INSERT' AND NOT entry.is_grantable) AS exact
     FROM pg_attribute AS attribute
@@ -202,7 +210,7 @@ const (
 	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
 	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
 	memoryConsolidationDocumentsRoutineMD5           = "0b284fa1e93f9b8cd62604d4e2a3821c"
-	memoryConsolidationV38DocumentsRoutineMD5        = "f34725c0ab56059bbaef422677f37357"
+	memoryConsolidationV38DocumentsRoutineMD5        = "d2d9593918a866b633499a2619609ce3"
 	memoryConsolidationV35DocumentsRoutineMD5        = "578fc76b7dd1ed66ccdd7895cd50e07c"
 	memoryConsolidationV36DocumentsRoutineMD5        = "8eac22d68c0b50c43de1f8892c925c55"
 	memoryConsolidationV33ClaimRoutineMD5            = "32e95c7fb6a9e73522c73b825bc3dcea"

@@ -105,7 +105,8 @@ BEGIN
         LEFT JOIN brain.memory_items AS item ON item.id=source.item_id
         LEFT JOIN brain.scopes AS scope ON scope.id=item.scope_id
         LEFT JOIN brain.memory_secret_scans AS scan ON scan.item_id=source.item_id
-        LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=scope.project_id
+        LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+        LEFT JOIN brain.secret_project_state AS project_state ON project_state.project_id=COALESCE(alias.canonical_project_id,scope.project_id)
         WHERE source.item_id IS NOT NULL
           AND (scan.revision IS DISTINCT FROM source.revision
                OR scan.rule_version IS DISTINCT FROM guard.rule_version

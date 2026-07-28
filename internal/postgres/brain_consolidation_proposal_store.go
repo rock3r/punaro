@@ -57,16 +57,6 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 	}
 	defer func() { _ = tx.Rollback() }()
 	outcome, err := executeIdempotentTx(ctx, tx, idempotency, func(control *ControlTx) (IdempotencyOutcome, error) {
-		var timelineID string
-		var sequence int64
-		err := tx.QueryRowContext(ctx, `SELECT timeline_id::text,change_sequence FROM brain.memory_consolidation_checkpoints
-WHERE scope_id=$1 AND lease_token=$2 AND lease_generation=$3 AND lease_until>statement_timestamp() FOR UPDATE`, request.Input.Lease.ScopeID, request.Input.Lease.Token, request.Input.Lease.Generation).Scan(&timelineID, &sequence)
-		if errors.Is(err, sql.ErrNoRows) {
-			return IdempotencyOutcome{}, ErrStaleMemoryConsolidationLease
-		}
-		if err != nil || timelineID != request.Input.TimelineID || sequence != request.Input.Lease.Sequence {
-			return IdempotencyOutcome{}, ErrStaleMemoryConsolidationLease
-		}
 		project, err := lockDirectActiveProject(ctx, tx, proposal.ProjectID)
 		if err != nil {
 			return IdempotencyOutcome{}, ErrNotFound
