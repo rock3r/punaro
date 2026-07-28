@@ -17,7 +17,6 @@ BEGIN
       LEFT JOIN jobs.restore_events AS event ON event.previous_timeline_id=checkpoint.timeline_id
       WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
         AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until > statement_timestamp()
-        AND (checkpoint.timeline_id=state.timeline_id OR event.restore_id IS NOT NULL)
     )
     SELECT fence.timeline_id,NULL::uuid,NULL::bigint,fence.change_sequence,true FROM fence
     UNION ALL
