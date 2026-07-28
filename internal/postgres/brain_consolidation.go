@@ -29,11 +29,15 @@ type MemoryConsolidationPolicy struct {
 // durable store will advance Generation whenever this lease is reclaimed.
 type MemoryConsolidationLease struct {
 	ScopeID    string
+	TimelineID string
+	Sequence   int64
 	Holder     string
 	Token      string
 	Generation int64
 	Until      time.Time
 }
+
+var ErrStaleMemoryConsolidationLease = errors.New("consolidation lease is stale")
 
 func (lease MemoryConsolidationLease) valid() bool {
 	return validOpaqueID(lease.ScopeID) && validOpaqueID(lease.Holder) &&
@@ -46,7 +50,7 @@ func (d *Database) ClaimMemoryConsolidationCheckpoint(ctx context.Context, scope
 		return MemoryConsolidationLease{}, false, errors.New("invalid consolidation claim")
 	}
 	var lease MemoryConsolidationLease
-	err := d.db.QueryRowContext(ctx, `SELECT scope_id::text,lease_holder::text,lease_token::text,lease_generation,lease_until FROM brain.claim_memory_consolidation_checkpoint($1,$2,$3)`, scopeID, holder, leaseDuration.Microseconds()).Scan(&lease.ScopeID, &lease.Holder, &lease.Token, &lease.Generation, &lease.Until)
+	err := d.db.QueryRowContext(ctx, `SELECT scope_id::text,timeline_id::text,change_sequence,lease_holder::text,lease_token::text,lease_generation,lease_until FROM brain.claim_memory_consolidation_checkpoint($1,$2,$3)`, scopeID, holder, leaseDuration.Microseconds()).Scan(&lease.ScopeID, &lease.TimelineID, &lease.Sequence, &lease.Holder, &lease.Token, &lease.Generation, &lease.Until)
 	if errors.Is(err, sql.ErrNoRows) {
 		return MemoryConsolidationLease{}, false, nil
 	}
@@ -66,7 +70,7 @@ func (d *Database) AdvanceMemoryConsolidationCheckpoint(ctx context.Context, lea
 		return errors.New("consolidation checkpoint could not advance")
 	}
 	if !changed {
-		return ErrStaleEmbeddingLease
+		return ErrStaleMemoryConsolidationLease
 	}
 	return nil
 }
