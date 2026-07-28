@@ -46,7 +46,12 @@ BEGIN
     WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_until IS NULL
       AND event.previous_timeline_id=checkpoint.timeline_id AND checkpoint.change_sequence>=event.restored_change_sequence;
     INSERT INTO brain.memory_consolidation_checkpoints(scope_id,timeline_id)
-    SELECT scope.id,state.timeline_id FROM brain.scopes AS scope CROSS JOIN jobs.server_state AS state WHERE scope.id=requested_scope AND state.singleton ON CONFLICT (scope_id) DO NOTHING;
+    SELECT scope.id,(WITH RECURSIVE lineage(timeline_id) AS (
+      SELECT state.timeline_id FROM jobs.server_state AS state WHERE state.singleton
+      UNION
+      SELECT event.previous_timeline_id FROM jobs.restore_events AS event JOIN lineage ON event.restored_timeline_id=lineage.timeline_id
+    ) SELECT candidate.timeline_id FROM lineage AS candidate WHERE NOT EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.restored_timeline_id=candidate.timeline_id))
+    FROM brain.scopes AS scope WHERE scope.id=requested_scope ON CONFLICT (scope_id) DO NOTHING;
     RETURN QUERY UPDATE brain.memory_consolidation_checkpoints AS checkpoint SET lease_holder=requested_holder,lease_token=gen_random_uuid(),lease_generation=checkpoint.lease_generation+1,lease_until=statement_timestamp()+(requested_lease_micros * interval '1 microsecond'),updated_at=statement_timestamp()
     WHERE checkpoint.scope_id=requested_scope AND (checkpoint.lease_until IS NULL OR checkpoint.lease_until <= statement_timestamp()) RETURNING checkpoint.scope_id,checkpoint.timeline_id,checkpoint.change_sequence,checkpoint.lease_holder,checkpoint.lease_token,checkpoint.lease_generation,checkpoint.lease_until;
 END
