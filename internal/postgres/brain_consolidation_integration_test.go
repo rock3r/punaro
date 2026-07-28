@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,14 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 		}
 		created = append(created, result)
 	}
+	evidence, err := app.CreateMemoryEvidence(ctx, MemoryEvidenceCreateRequest{
+		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111139",
+		LogicalKey: "consolidation.evidence", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"source":"evidence"}`),
+		Sources: []MemoryEvidenceSourceInput{{Mode: MemorySourceCopied, Kind: MemorySourceExternal, ReferenceSHA256: strings.Repeat("12", 32)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	lagged, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111130", LogicalKey: "consolidation.lagged", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"before-update"}`)})
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +61,11 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	input, err = app.ReadMemoryConsolidationInput(ctx, first)
 	if err != nil || len(input.Sources) != len(created)+1 || input.NextSequence != lagged.ChangeSequence || input.Sources[0].ItemID != created[0].ItemID || input.Sources[1].Revision != created[1].Revision || input.Sources[2].ItemID != lagged.ItemID || input.Sources[2].Revision != lagged.Revision {
 		t.Fatalf("post-claim consolidation input=%#v created=%#v lagged=%#v err=%v", input, created, lagged, err)
+	}
+	for _, source := range input.Sources {
+		if source.ItemID == evidence.ItemID {
+			t.Fatalf("consolidation input included evidence source=%#v", source)
+		}
 	}
 	var firstDocument, secondDocument map[string]bool
 	if json.Unmarshal(input.Sources[0].Document, &firstDocument) != nil || json.Unmarshal(input.Sources[1].Document, &secondDocument) != nil || !firstDocument["source"] || !secondDocument["source"] {
@@ -347,6 +361,7 @@ func testMemoryConsolidationSchemaDriftIntegration(ctx context.Context, t *testi
 		{`GRANT EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint) FROM PUBLIC`},
 		{`GRANT EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) TO PUBLIC`, `REVOKE EXECUTE ON FUNCTION brain.read_memory_consolidation_documents(uuid,uuid,bigint) FROM PUBLIC`},
 		{`GRANT UPDATE ON brain.memory_consolidation_proposal_sources TO punaro_app`, `REVOKE UPDATE ON brain.memory_consolidation_proposal_sources FROM punaro_app`},
+		{`GRANT SELECT ON brain.memory_consolidation_proposal_sources TO PUBLIC`, `REVOKE SELECT ON brain.memory_consolidation_proposal_sources FROM PUBLIC`},
 		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER memory_consolidation_proposal_source_insert_guard`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER memory_consolidation_proposal_source_insert_guard`},
 		{`ALTER TABLE brain.memory_consolidation_proposal_sources DISABLE TRIGGER application_mutation_fence`, `ALTER TABLE brain.memory_consolidation_proposal_sources ENABLE TRIGGER application_mutation_fence`},
 		{`ALTER TABLE brain.memory_consolidation_proposal_sources SET UNLOGGED`, `ALTER TABLE brain.memory_consolidation_proposal_sources SET LOGGED`},

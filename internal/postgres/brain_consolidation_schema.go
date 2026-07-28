@@ -17,6 +17,9 @@ func memoryConsolidationControlsAvailable(ctx context.Context, q queryer, versio
 	if version == 36 {
 		documentsMD5 = memoryConsolidationV36DocumentsRoutineMD5
 	}
+	if version >= 38 {
+		documentsMD5 = memoryConsolidationV38DocumentsRoutineMD5
+	}
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('brain.memory_consolidation_checkpoints') AS table_oid,
@@ -142,6 +145,10 @@ WITH relation AS (
            NOT has_table_privilege('punaro_app',oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
              AND NOT has_any_column_privilege('punaro_app',oid,'UPDATE,REFERENCES') AS no_writes
     FROM relation
+), public_acl_safety AS (
+    SELECT NOT has_table_privilege('public',oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       AND NOT has_any_column_privilege('public',oid,'SELECT,INSERT,UPDATE,REFERENCES') AS exact
+    FROM relation
 ), trigger_safety AS (
     SELECT count(*)=2
        AND count(*) FILTER (WHERE tgname='memory_consolidation_proposal_source_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O')=1
@@ -164,8 +171,9 @@ SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND application_privileges.selects AND application_privileges.inserts AND application_privileges.no_writes
+   AND public_acl_safety.exact
    AND trigger_safety.exact AND constraint_safety.exact AND guard_safety.exact
-FROM relation,application_privileges,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
+FROM relation,application_privileges,public_acl_safety,trigger_safety,constraint_safety,guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5).Scan(&available)
 	return available, err
 }
 
@@ -175,6 +183,7 @@ const (
 	memoryConsolidationAdvanceRoutineMD5             = "5666d576e054c6b06999a0b6ce7b6c62"
 	memoryConsolidationSourcesRoutineMD5             = "2b180c012d8c1ae7332b81456845a8bf"
 	memoryConsolidationDocumentsRoutineMD5           = "0b284fa1e93f9b8cd62604d4e2a3821c"
+	memoryConsolidationV38DocumentsRoutineMD5        = "da1f0cf7611c37604f98fa33529748df"
 	memoryConsolidationV35DocumentsRoutineMD5        = "578fc76b7dd1ed66ccdd7895cd50e07c"
 	memoryConsolidationV36DocumentsRoutineMD5        = "8eac22d68c0b50c43de1f8892c925c55"
 	memoryConsolidationV33ClaimRoutineMD5            = "32e95c7fb6a9e73522c73b825bc3dcea"
