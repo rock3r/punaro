@@ -38,7 +38,11 @@ WITH objects AS (
             AND routine.pronargs=5 AND routine.proargtypes='2950 2950 20 2950 20'::oidvector
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$2)
         OR (routine.oid=sources_oid AND routine.proretset AND routine.prorettype='record'::regtype
-            AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector))) AS exact
+            AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector
+            AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'boolean'::regtype]::oid[]
+            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t']::"char"[]
+            AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','is_fence']::text[]
+            AND md5(btrim(routine.prosrc,E' \n\r\t'))=$3)) AS exact
     FROM pg_proc AS routine,objects WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid])
 ), constraint_safety AS (
     SELECT count(*)=5
@@ -78,11 +82,12 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND table_acl_safety.exact
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
-FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5).Scan(&available)
+FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5, memoryConsolidationSourcesRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
 	memoryConsolidationClaimRoutineMD5   = "32e95c7fb6a9e73522c73b825bc3dcea"
 	memoryConsolidationAdvanceRoutineMD5 = "cce038c3cca8f3c4f48da8b5e155443c"
+	memoryConsolidationSourcesRoutineMD5 = "aa4d62b8c5591988e3c4cf898a318034"
 )

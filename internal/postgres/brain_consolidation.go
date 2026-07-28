@@ -106,7 +106,11 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 			continue
 		}
 		if !itemID.Valid || !revision.Valid || !sequence.Valid {
-			return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
+			if itemID.Valid || revision.Valid || !sequence.Valid {
+				return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
+			}
+			input.NextSequence = sequence.Int64
+			continue
 		}
 		source := MemoryConsolidationSource{ItemID: itemID.String, Revision: revision.Int64, ChangeSequence: sequence.Int64}
 		input.Sources = append(input.Sources, source)
