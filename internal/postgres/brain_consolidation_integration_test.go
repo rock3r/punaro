@@ -92,6 +92,24 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 		PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111133", Action: MemoryProposalCreate,
 		Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "consolidation.brief", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":"staged"}`)}},
 	}}
+	outsider, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "consolidation proposal outsider")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorized := stagedRequest
+	unauthorized.Proposal.PrincipalID = outsider.ID
+	unauthorized.Proposal.IdempotencyKey = "11111111-1111-4111-8111-111111111138"
+	var proposalsBefore int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, scopeID).Scan(&proposalsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.StageMemoryConsolidationProposal(ctx, unauthorized); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unauthorized consolidation proposal error=%v", err)
+	}
+	var proposalsAfter int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, scopeID).Scan(&proposalsAfter); err != nil || proposalsAfter != proposalsBefore {
+		t.Fatalf("unauthorized consolidation proposal created rows before=%d after=%d err=%v", proposalsBefore, proposalsAfter, err)
+	}
 	staged, err := app.StageMemoryConsolidationProposal(ctx, stagedRequest)
 	if err != nil || staged.State != MemoryProposalPending || staged.ProposalID == "" || len(staged.Mutations) != 0 {
 		t.Fatalf("stage consolidation proposal=%#v err=%v", staged, err)
