@@ -83,7 +83,7 @@ BEGIN
     UPDATE brain.memory_consolidation_checkpoints AS checkpoint SET timeline_id=requested_timeline,change_sequence=requested_sequence,lease_holder=NULL,lease_token=NULL,lease_until=NULL,updated_at=statement_timestamp()
     FROM jobs.server_state AS state
     WHERE state.singleton AND checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
-      AND requested_sequence>=checkpoint.change_sequence AND ((requested_timeline=state.timeline_id AND requested_sequence<=state.change_sequence) OR (requested_timeline=checkpoint.timeline_id AND EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.previous_timeline_id=checkpoint.timeline_id AND requested_sequence<=event.restored_change_sequence)));
+      AND requested_sequence>=checkpoint.change_sequence AND ((checkpoint.timeline_id=state.timeline_id AND requested_timeline=state.timeline_id AND requested_sequence<=state.change_sequence) OR (requested_timeline=checkpoint.timeline_id AND EXISTS (SELECT 1 FROM jobs.restore_events AS event WHERE event.previous_timeline_id=checkpoint.timeline_id AND requested_sequence<=event.restored_change_sequence)));
     RETURN FOUND;
 END
 $function$;
