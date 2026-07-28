@@ -1,6 +1,9 @@
 package postgres
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // memoryConsolidationControlsAvailable verifies the schema-v33 durable
 // checkpoint fence and its application-role boundary.
@@ -74,7 +77,22 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
 FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5).Scan(&available)
-	return available, err
+	if err != nil || available {
+		return available, err
+	}
+	var diagnostic string
+	err = q.QueryRowContext(ctx, `
+SELECT concat_ws(':',
+  (SELECT md5(btrim(prosrc,E' \n\r\t')) FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
+  (SELECT proargmodes::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
+  (SELECT proallargtypes::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
+  (SELECT proargnames::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
+  (SELECT count(*)::text FROM pg_constraint WHERE conrelid='brain.memory_consolidation_checkpoints'::regclass)
+)`).Scan(&diagnostic)
+	if err != nil {
+		return false, err
+	}
+	return false, fmt.Errorf("consolidation checkpoint catalog mismatch: %s", diagnostic)
 }
 
 const (

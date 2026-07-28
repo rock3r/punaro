@@ -1210,7 +1210,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 33 {
 		consolidationObjectsPresent, err := memoryConsolidationControlsAvailable(ctx, q)
 		if err != nil {
-			return Snapshot{}, errors.New("PostgreSQL memory consolidation checkpoint schema cannot be inspected")
+			return Snapshot{}, fmt.Errorf("PostgreSQL memory consolidation checkpoint schema cannot be inspected: %w", err)
 		}
 		snapshot.CurrentObjectsPresent = consolidationObjectsPresent
 	}
