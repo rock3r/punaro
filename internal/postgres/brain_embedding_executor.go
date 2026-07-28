@@ -234,7 +234,10 @@ func (e *MemoryEmbeddingExecutor) executeLease(ctx context.Context, lease Memory
 		}
 		return nil
 	}
-	publicationCtx, cancelPublication := context.WithDeadline(ctx, lease.LeaseUntil)
+	// Publication is the other lease-bound durable cleanup path. A completed
+	// provider result remains publishable until the exact lease expires even if
+	// the runtime's per-pass budget has elapsed.
+	publicationCtx, cancelPublication := context.WithDeadline(context.Background(), lease.LeaseUntil.Add(-memoryEmbeddingPublicationReserve))
 	defer cancelPublication()
 	if err := e.store.PublishMemoryEmbeddingWork(publicationCtx, publication); err == nil {
 		result.Published++
@@ -281,8 +284,11 @@ func validMemoryEmbeddingSource(lease MemoryEmbeddingLease, generation MemoryEmb
 	return hex.EncodeToString(digest[:]) == lease.ContentSHA256
 }
 
-func (e *MemoryEmbeddingExecutor) retry(ctx context.Context, lease MemoryEmbeddingLease, code string, result *MemoryEmbeddingExecutionResult) error {
-	retryCtx, cancel := context.WithDeadline(ctx, lease.LeaseUntil)
+func (e *MemoryEmbeddingExecutor) retry(_ context.Context, lease MemoryEmbeddingLease, code string, result *MemoryEmbeddingExecutionResult) error {
+	// Retry is the lease's durable cleanup path. It cannot inherit a pass
+	// deadline that has already fired, but it remains strictly bounded by the
+	// exact lease that authorized this worker mutation.
+	retryCtx, cancel := context.WithDeadline(context.Background(), lease.LeaseUntil)
 	defer cancel()
 	if err := e.store.RetryMemoryEmbeddingWork(retryCtx, MemoryEmbeddingRetry{Lease: lease, ErrorCode: code, Delay: time.Second}); err != nil {
 		if errors.Is(err, ErrStaleEmbeddingLease) || !time.Now().Before(lease.LeaseUntil) {
