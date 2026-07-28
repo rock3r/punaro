@@ -586,7 +586,10 @@ Schema version 37 additionally materializes only each item's current active
 revision as a consolidation source; superseded changes remain cursor gaps. A
 stale or non-clear scan for a selected source is a failed provider read rather
 than a cursor gap, so a worker cannot advance past a current revision until it
-is clear under the current scanner and exception state.
+is clear under the current scanner and exception state. The read holds its
+matching checkpoint lease fence through materialization, so a new generation
+cannot reclaim the checkpoint while the old generation is still being returned
+work.
 
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled

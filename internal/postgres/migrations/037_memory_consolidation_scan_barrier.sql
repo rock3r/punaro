@@ -6,6 +6,16 @@ DECLARE
     raw_page jsonb;
     source_page jsonb;
 BEGIN
+    PERFORM 1
+    FROM brain.memory_consolidation_checkpoints AS checkpoint
+    WHERE checkpoint.scope_id=requested_scope
+      AND checkpoint.lease_token=requested_token
+      AND checkpoint.lease_generation=requested_generation
+      AND checkpoint.lease_until>statement_timestamp()
+    FOR SHARE OF checkpoint;
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
     LOCK TABLE brain.secret_guard_state IN SHARE MODE;
     LOCK TABLE brain.secret_project_state IN SHARE MODE;
     WITH raw_source AS MATERIALIZED (
