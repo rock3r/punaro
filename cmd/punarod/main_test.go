@@ -72,16 +72,27 @@ func TestBuildMemoryHandlerIsDarkByDefaultAndRequiresCompleteAuthority(t *testin
 	}
 }
 
+func TestBuildMemoryHandlerFailsClosedWhenConfiguredProviderCredentialCannotLoad(t *testing.T) {
+	original := readEmbeddingAPIKey
+	t.Cleanup(func() { readEmbeddingAPIKey = original })
+	readEmbeddingAPIKey = func(string) (string, error) { return "", errors.New("unsafe") }
+	_, err := buildMemoryHandler(config.Config{MemoryOpenAIEmbeddingsURL: "https://embeddings.example/v1/embeddings", MemoryOpenAIAPIKeyFile: "/run/secrets/provider-key"}, &refusingPlatformDatabase{})
+	if err == nil || !strings.Contains(err.Error(), "provider credential") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 type unavailableMemoryDatabase struct {
 	deviceDatabase
 	readyCalled bool
+	readyErr    error
 }
 
 func (*unavailableMemoryDatabase) Ready(context.Context) error { return nil }
 func (*unavailableMemoryDatabase) Close() error                { return nil }
 func (database *unavailableMemoryDatabase) CanonicalBrainRuntimeReady(context.Context) error {
 	database.readyCalled = true
-	return errors.New("schema 14 is unavailable")
+	return database.readyErr
 }
 func (*unavailableMemoryDatabase) ResolveProjectIdentity(context.Context, string, punaropostgres.ProjectIdentityKind, string) (punaropostgres.ProjectIdentityResolution, error) {
 	return punaropostgres.ProjectIdentityResolution{}, errors.New("unused")
@@ -124,7 +135,7 @@ func (*unavailableMemoryDatabase) RejectMemoryProposal(context.Context, punaropo
 }
 
 func TestBuildMemoryHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
-	database := &unavailableMemoryDatabase{}
+	database := &unavailableMemoryDatabase{readyErr: errors.New("schema 14 is unavailable")}
 	_, err := buildMemoryHandler(config.Config{MemoryAPIEnabled: true, IngressMode: "internet", ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, database)
 	if err == nil || !database.readyCalled || !strings.Contains(err.Error(), "schema is unavailable") {
 		t.Fatalf("ready=%t error=%v", database.readyCalled, err)
