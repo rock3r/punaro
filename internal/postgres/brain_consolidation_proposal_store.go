@@ -70,7 +70,10 @@ WHERE scope.id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonica
 		}
 		body, payloadSHA := memoryProposalPayloadSHA(scopeProjectID, proposal.Action, proposal.Steps, proposal.Evidence)
 		allowed, err := lockCapability(ctx, tx, proposal.PrincipalID, project.ID, CapabilityMemoryPropose)
-		if err != nil || !allowed {
+		if err != nil {
+			return IdempotencyOutcome{}, err
+		}
+		if !allowed {
 			return IdempotencyOutcome{}, ErrNotFound
 		}
 		if err := validateConsolidationInputSources(ctx, tx, request.Input); err != nil {

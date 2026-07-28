@@ -388,11 +388,14 @@ func (d *Database) decideMemoryProposal(ctx context.Context, request MemoryPropo
 // proposal stale when any bound curated source is no longer its live revision.
 // Ordinary proposals have no rows here and retain their existing semantics.
 func lockAndValidateConsolidationProposalSources(ctx context.Context, tx *sql.Tx, projectID, proposalID, scopeID string) error {
-	available, err := consolidationProposalSourcesAvailable(ctx, tx)
+	available, required, err := consolidationProposalSourcesAvailable(ctx, tx)
 	if err != nil {
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	if !available {
+		if required {
+			return errors.New("consolidation proposal sources are unavailable")
+		}
 		return nil
 	}
 	var expected int
@@ -453,10 +456,10 @@ ORDER BY source.ordinal FOR SHARE OF item,scan`, proposalID, projectID)
 	return nil
 }
 
-func consolidationProposalSourcesAvailable(ctx context.Context, tx *sql.Tx) (bool, error) {
-	var available bool
-	err := tx.QueryRowContext(ctx, `SELECT to_regclass('brain.memory_consolidation_proposal_sources') IS NOT NULL`).Scan(&available)
-	return available, err
+func consolidationProposalSourcesAvailable(ctx context.Context, tx *sql.Tx) (available, required bool, err error) {
+	err = tx.QueryRowContext(ctx, `SELECT to_regclass('brain.memory_consolidation_proposal_sources') IS NOT NULL,
+EXISTS (SELECT 1 FROM jobs.schema_migrations WHERE version>=38 AND status='applied')`).Scan(&available, &required)
+	return available, required, err
 }
 
 func lockAndValidateProposalItems(ctx context.Context, tx *sql.Tx, projectID string, steps []MemoryProposalStepInput, evidence []MemoryProposalEvidenceInput) (map[string]lockedProposalItem, error) {
@@ -654,7 +657,7 @@ WHERE proposal.id=$1 AND COALESCE(alias.canonical_project_id,scope.project_id)=$
 	if err := evidenceRows.Close(); err != nil {
 		return MemoryProposal{}, errors.New("memory proposal evidence cannot close")
 	}
-	available, err := consolidationProposalSourcesAvailable(ctx, tx)
+	available, _, err := consolidationProposalSourcesAvailable(ctx, tx)
 	if err != nil {
 		return MemoryProposal{}, errors.New("memory proposal sources are unavailable")
 	}
