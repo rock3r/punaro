@@ -571,7 +571,9 @@ lineage before ordinary current-timeline advancement resumes, so no pending
 pre-restore changes are skipped. A crashed worker is reclaimed after expiry,
 and a stale worker cannot advance or release the checkpoint. Reprocessing
 after a crash or restore is allowed, but proposal creation remains idempotent
-and approval remains separately fenced.
+and approval remains separately fenced. Timeline rotation invalidates every
+live consolidation lease and advances its generation, so a token resurrected
+from a restored backup cannot act on the recovered checkpoint.
 
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled

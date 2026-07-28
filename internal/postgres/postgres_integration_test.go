@@ -2494,6 +2494,14 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	if err != nil {
 		t.Fatal(err)
 	}
+	var recoveredLease MemoryConsolidationLease
+	if err := ownerDB.QueryRowContext(ctx, `SELECT scope_id::text,timeline_id::text,change_sequence,lease_holder::text,lease_token::text,lease_generation,lease_until
+FROM brain.memory_consolidation_checkpoints
+WHERE lease_until > statement_timestamp()
+ORDER BY scope_id
+LIMIT 1`).Scan(&recoveredLease.ScopeID, &recoveredLease.TimelineID, &recoveredLease.Sequence, &recoveredLease.Holder, &recoveredLease.Token, &recoveredLease.Generation, &recoveredLease.Until); err != nil {
+		t.Fatalf("live consolidation lease for restore fence: %v", err)
+	}
 	admin, err := OpenAdministration(ctx, Config{DSNFile: ownerFile})
 	if err != nil {
 		t.Fatal(err)
@@ -2504,6 +2512,14 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 	}
 	if err != nil || rotated.InstallationID != before.InstallationID || rotated.TimelineID == before.TimelineID || rotated.ChangeSequence != before.ChangeSequence {
 		t.Fatalf("timeline rotation before=%#v after=%#v err=%v", before, rotated, err)
+	}
+	if _, err := app.ReadMemoryConsolidationInput(ctx, recoveredLease); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
+		t.Fatalf("restored consolidation lease remained live: %v", err)
+	}
+	var invalidatedToken sql.NullString
+	var invalidatedGeneration int64
+	if err := ownerDB.QueryRowContext(ctx, `SELECT lease_token::text,lease_generation FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, recoveredLease.ScopeID).Scan(&invalidatedToken, &invalidatedGeneration); err != nil || invalidatedToken.Valid || invalidatedGeneration <= recoveredLease.Generation {
+		t.Fatalf("restored consolidation lease token=%#v generation=%d previous=%d err=%v", invalidatedToken, invalidatedGeneration, recoveredLease.Generation, err)
 	}
 	admin, err = OpenAdministration(ctx, Config{DSNFile: ownerFile})
 	if err != nil {

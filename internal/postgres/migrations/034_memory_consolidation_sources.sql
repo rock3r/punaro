@@ -81,3 +81,61 @@ BEGIN
     RETURN FOUND;
 END
 $function$;
+
+CREATE OR REPLACE FUNCTION jobs.rotate_restored_timeline(
+    requested_backup_id uuid,
+    expected_installation_id uuid,
+    expected_timeline_id uuid,
+    expected_change_sequence bigint
+)
+RETURNS TABLE (installation_id uuid, timeline_id uuid, change_sequence bigint)
+LANGUAGE plpgsql
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    next_timeline uuid;
+BEGIN
+    SELECT state.timeline_id
+    INTO next_timeline
+    FROM jobs.server_state AS state
+    JOIN jobs.restore_events AS event
+      ON event.installation_id = state.installation_id
+     AND event.restored_timeline_id = state.timeline_id
+     AND event.restored_change_sequence = state.change_sequence
+    WHERE state.singleton
+      AND event.backup_id = requested_backup_id
+      AND event.installation_id = expected_installation_id
+      AND event.previous_timeline_id = expected_timeline_id
+      AND event.restored_change_sequence = expected_change_sequence;
+    IF FOUND THEN
+        RETURN QUERY
+        SELECT state.installation_id, state.timeline_id, state.change_sequence
+        FROM jobs.server_state AS state WHERE state.singleton;
+        RETURN;
+    END IF;
+    next_timeline := gen_random_uuid();
+    UPDATE jobs.server_state AS state
+    SET timeline_id = next_timeline,
+        timeline_started_at = statement_timestamp()
+    WHERE state.singleton
+      AND state.installation_id = expected_installation_id
+      AND state.timeline_id = expected_timeline_id
+      AND state.change_sequence = expected_change_sequence;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'restored state does not match the verified backup';
+    END IF;
+    UPDATE brain.memory_consolidation_checkpoints AS checkpoint
+    SET lease_holder=NULL,lease_token=NULL,lease_generation=checkpoint.lease_generation+1,lease_until=NULL,updated_at=statement_timestamp()
+    WHERE checkpoint.lease_until IS NOT NULL;
+    INSERT INTO jobs.restore_events (
+        restore_id, backup_id, installation_id, previous_timeline_id,
+        restored_timeline_id, restored_change_sequence
+    ) VALUES (
+        gen_random_uuid(), requested_backup_id, expected_installation_id,
+        expected_timeline_id, next_timeline, expected_change_sequence
+    );
+    RETURN QUERY
+    SELECT state.installation_id, state.timeline_id, state.change_sequence
+    FROM jobs.server_state AS state WHERE state.singleton;
+END
+$function$;
