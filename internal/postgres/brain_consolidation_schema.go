@@ -1,9 +1,6 @@
 package postgres
 
-import (
-	"context"
-	"fmt"
-)
+import "context"
 
 // memoryConsolidationControlsAvailable verifies the schema-v33 durable
 // checkpoint fence and its application-role boundary.
@@ -47,7 +44,7 @@ WITH objects AS (
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%change_sequence >= 0%')=1
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%lease_generation >= 0%')=1
        AND count(*) FILTER (WHERE contype='c' AND pg_get_constraintdef(oid) LIKE '%lease_holder IS NULL%' AND pg_get_constraintdef(oid) LIKE '%lease_until IS NOT NULL%')=1 AS exact
-    FROM pg_constraint,objects WHERE conrelid=table_oid
+    FROM pg_constraint,objects WHERE conrelid=table_oid AND contype<>'n'
 ), expected_acl(routine_oid,grantee,privilege_type,is_grantable) AS (
     SELECT claim_oid,'punaro_owner','EXECUTE',false FROM objects UNION ALL
     SELECT claim_oid,'punaro_app','EXECUTE',false FROM objects UNION ALL
@@ -77,22 +74,7 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
 FROM objects,routine_safety,constraint_safety,table_acl_safety`, memoryConsolidationClaimRoutineMD5, memoryConsolidationAdvanceRoutineMD5).Scan(&available)
-	if err != nil || available {
-		return available, err
-	}
-	var diagnostic string
-	err = q.QueryRowContext(ctx, `
-SELECT concat_ws(':',
-  (SELECT md5(btrim(prosrc,E' \n\r\t')) FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
-  (SELECT proargmodes::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
-  (SELECT proallargtypes::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
-  (SELECT proargnames::text FROM pg_proc WHERE oid=to_regprocedure('brain.claim_memory_consolidation_checkpoint(uuid,uuid,bigint)')),
-  (SELECT count(*)::text FROM pg_constraint WHERE conrelid='brain.memory_consolidation_checkpoints'::regclass)
-)`).Scan(&diagnostic)
-	if err != nil {
-		return false, err
-	}
-	return false, fmt.Errorf("consolidation checkpoint catalog mismatch: %s", diagnostic)
+	return available, err
 }
 
 const (
