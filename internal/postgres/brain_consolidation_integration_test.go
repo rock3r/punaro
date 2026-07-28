@@ -133,17 +133,23 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
 	}
-	testMemoryConsolidationRestoreLineageIntegration(ctx, t, app, ownerDB, actor.ID, projectID)
+	testMemoryConsolidationRestoreLineageIntegration(ctx, t, app, ownerDB, actor.ID)
 }
 
-func testMemoryConsolidationRestoreLineageIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, actorID, projectID string) {
+func testMemoryConsolidationRestoreLineageIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB, actorID string) {
 	t.Helper()
-	var scopeID string
-	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, projectID, actorID).Scan(&scopeID); err != nil {
+	var projectID, scopeID string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('consolidation restore lineage project',$1) RETURNING id::text`, actorID).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actorID, projectID, CapabilityMemoryWrite); err != nil {
 		t.Fatal(err)
 	}
 	rootSource, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actorID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111120", LogicalKey: "consolidation.restore.root", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"root"}`)})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes WHERE project_id=$1`, projectID).Scan(&scopeID); err != nil {
 		t.Fatal(err)
 	}
 	rootLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, scopeID, "55555555-5555-4555-8555-555555555555", memoryEmbeddingMinLease)
