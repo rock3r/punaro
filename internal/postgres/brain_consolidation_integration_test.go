@@ -118,6 +118,18 @@ VALUES ($1,$2,1,'sensitive-field','/source',decode(repeat('11',32),'hex'),$3)`, 
 	if err != nil || !claimed || fourth.Generation <= third.Generation || fourth.Sequence != input.NextSequence {
 		t.Fatalf("expired consolidation reclaim=%#v input=%#v claimed=%t err=%v", fourth, input, claimed, err)
 	}
+	archived, err := app.CreateMemory(ctx, MemoryCreateRequest{PrincipalID: actor.ID, ProjectID: projectID, IdempotencyKey: "11111111-1111-4111-8111-111111111118", LogicalKey: "consolidation.archived", Kind: "fact", Trust: "curated", Document: json.RawMessage(`{"source":"archived"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archived, err = app.ArchiveMemory(ctx, MemoryArchiveRequest{PrincipalID: actor.ID, ProjectID: projectID, ItemID: archived.ItemID, IdempotencyKey: "11111111-1111-4111-8111-111111111119", ExpectedETag: archived.ETag, Archived: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err = app.ReadMemoryConsolidationInput(ctx, fourth)
+	if err != nil || len(input.Sources) != 0 || input.NextSequence != archived.ChangeSequence {
+		t.Fatalf("archived revisions remained materializable=%#v archived=%#v err=%v", input, archived, err)
+	}
 	if err := app.AdvanceMemoryConsolidationCheckpoint(ctx, second, second.TimelineID, 3); !errors.Is(err, ErrStaleMemoryConsolidationLease) {
 		t.Fatalf("expired consolidation lease advance error=%v", err)
 	}
