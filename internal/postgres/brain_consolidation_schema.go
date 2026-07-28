@@ -25,7 +25,8 @@ WITH objects AS (
            to_regprocedure('brain.read_memory_consolidation_sources(uuid,uuid,bigint)') AS sources_oid,
            to_regprocedure('brain.read_memory_consolidation_documents(uuid,uuid,bigint)') AS documents_oid,
            $5::boolean AS sources_required,
-           $6::boolean AS documents_required
+           $6::boolean AS documents_required,
+           $7::boolean AS document_hash_required
 ), expected_columns(name,type_name,required,default_expression) AS (
     VALUES
       ('scope_id','uuid',true,''),('timeline_id','uuid',true,''),('change_sequence','bigint',true,'0'),
@@ -59,13 +60,18 @@ WITH objects AS (
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$3)
         OR (routine.oid=documents_oid AND routine.proretset AND routine.prorettype='record'::regtype
             AND routine.pronargs=3 AND routine.proargtypes='2950 2950 20'::oidvector
-            AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'jsonb'::regtype,'bytea'::regtype,'boolean'::regtype]::oid[]
-            AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t','t']::"char"[]
-            AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','document','content_sha256','is_fence']::text[]
+            AND ((document_hash_required
+                  AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'jsonb'::regtype,'bytea'::regtype,'boolean'::regtype]::oid[]
+                  AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t','t']::"char"[]
+                  AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','document','content_sha256','is_fence']::text[])
+                 OR (NOT document_hash_required
+                  AND routine.proallargtypes=ARRAY['uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'uuid'::regtype,'uuid'::regtype,'bigint'::regtype,'bigint'::regtype,'jsonb'::regtype,'boolean'::regtype]::oid[]
+                  AND routine.proargmodes=ARRAY['i','i','i','t','t','t','t','t','t']::"char"[]
+                  AND routine.proargnames=ARRAY['requested_scope','requested_token','requested_generation','timeline_id','item_id','revision','change_sequence','document','is_fence']::text[]))
             AND md5(btrim(routine.prosrc,E' \n\r\t'))=$4))) AS exact
     FROM pg_proc AS routine,objects
     WHERE routine.oid=ANY(ARRAY[claim_oid,advance_oid,sources_oid,documents_oid])
-    GROUP BY sources_required,documents_required
+    GROUP BY sources_required,documents_required,document_hash_required
 ), constraint_safety AS (
     SELECT count(*)=5
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1]::smallint[])=1
@@ -106,7 +112,7 @@ SELECT table_oid IS NOT NULL AND claim_oid IS NOT NULL AND advance_oid IS NOT NU
    AND table_acl_safety.exact
    AND NOT has_table_privilege('punaro_app',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT EXISTS (SELECT 1 FROM pg_attribute,objects WHERE attrelid=table_oid AND attnum>0 AND NOT attisdropped AND attacl IS NOT NULL)
-FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advanceMD5, memoryConsolidationSourcesRoutineMD5, documentsMD5, version >= 34, version >= 35).Scan(&available)
+FROM objects,routine_safety,constraint_safety,table_acl_safety`, claimMD5, advanceMD5, memoryConsolidationSourcesRoutineMD5, documentsMD5, version >= 34, version >= 35, version >= 37).Scan(&available)
 	return available, err
 }
 

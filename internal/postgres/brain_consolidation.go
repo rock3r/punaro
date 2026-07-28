@@ -119,8 +119,8 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 			input.NextSequence = sequence.Int64
 			continue
 		}
+		digest := sha256.Sum256([]byte(document.String))
 		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
-		digest := sha256.Sum256(canonical)
 		if err != nil || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) {
 			return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
 		}
