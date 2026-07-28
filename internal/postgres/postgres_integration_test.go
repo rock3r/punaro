@@ -835,6 +835,15 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	}
 	conn := mustConn(ctx, t, ownerDB)
 	defer func() { _ = conn.Close() }()
+	if _, err := ownerDB.ExecContext(ctx, `GRANT SELECT ON brain.memory_consolidation_checkpoints TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err := inspect(ctx, conn); err != nil || snapshot.CurrentObjectsPresent || Classify(snapshot, v33).Classification != Incompatible {
+		t.Fatalf("v33 consolidation drift snapshot=%#v state=%#v err=%v", snapshot, Classify(snapshot, v33), err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE SELECT ON brain.memory_consolidation_checkpoints FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
 	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
 		t.Fatalf("v33-to-current bridge state=%#v err=%v", state, err)
 	}
