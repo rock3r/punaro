@@ -179,6 +179,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	accessReadiness := func() error { return nil }
+	var accessVerifier *access.Verifier
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -190,6 +191,7 @@ func run(args []string, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "punarod Access readiness error: %v\n", err)
 			return 2
 		}
+		accessVerifier = verifier
 	}
 	var postgresRelay relay.Backend
 	if cfg.RelayStore == "postgres" {
@@ -226,6 +228,7 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punarod remote MCP configuration error: metadata is unavailable")
 		return 2
 	}
+	remoteMCPMetadataHandler = protectRemoteMCPHandler(remoteMCPMetadataHandler, accessVerifier)
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
@@ -312,6 +315,7 @@ func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, tr
 	if remoteMCPMetadataHandler != nil {
 		mux.Handle("/.well-known/oauth-protected-resource", remoteMCPMetadataHandler)
 		mux.Handle("/.well-known/oauth-protected-resource/", remoteMCPMetadataHandler)
+		mux.Handle("/mcp", remoteMCPMetadataHandler)
 	}
 	if memoryHandler != nil {
 		mux.Handle("/v1/projects/resolve", memoryHandler)
@@ -331,6 +335,13 @@ func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
 		return nil, nil
 	}
 	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","))
+}
+
+func protectRemoteMCPHandler(handler http.Handler, verifier *access.Verifier) http.Handler {
+	if handler == nil || verifier == nil {
+		return handler
+	}
+	return verifier.Middleware(handler)
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {

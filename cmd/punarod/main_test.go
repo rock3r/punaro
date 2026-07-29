@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/access"
 	"github.com/rock3r/punaro/internal/config"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/trustedattachment"
@@ -173,7 +174,7 @@ func TestProductionRoutesKeepMemoryAPIDarkWhenHandlerIsAbsent(t *testing.T) {
 	}
 }
 
-func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadata(t *testing.T) {
+func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadataAndChallenge(t *testing.T) {
 	handler, err := buildRemoteMCPMetadataHandler(config.Config{})
 	if err != nil || handler != nil {
 		t.Fatalf("disabled handler=%v err=%v", handler, err)
@@ -191,8 +192,24 @@ func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadata(t *te
 	}
 	transport := httptest.NewRecorder()
 	mux.ServeHTTP(transport, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil))
-	if transport.Code != http.StatusNotFound {
+	if transport.Code != http.StatusUnauthorized {
 		t.Fatalf("transport status=%d", transport.Code)
+	}
+}
+
+func TestRemoteMCPChallengeIsAdmittedByConfiguredAccess(t *testing.T) {
+	handler, err := buildRemoteMCPMetadataHandler(config.Config{RemoteMCPMetadataEnabled: true, RemoteMCPResourceURL: "https://punaro.example/mcp", RemoteMCPAuthorizationServers: "https://auth.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := access.NewVerifier(access.Config{Issuer: "https://access.example", Audience: "punaro", JWKSURL: "https://access.example/certs"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	protectRemoteMCPHandler(handler, verifier).ServeHTTP(response, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil))
+	if response.Code != http.StatusForbidden || response.Header().Get("WWW-Authenticate") != "" {
+		t.Fatalf("unadmitted MCP challenge = %d authenticate=%q", response.Code, response.Header().Get("WWW-Authenticate"))
 	}
 }
 

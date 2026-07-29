@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestProtectedResourceMetadataIsStrictAndDoesNotMountMCPTransport(t *testing.T) {
+func TestProtectedResourceMetadataIsStrictAndChallengesMCPWithoutAcceptingTokens(t *testing.T) {
 	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"})
 	if err != nil {
 		t.Fatal(err)
@@ -22,15 +22,24 @@ func TestProtectedResourceMetadataIsStrictAndDoesNotMountMCPTransport(t *testing
 		t.Fatalf("metadata = %s", got)
 	}
 
-	transport := httptest.NewRecorder()
-	handler.ServeHTTP(transport, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil))
-	if transport.Code != http.StatusNotFound {
-		t.Fatalf("MCP transport must remain dark, got %d", transport.Code)
+	challenge := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer deliberately-uninspected")
+	handler.ServeHTTP(challenge, request)
+	if challenge.Code != http.StatusUnauthorized || challenge.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("challenge response = %d cache-control=%q", challenge.Code, challenge.Header().Get("Cache-Control"))
+	}
+	wantChallenge := `Bearer realm="punaro-mcp", resource_metadata="https://mcp.example.test/.well-known/oauth-protected-resource/mcp", scope="memory.search memory.read memory.propose"`
+	if challenge.Header().Get("WWW-Authenticate") != wantChallenge {
+		t.Fatalf("WWW-Authenticate = %q, want %q", challenge.Header().Get("WWW-Authenticate"), wantChallenge)
+	}
+	if challenge.Body.Len() != 0 {
+		t.Fatalf("challenge body = %q", challenge.Body.String())
 	}
 }
 
 func TestProtectedResourceMetadataRejectsUnsafeConfiguration(t *testing.T) {
-	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment", "https://mcp.example.test//mcp"} {
+	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment", "https://mcp.example.test//mcp"} {
 		if _, err := New(resource, []string{"https://auth.example.test"}); err == nil {
 			t.Fatalf("unsafe resource accepted: %q", resource)
 		}
