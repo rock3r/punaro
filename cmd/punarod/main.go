@@ -27,6 +27,7 @@ import (
 	"github.com/rock3r/punaro/internal/embeddingprovider"
 	"github.com/rock3r/punaro/internal/ingress"
 	"github.com/rock3r/punaro/internal/mcphttp"
+	"github.com/rock3r/punaro/internal/mcpoauth"
 	"github.com/rock3r/punaro/internal/memoryhttp"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
@@ -179,7 +180,6 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	accessReadiness := func() error { return nil }
-	var accessVerifier *access.Verifier
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -191,7 +191,6 @@ func run(args []string, stderr io.Writer) int {
 			_, _ = fmt.Fprintf(stderr, "punarod Access readiness error: %v\n", err)
 			return 2
 		}
-		accessVerifier = verifier
 	}
 	var postgresRelay relay.Backend
 	if cfg.RelayStore == "postgres" {
@@ -228,7 +227,6 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "punarod remote MCP configuration error: metadata is unavailable")
 		return 2
 	}
-	remoteMCPMetadataHandler = protectRemoteMCPHandler(remoteMCPMetadataHandler, accessVerifier)
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
@@ -334,14 +332,15 @@ func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
 	if !cfg.RemoteMCPMetadataEnabled {
 		return nil, nil
 	}
-	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","))
-}
-
-func protectRemoteMCPHandler(handler http.Handler, verifier *access.Verifier) http.Handler {
-	if handler == nil || verifier == nil {
-		return handler
+	var validator mcphttp.TokenValidator
+	var err error
+	if cfg.RemoteMCPTokenValidationEnabled {
+		validator, err = mcpoauth.NewVerifier(mcpoauth.Config{Issuer: cfg.RemoteMCPIssuer, Audience: cfg.RemoteMCPResourceURL, JWKSURL: cfg.RemoteMCPJWKSURL}, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return verifier.Middleware(handler)
+	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator)
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {

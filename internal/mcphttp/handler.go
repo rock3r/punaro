@@ -6,12 +6,16 @@
 package mcphttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"time"
+
+	"github.com/rock3r/punaro/internal/mcpoauth"
 )
 
 type protectedResourceMetadata struct {
@@ -21,10 +25,17 @@ type protectedResourceMetadata struct {
 
 const defaultScopeChallenge = "memory.search memory.read memory.propose"
 
+// TokenValidator is the narrow resource-server dependency used before an MCP
+// transport exists. A later adapter maps its verified identity and scopes to
+// Punaro project grants.
+type TokenValidator interface {
+	Validate(context.Context, string, time.Time) (mcpoauth.Claims, error)
+}
+
 // New creates the OAuth protected-resource metadata endpoint and a discovery
 // challenge for one canonical HTTPS MCP resource. It accepts no credentials and
 // does not mount an MCP transport.
-func New(resource string, authorizationServers []string) (http.Handler, error) {
+func New(resource string, authorizationServers []string, validator TokenValidator) (http.Handler, error) {
 	resourcePath := resourcePath(resource)
 	if !validCanonicalHTTPSURL(resource, true) || resourcePath == "" || len(authorizationServers) == 0 {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
@@ -56,12 +67,38 @@ func New(resource string, authorizationServers []string) (http.Handler, error) {
 	if err != nil {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
 	}
-	mux.HandleFunc(resourcePath, func(response http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(resourcePath, func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Cache-Control", "no-store")
-		response.Header().Set("WWW-Authenticate", `Bearer realm="punaro-mcp", resource_metadata="`+metadataURL+`", scope="`+defaultScopeChallenge+`"`)
-		response.WriteHeader(http.StatusUnauthorized)
+		credential, presented := bearerCredential(request)
+		if !presented || validator == nil {
+			response.Header().Set("WWW-Authenticate", challengeHeader(metadataURL, ""))
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if _, err := validator.Validate(request.Context(), credential, time.Now().UTC()); err != nil {
+			response.Header().Set("WWW-Authenticate", challengeHeader(metadataURL, "error=\"invalid_token\", "))
+			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		response.WriteHeader(http.StatusNotImplemented)
 	})
 	return mux, nil
+}
+
+func challengeHeader(metadataURL, prefix string) string {
+	return `Bearer ` + prefix + `realm="punaro-mcp", resource_metadata="` + metadataURL + `", scope="` + defaultScopeChallenge + `"`
+}
+
+func bearerCredential(request *http.Request) (string, bool) {
+	if len(request.Header.Values("Authorization")) != 1 {
+		return "", false
+	}
+	value := request.Header.Get("Authorization")
+	scheme, credential, found := strings.Cut(value, " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	return credential, true
 }
 
 func protectedResourceMetadataURL(resource, metadataPath string) (string, error) {

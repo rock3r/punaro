@@ -82,8 +82,15 @@ configured HTTPS authorization-server origins, and returns a 401
 the default `memory.search`, `memory.read`, and `memory.propose` scopes; it
 does not parse or accept a token, mount an MCP transport, or expose tools. Thus
 enabling it cannot grant remote access before the later OAuth resource-server
-and strict transport slices. When the optional Access admission layer is
-configured, it wraps this discovery surface before the challenge is emitted.
+and strict transport slices. The OAuth metadata and challenge remain reachable
+for standards-required discovery even when optional Access admission is
+configured; Access is not application authorization.
+The next opt-in resource-server boundary validates only RS256 JWTs from an
+advertised issuer through its HTTPS JWKS endpoint. It requires an expiry and
+the exact canonical MCP resource as audience, and never forwards the bearer
+token. A successful validation returns only the deliberate no-transport
+response until a later slice maps the verified subject and scopes to Punaro
+project grants.
 The mutation slice is separately dark behind
 `PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
 strict canonical create/update/archive/restore/purge and staged-proposal

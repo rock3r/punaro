@@ -38,6 +38,39 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.T) {
+	t.Setenv("PUNARO_REMOTE_MCP_TOKEN_VALIDATION_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted without remote MCP metadata")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-postgres-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	t.Setenv("PUNARO_REMOTE_MCP_METADATA_ENABLED", "true")
+	t.Setenv("PUNARO_REMOTE_MCP_RESOURCE_URL", "https://punaro.example/mcp")
+	t.Setenv("PUNARO_REMOTE_MCP_AUTHORIZATION_SERVERS", "https://auth.example")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted without issuer and JWKS URL")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_ISSUER", "https://other.example")
+	t.Setenv("PUNARO_REMOTE_MCP_JWKS_URL", "https://auth.example/jwks")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted an unadvertised issuer")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_ISSUER", "https://auth.example")
+	t.Setenv("PUNARO_REMOTE_MCP_JWKS_URL", "http://auth.example/jwks")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted plaintext JWKS")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_JWKS_URL", "https://auth.example/jwks")
+	cfg, err := Load("")
+	if err != nil || !cfg.RemoteMCPTokenValidationEnabled || cfg.RemoteMCPIssuer != "https://auth.example" {
+		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+}
+
 func TestLoadOpenAIEmbeddingProviderRequiresCompleteSafeConfiguration(t *testing.T) {
 	t.Setenv("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "https://embeddings.example/v1/embeddings")
 	if _, err := Load(""); err == nil {
