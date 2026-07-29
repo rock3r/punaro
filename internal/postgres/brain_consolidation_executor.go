@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"strconv"
 
@@ -114,7 +115,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		return MemoryConsolidationExecutionResult{}, errors.New("consolidation input is invalid")
 	}
 	if !found {
-		proposals, err = e.planner.Propose(passCtx, input)
+		proposals, err = e.planner.Propose(passCtx, cloneMemoryConsolidationInput(input))
 		if err != nil {
 			return MemoryConsolidationExecutionResult{}, err
 		}
@@ -165,6 +166,18 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	return MemoryConsolidationExecutionResult{Sources: len(input.Sources), Staged: len(proposals), Advanced: true}, nil
+}
+
+// cloneMemoryConsolidationInput isolates the executor's fenced source page
+// from untrusted planner mutation.
+func cloneMemoryConsolidationInput(input MemoryConsolidationInput) MemoryConsolidationInput {
+	copy := input
+	copy.Sources = make([]MemoryConsolidationSource, len(input.Sources))
+	for index, source := range input.Sources {
+		source.Document = append(json.RawMessage(nil), source.Document...)
+		copy.Sources[index] = source
+	}
+	return copy
 }
 
 func (e *MemoryConsolidationExecutor) normalizeMemoryConsolidationProposals(raw []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
