@@ -14,6 +14,8 @@ grep -Fq 'postgres_app_password' "$compose_file"
 grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
 grep -Fq 'postgres-bootstrap:' "$compose_file"
 grep -Fq 'service_completed_successfully' "$compose_file"
+grep -Fq 'pg_isready --host 127.0.0.1 -U punaro_owner -d punaro' "$compose_file"
+grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"
 grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
 grep -Fq "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')" deploy/compose/postgres-bootstrap.sh
 grep -Fq '\\set app_password `cat /run/secrets/postgres_app_password`' deploy/compose/postgres-bootstrap.sh

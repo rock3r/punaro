@@ -21,7 +21,7 @@ services:
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     network_mode: host
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U punaro_owner -d punaro"]
+      test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 -U punaro_owner -d punaro"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -46,6 +46,7 @@ services:
     restart: "no"
 
   punarod:
+    profiles: ["reference-daemon"]
     image: ${PUNARO_IMAGE:?required}
     init: true
     user: "${PUNARO_RUNTIME_UID:?required}:${PUNARO_RUNTIME_GID:?required}"

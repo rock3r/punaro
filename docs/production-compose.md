@@ -4,12 +4,14 @@
 not a development shortcut and deliberately refuses to choose an image,
 database password, application DSN, or public URL on the operator's behalf.
 
-The default services are only `postgres` and `punarod`. PostgreSQL is pinned to
-the reviewed pgvector 18 digest and is forced to same-host loopback. `punarod`
-uses that same reviewed loopback boundary, has a read-only root filesystem, no Linux capabilities,
-`no-new-privileges`, a bounded temporary filesystem, and loopback-only host
-ports. Database credentials are mounted as read-only Compose secrets; neither
-credential is an environment variable or image layer.
+The default services are `postgres` and its one-shot role bootstrap. PostgreSQL
+is pinned to the reviewed pgvector 18 digest and is forced to same-host
+loopback. The bundled `punarod` definition is an explicit
+`reference-daemon` profile, not a default service: the supported installation
+uses the host-local lifecycle created by `punaro init`, `punaro up`, and
+`punaro update`. This prevents two daemons from claiming the same loopback
+ports or different blob state. Database credentials are mounted as read-only
+Compose secrets; neither credential is an environment variable or image layer.
 
 ## First installation
 
@@ -48,8 +50,9 @@ invoke the database bundle through `scripts/production-compose`: it refuses a
 non-digest image reference and a root runtime identity. Start the private
 database and its idempotent role bootstrap, then initialize the host-local
 Punaro lifecycle. The initial `punaro init` owns the daemon Compose artifact
-and writes the installation record required by `punaro update`; do not start
-the reference bundle's `punarod` service separately.
+and writes the installation record required by `punaro update`; do not enable
+the `reference-daemon` profile or start the reference bundle's `punarod`
+service separately.
 
 Create private, non-overlapping daemon data, backup, and installation
 directories outside the repository, then initialize and start the daemon:

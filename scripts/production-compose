@@ -32,6 +32,10 @@ fi
 case "$repository" in
 	*[!a-z0-9./:_-]*|*//*|/*|*/|*::*|*:) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
+repository_leaf=${repository##*/}
+case "$repository_leaf" in
+	*:*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
+esac
 case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
