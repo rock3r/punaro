@@ -275,6 +275,7 @@ func validRemoteMCPSubjectBindings(raw string) bool {
 		return false
 	}
 	seen := make(map[string]struct{}, len(bindings))
+	principalIDs := make(map[string]struct{}, len(bindings))
 	for _, binding := range bindings {
 		principalID, err := uuid.Parse(binding.PrincipalID)
 		if binding.Subject == "" || len(binding.Subject) > 255 || strings.TrimSpace(binding.Subject) != binding.Subject || strings.ContainsAny(binding.Subject, "\x00\r\n") || err != nil || principalID == uuid.Nil || principalID.String() != binding.PrincipalID {
@@ -283,7 +284,11 @@ func validRemoteMCPSubjectBindings(raw string) bool {
 		if _, duplicate := seen[binding.Subject]; duplicate {
 			return false
 		}
+		if _, duplicate := principalIDs[binding.PrincipalID]; duplicate {
+			return false
+		}
 		seen[binding.Subject] = struct{}{}
+		principalIDs[binding.PrincipalID] = struct{}{}
 	}
 	return true
 }

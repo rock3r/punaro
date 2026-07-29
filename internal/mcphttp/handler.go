@@ -32,10 +32,12 @@ type TokenValidator interface {
 	Validate(context.Context, string, time.Time) (mcpoauth.Claims, error)
 }
 
+type PrincipalActive func(context.Context, string) (bool, error)
+
 // New creates the OAuth protected-resource metadata endpoint and a discovery
 // challenge for one canonical HTTPS MCP resource. It accepts no credentials and
 // does not mount an MCP transport.
-func New(resource string, authorizationServers []string, validator TokenValidator, subjectBindings map[string]string) (http.Handler, error) {
+func New(resource string, authorizationServers []string, validator TokenValidator, subjectBindings map[string]string, principalActive PrincipalActive) (http.Handler, error) {
 	resourcePath := resourcePath(resource)
 	if !validCanonicalHTTPSURL(resource, true) || resourcePath == "" || len(authorizationServers) == 0 {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
@@ -81,7 +83,13 @@ func New(resource string, authorizationServers []string, validator TokenValidato
 			response.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if subjectBindings[claims.Subject] == "" {
+		principalID := subjectBindings[claims.Subject]
+		if principalID == "" || principalActive == nil {
+			response.WriteHeader(http.StatusForbidden)
+			return
+		}
+		active, err := principalActive(request.Context(), principalID)
+		if err != nil || !active {
 			response.WriteHeader(http.StatusForbidden)
 			return
 		}

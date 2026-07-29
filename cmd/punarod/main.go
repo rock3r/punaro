@@ -339,13 +339,15 @@ func buildRemoteMCPMetadataHandler(cfg config.Config, database platformDatabase)
 	}
 	var validator mcphttp.TokenValidator
 	subjectBindings := map[string]string(nil)
+	var principalDatabase remoteMCPPrincipalDatabase
 	var err error
 	if cfg.RemoteMCPTokenValidationEnabled {
 		validator, err = mcpoauth.NewVerifier(mcpoauth.Config{Issuer: cfg.RemoteMCPIssuer, Audience: cfg.RemoteMCPResourceURL, JWKSURL: cfg.RemoteMCPJWKSURL}, nil)
 		if err != nil {
 			return nil, err
 		}
-		principalDatabase, ok := database.(remoteMCPPrincipalDatabase)
+		var ok bool
+		principalDatabase, ok = database.(remoteMCPPrincipalDatabase)
 		if !ok {
 			return nil, errors.New("remote MCP principal database is unavailable")
 		}
@@ -354,7 +356,11 @@ func buildRemoteMCPMetadataHandler(cfg config.Config, database platformDatabase)
 			return nil, err
 		}
 	}
-	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator, subjectBindings)
+	var principalActive mcphttp.PrincipalActive
+	if cfg.RemoteMCPTokenValidationEnabled {
+		principalActive = principalDatabase.RemoteMCPPrincipalActive
+	}
+	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator, subjectBindings, principalActive)
 }
 
 func remoteMCPSubjectBindings(ctx context.Context, raw string, database remoteMCPPrincipalDatabase) (map[string]string, error) {

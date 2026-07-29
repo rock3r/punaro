@@ -13,7 +13,7 @@ import (
 )
 
 func TestProtectedResourceMetadataIsStrictAndChallengesMCPWithoutAcceptingTokens(t *testing.T) {
-	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, nil, nil)
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestProtectedResourceMetadataIsStrictAndChallengesMCPWithoutAcceptingTokens
 }
 
 func TestValidatedTokenReachesOnlyTheNoTransportBoundary(t *testing.T) {
-	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"})
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"}, activePrincipal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestValidatedTokenReachesOnlyTheNoTransportBoundary(t *testing.T) {
 }
 
 func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
-	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"})
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"}, activePrincipal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,21 @@ func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
 }
 
 func TestVerifiedButUnmappedSubjectIsForbidden(t *testing.T) {
-	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, nil)
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, nil, activePrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+func TestVerifiedSubjectWithDisabledPrincipalIsForbidden(t *testing.T) {
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"}, func(context.Context, string) (bool, error) { return false, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,6 +108,8 @@ func TestVerifiedButUnmappedSubjectIsForbidden(t *testing.T) {
 
 type testValidator struct{}
 
+func activePrincipal(context.Context, string) (bool, error) { return true, nil }
+
 func (testValidator) Validate(_ context.Context, raw string, _ time.Time) (mcpoauth.Claims, error) {
 	if raw != "valid" {
 		return mcpoauth.Claims{}, errors.New("invalid")
@@ -103,12 +119,12 @@ func (testValidator) Validate(_ context.Context, raw string, _ time.Time) (mcpoa
 
 func TestProtectedResourceMetadataRejectsUnsafeConfiguration(t *testing.T) {
 	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment", "https://mcp.example.test//mcp"} {
-		if _, err := New(resource, []string{"https://auth.example.test"}, nil, nil); err == nil {
+		if _, err := New(resource, []string{"https://auth.example.test"}, nil, nil, nil); err == nil {
 			t.Fatalf("unsafe resource accepted: %q", resource)
 		}
 	}
 	for _, authorizationServer := range [][]string{nil, {"http://auth.example.test"}, {"https://auth.example.test/path"}} {
-		if _, err := New("https://mcp.example.test/mcp", authorizationServer, nil, nil); err == nil {
+		if _, err := New("https://mcp.example.test/mcp", authorizationServer, nil, nil, nil); err == nil {
 			t.Fatalf("unsafe authorization server accepted: %q", authorizationServer)
 		}
 	}
