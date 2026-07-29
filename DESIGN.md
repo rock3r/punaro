@@ -602,15 +602,18 @@ memory. Generic proposal evidence remains restricted to evidence-layer records;
 consolidation provenance is a separate scope-bound relation so curated source
 revisions remain auditable without weakening that invariant.
 
-The bounded consolidation executor is provider-agnostic: it reads one live
-page, validates the complete proposal/evidence budget before staging any
-output, and stages every validated output through that same source-bound path.
-It advances the exact checkpoint only after all staging succeeds. Planner, validation, staging, or
-checkpoint failure leaves the page unadvanced for fenced replay; the executor
-has no canonical mutation or approval authority. Planner output cannot choose
-a principal, project, or idempotency key: the trusted executor caller binds
-the authorized principal/project, while page coordinates plus each normalized
-proposal payload derive stable idempotency keys for partial-stage replay.
+Schema version 39 adds one immutable, lease-fenced pass record for each exact
+source page and authorized proposer/project. The bounded, provider-agnostic
+executor first loads that record; only an absent record permits planner output,
+which is fully validated and durably reserved before any proposal is staged.
+Every retry consequently reuses the original proposal bodies and ordinal-based
+idempotency keys even if a later planner response differs. It advances the
+exact checkpoint and removes that pass atomically only after all staging
+succeeds. Planner, validation, staging, or checkpoint failure leaves the page
+unadvanced for fenced replay; the executor has no canonical mutation or
+approval authority. Planner output cannot choose a principal, project, or
+idempotency key: the trusted executor caller binds the authorized
+principal/project.
 Consolidation staging also proves that the requested project is the leased
 scope's canonical project before expiry/retention maintenance can touch any
 proposal rows, so a wrong-project request has no cross-project side effects.

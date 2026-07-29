@@ -55,8 +55,10 @@ func (request MemoryConsolidationExecutionRequest) valid() bool {
 
 type memoryConsolidationExecutorStore interface {
 	ReadMemoryConsolidationInput(context.Context, MemoryConsolidationLease) (MemoryConsolidationInput, error)
+	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) ([]MemoryConsolidationProposal, bool, error)
+	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error)
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
-	AdvanceMemoryConsolidationCheckpoint(context.Context, MemoryConsolidationLease, string, int64) error
+	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 }
 
 // MemoryConsolidationExecutor runs one bounded proposal-only pass. Its only
@@ -84,9 +86,10 @@ func NewMemoryConsolidationExecutor(store memoryConsolidationExecutorStore, plan
 	return &MemoryConsolidationExecutor{store: store, planner: planner, policy: policy}, nil
 }
 
-// Execute reads one live page, stages every validated output, and only then
-// advances the exact checkpoint. Any failure leaves the checkpoint leased for
-// expiry/reclaim, so a later worker can safely replay the page.
+// Execute reads one live page, durably fixes its validated planner output,
+// stages every entry, and only then completes the exact checkpoint. Any
+// failure leaves that immutable pass available for a later worker to replay
+// without asking a planner to produce a replacement proposal set.
 func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request MemoryConsolidationExecutionRequest) (MemoryConsolidationExecutionResult, error) {
 	if !request.valid() {
 		return MemoryConsolidationExecutionResult{}, errors.New("invalid consolidation lease")
@@ -101,43 +104,62 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	if input.Lease != lease || input.TimelineID != lease.TimelineID || !input.valid() || len(input.Sources) > e.policy.MaxChanges {
 		return MemoryConsolidationExecutionResult{}, errors.New("consolidation input is invalid")
 	}
-	proposals, err := e.planner.Propose(passCtx, input)
+	proposals, found, err := e.store.LoadMemoryConsolidationPass(passCtx, input, request)
 	if err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
-	if len(proposals) > e.policy.MaxProposals {
-		return MemoryConsolidationExecutionResult{}, errors.New("consolidation output exceeds policy")
-	}
-	normalized := make([]MemoryConsolidationProposal, 0, len(proposals))
-	keys := make([]string, 0, len(proposals))
-	seen := make(map[string]struct{}, len(proposals))
-	for _, raw := range proposals {
-		proposal, err := raw.normalized()
-		if err != nil || len(proposal.Evidence) > e.policy.MaxEvidencePerProposal {
-			return MemoryConsolidationExecutionResult{}, errors.New("consolidation output is invalid")
+	if !found {
+		proposals, err = e.planner.Propose(passCtx, input)
+		if err != nil {
+			return MemoryConsolidationExecutionResult{}, err
 		}
-		key := memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, proposal)
-		if _, duplicate := seen[key]; duplicate {
-			return MemoryConsolidationExecutionResult{}, errors.New("consolidation output is invalid")
+		proposals, err = e.normalizeMemoryConsolidationProposals(proposals)
+		if err != nil {
+			return MemoryConsolidationExecutionResult{}, err
 		}
-		seen[key] = struct{}{}
-		normalized = append(normalized, proposal)
-		keys = append(keys, key)
+		proposals, err = e.store.ReserveMemoryConsolidationPass(passCtx, input, request, proposals)
+		if err != nil {
+			return MemoryConsolidationExecutionResult{}, err
+		}
 	}
-	for ordinal, proposal := range normalized {
-		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: keys[ordinal], Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
+	proposals, err = e.normalizeMemoryConsolidationProposals(proposals)
+	if err != nil {
+		return MemoryConsolidationExecutionResult{}, err
+	}
+	for ordinal, proposal := range proposals {
+		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
 		if _, err := e.store.StageMemoryConsolidationProposal(passCtx, MemoryConsolidationProposalRequest{Input: input, Proposal: staged}); err != nil {
 			return MemoryConsolidationExecutionResult{}, err
 		}
 	}
-	if err := e.store.AdvanceMemoryConsolidationCheckpoint(passCtx, lease, input.TimelineID, input.NextSequence); err != nil {
+	if err := e.store.CompleteMemoryConsolidationPass(passCtx, input, request); err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	return MemoryConsolidationExecutionResult{Sources: len(input.Sources), Staged: len(proposals), Advanced: true}, nil
 }
 
-func memoryConsolidationProposalIdempotencyKey(input MemoryConsolidationInput, principalID, projectID string, proposal MemoryConsolidationProposal) string {
-	_, payloadSHA := memoryProposalPayloadSHA(projectID, proposal.Action, proposal.Steps, proposal.Evidence)
-	digest := sha256.Sum256([]byte(input.Lease.ScopeID + "\x00" + input.TimelineID + "\x00" + strconv.FormatInt(input.Lease.Sequence, 10) + "\x00" + strconv.FormatInt(input.NextSequence, 10) + "\x00" + principalID + "\x00" + projectID + "\x00" + string(payloadSHA)))
+func (e *MemoryConsolidationExecutor) normalizeMemoryConsolidationProposals(raw []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
+	if len(raw) > e.policy.MaxProposals {
+		return nil, errors.New("consolidation output exceeds policy")
+	}
+	normalized := make([]MemoryConsolidationProposal, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, value := range raw {
+		proposal, err := value.normalized()
+		if err != nil || len(proposal.Evidence) > e.policy.MaxEvidencePerProposal {
+			return nil, errors.New("consolidation output is invalid")
+		}
+		_, payloadSHA := memoryProposalPayloadSHA("00000000-0000-4000-8000-000000000001", proposal.Action, proposal.Steps, proposal.Evidence)
+		if _, duplicate := seen[string(payloadSHA)]; duplicate {
+			return nil, errors.New("consolidation output is invalid")
+		}
+		seen[string(payloadSHA)] = struct{}{}
+		normalized = append(normalized, proposal)
+	}
+	return normalized, nil
+}
+
+func memoryConsolidationProposalIdempotencyKey(input MemoryConsolidationInput, principalID, projectID string, ordinal int) string {
+	digest := sha256.Sum256([]byte(input.Lease.ScopeID + "\x00" + input.TimelineID + "\x00" + strconv.FormatInt(input.Lease.Sequence, 10) + "\x00" + strconv.FormatInt(input.NextSequence, 10) + "\x00" + principalID + "\x00" + projectID + "\x00" + strconv.Itoa(ordinal)))
 	return uuid.NewSHA1(uuid.NameSpaceOID, digest[:]).String()
 }

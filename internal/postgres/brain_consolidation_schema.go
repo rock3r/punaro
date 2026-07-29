@@ -173,10 +173,10 @@ WITH relation AS (
        AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=relation.oid AND NOT tgisinternal
 ), constraint_safety AS (
-    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+    SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.memory_proposals'::regclass AND confdeltype='c')=1
-       AND count(*) FILTER (WHERE contype='c')=3 AS exact
+       AND count(*) FILTER (WHERE contype='c')=4 AS exact
     FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
 ), expected_checks(name,expression) AS (
     VALUES ('memory_consolidation_proposal_sources_ordinal_check','((ordinal >= 0) AND (ordinal <= 127))'),
@@ -218,6 +218,81 @@ SELECT relation.oid IS NOT NULL AND relation.guard_oid IS NOT NULL AND relation.
    AND NOT EXISTS (SELECT * FROM expected_checks EXCEPT SELECT * FROM actual_checks)
    AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
 FROM relation,application_privileges,table_acl_safety,column_acl_safety,trigger_safety,constraint_safety,guard_safety,lock_guard_safety`, memoryConsolidationProposalSourceGuardRoutineMD5, memoryConsolidationProposalSourceLockGuardRoutineMD5).Scan(&available)
+	return available, err
+}
+
+// memoryConsolidationPassesAvailable verifies the immutable replay plan and
+// its narrow application boundary. A missing or writable pass relation must
+// leave the database non-current rather than permitting replacement outputs.
+func memoryConsolidationPassesAvailable(ctx context.Context, q queryer) (bool, error) {
+	var available bool
+	err := q.QueryRowContext(ctx, `
+WITH relation AS (
+    SELECT to_regclass('brain.memory_consolidation_passes') AS table_oid,
+           to_regclass('brain.memory_consolidation_checkpoints') AS checkpoint_oid,
+           to_regprocedure('brain.guard_memory_consolidation_pass()') AS guard_oid,
+           to_regprocedure('brain.clear_memory_consolidation_passes_on_checkpoint_move()') AS cleanup_oid,
+           to_regprocedure('brain.complete_memory_consolidation_pass(uuid,uuid,bigint,uuid,bigint,bigint,uuid,uuid)') AS complete_oid
+), expected_columns(name,type_name,required,default_expression) AS (
+    VALUES
+      ('scope_id','uuid',true,''),('timeline_id','uuid',true,''),('start_sequence','bigint',true,''),
+      ('next_sequence','bigint',true,''),('principal_id','uuid',true,''),('project_id','uuid',true,''),
+      ('lease_token','uuid',true,''),('lease_generation','bigint',true,''),('source_sha256','bytea',true,''),
+      ('proposals','jsonb',true,''),('created_at','timestamp with time zone',true,'statement_timestamp()')
+), actual_columns AS (
+    SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
+    FROM pg_attribute AS attribute CROSS JOIN relation
+    LEFT JOIN pg_attrdef AS default_value ON default_value.adrelid=attribute.attrelid AND default_value.adnum=attribute.attnum
+    WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped
+), table_acl AS (
+    SELECT has_table_privilege('punaro_app',table_oid,'SELECT') AS selects,
+           NOT has_table_privilege('punaro_app',table_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS no_writes,
+           NOT has_table_privilege('public',table_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS no_public
+    FROM relation
+), insert_acl AS (
+    SELECT has_column_privilege('punaro_app',table_oid,'scope_id','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'timeline_id','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'start_sequence','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'next_sequence','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'principal_id','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'project_id','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'lease_token','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'lease_generation','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'source_sha256','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'proposals','INSERT')
+       AND NOT has_table_privilege('punaro_app',table_oid,'INSERT') AS exact
+    FROM relation
+), triggers AS (
+    SELECT count(*)=2
+       AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O')=1
+       AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O')=1 AS exact
+    FROM pg_trigger,relation WHERE tgrelid=table_oid AND NOT tgisinternal
+), checkpoint_triggers AS (
+    SELECT count(*)=1 AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_checkpoint_cleanup'
+      AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O')=1 AS exact
+    FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
+), constraints AS (
+    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3,4,5,6]::smallint[])=1
+       AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
+       AND count(*) FILTER (WHERE contype='c')=3 AS exact
+    FROM pg_constraint,relation WHERE conrelid=table_oid AND contype<>'n'
+), routines AS (
+    SELECT count(*)=3 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
+    FROM pg_proc,relation WHERE oid=ANY(ARRAY[guard_oid,cleanup_oid,complete_oid])
+), complete_acl AS (
+    SELECT has_function_privilege('punaro_app',complete_oid,'EXECUTE') AS app_exec,
+           NOT has_function_privilege('public',complete_oid,'EXECUTE') AS no_public
+    FROM relation
+)
+SELECT relation.table_oid IS NOT NULL AND relation.checkpoint_oid IS NOT NULL AND relation.guard_oid IS NOT NULL AND relation.cleanup_oid IS NOT NULL AND relation.complete_oid IS NOT NULL
+   AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=table_oid)
+   AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
+   AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
+   AND table_acl.selects AND table_acl.no_writes AND table_acl.no_public AND insert_acl.exact
+   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND complete_acl.app_exec AND complete_acl.no_public
+FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,routines,complete_acl`).Scan(&available)
 	return available, err
 }
 

@@ -88,6 +88,34 @@ func TestMemoryConsolidationExecutorDoesNotAdvanceAfterPartialStageFailure(t *te
 	}
 }
 
+func TestMemoryConsolidationExecutorReplaysDurablePassWhenPlannerOutputChanges(t *testing.T) {
+	lease := MemoryConsolidationLease{
+		ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4,
+		Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", Generation: 1, Until: time.Now().Add(time.Minute),
+	}
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: 5, Sources: []MemoryConsolidationSource{{
+		ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 5, Document: json.RawMessage(`{"source":true}`),
+	}}}
+	proposal := func(logicalKey string) MemoryConsolidationProposal {
+		return MemoryConsolidationProposal{Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: logicalKey, Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":true}`)}}}
+	}
+	store := &fakeMemoryConsolidationExecutorStore{input: input, stageFailures: 1, stageErr: errors.New("stage unavailable")}
+	planner := &changingMemoryConsolidationPlanner{outputs: [][]MemoryConsolidationProposal{{proposal("consolidation.original-a"), proposal("consolidation.original-b")}, {proposal("consolidation.replacement")}}}
+	executor, err := NewMemoryConsolidationExecutor(store, planner, MemoryConsolidationPolicy{MaxChanges: 1, MaxProposals: 2, MaxEvidencePerProposal: 1, PassTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); err == nil {
+		t.Fatal("first pass unexpectedly completed")
+	}
+	if result, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); err != nil || !result.Advanced {
+		t.Fatalf("replay result=%#v err=%v", result, err)
+	}
+	if planner.calls != 1 || len(store.staged) != 2 || store.staged[0].Proposal.Steps[0].LogicalKey != "consolidation.original-a" || store.staged[1].Proposal.Steps[0].LogicalKey != "consolidation.original-b" {
+		t.Fatalf("planner calls=%d staged=%#v", planner.calls, store.staged)
+	}
+}
+
 func TestMemoryConsolidationExecutorAdvancesNoProposalPageButRejectsDuplicateOutput(t *testing.T) {
 	lease := MemoryConsolidationLease{
 		ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4,
@@ -123,10 +151,20 @@ type fakeMemoryConsolidationExecutorStore struct {
 	stageFailures int
 	stageErr      error
 	stagedKeys    map[string]struct{}
+	pass          []MemoryConsolidationProposal
 }
 
 func (s *fakeMemoryConsolidationExecutorStore) ReadMemoryConsolidationInput(context.Context, MemoryConsolidationLease) (MemoryConsolidationInput, error) {
 	return s.input, nil
+}
+func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) ([]MemoryConsolidationProposal, bool, error) {
+	return s.pass, s.pass != nil, nil
+}
+func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
+	if s.pass == nil {
+		s.pass = proposals
+	}
+	return s.pass, nil
 }
 func (s *fakeMemoryConsolidationExecutorStore) StageMemoryConsolidationProposal(_ context.Context, request MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
 	if s.stageFailures > 0 && len(s.staged) == 1 && s.stageErr != nil {
@@ -143,8 +181,9 @@ func (s *fakeMemoryConsolidationExecutorStore) StageMemoryConsolidationProposal(
 	s.staged = append(s.staged, request)
 	return MemoryProposalResult{ProposalID: "99999999-9999-4999-8999-999999999999"}, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) AdvanceMemoryConsolidationCheckpoint(_ context.Context, _ MemoryConsolidationLease, _ string, sequence int64) error {
-	s.advanced = sequence
+func (s *fakeMemoryConsolidationExecutorStore) CompleteMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest) error {
+	s.advanced = input.NextSequence
+	s.pass = nil
 	return nil
 }
 
@@ -155,6 +194,17 @@ type fakeMemoryConsolidationPlanner struct {
 
 func (p fakeMemoryConsolidationPlanner) Propose(context.Context, MemoryConsolidationInput) ([]MemoryConsolidationProposal, error) {
 	return p.proposals, p.err
+}
+
+type changingMemoryConsolidationPlanner struct {
+	outputs [][]MemoryConsolidationProposal
+	calls   int
+}
+
+func (p *changingMemoryConsolidationPlanner) Propose(context.Context, MemoryConsolidationInput) ([]MemoryConsolidationProposal, error) {
+	output := p.outputs[p.calls]
+	p.calls++
+	return output, nil
 }
 
 func testMemoryConsolidationExecutionRequest(lease MemoryConsolidationLease) MemoryConsolidationExecutionRequest {
