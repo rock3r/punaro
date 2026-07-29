@@ -176,7 +176,7 @@ func TestMemoryConsolidationExecutorAbandonsStaleReservedPass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); !errors.Is(err, ErrStaleMemoryConsolidationLease) || !store.abandoned || store.advanced != 0 {
+	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); !errors.Is(err, ErrStaleMemoryConsolidationLease) || !store.abandoned || store.advanced != input.NextSequence {
 		t.Fatalf("err=%v abandoned=%t advanced=%d", err, store.abandoned, store.advanced)
 	}
 }
@@ -227,8 +227,9 @@ func (s *fakeMemoryConsolidationExecutorStore) StageMemoryConsolidationProposal(
 	return MemoryProposalResult{ProposalID: "99999999-9999-4999-8999-999999999999"}, nil
 }
 
-func (s *fakeMemoryConsolidationExecutorStore) AbandonMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error {
+func (s *fakeMemoryConsolidationExecutorStore) AbandonMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest) error {
 	s.abandoned = true
+	s.advanced = input.NextSequence
 	return nil
 }
 func (s *fakeMemoryConsolidationExecutorStore) CompleteMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest) error {
