@@ -92,6 +92,9 @@ WHERE scope.id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonica
 			if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) {
 				return IdempotencyOutcome{}, ErrStaleMemoryConsolidationLease
 			}
+			if errors.Is(err, errMemoryConsolidationSourceStale) {
+				return IdempotencyOutcome{}, errors.Join(err, ErrStaleMemoryConsolidationLease)
+			}
 			return IdempotencyOutcome{}, err
 		}
 		items, err := lockAndValidateProposalItems(ctx, tx, project.ID, proposal.Steps, proposal.Evidence)
