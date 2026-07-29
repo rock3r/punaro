@@ -135,10 +135,11 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	for ordinal, proposal := range proposals {
 		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
 		if _, err := e.store.StageMemoryConsolidationProposal(passCtx, MemoryConsolidationProposalRequest{Input: input, Proposal: staged}); err != nil {
-			if errors.Is(err, ErrStaleMemoryConsolidationLease) {
+			if errors.Is(err, errMemoryConsolidationSourceStale) {
 				if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, request); abandonErr != nil {
 					return MemoryConsolidationExecutionResult{}, abandonErr
 				}
+				return MemoryConsolidationExecutionResult{}, ErrStaleMemoryConsolidationLease
 			}
 			return MemoryConsolidationExecutionResult{}, err
 		}

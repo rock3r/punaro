@@ -9,6 +9,10 @@ import (
 	"errors"
 )
 
+// errMemoryConsolidationSourceStale distinguishes an irrecoverably changed
+// reserved page from a retryable lease or scan-coverage fence.
+var errMemoryConsolidationSourceStale = errors.New("consolidation source page is stale")
+
 // StageMemoryConsolidationProposal stages a proposal and its exact source page
 // only while the supplied consolidation lease remains live. It deliberately
 // does not advance the checkpoint: a later bounded runner decides when the
@@ -222,13 +226,13 @@ func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input Me
 			continue
 		}
 		if index >= len(input.Sources) || !revision.Valid || !document.Valid {
-			return ErrStaleMemoryConsolidationLease
+			return errMemoryConsolidationSourceStale
 		}
 		source := input.Sources[index]
 		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
 		digest := sha256.Sum256([]byte(document.String))
 		if err != nil || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) || source.ItemID != itemID.String || source.Revision != revision.Int64 || source.ChangeSequence != sequence.Int64 || !bytes.Equal(source.Document, canonical) {
-			return ErrStaleMemoryConsolidationLease
+			return errMemoryConsolidationSourceStale
 		}
 		index++
 	}
@@ -239,7 +243,7 @@ func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input Me
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	if index != len(input.Sources) || next != input.NextSequence {
-		return ErrStaleMemoryConsolidationLease
+		return errMemoryConsolidationSourceStale
 	}
 	return nil
 }
