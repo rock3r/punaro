@@ -35,6 +35,7 @@ services:
       POSTGRES_USER: punaro_owner
     secrets:
       - postgres_app_password
+      - postgres_owner_password
     volumes:
       - ./postgres-bootstrap.sh:/usr/local/bin/punaro-postgres-bootstrap.sh:ro
     network_mode: host

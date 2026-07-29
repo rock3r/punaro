@@ -13,10 +13,11 @@ credential is an environment variable or image layer.
 
 ## First installation
 
-Prepare two owner-only files outside the repository:
+Prepare owner-only files outside the repository:
 
 - a PostgreSQL owner password for `PUNARO_POSTGRES_OWNER_PASSWORD_FILE`; and
 - a PostgreSQL application-role password for `PUNARO_POSTGRES_APP_PASSWORD_FILE`; and
+- an owner PostgreSQL DSN file for `punaro_owner`; and
 - an application-role PostgreSQL DSN for `PUNARO_POSTGRES_APP_DSN_FILE`.
 
 Compose file secrets preserve their host ownership. The application DSN file
@@ -33,14 +34,13 @@ chmod 0400 APP_DSN_FILE
 
 Do not make it group- or world-readable: the daemon rejects broad DSN-file
 permissions. The PostgreSQL owner-password file remains an operator-owned
-secret consumed only by the PostgreSQL entrypoint. The app-password secret is
-used only during fresh PostgreSQL-volume initialization to create the
+secret consumed only by PostgreSQL and its bootstrap service. The app-password secret is
+used by the idempotent role bootstrap service to create the
 least-privilege `punaro_app` role; its value must match the password embedded
-in the application DSN. The root-started PostgreSQL entrypoint copies that
-single secret into a private in-memory directory, changes it to the PostgreSQL
-user, and then invokes the upstream entrypoint; this allows the initialization
-script to read it after privilege drop without making the host file broader or
-persisting a second copy on disk.
+in the application DSN.
+
+The owner DSN is a regular non-symlink `0400` file owned by the deployment
+account, for example `postgres://punaro_owner:OWNER_PASSWORD@127.0.0.1:5432/punaro?sslmode=disable`.
 
 Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
 HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Always
