@@ -16,6 +16,7 @@ grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
 grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
 grep -Fq 'CREATE ROLE punaro_app LOGIN PASSWORD' deploy/compose/postgres-init.sh
 grep -Fq '/run/punaro-secrets/postgres_app_password' deploy/compose/postgres-init.sh
+grep -Fq 'chown postgres:postgres "$staged_directory"' deploy/compose/postgres-entrypoint.sh
 grep -Fq 'chown postgres:postgres "$staged_password"' deploy/compose/postgres-entrypoint.sh
 grep -Fq 'PUNARO_DEVICE_AUTH_ENABLED: "true"' "$compose_file"
 grep -Fq 'PUNARO_RELAY_STORE: sqlite' "$compose_file"
