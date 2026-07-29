@@ -94,6 +94,11 @@ func New(resource string, authorizationServers []string, validator TokenValidato
 			response.WriteHeader(http.StatusForbidden)
 			return
 		}
+		if !hasDefaultScope(claims.Scopes) {
+			response.Header().Set("WWW-Authenticate", insufficientScopeChallenge(metadataURL))
+			response.WriteHeader(http.StatusForbidden)
+			return
+		}
 		response.WriteHeader(http.StatusNotImplemented)
 	})
 	return mux, nil
@@ -101,6 +106,19 @@ func New(resource string, authorizationServers []string, validator TokenValidato
 
 func challengeHeader(metadataURL, prefix string) string {
 	return `Bearer ` + prefix + `realm="punaro-mcp", resource_metadata="` + metadataURL + `", scope="` + defaultScopeChallenge + `"`
+}
+
+func insufficientScopeChallenge(metadataURL string) string {
+	return `Bearer error="insufficient_scope", realm="punaro-mcp", resource_metadata="` + metadataURL + `"`
+}
+
+func hasDefaultScope(scopes map[string]struct{}) bool {
+	for _, scope := range strings.Fields(defaultScopeChallenge) {
+		if _, ok := scopes[scope]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func bearerCredential(request *http.Request) (string, bool) {

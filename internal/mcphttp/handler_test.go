@@ -106,11 +106,34 @@ func TestVerifiedSubjectWithDisabledPrincipalIsForbidden(t *testing.T) {
 	}
 }
 
+func TestVerifiedBoundSubjectWithoutDefaultScopeIsForbidden(t *testing.T) {
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, unscopedValidator{}, map[string]string{"operator": "11111111-1111-4111-8111-111111111111"}, activePrincipal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Header().Get("WWW-Authenticate"), `error="insufficient_scope"`) || strings.Contains(response.Header().Get("WWW-Authenticate"), `scope=`) {
+		t.Fatalf("status=%d authenticate=%q", response.Code, response.Header().Get("WWW-Authenticate"))
+	}
+}
+
 type testValidator struct{}
+
+type unscopedValidator struct{}
 
 func activePrincipal(context.Context, string) (bool, error) { return true, nil }
 
 func (testValidator) Validate(_ context.Context, raw string, _ time.Time) (mcpoauth.Claims, error) {
+	if raw != "valid" {
+		return mcpoauth.Claims{}, errors.New("invalid")
+	}
+	return mcpoauth.Claims{Subject: "operator", Scopes: map[string]struct{}{"memory.read": {}}}, nil
+}
+
+func (unscopedValidator) Validate(_ context.Context, raw string, _ time.Time) (mcpoauth.Claims, error) {
 	if raw != "valid" {
 		return mcpoauth.Claims{}, errors.New("invalid")
 	}
