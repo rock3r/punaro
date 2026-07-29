@@ -41,8 +41,8 @@ func TestParseJSONRPCRequestEnforcesSizeBoundary(t *testing.T) {
 
 func TestParseJSONRPCRequestEnforcesDepthBoundary(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		arrays  int
+		name     string
+		arrays   int
 		accepted bool
 	}{
 		{name: "at limit", arrays: maxJSONRPCDepth - 2, accepted: true},
