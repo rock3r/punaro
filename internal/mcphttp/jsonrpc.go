@@ -154,6 +154,7 @@ func validJSONRPCID(raw json.RawMessage) bool {
 
 func validJSONObject(raw json.RawMessage, maxDepth int) bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	start, err := decoder.Token()
 	if err != nil || start != json.Delim('{') || !consumeJSONRPCValue(decoder, start, 1, maxDepth) {
 		return false
@@ -164,6 +165,7 @@ func validJSONObject(raw json.RawMessage, maxDepth int) bool {
 
 func validJSONRPCValue(raw json.RawMessage, maxDepth int) bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
 	start, err := decoder.Token()
 	if err != nil || !consumeJSONRPCValue(decoder, start, 1, maxDepth) {
 		return false

@@ -12,6 +12,17 @@ func TestParseJSONRPCRequestAcceptsBoundedSingleRequest(t *testing.T) {
 	}
 }
 
+func TestParseJSONRPCRequestPreservesValidLargeNumbers(t *testing.T) {
+	for _, raw := range []string{
+		`{"jsonrpc":"2.0","id":1e400,"method":"tools/list","params":{}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"n":1e400}}`,
+	} {
+		if _, ok := parseJSONRPCRequest([]byte(raw)); !ok {
+			t.Fatalf("rejected valid large number: %s", raw)
+		}
+	}
+}
+
 func TestParseJSONRPCRequestRejectsAmbiguousOrInvalidEnvelope(t *testing.T) {
 	for _, raw := range []string{
 		`[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`,
