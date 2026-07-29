@@ -4,6 +4,7 @@ set -eu
 compose_file=${1:-deploy/compose/production.yaml}
 
 test -f "$compose_file"
+test -f docs/production-compose.md
 grep -Eq 'pgvector/pgvector:[^[:space:]]+@sha256:[0-9a-f]{64}' "$compose_file"
 grep -Fq 'PUNARO_IMAGE:?required' "$compose_file"
 grep -Fq 'PUNARO_POSTGRES_DSN_FILE: /run/secrets/postgres_app_dsn' "$compose_file"
@@ -18,6 +19,8 @@ if [ "$(grep -Fc 'network_mode: host' "$compose_file")" -ne 2 ]; then
 	exit 1
 fi
 grep -Fq 'listen_addresses=127.0.0.1' "$compose_file"
+grep -Fq 'owned by numeric UID' docs/production-compose.md
+grep -Fq '`65532`' docs/production-compose.md
 if grep -Eq '^[[:space:]]+ports:' "$compose_file"; then
 	echo "production services must not publish host ports" >&2
 	exit 1

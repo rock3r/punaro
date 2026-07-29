@@ -18,6 +18,14 @@ Prepare two owner-only files outside the repository:
 - a PostgreSQL owner password for `PUNARO_POSTGRES_OWNER_PASSWORD_FILE`; and
 - an application-role PostgreSQL DSN for `PUNARO_POSTGRES_APP_DSN_FILE`.
 
+Compose file secrets preserve their host ownership. The application DSN file
+must therefore be a regular, non-symlink `0400` file owned by numeric UID
+`65532` (the `punarod` runtime user). For example, a privileged operator may
+prepare it with `chown 65532:65532 APP_DSN_FILE` and `chmod 0400 APP_DSN_FILE`.
+Do not make it group- or world-readable: the daemon rejects broad DSN-file
+permissions. The PostgreSQL owner-password file remains an operator-owned
+secret consumed only by the PostgreSQL entrypoint.
+
 Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
 HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Start only the private database, then use the host-local
 operator workflow to initialize/migrate it with the protected owner and
