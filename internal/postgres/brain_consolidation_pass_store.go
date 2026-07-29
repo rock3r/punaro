@@ -61,7 +61,9 @@ ON CONFLICT (scope_id,timeline_id,start_sequence) DO NOTHING`,
 	return resolvedInput, resolvedRequest, resolved, nil
 }
 
-// CheckMemoryConsolidationPassCapacity verifies that an entire proposed pass fits the live quota.
+// CheckMemoryConsolidationPassCapacity verifies that every not-yet-staged
+// ordinal of a durable pass fits the live quota and that completed ordinals
+// still reference actionable proposals.
 func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) error {
 	if proposals < 0 || !request.valid() {
 		return errors.New("consolidation pass capacity is invalid")
@@ -71,13 +73,41 @@ func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, inp
 		return mutationStartError(err, "consolidation pass capacity cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := checkMemoryProposalCapacityForCount(ctx, tx, input.Lease.ScopeID, request.PrincipalID, proposals); err != nil {
+	remaining, err := unstagedMemoryConsolidationProposalCount(ctx, tx, input, request, proposals)
+	if err != nil {
+		return err
+	}
+	if err := checkMemoryProposalCapacityForCount(ctx, tx, input.Lease.ScopeID, request.PrincipalID, remaining); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return errors.New("consolidation pass capacity cannot commit")
 	}
 	return nil
+}
+
+func unstagedMemoryConsolidationProposalCount(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) (int, error) {
+	remaining := 0
+	for ordinal := range proposals {
+		var status sql.NullString
+		var state sql.NullString
+		var actionable sql.NullBool
+		err := tx.QueryRowContext(ctx, `SELECT record.status,proposal.state,proposal.expires_at > statement_timestamp()
+FROM relay.idempotency_records AS record
+LEFT JOIN brain.memory_proposals AS proposal ON proposal.id=record.resource_id
+WHERE record.key=$1`, memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal)).Scan(&status, &state, &actionable)
+		if errors.Is(err, sql.ErrNoRows) {
+			remaining++
+			continue
+		}
+		if err != nil {
+			return 0, errors.New("consolidation pass idempotency is unavailable")
+		}
+		if status.String != string(OutcomeSucceeded) || state.String != string(MemoryProposalPending) || !actionable.Bool {
+			return 0, errMemoryConsolidationProposalRejected
+		}
+	}
+	return remaining, nil
 }
 
 // CompleteMemoryConsolidationPass atomically advances the fenced checkpoint

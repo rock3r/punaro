@@ -141,6 +141,12 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	// A pass is durable before its first capacity check. Recheck it on every
 	// replay so a capacity-rejected pass cannot later begin partial staging.
 	if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, len(proposals)); err != nil {
+		if errors.Is(err, errMemoryConsolidationProposalRejected) {
+			if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, effectiveRequest); abandonErr != nil {
+				return MemoryConsolidationExecutionResult{}, abandonErr
+			}
+			return MemoryConsolidationExecutionResult{}, ErrStaleMemoryConsolidationLease
+		}
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	for ordinal, proposal := range proposals {
