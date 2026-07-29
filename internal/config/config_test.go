@@ -341,6 +341,32 @@ func TestLoadMemoryAPIIsDarkByDefaultAndRequiresPostgresDeviceAuthority(t *testi
 	}
 }
 
+func TestLoadRemoteMCPMetadataIsDarkByDefaultAndRequiresCanonicalOAuthAuthority(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil || cfg.RemoteMCPMetadataEnabled {
+		t.Fatalf("default config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_METADATA_ENABLED", "true")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP metadata was enabled without its authority configuration")
+	}
+	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
+	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
+	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
+	t.Setenv("PUNARO_INGRESS_MODE", "internet")
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example")
+	t.Setenv("PUNARO_REMOTE_MCP_RESOURCE_URL", "https://punaro.example/mcp")
+	t.Setenv("PUNARO_REMOTE_MCP_AUTHORIZATION_SERVERS", "https://auth.example")
+	cfg, err = Load("")
+	if err != nil || !cfg.RemoteMCPMetadataEnabled || cfg.RemoteMCPResourceURL != "https://punaro.example/mcp" || cfg.RemoteMCPAuthorizationServers != "https://auth.example" {
+		t.Fatalf("remote MCP config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_RESOURCE_URL", "http://punaro.example/mcp")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP metadata accepted an unsafe resource URL")
+	}
+}
+
 func TestLoadAcceptsExplicitRelayMachineEnrollment(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)

@@ -38,7 +38,7 @@ func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
 	trusted := &trustedAttachmentRuntime{handler: http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.WriteHeader(http.StatusNoContent)
 	})}
-	registerProductionRoutes(mux, memory, trusted, nil)
+	registerProductionRoutes(mux, memory, trusted, nil, nil)
 	for _, path := range []string{"/v2/directory", "/v2/permits", "/v3/permits", "/v3/attachments/example"} {
 		request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, path, nil)
 		response := httptest.NewRecorder()
@@ -164,12 +164,35 @@ func TestBuildMemoryHandlerRejectsCompatibleHistoricalSchema(t *testing.T) {
 
 func TestProductionRoutesKeepMemoryAPIDarkWhenHandlerIsAbsent(t *testing.T) {
 	mux := http.NewServeMux()
-	registerProductionRoutes(mux, nil, nil, nil)
+	registerProductionRoutes(mux, nil, nil, nil, nil)
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/projects/resolve", nil)
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("dark memory route status=%d", response.Code)
+	}
+}
+
+func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadata(t *testing.T) {
+	handler, err := buildRemoteMCPMetadataHandler(config.Config{})
+	if err != nil || handler != nil {
+		t.Fatalf("disabled handler=%v err=%v", handler, err)
+	}
+	handler, err = buildRemoteMCPMetadataHandler(config.Config{RemoteMCPMetadataEnabled: true, RemoteMCPResourceURL: "https://punaro.example/mcp", RemoteMCPAuthorizationServers: "https://auth.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerProductionRoutes(mux, nil, nil, nil, handler)
+	metadata := httptest.NewRecorder()
+	mux.ServeHTTP(metadata, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/.well-known/oauth-protected-resource/mcp", nil))
+	if metadata.Code != http.StatusOK {
+		t.Fatalf("metadata status=%d", metadata.Code)
+	}
+	transport := httptest.NewRecorder()
+	mux.ServeHTTP(transport, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil))
+	if transport.Code != http.StatusNotFound {
+		t.Fatalf("transport status=%d", transport.Code)
 	}
 }
 
