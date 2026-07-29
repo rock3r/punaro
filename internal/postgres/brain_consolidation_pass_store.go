@@ -172,12 +172,25 @@ WHERE scope_id=$1 AND timeline_id=$2 AND start_sequence=$3`,
 }
 
 func memoryConsolidationPassSourceSHA(input MemoryConsolidationInput) ([]byte, error) {
+	canonicalSources := make([]MemoryConsolidationSource, len(input.Sources))
+	for index, source := range input.Sources {
+		var document any
+		if err := json.Unmarshal(source.Document, &document); err != nil {
+			return nil, errors.New("consolidation source page cannot be encoded")
+		}
+		canonicalDocument, err := json.Marshal(document)
+		if err != nil {
+			return nil, errors.New("consolidation source page cannot be encoded")
+		}
+		source.Document = canonicalDocument
+		canonicalSources[index] = source
+	}
 	body, err := json.Marshal(struct {
 		TimelineID    string                      `json:"timeline_id"`
 		StartSequence int64                       `json:"start_sequence"`
 		NextSequence  int64                       `json:"next_sequence"`
 		Sources       []MemoryConsolidationSource `json:"sources"`
-	}{input.TimelineID, input.Lease.Sequence, input.NextSequence, input.Sources})
+	}{input.TimelineID, input.Lease.Sequence, input.NextSequence, canonicalSources})
 	if err != nil {
 		return nil, errors.New("consolidation source page cannot be encoded")
 	}
