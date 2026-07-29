@@ -464,6 +464,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testMemoryReconciliationSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testMemoryEmbeddingSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testMemoryConsolidationSchemaDriftIntegration(ctx, t, app, ownerDB)
+	testRemoteMCPPrincipalActivityIntegration(ctx, t, app, ownerDB)
 	testCanonicalBrainIntegration(ctx, t, app, ownerDB)
 	testMemoryLexicalSearchIntegration(ctx, t, app, ownerDB)
 	testMemoryPromptBriefIntegration(ctx, t, app, ownerDB)
@@ -768,6 +769,26 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testRemoteMCPPrincipalActivityIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	principal, err := app.CreatePrincipal(ctx, PrincipalKindDevice, "remote MCP binding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active, err := app.RemoteMCPPrincipalActive(ctx, principal.ID); err != nil || !active {
+		t.Fatalf("existing active principal=%t err=%v", active, err)
+	}
+	if active, err := app.RemoteMCPPrincipalActive(ctx, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"); err != nil || active {
+		t.Fatalf("unknown principal=%t err=%v", active, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.principals SET disabled_at=statement_timestamp() WHERE id=$1`, principal.ID); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := app.RemoteMCPPrincipalActive(ctx, principal.ID); err != nil || active {
+		t.Fatalf("disabled principal=%t err=%v", active, err)
 	}
 }
 

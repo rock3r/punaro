@@ -3,13 +3,17 @@ package config
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/listener"
 
 	"github.com/rock3r/punaro/internal/ingress"
@@ -39,6 +43,7 @@ type Config struct {
 	RemoteMCPTokenValidationEnabled bool
 	RemoteMCPIssuer                 string
 	RemoteMCPJWKSURL                string
+	RemoteMCPSubjectBindingsJSON    string
 	MemoryOpenAIEmbeddingsURL       string
 	MemoryOpenAIAPIKeyFile          string
 	TrustedAttachmentsEnabled       bool
@@ -115,6 +120,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	}
 	remoteMCPIssuer := value("PUNARO_REMOTE_MCP_ISSUER", "")
 	remoteMCPJWKSURL := value("PUNARO_REMOTE_MCP_JWKS_URL", "")
+	remoteMCPSubjectBindingsJSON := value("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", "")
 	memoryOpenAIEmbeddingsURL := value("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "")
 	memoryOpenAIAPIKeyFile := value("PUNARO_MEMORY_OPENAI_API_KEY_FILE", "")
 	trustedAttachmentsEnabled, err := strconv.ParseBool(value("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "false"))
@@ -179,11 +185,11 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, fmt.Errorf("remote MCP metadata configuration requires PUNARO_REMOTE_MCP_METADATA_ENABLED")
 	}
 	if remoteMCPTokenValidationEnabled {
-		if !remoteMCPMetadataEnabled || !remoteMCPAuthorizationServerIncludes(remoteMCPAuthorizationServers, remoteMCPIssuer) || !validRemoteMCPHTTPSURL(remoteMCPJWKSURL, true) {
-			return Config{}, fmt.Errorf("remote MCP token validation requires enabled metadata, an advertised HTTPS issuer, and an HTTPS JWKS URL")
+		if !remoteMCPMetadataEnabled || !remoteMCPAuthorizationServerIncludes(remoteMCPAuthorizationServers, remoteMCPIssuer) || !validRemoteMCPHTTPSURL(remoteMCPJWKSURL, true) || !validRemoteMCPSubjectBindings(remoteMCPSubjectBindingsJSON) {
+			return Config{}, fmt.Errorf("remote MCP token validation requires enabled metadata, an advertised HTTPS issuer, an HTTPS JWKS URL, and subject bindings")
 		}
-	} else if remoteMCPIssuer != "" || remoteMCPJWKSURL != "" {
-		return Config{}, fmt.Errorf("remote MCP issuer and JWKS configuration require PUNARO_REMOTE_MCP_TOKEN_VALIDATION_ENABLED")
+	} else if remoteMCPIssuer != "" || remoteMCPJWKSURL != "" || remoteMCPSubjectBindingsJSON != "" {
+		return Config{}, fmt.Errorf("remote MCP issuer, JWKS, and subject-binding configuration require PUNARO_REMOTE_MCP_TOKEN_VALIDATION_ENABLED")
 	}
 	if (memoryOpenAIEmbeddingsURL == "") != (memoryOpenAIAPIKeyFile == "") {
 		return Config{}, fmt.Errorf("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL and PUNARO_MEMORY_OPENAI_API_KEY_FILE must be configured together")
@@ -221,7 +227,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
 }
 
 func validRemoteMCPHTTPSURL(raw string, permitPath bool) bool {
@@ -257,6 +263,65 @@ func remoteMCPAuthorizationServerIncludes(raw, issuer string) bool {
 		}
 	}
 	return false
+}
+
+func validRemoteMCPSubjectBindings(raw string) bool {
+	if raw == "" || len(raw) > 16<<10 {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return false
+	}
+	seen := map[string]struct{}{}
+	principalIDs := map[string]struct{}{}
+	for count := 0; decoder.More(); count++ {
+		if count >= 128 {
+			return false
+		}
+		token, err = decoder.Token()
+		if err != nil || token != json.Delim('{') {
+			return false
+		}
+		fields := map[string]json.RawMessage{}
+		for decoder.More() {
+			name, fieldErr := decoder.Token()
+			if fieldErr != nil {
+				return false
+			}
+			key, ok := name.(string)
+			if !ok || (key != "subject" && key != "principal_id") || fields[key] != nil {
+				return false
+			}
+			var value json.RawMessage
+			if decoder.Decode(&value) != nil {
+				return false
+			}
+			fields[key] = value
+		}
+		if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(fields) != 2 {
+			return false
+		}
+		var subject, principalRaw string
+		if json.Unmarshal(fields["subject"], &subject) != nil || json.Unmarshal(fields["principal_id"], &principalRaw) != nil {
+			return false
+		}
+		principalID, parseErr := uuid.Parse(principalRaw)
+		if subject == "" || len(subject) > 255 || strings.TrimSpace(subject) != subject || strings.ContainsAny(subject, "\x00\r\n") || parseErr != nil || principalID == uuid.Nil || principalID.String() != principalRaw {
+			return false
+		}
+		if _, duplicate := seen[subject]; duplicate {
+			return false
+		}
+		if _, duplicate := principalIDs[principalRaw]; duplicate {
+			return false
+		}
+		seen[subject] = struct{}{}
+		principalIDs[principalRaw] = struct{}{}
+	}
+	token, err = decoder.Token()
+	return err == nil && token == json.Delim(']') && len(seen) > 0 && decoder.Decode(&struct{}{}) == io.EOF
 }
 
 func rejectRetiredAttachmentConfiguration() error {

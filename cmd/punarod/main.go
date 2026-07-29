@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -222,7 +223,7 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "punarod memory API configuration error: %v\n", err)
 		return 2
 	}
-	remoteMCPMetadataHandler, err := buildRemoteMCPMetadataHandler(cfg)
+	remoteMCPMetadataHandler, err := buildRemoteMCPMetadataHandler(cfg, platformDB)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punarod remote MCP configuration error: metadata is unavailable")
 		return 2
@@ -328,19 +329,60 @@ func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, tr
 	}
 }
 
-func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
+type remoteMCPPrincipalDatabase interface {
+	RemoteMCPPrincipalActive(context.Context, string) (bool, error)
+}
+
+func buildRemoteMCPMetadataHandler(cfg config.Config, database platformDatabase) (http.Handler, error) {
 	if !cfg.RemoteMCPMetadataEnabled {
 		return nil, nil
 	}
 	var validator mcphttp.TokenValidator
+	subjectBindings := map[string]string(nil)
+	var principalDatabase remoteMCPPrincipalDatabase
 	var err error
 	if cfg.RemoteMCPTokenValidationEnabled {
 		validator, err = mcpoauth.NewVerifier(mcpoauth.Config{Issuer: cfg.RemoteMCPIssuer, Audience: cfg.RemoteMCPResourceURL, JWKSURL: cfg.RemoteMCPJWKSURL}, nil)
 		if err != nil {
 			return nil, err
 		}
+		var ok bool
+		principalDatabase, ok = database.(remoteMCPPrincipalDatabase)
+		if !ok {
+			return nil, errors.New("remote MCP principal database is unavailable")
+		}
+		subjectBindings, err = remoteMCPSubjectBindings(context.Background(), cfg.RemoteMCPSubjectBindingsJSON, principalDatabase)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator)
+	var principalActive mcphttp.PrincipalActive
+	if cfg.RemoteMCPTokenValidationEnabled {
+		principalActive = principalDatabase.RemoteMCPPrincipalActive
+	}
+	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator, subjectBindings, principalActive)
+}
+
+func remoteMCPSubjectBindings(ctx context.Context, raw string, database remoteMCPPrincipalDatabase) (map[string]string, error) {
+	var bindings []struct {
+		Subject     string `json:"subject"`
+		PrincipalID string `json:"principal_id"`
+	}
+	if json.Unmarshal([]byte(raw), &bindings) != nil || len(bindings) == 0 {
+		return nil, errors.New("remote MCP subject bindings are invalid")
+	}
+	result := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		if binding.Subject == "" || binding.PrincipalID == "" || result[binding.Subject] != "" {
+			return nil, errors.New("remote MCP subject bindings are invalid")
+		}
+		active, err := database.RemoteMCPPrincipalActive(ctx, binding.PrincipalID)
+		if err != nil || !active {
+			return nil, errors.New("remote MCP subject binding principal is unavailable")
+		}
+		result[binding.Subject] = binding.PrincipalID
+	}
+	return result, nil
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {

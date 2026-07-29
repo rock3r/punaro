@@ -65,9 +65,33 @@ func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.
 		t.Fatal("remote MCP token validation accepted plaintext JWKS")
 	}
 	t.Setenv("PUNARO_REMOTE_MCP_JWKS_URL", "https://auth.example/jwks")
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted without subject bindings")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}]`)
 	cfg, err := Load("")
 	if err != nil || !cfg.RemoteMCPTokenValidationEnabled || cfg.RemoteMCPIssuer != "https://auth.example" {
 		t.Fatalf("config=%#v err=%v", cfg, err)
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"00000000-0000-0000-0000-000000000000"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted a nil principal binding")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"11111111-1111-4111-8111-111111111111"},{"subject":"operator-1","principal_id":"22222222-2222-4222-8222-222222222222"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted duplicate subject bindings")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},{"subject":"operator-2","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted duplicate principal bindings")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted a noncanonical principal binding UUID")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","principal_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted duplicate binding fields")
 	}
 }
 
