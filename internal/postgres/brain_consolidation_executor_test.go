@@ -118,6 +118,26 @@ func TestMemoryConsolidationExecutorReplaysDurablePassWhenPlannerOutputChanges(t
 	}
 }
 
+func TestMemoryConsolidationExecutorReplaysReservedPassAfterPolicyTightens(t *testing.T) {
+	lease := MemoryConsolidationLease{ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", Generation: 1, Until: time.Now().Add(time.Minute)}
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: 6, Sources: []MemoryConsolidationSource{
+		{ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 5, Document: json.RawMessage(`{"source":true}`)},
+		{ItemID: "66666666-6666-4666-8666-666666666666", Revision: 1, ChangeSequence: 6, Document: json.RawMessage(`{"source":true}`)},
+	}}
+	proposal := func(logicalKey string) MemoryConsolidationProposal {
+		return MemoryConsolidationProposal{Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: logicalKey, Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":true}`)}}}
+	}
+	store := &fakeMemoryConsolidationExecutorStore{pass: []MemoryConsolidationProposal{proposal("original-a"), proposal("original-b")}, passInput: input}
+	executor, err := NewMemoryConsolidationExecutor(store, fakeMemoryConsolidationPlanner{}, MemoryConsolidationPolicy{MaxChanges: 1, MaxProposals: 1, MaxEvidencePerProposal: 1, PassTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease))
+	if err != nil || !result.Advanced || len(store.staged) != 2 || store.advanced != input.NextSequence {
+		t.Fatalf("result=%#v err=%v staged=%#v advanced=%d", result, err, store.staged, store.advanced)
+	}
+}
+
 func TestMemoryConsolidationExecutorAdvancesNoProposalPageButRejectsDuplicateOutput(t *testing.T) {
 	lease := MemoryConsolidationLease{
 		ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4,
@@ -195,6 +215,12 @@ func TestMemoryConsolidationExecutorAbandonsPermanentlyRejectedReservedPass(t *t
 	}
 	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); !errors.Is(err, ErrStaleMemoryConsolidationLease) || !store.abandoned || store.advanced != input.NextSequence {
 		t.Fatalf("err=%v abandoned=%t advanced=%d", err, store.abandoned, store.advanced)
+	}
+}
+
+func TestMemoryConsolidationStageErrorMarksAuthorizationRejectionPermanent(t *testing.T) {
+	if err := memoryConsolidationStageError(ErrNotFound); !errors.Is(err, errMemoryConsolidationProposalRejected) || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("authorization error=%v", err)
 	}
 }
 

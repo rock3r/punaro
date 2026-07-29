@@ -125,25 +125,23 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
 BEGIN
     PERFORM jobs.assert_application_mutation();
-    DELETE FROM brain.memory_consolidation_passes AS pass
-    USING brain.memory_consolidation_checkpoints AS checkpoint
-    WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
-      AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
-      AND checkpoint.timeline_id=requested_timeline AND checkpoint.change_sequence=requested_start_sequence
-      AND pass.scope_id=requested_scope AND pass.timeline_id=requested_timeline
-      AND pass.start_sequence=requested_start_sequence AND pass.next_sequence=requested_next_sequence
-      AND pass.principal_id=requested_principal AND pass.project_id=requested_project;
-    IF NOT FOUND THEN
-        RETURN false;
-    END IF;
     UPDATE brain.memory_consolidation_checkpoints AS checkpoint
     SET change_sequence=requested_next_sequence,lease_holder=NULL,lease_token=NULL,lease_until=NULL,updated_at=statement_timestamp()
     FROM jobs.server_state AS state
     WHERE state.singleton AND checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
       AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
       AND checkpoint.timeline_id=requested_timeline AND checkpoint.change_sequence=requested_start_sequence
-      AND requested_next_sequence>=checkpoint.change_sequence AND requested_next_sequence<=state.change_sequence;
-    RETURN FOUND;
+      AND requested_next_sequence>=checkpoint.change_sequence AND requested_next_sequence<=state.change_sequence
+      AND EXISTS (
+          SELECT 1 FROM brain.memory_consolidation_passes AS pass
+          WHERE pass.scope_id=requested_scope AND pass.timeline_id=requested_timeline
+            AND pass.start_sequence=requested_start_sequence AND pass.next_sequence=requested_next_sequence
+            AND pass.principal_id=requested_principal AND pass.project_id=requested_project
+      );
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    RETURN true;
 END
 $function$;
 

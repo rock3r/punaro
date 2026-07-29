@@ -109,7 +109,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 			return MemoryConsolidationExecutionResult{}, err
 		}
 	}
-	if input.Lease != lease || input.TimelineID != lease.TimelineID || !input.valid() || len(input.Sources) > e.policy.MaxChanges {
+	if input.Lease != lease || input.TimelineID != lease.TimelineID || !input.valid() || (!found && len(input.Sources) > e.policy.MaxChanges) {
 		return MemoryConsolidationExecutionResult{}, errors.New("consolidation input is invalid")
 	}
 	if !found {
@@ -129,7 +129,11 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 			return MemoryConsolidationExecutionResult{}, err
 		}
 	}
-	proposals, err = e.normalizeMemoryConsolidationProposals(proposals)
+	if found {
+		proposals, err = normalizeMemoryConsolidationProposals(proposals, maxMemoryConsolidationProposals, maxMemoryConsolidationEvidence)
+	} else {
+		proposals, err = e.normalizeMemoryConsolidationProposals(proposals)
+	}
 	if err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
@@ -152,14 +156,18 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 }
 
 func (e *MemoryConsolidationExecutor) normalizeMemoryConsolidationProposals(raw []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
-	if len(raw) > e.policy.MaxProposals {
+	return normalizeMemoryConsolidationProposals(raw, e.policy.MaxProposals, e.policy.MaxEvidencePerProposal)
+}
+
+func normalizeMemoryConsolidationProposals(raw []MemoryConsolidationProposal, maxProposals, maxEvidencePerProposal int) ([]MemoryConsolidationProposal, error) {
+	if len(raw) > maxProposals {
 		return nil, errors.New("consolidation output exceeds policy")
 	}
 	normalized := make([]MemoryConsolidationProposal, 0, len(raw))
 	seen := make(map[string]struct{}, len(raw))
 	for _, value := range raw {
 		proposal, err := value.normalized()
-		if err != nil || len(proposal.Evidence) > e.policy.MaxEvidencePerProposal {
+		if err != nil || len(proposal.Evidence) > maxEvidencePerProposal {
 			return nil, errors.New("consolidation output is invalid")
 		}
 		_, payloadSHA := memoryProposalPayloadSHA("00000000-0000-4000-8000-000000000001", proposal.Action, proposal.Steps, proposal.Evidence)

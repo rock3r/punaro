@@ -323,7 +323,7 @@ FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,rout
 const (
 	memoryConsolidationPassCompleteRoutineMD5            = "1319f8b0c9b50efcbc1c6e1df68c7945" // #nosec G101 -- immutable schema routine checksum
 	memoryConsolidationPassGuardRoutineMD5               = "060b94eab7fe744984bd09efc2958a57" // #nosec G101 -- immutable schema routine checksum
-	memoryConsolidationPassAbandonRoutineMD5             = "f2f3a61fec2e26e7ca19653eefde4819" // #nosec G101 -- immutable schema routine checksum
+	memoryConsolidationPassAbandonRoutineMD5             = "bfe14c5526ec0cba1761501b1581ffe9" // #nosec G101 -- immutable schema routine checksum
 	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
 	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
 	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"

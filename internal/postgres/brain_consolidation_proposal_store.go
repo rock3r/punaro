@@ -58,7 +58,7 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		return decodeMemoryProposalOutcome(outcome)
 	}
 	if err := d.validateMemoryConsolidationProposalScope(ctx, proposal.PrincipalID, proposal.ProjectID, request.Input.Lease.ScopeID); err != nil {
-		return MemoryProposalResult{}, err
+		return MemoryProposalResult{}, memoryConsolidationStageError(err)
 	}
 	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
 		return MemoryProposalResult{}, err
