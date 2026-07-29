@@ -68,7 +68,7 @@ func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.
 	if _, err := Load(""); err == nil {
 		t.Fatal("remote MCP token validation accepted without subject bindings")
 	}
-	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"11111111-1111-4111-8111-111111111111"}]`)
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"}]`)
 	cfg, err := Load("")
 	if err != nil || !cfg.RemoteMCPTokenValidationEnabled || cfg.RemoteMCPIssuer != "https://auth.example" {
 		t.Fatalf("config=%#v err=%v", cfg, err)
@@ -80,6 +80,10 @@ func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.
 	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"11111111-1111-4111-8111-111111111111"},{"subject":"operator-1","principal_id":"22222222-2222-4222-8222-222222222222"}]`)
 	if _, err := Load(""); err == nil {
 		t.Fatal("remote MCP token validation accepted duplicate subject bindings")
+	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted a noncanonical principal binding UUID")
 	}
 }
 

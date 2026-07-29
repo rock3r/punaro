@@ -277,7 +277,7 @@ func validRemoteMCPSubjectBindings(raw string) bool {
 	seen := make(map[string]struct{}, len(bindings))
 	for _, binding := range bindings {
 		principalID, err := uuid.Parse(binding.PrincipalID)
-		if binding.Subject == "" || len(binding.Subject) > 255 || strings.TrimSpace(binding.Subject) != binding.Subject || strings.ContainsAny(binding.Subject, "\x00\r\n") || err != nil || principalID == uuid.Nil {
+		if binding.Subject == "" || len(binding.Subject) > 255 || strings.TrimSpace(binding.Subject) != binding.Subject || strings.ContainsAny(binding.Subject, "\x00\r\n") || err != nil || principalID == uuid.Nil || principalID.String() != binding.PrincipalID {
 			return false
 		}
 		if _, duplicate := seen[binding.Subject]; duplicate {
