@@ -115,7 +115,7 @@ func TestVerifiedBoundSubjectWithoutDefaultScopeIsForbidden(t *testing.T) {
 	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
 	request.Header.Set("Authorization", "Bearer valid")
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || !strings.Contains(response.Header().Get("WWW-Authenticate"), `error="insufficient_scope"`) {
+	if response.Code != http.StatusForbidden || !strings.Contains(response.Header().Get("WWW-Authenticate"), `error="insufficient_scope"`) || strings.Contains(response.Header().Get("WWW-Authenticate"), `scope=`) {
 		t.Fatalf("status=%d authenticate=%q", response.Code, response.Header().Get("WWW-Authenticate"))
 	}
 }
