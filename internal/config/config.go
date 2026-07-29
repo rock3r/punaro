@@ -17,31 +17,34 @@ import (
 
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
-	ListenAddr                  string
-	HealthListenAddr            string
-	DataDir                     string
-	LogLevel                    string
-	RelayEnabled                bool
-	RelayMachinesJSON           string
-	RelayStore                  string
-	AccessIssuer                string
-	AccessAudience              string
-	AccessJWKSURL               string
-	AccessJWKSFile              string
-	PostgresEnabled             bool
-	PostgresDSNFile             string
-	DeviceAuthEnabled           bool
-	MemoryAPIEnabled            bool
-	MemoryMutationsEnabled      bool
-	MemoryOpenAIEmbeddingsURL   string
-	MemoryOpenAIAPIKeyFile      string
-	TrustedAttachmentsEnabled   bool
-	TrustedAttachmentBlobDir    string
-	CredentialTransitionEnabled bool
-	IngressMode                 string
-	PublicURL                   string
-	TrustedLANCIDR              string
-	TrustedLANHTTP              bool
+	ListenAddr                    string
+	HealthListenAddr              string
+	DataDir                       string
+	LogLevel                      string
+	RelayEnabled                  bool
+	RelayMachinesJSON             string
+	RelayStore                    string
+	AccessIssuer                  string
+	AccessAudience                string
+	AccessJWKSURL                 string
+	AccessJWKSFile                string
+	PostgresEnabled               bool
+	PostgresDSNFile               string
+	DeviceAuthEnabled             bool
+	MemoryAPIEnabled              bool
+	MemoryMutationsEnabled        bool
+	RemoteMCPMetadataEnabled      bool
+	RemoteMCPResourceURL          string
+	RemoteMCPAuthorizationServers string
+	MemoryOpenAIEmbeddingsURL     string
+	MemoryOpenAIAPIKeyFile        string
+	TrustedAttachmentsEnabled     bool
+	TrustedAttachmentBlobDir      string
+	CredentialTransitionEnabled   bool
+	IngressMode                   string
+	PublicURL                     string
+	TrustedLANCIDR                string
+	TrustedLANHTTP                bool
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -97,6 +100,12 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_MEMORY_MUTATIONS_ENABLED: %w", err)
 	}
+	remoteMCPMetadataEnabled, err := strconv.ParseBool(value("PUNARO_REMOTE_MCP_METADATA_ENABLED", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse PUNARO_REMOTE_MCP_METADATA_ENABLED: %w", err)
+	}
+	remoteMCPResourceURL := value("PUNARO_REMOTE_MCP_RESOURCE_URL", "")
+	remoteMCPAuthorizationServers := value("PUNARO_REMOTE_MCP_AUTHORIZATION_SERVERS", "")
 	memoryOpenAIEmbeddingsURL := value("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL", "")
 	memoryOpenAIAPIKeyFile := value("PUNARO_MEMORY_OPENAI_API_KEY_FILE", "")
 	trustedAttachmentsEnabled, err := strconv.ParseBool(value("PUNARO_TRUSTED_ATTACHMENTS_ENABLED", "false"))
@@ -153,6 +162,13 @@ func Load(explicitEnvFile string) (Config, error) {
 	if memoryMutationsEnabled && !memoryAPIEnabled {
 		return Config{}, fmt.Errorf("memory mutations require PUNARO_MEMORY_API_ENABLED")
 	}
+	if remoteMCPMetadataEnabled {
+		if !postgresEnabled || !deviceAuthEnabled || (ingressMode != string(ingress.Proxy) && ingressMode != string(ingress.Internet)) || remoteMCPResourceURL != strings.TrimSuffix(publicURL, "/")+"/mcp" || !validRemoteMCPHTTPSURL(remoteMCPResourceURL, true) || !validRemoteMCPAuthorizationServers(remoteMCPAuthorizationServers) {
+			return Config{}, fmt.Errorf("remote MCP metadata requires authenticated proxy or Internet ingress, canonical resource URL, and HTTPS authorization servers")
+		}
+	} else if remoteMCPResourceURL != "" || remoteMCPAuthorizationServers != "" {
+		return Config{}, fmt.Errorf("remote MCP metadata configuration requires PUNARO_REMOTE_MCP_METADATA_ENABLED")
+	}
 	if (memoryOpenAIEmbeddingsURL == "") != (memoryOpenAIAPIKeyFile == "") {
 		return Config{}, fmt.Errorf("PUNARO_MEMORY_OPENAI_EMBEDDINGS_URL and PUNARO_MEMORY_OPENAI_API_KEY_FILE must be configured together")
 	}
@@ -189,7 +205,33 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+}
+
+func validRemoteMCPHTTPSURL(raw string, permitPath bool) bool {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.String() != raw {
+		return false
+	}
+	return permitPath || parsed.Path == "" || parsed.Path == "/"
+}
+
+func validRemoteMCPAuthorizationServers(raw string) bool {
+	servers := strings.Split(raw, ",")
+	if raw == "" || len(servers) > 8 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(servers))
+	for _, server := range servers {
+		if strings.TrimSpace(server) != server || !validRemoteMCPHTTPSURL(server, false) {
+			return false
+		}
+		if _, duplicate := seen[server]; duplicate {
+			return false
+		}
+		seen[server] = struct{}{}
+	}
+	return true
 }
 
 func rejectRetiredAttachmentConfiguration() error {

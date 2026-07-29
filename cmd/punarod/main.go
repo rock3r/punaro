@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/rock3r/punaro/internal/devicehttp"
 	"github.com/rock3r/punaro/internal/embeddingprovider"
 	"github.com/rock3r/punaro/internal/ingress"
+	"github.com/rock3r/punaro/internal/mcphttp"
 	"github.com/rock3r/punaro/internal/memoryhttp"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
@@ -219,6 +221,11 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "punarod memory API configuration error: %v\n", err)
 		return 2
 	}
+	remoteMCPMetadataHandler, err := buildRemoteMCPMetadataHandler(cfg)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "punarod remote MCP configuration error: metadata is unavailable")
+		return 2
+	}
 	logger := log.New(os.Stderr, "punarod ", log.LstdFlags|log.LUTC)
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
@@ -245,7 +252,7 @@ func run(args []string, stderr io.Writer) int {
 		mux.Handle("/v1/enrollments/redeem", deviceHandler)
 		mux.Handle("/v1/device/session", deviceHandler)
 	}
-	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler)
+	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler, remoteMCPMetadataHandler)
 	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
 	healthServer := configuredServer(cfg.HealthListenAddr, securityHeaders(healthMux))
 	publicListener, err := listenTCP("tcp", cfg.ListenAddr)
@@ -301,7 +308,11 @@ func run(args []string, stderr io.Writer) int {
 	}
 }
 
-func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler) {
+func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler, remoteMCPMetadataHandler http.Handler) {
+	if remoteMCPMetadataHandler != nil {
+		mux.Handle("/.well-known/oauth-protected-resource", remoteMCPMetadataHandler)
+		mux.Handle("/.well-known/oauth-protected-resource/", remoteMCPMetadataHandler)
+	}
 	if memoryHandler != nil {
 		mux.Handle("/v1/projects/resolve", memoryHandler)
 		mux.Handle("/v1/projects/", memoryHandler)
@@ -313,6 +324,13 @@ func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, tr
 	if relayHandler != nil {
 		mux.Handle("/v1/", relayHandler)
 	}
+}
+
+func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
+	if !cfg.RemoteMCPMetadataEnabled {
+		return nil, nil
+	}
+	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","))
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {

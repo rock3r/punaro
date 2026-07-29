@@ -74,7 +74,13 @@ project-scoped v1 routes. The server binds the principal, uses strict bounded
 inputs and content-free failures, and keeps unauthorized resources
 indistinguishable from missing. An explicit null change cursor starts at the
 current installation/timeline origin; subsequent cursors fail on restore or
-future coordinates. The mutation slice is separately dark behind
+future coordinates. Remote MCP metadata is separately dark behind
+`PUNARO_REMOTE_MCP_METADATA_ENABLED`. It is limited to the OAuth protected
+resource metadata document for the canonical `PUNARO_PUBLIC_URL/mcp` resource,
+with configured HTTPS authorization-server origins. It mounts neither an MCP
+transport nor token validation or tools, so enabling it cannot grant remote
+access before the later OAuth resource-server and strict transport slices.
+The mutation slice is separately dark behind
 `PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
 strict canonical create/update/archive/restore/purge and staged-proposal
 create/approve/reject routes without changing the schema. Mutations accept
