@@ -18,7 +18,7 @@ grep -Fq 'pg_isready --host 127.0.0.1 -U punaro_owner -d punaro' "$compose_file"
 grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"
 grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
 grep -Fq "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')" deploy/compose/postgres-bootstrap.sh
-grep -Fq '\\set app_password `cat /run/secrets/postgres_app_password`' deploy/compose/postgres-bootstrap.sh
+grep -Fq '\set app_password `cat /run/secrets/postgres_app_password`' deploy/compose/postgres-bootstrap.sh
 grep -Fq "ALTER ROLE punaro_app LOGIN PASSWORD :'app_password'" deploy/compose/postgres-bootstrap.sh
 if grep -Fq -- '--set=app_password=' deploy/compose/postgres-bootstrap.sh; then
 	echo "production bootstrap must not expose the application password in psql argv" >&2
