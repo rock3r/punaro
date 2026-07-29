@@ -232,6 +232,17 @@ image supplies role subcommands. Containers run non-root with a read-only root,
 dropped capabilities, `no-new-privileges`, bounded temporary storage, and no
 Docker socket. PostgreSQL and blob storage are never host-published.
 
+The first executable reference bundle is
+`deploy/compose/production.yaml`. It pins PostgreSQL/pgvector 18, requires a
+digest-pinned application image and canonical HTTPS public URL, mounts owner
+and application database credentials only as read-only Compose secrets, and
+uses the same-host loopback boundary already required by proxy/Internet ingress:
+PostgreSQL is forced to loopback and the bundle defines no host-published
+ports. A separately configured local ingress reaches `punarod` on loopback. It
+starts only PostgreSQL and `punarod`; a host-local operator must
+initialize/migrate the database before ordinary application startup, so raw
+Compose startup cannot migrate a schema.
+
 PostgreSQL is the only authoritative server database. SQLite remains a native
 client recovery store and a server migration/parity source until cutover. The
 current SQLite/systemd deployment remains an alpha compatibility path while

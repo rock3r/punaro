@@ -38,6 +38,26 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsProductionComposeRuntimeConfiguration(t *testing.T) {
+	for key, value := range map[string]string{
+		"PUNARO_LISTEN_ADDR":         "127.0.0.1:8080",
+		"PUNARO_HEALTH_LISTEN_ADDR":  "127.0.0.1:8081",
+		"PUNARO_POSTGRES_ENABLED":    "true",
+		"PUNARO_POSTGRES_DSN_FILE":   "/run/secrets/postgres_app_dsn",
+		"PUNARO_DEVICE_AUTH_ENABLED": "true",
+		"PUNARO_RELAY_ENABLED":       "false",
+		"PUNARO_RELAY_STORE":         "sqlite",
+		"PUNARO_INGRESS_MODE":        "proxy",
+		"PUNARO_PUBLIC_URL":          "https://punaro.example",
+		"PUNARO_TRUSTED_LAN_HTTP":    "false",
+	} {
+		t.Setenv(key, value)
+	}
+	if _, err := Load(""); err != nil {
+		t.Fatalf("production Compose configuration rejected: %v", err)
+	}
+}
+
 func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.T) {
 	t.Setenv("PUNARO_REMOTE_MCP_TOKEN_VALIDATION_ENABLED", "true")
 	if _, err := Load(""); err == nil {

@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+compose_file=${1:-deploy/compose/production.yaml}
+
+test -f "$compose_file"
+grep -Eq 'pgvector/pgvector:[^[:space:]]+@sha256:[0-9a-f]{64}' "$compose_file"
+grep -Fq 'PUNARO_IMAGE:?required' "$compose_file"
+grep -Fq 'PUNARO_POSTGRES_DSN_FILE: /run/secrets/postgres_app_dsn' "$compose_file"
+grep -Fq 'POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password' "$compose_file"
+grep -Fq 'PUNARO_DEVICE_AUTH_ENABLED: "true"' "$compose_file"
+grep -Fq 'PUNARO_RELAY_STORE: sqlite' "$compose_file"
+grep -Fq 'read_only: true' "$compose_file"
+grep -Fq 'no-new-privileges:true' "$compose_file"
+grep -Fq 'cap_drop:' "$compose_file"
+if [ "$(grep -Fc 'network_mode: host' "$compose_file")" -ne 2 ]; then
+	echo "production services must use the reviewed same-host loopback network" >&2
+	exit 1
+fi
+grep -Fq 'listen_addresses=127.0.0.1' "$compose_file"
+if grep -Eq '^[[:space:]]+ports:' "$compose_file"; then
+	echo "production services must not publish host ports" >&2
+	exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+	echo "production Compose structure verified; Docker Compose validation requires Docker" >&2
+	exit 0
+fi
+
+temporary=$(mktemp -d)
+cleanup() { rm -rf "$temporary"; }
+trap cleanup EXIT INT TERM
+chmod 700 "$temporary"
+printf '%s\n' 'owner-password' >"$temporary/owner-password"
+printf '%s\n' 'postgres://punaro_app@postgres:5432/punaro?sslmode=disable' >"$temporary/app.dsn"
+chmod 600 "$temporary/owner-password" "$temporary/app.dsn"
+PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+PUNARO_PUBLIC_URL='https://punaro.example' \
+PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$temporary/owner-password" \
+PUNARO_POSTGRES_APP_DSN_FILE="$temporary/app.dsn" \
+docker compose -f "$compose_file" config --quiet
