@@ -11,7 +11,7 @@ CREATE TABLE brain.memory_consolidation_passes (
     sources jsonb NOT NULL,
     proposals jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
-    PRIMARY KEY (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id)
+    PRIMARY KEY (scope_id,timeline_id,start_sequence,principal_id,project_id)
 );
 
 CREATE FUNCTION brain.guard_memory_consolidation_pass()

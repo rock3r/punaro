@@ -168,12 +168,12 @@ func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(_ con
 	input.Lease = lease
 	return input, s.pass, true, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
+func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error) {
 	if s.pass == nil {
 		s.pass = proposals
 		s.passInput = input
 	}
-	return s.pass, nil
+	return s.passInput, s.pass, nil
 }
 func (s *fakeMemoryConsolidationExecutorStore) StageMemoryConsolidationProposal(_ context.Context, request MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
 	if s.stageFailures > 0 && len(s.staged) == 1 && s.stageErr != nil {

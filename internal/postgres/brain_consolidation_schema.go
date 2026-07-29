@@ -274,7 +274,7 @@ WITH relation AS (
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
-       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3,4,5,6]::smallint[])=1
+       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3,5,6]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
        AND count(*) FILTER (WHERE contype='c')=4 AS exact
     FROM pg_constraint,relation WHERE conrelid=table_oid AND contype<>'n'

@@ -19,46 +19,46 @@ func (d *Database) LoadMemoryConsolidationPass(ctx context.Context, lease Memory
 
 // ReserveMemoryConsolidationPass atomically records a fully validated plan.
 // Concurrent workers resolve to the first plan rather than replacing it.
-func (d *Database) ReserveMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
+func (d *Database) ReserveMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error) {
 	if err := d.validateMemoryConsolidationProposalScope(ctx, request.PrincipalID, request.ProjectID, input.Lease.ScopeID); err != nil {
-		return nil, err
+		return MemoryConsolidationInput{}, nil, err
 	}
 	body, err := json.Marshal(proposals)
 	if err != nil {
-		return nil, errors.New("consolidation pass cannot be encoded")
+		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass cannot be encoded")
 	}
 	sourceSHA, err := memoryConsolidationPassSourceSHA(input)
 	if err != nil {
-		return nil, err
+		return MemoryConsolidationInput{}, nil, err
 	}
 	sourcesBody, err := json.Marshal(input.Sources)
 	if err != nil {
-		return nil, errors.New("consolidation pass sources cannot be encoded")
+		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass sources cannot be encoded")
 	}
 	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return nil, mutationStartError(err, "consolidation pass transaction cannot start")
+		return MemoryConsolidationInput{}, nil, mutationStartError(err, "consolidation pass transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO brain.memory_consolidation_passes
 (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id,lease_token,lease_generation,source_sha256,sources,proposals)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-ON CONFLICT (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id) DO NOTHING`,
+ON CONFLICT (scope_id,timeline_id,start_sequence,principal_id,project_id) DO NOTHING`,
 		input.Lease.ScopeID, input.TimelineID, input.Lease.Sequence, input.NextSequence, request.PrincipalID, request.ProjectID,
 		input.Lease.Token, input.Lease.Generation, sourceSHA, sourcesBody, body); err != nil {
-		return nil, errors.New("consolidation pass cannot be reserved")
+		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass cannot be reserved")
 	}
-	_, resolved, found, err := d.readMemoryConsolidationPass(ctx, tx, input.Lease, request)
+	resolvedInput, resolved, found, err := d.readMemoryConsolidationPass(ctx, tx, input.Lease, request)
 	if err != nil {
-		return nil, err
+		return MemoryConsolidationInput{}, nil, err
 	}
 	if !found {
-		return nil, errors.New("consolidation pass was not reserved")
+		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass was not reserved")
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, errors.New("consolidation pass transaction cannot commit")
+		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass transaction cannot commit")
 	}
-	return resolved, nil
+	return resolvedInput, resolved, nil
 }
 
 // CompleteMemoryConsolidationPass atomically advances the fenced checkpoint
