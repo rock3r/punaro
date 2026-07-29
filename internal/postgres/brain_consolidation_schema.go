@@ -271,11 +271,12 @@ WITH relation AS (
     FROM pg_trigger,relation WHERE tgrelid=table_oid AND NOT tgisinternal
 ), checkpoint_triggers AS (
     SELECT count(*)=1 AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_checkpoint_cleanup'
-      AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O')=1 AS exact
+      AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O' AND tgattr='2 3'::int2vector
+      AND pg_get_expr(tgqual,tgrelid)='((old.timeline_id, old.change_sequence) IS DISTINCT FROM (new.timeline_id, new.change_sequence))')=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
-       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3,5,6]::smallint[])=1
+       AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
        AND count(*) FILTER (WHERE contype='c')=4 AS exact
     FROM pg_constraint,relation WHERE conrelid=table_oid AND contype<>'n'

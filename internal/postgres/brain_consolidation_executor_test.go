@@ -191,6 +191,7 @@ type fakeMemoryConsolidationExecutorStore struct {
 	stagedKeys    map[string]struct{}
 	pass          []MemoryConsolidationProposal
 	passInput     MemoryConsolidationInput
+	passRequest   MemoryConsolidationExecutionRequest
 	readLimit     int
 }
 
@@ -198,20 +199,25 @@ func (s *fakeMemoryConsolidationExecutorStore) readMemoryConsolidationInput(_ co
 	s.readLimit = limit
 	return s.input, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(_ context.Context, lease MemoryConsolidationLease, _ MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {
+func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(_ context.Context, lease MemoryConsolidationLease, request MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error) {
 	if s.pass == nil {
-		return MemoryConsolidationInput{}, nil, false, nil
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, nil
 	}
 	input := s.passInput
 	input.Lease = lease
-	return input, s.pass, true, nil
+	if !s.passRequest.valid() {
+		s.passRequest = request
+		s.passRequest.Lease = lease
+	}
+	return input, s.passRequest, s.pass, true, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error) {
+func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, error) {
 	if s.pass == nil {
 		s.pass = proposals
 		s.passInput = input
+		s.passRequest = request
 	}
-	return s.passInput, s.pass, nil
+	return s.passInput, s.passRequest, s.pass, nil
 }
 func (s *fakeMemoryConsolidationExecutorStore) StageMemoryConsolidationProposal(_ context.Context, request MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
 	if s.stageFailures > 0 && len(s.staged) == 1 && s.stageErr != nil {

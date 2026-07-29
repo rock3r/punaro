@@ -10,55 +10,55 @@ import (
 
 // LoadMemoryConsolidationPass returns the immutable plan reserved for this
 // exact source page. A retry must load this before consulting a planner.
-func (d *Database) LoadMemoryConsolidationPass(ctx context.Context, lease MemoryConsolidationLease, request MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {
+func (d *Database) LoadMemoryConsolidationPass(ctx context.Context, lease MemoryConsolidationLease, request MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error) {
 	if err := d.validateMemoryConsolidationProposalScope(ctx, request.PrincipalID, request.ProjectID, lease.ScopeID); err != nil {
-		return MemoryConsolidationInput{}, nil, false, err
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, err
 	}
 	return d.readMemoryConsolidationPass(ctx, d.db, lease, request)
 }
 
 // ReserveMemoryConsolidationPass atomically records a fully validated plan.
 // Concurrent workers resolve to the first plan rather than replacing it.
-func (d *Database) ReserveMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error) {
+func (d *Database) ReserveMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, error) {
 	if err := d.validateMemoryConsolidationProposalScope(ctx, request.PrincipalID, request.ProjectID, input.Lease.ScopeID); err != nil {
-		return MemoryConsolidationInput{}, nil, err
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, err
 	}
 	body, err := json.Marshal(proposals)
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass cannot be encoded")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, errors.New("consolidation pass cannot be encoded")
 	}
 	sourceSHA, err := memoryConsolidationPassSourceSHA(input)
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, err
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, err
 	}
 	sourcesBody, err := json.Marshal(input.Sources)
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass sources cannot be encoded")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, errors.New("consolidation pass sources cannot be encoded")
 	}
 	tx, err := beginMutation(ctx, d.db)
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, mutationStartError(err, "consolidation pass transaction cannot start")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, mutationStartError(err, "consolidation pass transaction cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO brain.memory_consolidation_passes
 (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id,lease_token,lease_generation,source_sha256,sources,proposals)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-ON CONFLICT (scope_id,timeline_id,start_sequence,principal_id,project_id) DO NOTHING`,
+ON CONFLICT (scope_id,timeline_id,start_sequence) DO NOTHING`,
 		input.Lease.ScopeID, input.TimelineID, input.Lease.Sequence, input.NextSequence, request.PrincipalID, request.ProjectID,
 		input.Lease.Token, input.Lease.Generation, sourceSHA, sourcesBody, body); err != nil {
-		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass cannot be reserved")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, errors.New("consolidation pass cannot be reserved")
 	}
-	resolvedInput, resolved, found, err := d.readMemoryConsolidationPass(ctx, tx, input.Lease, request)
+	resolvedInput, resolvedRequest, resolved, found, err := d.readMemoryConsolidationPass(ctx, tx, input.Lease, request)
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, err
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, err
 	}
 	if !found {
-		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass was not reserved")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, errors.New("consolidation pass was not reserved")
 	}
 	if err := tx.Commit(); err != nil {
-		return MemoryConsolidationInput{}, nil, errors.New("consolidation pass transaction cannot commit")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, errors.New("consolidation pass transaction cannot commit")
 	}
-	return resolvedInput, resolved, nil
+	return resolvedInput, resolvedRequest, resolved, nil
 }
 
 // CompleteMemoryConsolidationPass atomically advances the fenced checkpoint
@@ -93,32 +93,32 @@ func (d *Database) AbandonMemoryConsolidationPass(ctx context.Context, input Mem
 	return nil
 }
 
-func (d *Database) readMemoryConsolidationPass(ctx context.Context, q queryer, lease MemoryConsolidationLease, request MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {
+func (d *Database) readMemoryConsolidationPass(ctx context.Context, q queryer, lease MemoryConsolidationLease, _ MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error) {
 	var storedSHA []byte
-	var timelineID, body, sourcesBody string
+	var timelineID, body, sourcesBody, principalID, projectID string
 	var nextSequence int64
-	err := q.QueryRowContext(ctx, `SELECT timeline_id::text,next_sequence,source_sha256,proposals::text,sources::text FROM brain.memory_consolidation_passes
-WHERE scope_id=$1 AND timeline_id=$2 AND start_sequence=$3 AND principal_id=$4 AND project_id=$5`,
-		lease.ScopeID, lease.TimelineID, lease.Sequence, request.PrincipalID, request.ProjectID).Scan(&timelineID, &nextSequence, &storedSHA, &body, &sourcesBody)
+	err := q.QueryRowContext(ctx, `SELECT timeline_id::text,next_sequence,principal_id::text,project_id::text,source_sha256,proposals::text,sources::text FROM brain.memory_consolidation_passes
+WHERE scope_id=$1 AND timeline_id=$2 AND start_sequence=$3`,
+		lease.ScopeID, lease.TimelineID, lease.Sequence).Scan(&timelineID, &nextSequence, &principalID, &projectID, &storedSHA, &body, &sourcesBody)
 	if errors.Is(err, sql.ErrNoRows) {
-		return MemoryConsolidationInput{}, nil, false, nil
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, nil
 	}
 	if err != nil {
-		return MemoryConsolidationInput{}, nil, false, errors.New("consolidation pass is unavailable")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, errors.New("consolidation pass is unavailable")
 	}
 	input := MemoryConsolidationInput{Lease: lease, TimelineID: timelineID, NextSequence: nextSequence}
 	if err := json.Unmarshal([]byte(sourcesBody), &input.Sources); err != nil {
-		return MemoryConsolidationInput{}, nil, false, errors.New("consolidation pass is malformed")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, errors.New("consolidation pass is malformed")
 	}
 	sourceSHA, err := memoryConsolidationPassSourceSHA(input)
 	if err != nil || len(storedSHA) != sha256.Size || string(storedSHA) != string(sourceSHA) {
-		return MemoryConsolidationInput{}, nil, false, ErrStaleMemoryConsolidationLease
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, ErrStaleMemoryConsolidationLease
 	}
 	var proposals []MemoryConsolidationProposal
 	if err := json.Unmarshal([]byte(body), &proposals); err != nil {
-		return MemoryConsolidationInput{}, nil, false, errors.New("consolidation pass is malformed")
+		return MemoryConsolidationInput{}, MemoryConsolidationExecutionRequest{}, nil, false, errors.New("consolidation pass is malformed")
 	}
-	return input, proposals, true, nil
+	return input, MemoryConsolidationExecutionRequest{Lease: lease, PrincipalID: principalID, ProjectID: projectID}, proposals, true, nil
 }
 
 func memoryConsolidationPassSourceSHA(input MemoryConsolidationInput) ([]byte, error) {

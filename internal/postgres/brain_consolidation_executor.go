@@ -55,8 +55,8 @@ func (request MemoryConsolidationExecutionRequest) valid() bool {
 
 type memoryConsolidationExecutorStore interface {
 	readMemoryConsolidationInput(context.Context, MemoryConsolidationLease, int) (MemoryConsolidationInput, error)
-	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error)
-	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error)
+	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error)
+	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, error)
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
 	AbandonMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
@@ -98,11 +98,12 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	lease := request.Lease
 	passCtx, cancel := context.WithTimeout(ctx, e.policy.PassTimeout)
 	defer cancel()
-	input, proposals, found, err := e.store.LoadMemoryConsolidationPass(passCtx, lease, request)
+	input, effectiveRequest, proposals, found, err := e.store.LoadMemoryConsolidationPass(passCtx, lease, request)
 	if err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	if !found {
+		effectiveRequest = request
 		input, err = e.store.readMemoryConsolidationInput(passCtx, lease, e.policy.MaxChanges)
 		if err != nil {
 			return MemoryConsolidationExecutionResult{}, err
@@ -123,7 +124,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		if len(input.Sources) == 0 && len(proposals) != 0 {
 			return MemoryConsolidationExecutionResult{}, errors.New("consolidation output requires source documents")
 		}
-		input, proposals, err = e.store.ReserveMemoryConsolidationPass(passCtx, input, request, proposals)
+		input, effectiveRequest, proposals, err = e.store.ReserveMemoryConsolidationPass(passCtx, input, request, proposals)
 		if err != nil {
 			return MemoryConsolidationExecutionResult{}, err
 		}
@@ -133,10 +134,10 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	for ordinal, proposal := range proposals {
-		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
+		staged := MemoryProposalCreateRequest{PrincipalID: effectiveRequest.PrincipalID, ProjectID: effectiveRequest.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, effectiveRequest.PrincipalID, effectiveRequest.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
 		if _, err := e.store.StageMemoryConsolidationProposal(passCtx, MemoryConsolidationProposalRequest{Input: input, Proposal: staged}); err != nil {
 			if errors.Is(err, errMemoryConsolidationSourceStale) {
-				if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, request); abandonErr != nil {
+				if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, effectiveRequest); abandonErr != nil {
 					return MemoryConsolidationExecutionResult{}, abandonErr
 				}
 				return MemoryConsolidationExecutionResult{}, ErrStaleMemoryConsolidationLease
@@ -144,7 +145,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 			return MemoryConsolidationExecutionResult{}, err
 		}
 	}
-	if err := e.store.CompleteMemoryConsolidationPass(passCtx, input, request); err != nil {
+	if err := e.store.CompleteMemoryConsolidationPass(passCtx, input, effectiveRequest); err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	return MemoryConsolidationExecutionResult{Sources: len(input.Sources), Staged: len(proposals), Advanced: true}, nil
