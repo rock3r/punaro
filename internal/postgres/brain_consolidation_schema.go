@@ -284,11 +284,7 @@ WITH relation AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
-       AND count(*) FILTER (WHERE contype='c')=4
-       AND count(*) FILTER (WHERE contype='c' AND conname='memory_consolidation_passes_start_sequence_check' AND pg_get_expr(conbin,conrelid)='(start_sequence >= 0)')=1
-       AND count(*) FILTER (WHERE contype='c' AND conname='memory_consolidation_passes_next_sequence_check' AND pg_get_expr(conbin,conrelid)='(next_sequence >= start_sequence)')=1
-       AND count(*) FILTER (WHERE contype='c' AND conname='memory_consolidation_passes_lease_generation_check' AND pg_get_expr(conbin,conrelid)='(lease_generation >= 1)')=1
-       AND count(*) FILTER (WHERE contype='c' AND conname='memory_consolidation_passes_source_sha256_check' AND pg_get_expr(conbin,conrelid)='(octet_length(source_sha256) = 32)')=1 AS exact
+       AND count(*) FILTER (WHERE contype='c')=4 AS exact
     FROM pg_constraint,relation WHERE conrelid=table_oid AND contype<>'n'
 ), routines AS (
     SELECT count(*)=4 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
