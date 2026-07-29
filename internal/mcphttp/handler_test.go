@@ -1,14 +1,19 @@
 package mcphttp
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/rock3r/punaro/internal/mcpoauth"
 )
 
 func TestProtectedResourceMetadataIsStrictAndChallengesMCPWithoutAcceptingTokens(t *testing.T) {
-	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"})
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,14 +43,58 @@ func TestProtectedResourceMetadataIsStrictAndChallengesMCPWithoutAcceptingTokens
 	}
 }
 
+func TestValidatedTokenReachesOnlyTheNoTransportBoundary(t *testing.T) {
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer valid")
+	handler.ServeHTTP(valid, request)
+	if valid.Code != http.StatusNotImplemented || valid.Header().Get("WWW-Authenticate") != "" {
+		t.Fatalf("valid token response=%d authenticate=%q", valid.Code, valid.Header().Get("WWW-Authenticate"))
+	}
+	invalid := httptest.NewRecorder()
+	request = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "Bearer invalid")
+	handler.ServeHTTP(invalid, request)
+	if invalid.Code != http.StatusUnauthorized || !strings.Contains(invalid.Header().Get("WWW-Authenticate"), `error="invalid_token"`) {
+		t.Fatalf("invalid token response=%d authenticate=%q", invalid.Code, invalid.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestBearerSchemeIsCaseInsensitive(t *testing.T) {
+	handler, err := New("https://mcp.example.test/mcp", []string{"https://auth.example.test"}, testValidator{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/mcp", nil)
+	request.Header.Set("Authorization", "bearer valid")
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNotImplemented {
+		t.Fatalf("status=%d", response.Code)
+	}
+}
+
+type testValidator struct{}
+
+func (testValidator) Validate(_ context.Context, raw string, _ time.Time) (mcpoauth.Claims, error) {
+	if raw != "valid" {
+		return mcpoauth.Claims{}, errors.New("invalid")
+	}
+	return mcpoauth.Claims{Subject: "operator"}, nil
+}
+
 func TestProtectedResourceMetadataRejectsUnsafeConfiguration(t *testing.T) {
 	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment", "https://mcp.example.test//mcp"} {
-		if _, err := New(resource, []string{"https://auth.example.test"}); err == nil {
+		if _, err := New(resource, []string{"https://auth.example.test"}, nil); err == nil {
 			t.Fatalf("unsafe resource accepted: %q", resource)
 		}
 	}
 	for _, authorizationServer := range [][]string{nil, {"http://auth.example.test"}, {"https://auth.example.test/path"}} {
-		if _, err := New("https://mcp.example.test/mcp", authorizationServer); err == nil {
+		if _, err := New("https://mcp.example.test/mcp", authorizationServer, nil); err == nil {
 			t.Fatalf("unsafe authorization server accepted: %q", authorizationServer)
 		}
 	}
