@@ -16,26 +16,40 @@ credential is an environment variable or image layer.
 Prepare two owner-only files outside the repository:
 
 - a PostgreSQL owner password for `PUNARO_POSTGRES_OWNER_PASSWORD_FILE`; and
+- a PostgreSQL application-role password for `PUNARO_POSTGRES_APP_PASSWORD_FILE`; and
 - an application-role PostgreSQL DSN for `PUNARO_POSTGRES_APP_DSN_FILE`.
 
 Compose file secrets preserve their host ownership. The application DSN file
-must therefore be a regular, non-symlink `0400` file owned by numeric UID
-`65532` (the `punarod` runtime user). For example, a privileged operator may
-prepare it with `chown 65532:65532 APP_DSN_FILE` and `chmod 0400 APP_DSN_FILE`.
+must therefore be a regular, non-symlink `0400` file owned by the non-root
+runtime UID supplied to Compose. Set the runtime identity from the deployment
+account, then use it to own the DSN file:
+
+```sh
+export PUNARO_RUNTIME_UID="$(id -u)"
+export PUNARO_RUNTIME_GID="$(id -g)"
+chown "$PUNARO_RUNTIME_UID:$PUNARO_RUNTIME_GID" APP_DSN_FILE
+chmod 0400 APP_DSN_FILE
+```
+
 Do not make it group- or world-readable: the daemon rejects broad DSN-file
 permissions. The PostgreSQL owner-password file remains an operator-owned
-secret consumed only by the PostgreSQL entrypoint.
+secret consumed only by the PostgreSQL entrypoint. The app-password secret is
+used only during fresh PostgreSQL-volume initialization to create the
+least-privilege `punaro_app` role; its value must match the password embedded
+in the application DSN.
 
 Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
-HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Start only the private database, then use the host-local
+HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Always
+invoke the bundle through `scripts/production-compose`: it refuses a non-digest
+image reference and a root runtime identity. Start only the private database, then use the host-local
 operator workflow to initialize/migrate it with the protected owner and
 application DSNs. Ordinary Compose startup never migrates an existing schema.
 After successful initialization, start the default services:
 
 ```sh
-docker compose -f deploy/compose/production.yaml up -d postgres
+scripts/production-compose up -d postgres
 # Run the documented host-local `punaro init` workflow here.
-docker compose -f deploy/compose/production.yaml up -d
+scripts/production-compose up -d
 ```
 
 The application and PostgreSQL bind only to `127.0.0.1` for a separately

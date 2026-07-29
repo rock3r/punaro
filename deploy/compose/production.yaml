@@ -10,8 +10,10 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password
     secrets:
       - postgres_owner_password
+      - postgres_app_password
     volumes:
       - postgres-data:/var/lib/postgresql
+      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-punaro-app-role.sh:ro
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     network_mode: host
     healthcheck:
@@ -25,7 +27,7 @@ services:
   punarod:
     image: ${PUNARO_IMAGE:?required}
     init: true
-    user: "65532:65532"
+    user: "${PUNARO_RUNTIME_UID:?required}:${PUNARO_RUNTIME_GID:?required}"
     read_only: true
     cap_drop:
       - ALL
@@ -61,6 +63,8 @@ secrets:
     file: ${PUNARO_POSTGRES_OWNER_PASSWORD_FILE:?required}
   postgres_app_dsn:
     file: ${PUNARO_POSTGRES_APP_DSN_FILE:?required}
+  postgres_app_password:
+    file: ${PUNARO_POSTGRES_APP_PASSWORD_FILE:?required}
 
 volumes:
   postgres-data:

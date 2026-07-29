@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+fail() {
+	printf '%s\n' "$1" >&2
+	exit 1
+}
+
+require_numeric_nonroot() {
+	name=$1
+	value=$2
+	case "$value" in
+		''|*[!0-9]*) fail "$name must be a non-zero numeric ID" ;;
+	esac
+	[ "$value" -gt 0 ] || fail "$name must be a non-zero numeric ID"
+}
+
+: "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
+: "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
+: "${PUNARO_RUNTIME_GID:?PUNARO_RUNTIME_GID is required}"
+: "${PUNARO_PUBLIC_URL:?PUNARO_PUBLIC_URL is required}"
+require_numeric_nonroot PUNARO_RUNTIME_UID "$PUNARO_RUNTIME_UID"
+require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
+
+repository=${PUNARO_IMAGE%@sha256:*}
+digest=${PUNARO_IMAGE#*@sha256:}
+if [ "$repository" = "$PUNARO_IMAGE" ] || [ -z "$repository" ] || [ ${#digest} -ne 64 ]; then
+	fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest'
+fi
+case "$repository" in
+	*[!a-z0-9./:_-]*|*//*|/*|*/|*::*|*:) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
+esac
+case "$digest" in
+	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
+esac
+
+exec docker compose -f "$root/deploy/compose/production.yaml" "$@"
