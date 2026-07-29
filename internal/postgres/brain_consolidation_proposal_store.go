@@ -48,6 +48,9 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 	} else if completed {
 		return decodeMemoryProposalOutcome(outcome)
 	}
+	if err := d.validateMemoryConsolidationProposalScope(ctx, proposal.PrincipalID, proposal.ProjectID, request.Input.Lease.ScopeID); err != nil {
+		return MemoryProposalResult{}, err
+	}
 	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
 		return MemoryProposalResult{}, err
 	}
@@ -143,6 +146,40 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 		return MemoryProposalResult{}, errors.New("consolidation proposal transaction could not commit")
 	}
 	return decodeMemoryProposalOutcome(outcome)
+}
+
+// validateMemoryConsolidationProposalScope proves the requested direct project
+// is the lease scope's canonical project before proposal maintenance can touch
+// that project's retained/expired proposal state. Stage revalidates the same
+// relation in its mutation transaction after maintenance completes.
+func (d *Database) validateMemoryConsolidationProposalScope(ctx context.Context, principalID, projectID, scopeID string) error {
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return mutationStartError(err, "consolidation proposal preflight cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	project, err := lockDirectActiveProject(ctx, tx, projectID)
+	if err != nil {
+		return ErrNotFound
+	}
+	var canonicalScopeProjectID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(alias.canonical_project_id,scope.project_id)::text
+FROM brain.scopes AS scope
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE scope.id=$1`, scopeID).Scan(&canonicalScopeProjectID); err != nil || canonicalScopeProjectID != project.ID {
+		return ErrNotFound
+	}
+	allowed, err := lockCapability(ctx, tx, principalID, project.ID, CapabilityMemoryPropose)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("consolidation proposal preflight cannot commit")
+	}
+	return nil
 }
 
 // validateConsolidationInputSources re-reads the complete security-definer

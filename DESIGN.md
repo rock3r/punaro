@@ -602,6 +602,19 @@ memory. Generic proposal evidence remains restricted to evidence-layer records;
 consolidation provenance is a separate scope-bound relation so curated source
 revisions remain auditable without weakening that invariant.
 
+The bounded consolidation executor is provider-agnostic: it reads one live
+page, validates the complete proposal/evidence budget before staging any
+output, and stages every validated output through that same source-bound path.
+It advances the exact checkpoint only after all staging succeeds. Planner, validation, staging, or
+checkpoint failure leaves the page unadvanced for fenced replay; the executor
+has no canonical mutation or approval authority. Planner output cannot choose
+a principal, project, or idempotency key: the trusted executor caller binds
+the authorized principal/project, while page coordinates plus each normalized
+proposal payload derive stable idempotency keys for partial-stage replay.
+Consolidation staging also proves that the requested project is the leased
+scope's canonical project before expiry/retention maintenance can touch any
+proposal rows, so a wrong-project request has no cross-project side effects.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes
