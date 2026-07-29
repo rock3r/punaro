@@ -93,8 +93,11 @@ bounded one-to-one OAuth-subject binding to an existing enabled opaque Punaro
 principal; an unbound subject is forbidden. The binding is identity plumbing,
 not a project grant and not a client-provided authority claim. A successfully
 validated and bound request returns only the deliberate no-transport response
-until a later slice checks both the verified scope and Punaro's authoritative
-project capability grant for that bound principal.
+when it carries at least one of the advertised default scopes. A token without
+those scopes receives an OAuth insufficient-scope response. A later slice must
+still check the operation-specific verified scope and Punaro's authoritative
+project capability grant for that bound principal before exposing transport or
+tools.
 The mutation slice is separately dark behind
 `PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
 strict canonical create/update/archive/restore/purge and staged-proposal
