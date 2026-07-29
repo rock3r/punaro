@@ -54,7 +54,7 @@ startup never migrates an existing schema.
 After successful initialization, start the default services:
 
 ```sh
-scripts/production-compose up -d postgres
+scripts/production-compose up -d postgres-bootstrap
 punaro bootstrap --owner-dsn-file OWNER_DSN_FILE --app-dsn-file APP_DSN_FILE --owner-name 'Production operator'
 scripts/production-compose up -d
 ```
