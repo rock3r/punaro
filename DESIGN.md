@@ -98,6 +98,13 @@ those scopes receives an OAuth insufficient-scope response. A later slice must
 still check the operation-specific verified scope and Punaro's authoritative
 project capability grant for that bound principal before exposing transport or
 tools.
+The next transport-dark foundation defines a bounded, strict JSON-RPC 2.0
+single-request parser. It rejects batches, ambiguous duplicate object members,
+unknown envelope members, invalid request IDs, non-object params, excessive
+nesting, and trailing data. It is intentionally not mounted on `/mcp` and
+cannot dispatch a method; a later adapter must apply operation-specific OAuth
+scope and authoritative project capability checks before using the parsed
+request.
 The mutation slice is separately dark behind
 `PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
 strict canonical create/update/archive/restore/purge and staged-proposal
