@@ -266,7 +266,7 @@ WITH relation AS (
     FROM relation
 ), triggers AS (
     SELECT count(*)=2
-       AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O' AND tgnattr=0 AND tgqual IS NULL)=1
+       AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1
        AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O')=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=table_oid AND NOT tgisinternal
 ), checkpoint_triggers AS (
