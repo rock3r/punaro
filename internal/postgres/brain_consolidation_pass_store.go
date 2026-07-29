@@ -61,6 +61,7 @@ ON CONFLICT (scope_id,timeline_id,start_sequence) DO NOTHING`,
 	return resolvedInput, resolvedRequest, resolved, nil
 }
 
+// CheckMemoryConsolidationPassCapacity verifies that an entire proposed pass fits the live quota.
 func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) error {
 	if proposals < 0 || !request.valid() {
 		return errors.New("consolidation pass capacity is invalid")
