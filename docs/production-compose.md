@@ -46,13 +46,16 @@ Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
 HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Always
 invoke the bundle through `scripts/production-compose`: it refuses a non-digest
 image reference and a root runtime identity. Start only the private database, then use the host-local
-operator workflow to initialize/migrate it with the protected owner and
-application DSNs. Ordinary Compose startup never migrates an existing schema.
+`punaro bootstrap` command to initialize/migrate the protected owner and
+application DSNs. Bootstrap is intentionally migration-only: it does not
+publish the host-local operator stack, so it cannot compete for ports or create
+a second lifecycle authority for this reference bundle. Ordinary Compose
+startup never migrates an existing schema.
 After successful initialization, start the default services:
 
 ```sh
 scripts/production-compose up -d postgres
-# Run the documented host-local `punaro init` workflow here.
+punaro bootstrap --owner-dsn-file OWNER_DSN_FILE --app-dsn-file APP_DSN_FILE --owner-name 'Production operator'
 scripts/production-compose up -d
 ```
 

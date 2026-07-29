@@ -839,6 +839,40 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	}
 }
 
+func TestBootstrapMigratesPristineWithoutPublishingAnInstallation(t *testing.T) {
+	preserveDependencies(t)
+	root := t.TempDir()
+	for _, name := range []string{"owner.dsn", "app.dsn"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("postgres://invalid\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sequence := []string{}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		sequence = append(sequence, "inspect")
+		if len(sequence) == 1 {
+			return punaropostgres.SchemaState{Classification: punaropostgres.Pristine}, nil
+		}
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+	}
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
+		sequence = append(sequence, "migrate")
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+	}
+	createOwner = func(context.Context, string, string) (punaropostgres.Principal, error) {
+		sequence = append(sequence, "owner")
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"bootstrap", "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator"}
+	if code := run(args, &stdout, &stderr); code != 0 || strings.Join(sequence, ",") != "inspect,migrate,inspect,owner" || !strings.Contains(stdout.String(), `"status": "bootstrapped"`) {
+		t.Fatalf("code=%d sequence=%v stdout=%q stderr=%q", code, sequence, stdout.String(), stderr.String())
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 2 {
+		t.Fatalf("bootstrap must not publish an installation: entries=%v err=%v", entries, err)
+	}
+}
+
 func TestInitProvesPristineDSNPairBeforeMigration(t *testing.T) {
 	preserveDependencies(t)
 	root := t.TempDir()
