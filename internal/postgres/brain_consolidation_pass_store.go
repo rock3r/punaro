@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -64,8 +65,8 @@ ON CONFLICT (scope_id,timeline_id,start_sequence) DO NOTHING`,
 // CheckMemoryConsolidationPassCapacity verifies that every not-yet-staged
 // ordinal of a durable pass fits the live quota and that completed ordinals
 // still reference actionable proposals.
-func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) error {
-	if proposals < 0 || !request.valid() {
+func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) error {
+	if !request.valid() {
 		return errors.New("consolidation pass capacity is invalid")
 	}
 	tx, err := beginMutation(ctx, d.db)
@@ -86,22 +87,33 @@ func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, inp
 	return nil
 }
 
-func unstagedMemoryConsolidationProposalCount(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) (int, error) {
+func unstagedMemoryConsolidationProposalCount(ctx context.Context, tx *sql.Tx, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) (int, error) {
 	remaining := 0
-	for ordinal := range proposals {
+	for ordinal, proposal := range proposals {
+		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
+		expectedBody, err := memoryConsolidationProposalRequestBody(input, staged)
+		if err != nil {
+			return 0, err
+		}
+		expectedHash := requestDigest(expectedBody)
+		var principal, operation string
+		var requestHash []byte
 		var status sql.NullString
 		var state sql.NullString
 		var actionable sql.NullBool
-		err := tx.QueryRowContext(ctx, `SELECT record.status,proposal.state,proposal.expires_at > statement_timestamp()
+		err = tx.QueryRowContext(ctx, `SELECT record.principal_id::text,record.operation,record.request_hash,record.status,proposal.state,proposal.expires_at > statement_timestamp()
 FROM relay.idempotency_records AS record
 LEFT JOIN brain.memory_proposals AS proposal ON proposal.id=record.resource_id
-WHERE record.key=$1`, memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal)).Scan(&status, &state, &actionable)
+WHERE record.key=$1`, staged.IdempotencyKey).Scan(&principal, &operation, &requestHash, &status, &state, &actionable)
 		if errors.Is(err, sql.ErrNoRows) {
 			remaining++
 			continue
 		}
 		if err != nil {
 			return 0, errors.New("consolidation pass idempotency is unavailable")
+		}
+		if principal != staged.PrincipalID || operation != "memory.consolidation.proposal.create" || !bytes.Equal(requestHash, expectedHash[:]) {
+			return 0, errMemoryConsolidationProposalRejected
 		}
 		if status.String != string(OutcomeSucceeded) || state.String == "" || state.String == "expired" ||
 			(state.String == string(MemoryProposalPending) && !actionable.Bool) {

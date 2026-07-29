@@ -262,8 +262,8 @@ type fakeMemoryConsolidationExecutorStore struct {
 	capacityErr   error
 }
 
-func (s *fakeMemoryConsolidationExecutorStore) CheckMemoryConsolidationPassCapacity(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, count int) error {
-	s.capacity = count
+func (s *fakeMemoryConsolidationExecutorStore) CheckMemoryConsolidationPassCapacity(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) error {
+	s.capacity = len(proposals)
 	return s.capacityErr
 }
 

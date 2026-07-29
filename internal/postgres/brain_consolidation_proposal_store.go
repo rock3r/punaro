@@ -18,16 +18,7 @@ var (
 	errMemoryConsolidationProposalRejected = errors.New("consolidation proposal is permanently rejected")
 )
 
-// StageMemoryConsolidationProposal stages a proposal and its exact source page
-// only while the supplied consolidation lease remains live. It deliberately
-// does not advance the checkpoint: a later bounded runner decides when the
-// complete page has been handled.
-func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
-	request, err := raw.normalized()
-	if err != nil {
-		return MemoryProposalResult{}, err
-	}
-	proposal := request.Proposal
+func memoryConsolidationProposalRequestBody(input MemoryConsolidationInput, proposal MemoryProposalCreateRequest) ([]byte, error) {
 	// The request body fences idempotency before the lease transaction. The
 	// stored proposal payload is derived later from the scope's physical project
 	// ID so it remains reproducible after that project becomes an alias.
@@ -38,20 +29,37 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		ChangeSequence int64             `json:"change_sequence"`
 		ContentSHA256  [sha256.Size]byte `json:"content_sha256"`
 	}
-	sources := make([]sourceDigest, len(request.Input.Sources))
-	for index, source := range request.Input.Sources {
+	sources := make([]sourceDigest, len(input.Sources))
+	for index, source := range input.Sources {
 		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(source.Document)}
 	}
-	inputBody, err := json.Marshal(struct {
+	body, err := json.Marshal(struct {
 		Proposal json.RawMessage `json:"proposal"`
 		Timeline string          `json:"timeline"`
 		Sequence int64           `json:"sequence"`
 		Sources  []sourceDigest  `json:"sources"`
-	}{Proposal: idempotencyPayload, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: sources})
+	}{Proposal: idempotencyPayload, Timeline: input.TimelineID, Sequence: input.NextSequence, Sources: sources})
+	if err != nil {
+		return nil, errors.New("consolidation proposal cannot be encoded")
+	}
+	return body, nil
+}
+
+// StageMemoryConsolidationProposal stages a proposal and its exact source page
+// only while the supplied consolidation lease remains live. It deliberately
+// does not advance the checkpoint: a later bounded runner decides when the
+// complete page has been handled.
+func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryProposalResult{}, err
+	}
+	proposal := request.Proposal
+	requestBody, err := memoryConsolidationProposalRequestBody(request.Input, proposal)
 	if err != nil {
 		return MemoryProposalResult{}, errors.New("consolidation proposal cannot be encoded")
 	}
-	idempotency := IdempotencyRequest{PrincipalID: proposal.PrincipalID, Operation: "memory.consolidation.proposal.create", Key: proposal.IdempotencyKey, Body: inputBody}
+	idempotency := IdempotencyRequest{PrincipalID: proposal.PrincipalID, Operation: "memory.consolidation.proposal.create", Key: proposal.IdempotencyKey, Body: requestBody}
 	if outcome, completed, err := completedIdempotencyOutcome(ctx, d.db, idempotency); err != nil {
 		return MemoryProposalResult{}, err
 	} else if completed {

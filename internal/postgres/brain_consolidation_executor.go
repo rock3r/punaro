@@ -58,7 +58,7 @@ type memoryConsolidationExecutorStore interface {
 	readMemoryConsolidationInput(context.Context, MemoryConsolidationLease, int) (MemoryConsolidationInput, error)
 	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error)
 	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, error)
-	CheckMemoryConsolidationPassCapacity(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, int) error
+	CheckMemoryConsolidationPassCapacity(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) error
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
 	AbandonMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
@@ -141,7 +141,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	}
 	// A pass is durable before its first capacity check. Recheck it on every
 	// replay so a capacity-rejected pass cannot later begin partial staging.
-	if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, len(proposals)); err != nil {
+	if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, proposals); err != nil {
 		if errors.Is(err, errMemoryConsolidationProposalRejected) {
 			if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, effectiveRequest); abandonErr != nil {
 				return MemoryConsolidationExecutionResult{}, abandonErr
