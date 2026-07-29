@@ -9,16 +9,16 @@ import (
 	"errors"
 )
 
-// StageMemoryConsolidationProposal stages a proposal and its exact source page
-// only while the supplied consolidation lease remains live. It deliberately
-// does not advance the checkpoint: a later bounded runner decides when the
-// complete page has been handled.
-func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
-	request, err := raw.normalized()
-	if err != nil {
-		return MemoryProposalResult{}, err
-	}
-	proposal := request.Proposal
+var (
+	// errMemoryConsolidationSourceStale distinguishes an irrecoverably changed
+	// reserved page from a retryable lease or scan-coverage fence.
+	errMemoryConsolidationSourceStale = errors.New("consolidation source page is stale")
+	// errMemoryConsolidationProposalRejected marks immutable planner output that
+	// cannot be staged against the reserved source page.
+	errMemoryConsolidationProposalRejected = errors.New("consolidation proposal is permanently rejected")
+)
+
+func memoryConsolidationProposalRequestBody(input MemoryConsolidationInput, proposal MemoryProposalCreateRequest) ([]byte, error) {
 	// The request body fences idempotency before the lease transaction. The
 	// stored proposal payload is derived later from the scope's physical project
 	// ID so it remains reproducible after that project becomes an alias.
@@ -29,24 +29,48 @@ func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw Mem
 		ChangeSequence int64             `json:"change_sequence"`
 		ContentSHA256  [sha256.Size]byte `json:"content_sha256"`
 	}
-	sources := make([]sourceDigest, len(request.Input.Sources))
-	for index, source := range request.Input.Sources {
-		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(source.Document)}
+	sources := make([]sourceDigest, len(input.Sources))
+	for index, source := range input.Sources {
+		document, err := canonicalMemoryDocument(source.Document)
+		if err != nil {
+			return nil, errors.New("consolidation proposal cannot be encoded")
+		}
+		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(document)}
 	}
-	inputBody, err := json.Marshal(struct {
+	body, err := json.Marshal(struct {
 		Proposal json.RawMessage `json:"proposal"`
 		Timeline string          `json:"timeline"`
 		Sequence int64           `json:"sequence"`
 		Sources  []sourceDigest  `json:"sources"`
-	}{Proposal: idempotencyPayload, Timeline: request.Input.TimelineID, Sequence: request.Input.NextSequence, Sources: sources})
+	}{Proposal: idempotencyPayload, Timeline: input.TimelineID, Sequence: input.NextSequence, Sources: sources})
+	if err != nil {
+		return nil, errors.New("consolidation proposal cannot be encoded")
+	}
+	return body, nil
+}
+
+// StageMemoryConsolidationProposal stages a proposal and its exact source page
+// only while the supplied consolidation lease remains live. It deliberately
+// does not advance the checkpoint: a later bounded runner decides when the
+// complete page has been handled.
+func (d *Database) StageMemoryConsolidationProposal(ctx context.Context, raw MemoryConsolidationProposalRequest) (MemoryProposalResult, error) {
+	request, err := raw.normalized()
+	if err != nil {
+		return MemoryProposalResult{}, err
+	}
+	proposal := request.Proposal
+	requestBody, err := memoryConsolidationProposalRequestBody(request.Input, proposal)
 	if err != nil {
 		return MemoryProposalResult{}, errors.New("consolidation proposal cannot be encoded")
 	}
-	idempotency := IdempotencyRequest{PrincipalID: proposal.PrincipalID, Operation: "memory.consolidation.proposal.create", Key: proposal.IdempotencyKey, Body: inputBody}
+	idempotency := IdempotencyRequest{PrincipalID: proposal.PrincipalID, Operation: "memory.consolidation.proposal.create", Key: proposal.IdempotencyKey, Body: requestBody}
 	if outcome, completed, err := completedIdempotencyOutcome(ctx, d.db, idempotency); err != nil {
 		return MemoryProposalResult{}, err
 	} else if completed {
 		return decodeMemoryProposalOutcome(outcome)
+	}
+	if err := d.validateMemoryConsolidationProposalScope(ctx, proposal.PrincipalID, proposal.ProjectID, request.Input.Lease.ScopeID); err != nil {
+		return MemoryProposalResult{}, err
 	}
 	if err := d.maintainMemoryProposals(ctx, proposal.PrincipalID, proposal.ProjectID); err != nil {
 		return MemoryProposalResult{}, err
@@ -80,20 +104,23 @@ WHERE scope.id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonica
 			if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) {
 				return IdempotencyOutcome{}, ErrStaleMemoryConsolidationLease
 			}
+			if errors.Is(err, errMemoryConsolidationSourceStale) {
+				return IdempotencyOutcome{}, errors.Join(err, ErrStaleMemoryConsolidationLease)
+			}
 			return IdempotencyOutcome{}, err
 		}
 		items, err := lockAndValidateProposalItems(ctx, tx, project.ID, proposal.Steps, proposal.Evidence)
 		if err != nil {
-			return IdempotencyOutcome{}, err
+			return IdempotencyOutcome{}, memoryConsolidationStageError(err)
 		}
 		for _, step := range proposal.Steps {
 			if step.Operation == MemoryProposalStepCreate || step.Operation == MemoryProposalStepUpdate {
 				if err := guardMemoryDocument(ctx, tx, project.ID, step.Document); err != nil {
-					return IdempotencyOutcome{}, err
+					return IdempotencyOutcome{}, memoryConsolidationStageError(err)
 				}
 			}
 			if step.Operation == MemoryProposalStepArchive && (items[step.ItemID].State == MemoryArchived) == step.Archived {
-				return IdempotencyOutcome{}, ErrMemoryProposalAlreadySatisfied
+				return IdempotencyOutcome{}, memoryConsolidationStageError(ErrMemoryProposalAlreadySatisfied)
 			}
 		}
 		if err := checkMemoryProposalCapacity(ctx, tx, request.Input.Lease.ScopeID, proposal.PrincipalID); err != nil {
@@ -145,6 +172,48 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 	return decodeMemoryProposalOutcome(outcome)
 }
 
+func memoryConsolidationStageError(err error) error {
+	var rejection MemorySecretRejection
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) || errors.Is(err, ErrMemoryProposalAlreadySatisfied) || errors.As(err, &rejection) {
+		return errors.Join(errMemoryConsolidationProposalRejected, err)
+	}
+	return err
+}
+
+// validateMemoryConsolidationProposalScope proves the requested direct project
+// is the lease scope's canonical project before proposal maintenance can touch
+// that project's retained/expired proposal state. Stage revalidates the same
+// relation in its mutation transaction after maintenance completes.
+func (d *Database) validateMemoryConsolidationProposalScope(ctx context.Context, principalID, projectID, scopeID string) error {
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return mutationStartError(err, "consolidation proposal preflight cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	project, err := lockDirectActiveProject(ctx, tx, projectID)
+	if err != nil {
+		return ErrNotFound
+	}
+	var canonicalScopeProjectID string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(alias.canonical_project_id,scope.project_id)::text
+FROM brain.scopes AS scope
+LEFT JOIN relay.project_lookup_aliases AS alias ON alias.alias_project_id=scope.project_id
+WHERE scope.id=$1`, scopeID).Scan(&canonicalScopeProjectID); err != nil || canonicalScopeProjectID != project.ID {
+		return ErrNotFound
+	}
+	allowed, err := lockCapability(ctx, tx, principalID, project.ID, CapabilityMemoryPropose)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("consolidation proposal preflight cannot commit")
+	}
+	return nil
+}
+
 // validateConsolidationInputSources re-reads the complete security-definer
 // page under the live lease. This preserves the exact source page and applies
 // the retrieval path's quarantine and scan-coverage fences at staging time.
@@ -174,18 +243,24 @@ func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input Me
 			}
 			continue
 		}
+		// A reserved pass owns this exact bounded page. Later changes may extend
+		// a fresh read before replay, but they belong to the next pass and must
+		// neither replace nor invalidate the stored page.
+		if sequence.Int64 > input.NextSequence {
+			break
+		}
 		next = sequence.Int64
 		if !itemID.Valid {
 			continue
 		}
 		if index >= len(input.Sources) || !revision.Valid || !document.Valid {
-			return ErrStaleMemoryConsolidationLease
+			return errMemoryConsolidationSourceStale
 		}
 		source := input.Sources[index]
 		canonical, err := canonicalMemoryDocument(json.RawMessage(document.String))
 		digest := sha256.Sum256([]byte(document.String))
 		if err != nil || len(contentHash) != sha256.Size || !bytes.Equal(digest[:], contentHash) || source.ItemID != itemID.String || source.Revision != revision.Int64 || source.ChangeSequence != sequence.Int64 || !bytes.Equal(source.Document, canonical) {
-			return ErrStaleMemoryConsolidationLease
+			return errMemoryConsolidationSourceStale
 		}
 		index++
 	}
@@ -196,7 +271,7 @@ func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input Me
 		return errors.New("consolidation proposal sources are unavailable")
 	}
 	if index != len(input.Sources) || next != input.NextSequence {
-		return ErrStaleMemoryConsolidationLease
+		return errMemoryConsolidationSourceStale
 	}
 	return nil
 }

@@ -124,6 +124,30 @@ func testMemoryConsolidationCheckpointIntegration(ctx context.Context, t *testin
 	if err := ownerDB.QueryRowContext(ctx, `SELECT count(*) FROM brain.memory_proposals WHERE scope_id=$1`, scopeID).Scan(&proposalsAfter); err != nil || proposalsAfter != proposalsBefore {
 		t.Fatalf("unauthorized consolidation proposal created rows before=%d after=%d err=%v", proposalsBefore, proposalsAfter, err)
 	}
+	var wrongProjectID, wrongScopeID string
+	var wrongProposalState MemoryProposalState
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO relay.projects(display_name,created_by) VALUES ('wrong consolidation proposal project',$1) RETURNING id::text`, actor.ID).Scan(&wrongProjectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.scopes(project_id,created_by) VALUES ($1,$2) RETURNING id::text`, wrongProjectID, actor.ID).Scan(&wrongScopeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.capability_grants(principal_id,scope,project_id,capability) VALUES ($1,'project',$2,$3)`, actor.ID, wrongProjectID, CapabilityMemoryPropose); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO brain.memory_proposals(scope_id,action,proposed_by,created_at,expires_at,payload_sha256,payload)
+VALUES ($1,'create',$2,statement_timestamp()-interval '8 days',statement_timestamp()-interval '1 day',decode(repeat('00',32),'hex'),'{}') RETURNING state`, wrongScopeID, actor.ID).Scan(&wrongProposalState); err != nil || wrongProposalState != MemoryProposalPending {
+		t.Fatalf("seed wrong-project proposal state=%q err=%v", wrongProposalState, err)
+	}
+	wrongProject := stagedRequest
+	wrongProject.Proposal.ProjectID = wrongProjectID
+	wrongProject.Proposal.IdempotencyKey = "11111111-1111-4111-8111-111111111141"
+	if _, err := app.StageMemoryConsolidationProposal(ctx, wrongProject); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("wrong-project consolidation proposal error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT state FROM brain.memory_proposals WHERE scope_id=$1`, wrongScopeID).Scan(&wrongProposalState); err != nil || wrongProposalState != MemoryProposalPending {
+		t.Fatalf("wrong-project proposal maintenance side effect state=%q err=%v", wrongProposalState, err)
+	}
 	staged, err := app.StageMemoryConsolidationProposal(ctx, stagedRequest)
 	if err != nil || staged.State != MemoryProposalPending || staged.ProposalID == "" || len(staged.Mutations) != 0 {
 		t.Fatalf("stage consolidation proposal=%#v err=%v", staged, err)

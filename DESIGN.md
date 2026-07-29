@@ -602,6 +602,25 @@ memory. Generic proposal evidence remains restricted to evidence-layer records;
 consolidation provenance is a separate scope-bound relation so curated source
 revisions remain auditable without weakening that invariant.
 
+Schema version 39 adds one immutable, lease-fenced pass record for each exact
+source page and authorized proposer/project. The bounded, provider-agnostic
+executor first loads that record; only an absent record permits planner output,
+which is fully validated and durably reserved before any proposal is staged.
+Every retry consequently reuses the original proposal bodies and ordinal-based
+idempotency keys even if a later planner response differs. It advances the
+exact checkpoint and removes that pass atomically only after all staging
+succeeds. Planner, validation, staging, or checkpoint failure leaves the page
+unadvanced for fenced replay; the executor has no canonical mutation or
+approval authority. Planner output cannot choose a principal, project, or
+idempotency key: the trusted executor caller binds the authorized
+principal/project. A source page that becomes stale, or immutable planner
+output that is permanently rejected by item, evidence, or secret validation,
+is fenced-retired and advanced without staging a replacement plan; transient
+operational and capacity failures remain replayable.
+Consolidation staging also proves that the requested project is the leased
+scope's canonical project before expiry/retention maintenance can touch any
+proposal rows, so a wrong-project request has no cross-project side effects.
+
 Schema version 16 adds bounded, operator-driven rescan and retained quarantine.
 Every current revision carries scan coverage bound to its revision, the compiled
 rule identity, and a per-project exact-exception generation. Exception changes

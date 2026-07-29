@@ -2520,8 +2520,17 @@ func testBackupRestoreIntegration(ctx context.Context, t *testing.T, app *Databa
 		t.Fatal(err)
 	}
 	var restoreScopeID string
-	if err := ownerDB.QueryRowContext(ctx, `SELECT id::text FROM brain.scopes ORDER BY id LIMIT 1`).Scan(&restoreScopeID); err != nil {
-		t.Fatalf("consolidation scope for restore fence: %v", err)
+	if err := ownerDB.QueryRowContext(ctx, `WITH actor AS (
+    SELECT id FROM auth.principals ORDER BY id LIMIT 1
+), project AS (
+    INSERT INTO relay.projects(display_name,created_by)
+    SELECT 'restore-fence consolidation scope',id FROM actor
+    RETURNING id,created_by
+)
+INSERT INTO brain.scopes(project_id,created_by)
+SELECT id,created_by FROM project
+RETURNING id::text`).Scan(&restoreScopeID); err != nil {
+		t.Fatalf("create consolidation scope for restore fence: %v", err)
 	}
 	recoveredLease, claimed, err := app.ClaimMemoryConsolidationCheckpoint(ctx, restoreScopeID, "018f47f4-7b18-7cc2-98d6-31d4fb5ab744", memoryEmbeddingMaxLease)
 	if err != nil || !claimed {

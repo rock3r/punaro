@@ -113,7 +113,11 @@ func (request MemoryConsolidationProposalRequest) normalized() (MemoryConsolidat
 // read-only: advancing the cursor and staging proposals remain separate,
 // independently fenced operations.
 func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease MemoryConsolidationLease) (MemoryConsolidationInput, error) {
-	if !lease.valid() {
+	return d.readMemoryConsolidationInput(ctx, lease, maxMemoryConsolidationChanges)
+}
+
+func (d *Database) readMemoryConsolidationInput(ctx context.Context, lease MemoryConsolidationLease, maxChanges int) (MemoryConsolidationInput, error) {
+	if !lease.valid() || maxChanges < 1 || maxChanges > maxMemoryConsolidationChanges {
 		return MemoryConsolidationInput{}, errors.New("invalid consolidation lease")
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,content_sha256,is_fence FROM brain.read_memory_consolidation_documents($1,$2,$3)`, lease.ScopeID, lease.Token, lease.Generation)
@@ -121,8 +125,8 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 		return MemoryConsolidationInput{}, errors.New("consolidation sources are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: lease.Sequence, Sources: make([]MemoryConsolidationSource, 0, maxMemoryConsolidationChanges)}
-	live := false
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: lease.Sequence, Sources: make([]MemoryConsolidationSource, 0, maxChanges)}
+	live, changes := false, 0
 	for rows.Next() {
 		var timelineID string
 		var itemID sql.NullString
@@ -140,6 +144,12 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 			live = true
 			continue
 		}
+		// The policy bounds the number of source changes consumed, including
+		// gaps produced by deleted, quarantined, or superseded documents.
+		if changes >= maxChanges {
+			break
+		}
+		changes++
 		if !itemID.Valid || !revision.Valid || !document.Valid || !sequence.Valid {
 			if itemID.Valid || revision.Valid || document.Valid || len(contentHash) != 0 || !sequence.Valid {
 				return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")
