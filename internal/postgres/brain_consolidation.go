@@ -126,7 +126,7 @@ func (d *Database) readMemoryConsolidationInput(ctx context.Context, lease Memor
 	}
 	defer func() { _ = rows.Close() }()
 	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: lease.Sequence, Sources: make([]MemoryConsolidationSource, 0, maxChanges)}
-	live := false
+	live, changes := false, 0
 	for rows.Next() {
 		var timelineID string
 		var itemID sql.NullString
@@ -144,9 +144,12 @@ func (d *Database) readMemoryConsolidationInput(ctx context.Context, lease Memor
 			live = true
 			continue
 		}
-		if len(input.Sources) >= maxChanges {
-			continue
+		// The policy bounds the number of source changes consumed, including
+		// gaps produced by deleted, quarantined, or superseded documents.
+		if changes >= maxChanges {
+			break
 		}
+		changes++
 		if !itemID.Valid || !revision.Valid || !document.Valid || !sequence.Valid {
 			if itemID.Valid || revision.Valid || document.Valid || len(contentHash) != 0 || !sequence.Valid {
 				return MemoryConsolidationInput{}, errors.New("consolidation source is malformed")

@@ -138,6 +138,20 @@ func TestMemoryConsolidationExecutorReplaysReservedPassAfterPolicyTightens(t *te
 	}
 }
 
+func TestMemoryConsolidationExecutorRechecksCapacityForReservedPass(t *testing.T) {
+	lease := MemoryConsolidationLease{ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", Generation: 1, Until: time.Now().Add(time.Minute)}
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: 5, Sources: []MemoryConsolidationSource{{ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 5, Document: json.RawMessage(`{"source":true}`)}}}
+	proposal := MemoryConsolidationProposal{Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "reserved", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":true}`)}}}
+	store := &fakeMemoryConsolidationExecutorStore{pass: []MemoryConsolidationProposal{proposal}, passInput: input, capacityErr: ErrMemoryProposalCapacity}
+	executor, err := NewMemoryConsolidationExecutor(store, fakeMemoryConsolidationPlanner{}, MemoryConsolidationPolicy{MaxChanges: 1, MaxProposals: 1, MaxEvidencePerProposal: 1, PassTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); !errors.Is(err, ErrMemoryProposalCapacity) || len(store.staged) != 0 || store.advanced != 0 || store.capacity != 1 {
+		t.Fatalf("err=%v staged=%#v advanced=%d capacity=%d", err, store.staged, store.advanced, store.capacity)
+	}
+}
+
 func TestMemoryConsolidationExecutorAdvancesNoProposalPageButRejectsDuplicateOutput(t *testing.T) {
 	lease := MemoryConsolidationLease{
 		ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4,
@@ -231,11 +245,12 @@ type fakeMemoryConsolidationExecutorStore struct {
 	passRequest   MemoryConsolidationExecutionRequest
 	readLimit     int
 	capacity      int
+	capacityErr   error
 }
 
 func (s *fakeMemoryConsolidationExecutorStore) CheckMemoryConsolidationPassCapacity(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, count int) error {
 	s.capacity = count
-	return nil
+	return s.capacityErr
 }
 
 func (s *fakeMemoryConsolidationExecutorStore) readMemoryConsolidationInput(_ context.Context, _ MemoryConsolidationLease, limit int) (MemoryConsolidationInput, error) {

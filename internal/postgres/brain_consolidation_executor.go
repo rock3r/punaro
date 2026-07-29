@@ -138,10 +138,10 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	if err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
-	if !found {
-		if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, len(proposals)); err != nil {
-			return MemoryConsolidationExecutionResult{}, err
-		}
+	// A pass is durable before its first capacity check. Recheck it on every
+	// replay so a capacity-rejected pass cannot later begin partial staging.
+	if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, len(proposals)); err != nil {
+		return MemoryConsolidationExecutionResult{}, err
 	}
 	for ordinal, proposal := range proposals {
 		staged := MemoryProposalCreateRequest{PrincipalID: effectiveRequest.PrincipalID, ProjectID: effectiveRequest.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, effectiveRequest.PrincipalID, effectiveRequest.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
