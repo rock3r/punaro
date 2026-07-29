@@ -264,6 +264,12 @@ WITH relation AS (
        AND has_column_privilege('punaro_app',table_oid,'proposals','INSERT')
        AND NOT has_table_privilege('punaro_app',table_oid,'INSERT') AS exact
     FROM relation
+), column_acl_safety AS (
+    SELECT count(*)=11 AND bool_and(role.rolname='punaro_app' AND entry.privilege_type='INSERT' AND NOT entry.is_grantable) AS exact
+    FROM pg_attribute AS attribute
+    CROSS JOIN LATERAL aclexplode(attribute.attacl) AS entry
+    LEFT JOIN pg_roles AS role ON role.oid=entry.grantee,relation
+    WHERE attribute.attrelid=table_oid AND attribute.attnum>0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
 ), triggers AS (
     SELECT count(*)=2
        AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_insert_guard' AND tgtype=7 AND tgfoid=guard_oid AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1
@@ -287,6 +293,10 @@ WITH relation AS (
 ), guard_routine AS (
     SELECT count(*)=1 AND bool_and(prosecdef AND md5(btrim(prosrc,E' \n\r\t'))=$2) AS exact
     FROM pg_proc,relation WHERE oid=guard_oid
+), cleanup_routine AS (
+    SELECT count(*)=1 AND bool_and(prokind='f' AND NOT prosecdef AND NOT proretset AND prorettype='trigger'::regtype AND pronargs=0
+      AND proargtypes=''::oidvector AND md5(btrim(prosrc,E' \n\r\t'))=$4) AS exact
+    FROM pg_proc,relation WHERE oid=cleanup_oid
 ), completion_routine AS (
     SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef AND provolatile='v'
       AND NOT proretset AND prorettype='boolean'::regtype AND pronargs=8
@@ -314,9 +324,9 @@ SELECT relation.table_oid IS NOT NULL AND relation.checkpoint_oid IS NOT NULL AN
    AND (SELECT count(*)=1 AND bool_and(pg_get_userbyid(relowner)='punaro_owner' AND relkind='r' AND relpersistence='p' AND NOT relrowsecurity AND NOT relforcerowsecurity) FROM pg_class WHERE oid=table_oid)
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
-   AND table_acl.selects AND table_acl.no_writes AND table_acl.no_public AND insert_acl.exact
-   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND guard_routine.exact AND completion_routine.exact AND abandon_routine.exact AND complete_acl.app_exec AND complete_acl.no_public
-FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,routines,guard_routine,completion_routine,abandon_routine,complete_acl`, memoryConsolidationPassCompleteRoutineMD5, memoryConsolidationPassGuardRoutineMD5, memoryConsolidationPassAbandonRoutineMD5).Scan(&available)
+   AND table_acl.selects AND table_acl.no_writes AND table_acl.no_public AND insert_acl.exact AND column_acl_safety.exact
+   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND guard_routine.exact AND cleanup_routine.exact AND completion_routine.exact AND abandon_routine.exact AND complete_acl.app_exec AND complete_acl.no_public
+FROM relation,table_acl,insert_acl,column_acl_safety,triggers,checkpoint_triggers,constraints,routines,guard_routine,cleanup_routine,completion_routine,abandon_routine,complete_acl`, memoryConsolidationPassCompleteRoutineMD5, memoryConsolidationPassGuardRoutineMD5, memoryConsolidationPassAbandonRoutineMD5, memoryConsolidationPassCleanupRoutineMD5).Scan(&available)
 	return available, err
 }
 
@@ -324,6 +334,7 @@ const (
 	memoryConsolidationPassCompleteRoutineMD5            = "1319f8b0c9b50efcbc1c6e1df68c7945" // #nosec G101 -- immutable schema routine checksum
 	memoryConsolidationPassGuardRoutineMD5               = "060b94eab7fe744984bd09efc2958a57" // #nosec G101 -- immutable schema routine checksum
 	memoryConsolidationPassAbandonRoutineMD5             = "bfe14c5526ec0cba1761501b1581ffe9" // #nosec G101 -- immutable schema routine checksum
+	memoryConsolidationPassCleanupRoutineMD5             = "29c0fef3a1d2e249301e5ae5040f24ea" // #nosec G101 -- immutable schema routine checksum
 	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
 	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
 	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"
