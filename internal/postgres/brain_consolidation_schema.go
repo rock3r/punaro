@@ -272,7 +272,7 @@ WITH relation AS (
 ), checkpoint_triggers AS (
     SELECT count(*)=1 AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_checkpoint_cleanup'
       AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O' AND tgattr='2 3'::int2vector
-      AND pg_get_triggerdef(oid)='CREATE TRIGGER memory_consolidation_pass_checkpoint_cleanup AFTER UPDATE OF timeline_id, change_sequence ON brain.memory_consolidation_checkpoints FOR EACH ROW WHEN (((old.timeline_id, old.change_sequence) IS DISTINCT FROM (new.timeline_id, new.change_sequence))) EXECUTE FUNCTION brain.clear_memory_consolidation_passes_on_checkpoint_move()')=1 AS exact
+      AND regexp_replace(pg_get_triggerdef(oid),'[[:space:]]+',' ','g') ~ '^CREATE TRIGGER memory_consolidation_pass_checkpoint_cleanup AFTER UPDATE OF timeline_id, change_sequence ON brain.memory_consolidation_checkpoints FOR EACH ROW WHEN \(+old\.timeline_id, old\.change_sequence\) IS DISTINCT FROM \(new\.timeline_id, new\.change_sequence\)\)+ EXECUTE FUNCTION brain\.clear_memory_consolidation_passes_on_checkpoint_move\(\)$')=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
