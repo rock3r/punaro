@@ -11,19 +11,17 @@ grep -Fq 'PUNARO_RUNTIME_UID:?required}:${PUNARO_RUNTIME_GID:?required' "$compos
 grep -Fq 'PUNARO_POSTGRES_DSN_FILE: /run/secrets/postgres_app_dsn' "$compose_file"
 grep -Fq 'POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password' "$compose_file"
 grep -Fq 'postgres_app_password' "$compose_file"
-grep -Fq '/docker-entrypoint-initdb.d/10-punaro-app-role.sh:ro' "$compose_file"
 grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
+grep -Fq 'postgres-bootstrap:' "$compose_file"
+grep -Fq 'service_completed_successfully' "$compose_file"
 grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
-grep -Fq 'CREATE ROLE punaro_app LOGIN PASSWORD' deploy/compose/postgres-init.sh
-grep -Fq '/run/punaro-secrets/postgres_app_password' deploy/compose/postgres-init.sh
-grep -Fq 'chown postgres:postgres "$staged_directory"' deploy/compose/postgres-entrypoint.sh
-grep -Fq 'chown postgres:postgres "$staged_password"' deploy/compose/postgres-entrypoint.sh
+grep -Fq "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')" deploy/compose/postgres-bootstrap.sh
 grep -Fq 'PUNARO_DEVICE_AUTH_ENABLED: "true"' "$compose_file"
 grep -Fq 'PUNARO_RELAY_STORE: sqlite' "$compose_file"
 grep -Fq 'read_only: true' "$compose_file"
 grep -Fq 'no-new-privileges:true' "$compose_file"
 grep -Fq 'cap_drop:' "$compose_file"
-if [ "$(grep -Fc 'network_mode: host' "$compose_file")" -ne 2 ]; then
+if [ "$(grep -Fc 'network_mode: host' "$compose_file")" -ne 3 ]; then
 	echo "production services must use the reviewed same-host loopback network" >&2
 	exit 1
 fi

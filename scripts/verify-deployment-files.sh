@@ -22,14 +22,14 @@ production_compose_verifier=scripts/verify-production-compose.sh
 production_compose_test=scripts/test-production-compose.sh
 production_compose_bootstrap_test=scripts/test-production-compose-bootstrap.sh
 
-for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" scripts/production-compose deploy/compose/postgres-init.sh deploy/compose/postgres-entrypoint.sh; do
+for path in "$unit" "$example" "$launch_agent" "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer" "$windows_guidance_installer" "$windows_client_installer_test" "$windows_adapter_runner" "$windows_environment_importer" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
 	if [ ! -f "$path" ]; then
 		printf '%s\n' "missing adapter deployment artifact: $path" >&2
 		exit 1
 	fi
 done
 
-for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" scripts/production-compose deploy/compose/postgres-init.sh deploy/compose/postgres-entrypoint.sh; do
+for executable in "$adapter_installer" "$client_installer" "$adapter_installer_test" "$server_installer" "$server_installer_test" "$attachment_relay_configurer" "$attachment_relay_configurer_test" "$agent_guidance_installer" "$agent_guidance_installer_test" "$windows_client_installer_test" "$production_compose_verifier" "$production_compose_test" "$production_compose_bootstrap_test" scripts/production-compose deploy/compose/postgres-bootstrap.sh deploy/compose/postgres-entrypoint.sh; do
 	if [ ! -x "$executable" ]; then
 		printf '%s\n' "deployment helper is not executable: $executable" >&2
 		exit 1

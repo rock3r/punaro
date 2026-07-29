@@ -1,4 +1,4 @@
-# Reference single-node production bundle. Run `punaro init` against the
+# Reference single-node production bundle. Run `punaro bootstrap` against the
 # PostgreSQL owner secret after starting only `postgres`; ordinary `up` never
 # migrates a schema. Both the image and pgvector digest are release inputs.
 services:
@@ -13,7 +13,6 @@ services:
       - postgres_app_password
     volumes:
       - postgres-data:/var/lib/postgresql
-      - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-punaro-app-role.sh:ro
       - ./postgres-entrypoint.sh:/usr/local/bin/punaro-postgres-entrypoint.sh:ro
     entrypoint: ["/usr/local/bin/punaro-postgres-entrypoint.sh"]
     tmpfs:
@@ -27,6 +26,22 @@ services:
       retries: 20
       start_period: 10s
     restart: unless-stopped
+
+  postgres-bootstrap:
+    image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3
+    entrypoint: ["/usr/local/bin/punaro-postgres-bootstrap.sh"]
+    environment:
+      POSTGRES_DB: punaro
+      POSTGRES_USER: punaro_owner
+    secrets:
+      - postgres_app_password
+    volumes:
+      - ./postgres-bootstrap.sh:/usr/local/bin/punaro-postgres-bootstrap.sh:ro
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   punarod:
     image: ${PUNARO_IMAGE:?required}
@@ -58,8 +73,8 @@ services:
       - punaro-blobs:/var/lib/punaro
     network_mode: host
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres-bootstrap:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 secrets:
