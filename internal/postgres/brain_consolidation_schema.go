@@ -173,10 +173,10 @@ WITH relation AS (
        AND count(*) FILTER (WHERE tgname='application_mutation_fence' AND tgtype=62 AND tgfoid='jobs.guard_application_mutation()'::regprocedure AND tgenabled='O' AND tgattr=''::int2vector AND tgqual IS NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=relation.oid AND NOT tgisinternal
 ), constraint_safety AS (
-    SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.memory_proposals'::regclass AND confdeltype='c')=1
-       AND count(*) FILTER (WHERE contype='c')=4 AS exact
+       AND count(*) FILTER (WHERE contype='c')=3 AS exact
     FROM pg_constraint,relation WHERE conrelid=relation.oid AND contype<>'n'
 ), expected_checks(name,expression) AS (
     VALUES ('memory_consolidation_proposal_sources_ordinal_check','((ordinal >= 0) AND (ordinal <= 127))'),
@@ -272,10 +272,10 @@ WITH relation AS (
       AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O')=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
 ), constraints AS (
-    SELECT count(*)=5 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
+    SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3,4,5,6]::smallint[])=1
        AND count(*) FILTER (WHERE contype='f' AND conkey=ARRAY[1]::smallint[] AND confrelid='brain.scopes'::regclass AND confdeltype='c')=1
-       AND count(*) FILTER (WHERE contype='c')=3 AS exact
+       AND count(*) FILTER (WHERE contype='c')=4 AS exact
     FROM pg_constraint,relation WHERE conrelid=table_oid AND contype<>'n'
 ), routines AS (
     SELECT count(*)=3 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
