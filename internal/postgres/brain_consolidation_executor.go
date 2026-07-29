@@ -171,13 +171,13 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 // cloneMemoryConsolidationInput isolates the executor's fenced source page
 // from untrusted planner mutation.
 func cloneMemoryConsolidationInput(input MemoryConsolidationInput) MemoryConsolidationInput {
-	copy := input
-	copy.Sources = make([]MemoryConsolidationSource, len(input.Sources))
+	cloned := input
+	cloned.Sources = make([]MemoryConsolidationSource, len(input.Sources))
 	for index, source := range input.Sources {
 		source.Document = append(json.RawMessage(nil), source.Document...)
-		copy.Sources[index] = source
+		cloned.Sources[index] = source
 	}
-	return copy
+	return cloned
 }
 
 func (e *MemoryConsolidationExecutor) normalizeMemoryConsolidationProposals(raw []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
