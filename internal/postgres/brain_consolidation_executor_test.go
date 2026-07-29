@@ -230,6 +230,12 @@ type fakeMemoryConsolidationExecutorStore struct {
 	passInput     MemoryConsolidationInput
 	passRequest   MemoryConsolidationExecutionRequest
 	readLimit     int
+	capacity      int
+}
+
+func (s *fakeMemoryConsolidationExecutorStore) CheckMemoryConsolidationPassCapacity(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, count int) error {
+	s.capacity = count
+	return nil
 }
 
 func (s *fakeMemoryConsolidationExecutorStore) readMemoryConsolidationInput(_ context.Context, _ MemoryConsolidationLease, limit int) (MemoryConsolidationInput, error) {

@@ -61,6 +61,24 @@ ON CONFLICT (scope_id,timeline_id,start_sequence) DO NOTHING`,
 	return resolvedInput, resolvedRequest, resolved, nil
 }
 
+func (d *Database) CheckMemoryConsolidationPassCapacity(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest, proposals int) error {
+	if proposals < 0 || !request.valid() {
+		return errors.New("consolidation pass capacity is invalid")
+	}
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return mutationStartError(err, "consolidation pass capacity cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := checkMemoryProposalCapacityForCount(ctx, tx, input.Lease.ScopeID, request.PrincipalID, proposals); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("consolidation pass capacity cannot commit")
+	}
+	return nil
+}
+
 // CompleteMemoryConsolidationPass atomically advances the fenced checkpoint
 // and removes the plan that made all staging retries deterministic.
 func (d *Database) CompleteMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest) error {

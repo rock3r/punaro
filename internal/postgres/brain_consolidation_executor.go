@@ -57,6 +57,7 @@ type memoryConsolidationExecutorStore interface {
 	readMemoryConsolidationInput(context.Context, MemoryConsolidationLease, int) (MemoryConsolidationInput, error)
 	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, bool, error)
 	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) (MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal, error)
+	CheckMemoryConsolidationPassCapacity(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, int) error
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
 	AbandonMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
@@ -135,6 +136,9 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		proposals, err = e.normalizeMemoryConsolidationProposals(proposals)
 	}
 	if err != nil {
+		return MemoryConsolidationExecutionResult{}, err
+	}
+	if err := e.store.CheckMemoryConsolidationPassCapacity(passCtx, input, effectiveRequest, len(proposals)); err != nil {
 		return MemoryConsolidationExecutionResult{}, err
 	}
 	for ordinal, proposal := range proposals {

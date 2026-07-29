@@ -228,6 +228,10 @@ FROM candidates WHERE proposal.id=candidates.id RETURNING proposal.id::text`, sc
 }
 
 func checkMemoryProposalCapacity(ctx context.Context, tx *sql.Tx, scopeID, principalID string) error {
+	return checkMemoryProposalCapacityForCount(ctx, tx, scopeID, principalID, 1)
+}
+
+func checkMemoryProposalCapacityForCount(ctx context.Context, tx *sql.Tx, scopeID, principalID string, requested int) error {
 	var livePrincipal, liveScope, retainedPrincipal, retainedScope int
 	err := tx.QueryRowContext(ctx, `SELECT
     count(*) FILTER (WHERE proposed_by=$2 AND state='pending' AND expires_at > statement_timestamp()),
@@ -238,8 +242,8 @@ FROM brain.memory_proposals WHERE scope_id=$1`, scopeID, principalID).Scan(&live
 	if err != nil {
 		return errors.New("memory proposal capacity cannot be checked")
 	}
-	if livePrincipal >= maxLiveMemoryProposalsPrincipal || liveScope >= maxLiveMemoryProposalsScope ||
-		retainedPrincipal >= maxRetainedMemoryProposalsPrincipal || retainedScope >= maxRetainedMemoryProposalsScope {
+	if requested < 0 || livePrincipal+requested > maxLiveMemoryProposalsPrincipal || liveScope+requested > maxLiveMemoryProposalsScope ||
+		retainedPrincipal+requested > maxRetainedMemoryProposalsPrincipal || retainedScope+requested > maxRetainedMemoryProposalsScope {
 		return ErrMemoryProposalCapacity
 	}
 	return nil
