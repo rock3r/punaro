@@ -1,7 +1,8 @@
 // Package mcphttp exposes the independently optional remote MCP gateway
-// boundary. This initial resource-metadata surface deliberately mounts no MCP
-// transport and accepts no credentials; a later slice supplies the audited
-// OAuth resource-server and strict JSON-RPC transport implementation.
+// boundary. It advertises the protected resource and challenges requests at
+// that resource without accepting credentials or mounting an MCP transport.
+// A later slice supplies the audited OAuth resource server and strict JSON-RPC
+// transport implementation.
 package mcphttp
 
 import (
@@ -18,10 +19,14 @@ type protectedResourceMetadata struct {
 	AuthorizationServers []string `json:"authorization_servers"`
 }
 
-// New creates only the OAuth protected-resource metadata endpoint for one
-// canonical HTTPS MCP resource. It intentionally does not mount /mcp.
+const defaultScopeChallenge = "memory.search memory.read memory.propose"
+
+// New creates the OAuth protected-resource metadata endpoint and a discovery
+// challenge for one canonical HTTPS MCP resource. It accepts no credentials and
+// does not mount an MCP transport.
 func New(resource string, authorizationServers []string) (http.Handler, error) {
-	if !validCanonicalHTTPSURL(resource, true) || len(authorizationServers) == 0 {
+	resourcePath := resourcePath(resource)
+	if !validCanonicalHTTPSURL(resource, true) || resourcePath == "" || len(authorizationServers) == 0 {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
 	}
 	servers := make([]string, len(authorizationServers))
@@ -41,13 +46,30 @@ func New(resource string, authorizationServers []string) (http.Handler, error) {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
 	}
 	mux := http.NewServeMux()
-	metadataPath := "/.well-known/oauth-protected-resource" + resourcePath(resource)
+	metadataPath := "/.well-known/oauth-protected-resource" + resourcePath
 	mux.HandleFunc("GET "+metadataPath, func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		response.Header().Set("Cache-Control", "no-store")
 		_, _ = response.Write(metadata)
 	})
+	metadataURL, err := protectedResourceMetadataURL(resource, metadataPath)
+	if err != nil {
+		return nil, errors.New("remote MCP metadata configuration is invalid")
+	}
+	mux.HandleFunc(resourcePath, func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Cache-Control", "no-store")
+		response.Header().Set("WWW-Authenticate", `Bearer realm="punaro-mcp", resource_metadata="`+metadataURL+`", scope="`+defaultScopeChallenge+`"`)
+		response.WriteHeader(http.StatusUnauthorized)
+	})
 	return mux, nil
+}
+
+func protectedResourceMetadataURL(resource, metadataPath string) (string, error) {
+	parsed, err := url.Parse(resource)
+	if err != nil {
+		return "", err
+	}
+	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: metadataPath}).String(), nil
 }
 
 func validCanonicalHTTPSURL(raw string, permitPath bool) bool {
