@@ -280,6 +280,14 @@ WITH relation AS (
       AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O' AND tgattr='2 3'::int2vector
       AND tgqual IS NOT NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
+), expected_checks(name,definition) AS (
+    VALUES ('memory_consolidation_passes_start_sequence_check','CHECK ((start_sequence >= 0))'),
+           ('memory_consolidation_passes_next_sequence_check','CHECK ((next_sequence >= start_sequence))'),
+           ('memory_consolidation_passes_lease_generation_check','CHECK ((lease_generation >= 1))'),
+           ('memory_consolidation_passes_source_sha256_check','CHECK ((octet_length(source_sha256) = 32))')
+), actual_checks AS (
+    SELECT conname,pg_get_constraintdef(oid) FROM pg_constraint,relation
+    WHERE conrelid=table_oid AND contype='c'
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
        AND count(*) FILTER (WHERE contype='p' AND conkey=ARRAY[1,2,3]::smallint[])=1
@@ -325,7 +333,10 @@ SELECT relation.table_oid IS NOT NULL AND relation.checkpoint_oid IS NOT NULL AN
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND table_acl.selects AND table_acl.no_writes AND table_acl.no_public AND insert_acl.exact AND column_acl_safety.exact
-   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND guard_routine.exact AND cleanup_routine.exact AND completion_routine.exact AND abandon_routine.exact AND complete_acl.app_exec AND complete_acl.no_public
+   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact
+   AND NOT EXISTS (SELECT * FROM expected_checks EXCEPT SELECT * FROM actual_checks)
+   AND NOT EXISTS (SELECT * FROM actual_checks EXCEPT SELECT * FROM expected_checks)
+   AND routines.exact AND guard_routine.exact AND cleanup_routine.exact AND completion_routine.exact AND abandon_routine.exact AND complete_acl.app_exec AND complete_acl.no_public
 FROM relation,table_acl,insert_acl,column_acl_safety,triggers,checkpoint_triggers,constraints,routines,guard_routine,cleanup_routine,completion_routine,abandon_routine,complete_acl`, memoryConsolidationPassCompleteRoutineMD5, memoryConsolidationPassGuardRoutineMD5, memoryConsolidationPassAbandonRoutineMD5, memoryConsolidationPassCleanupRoutineMD5).Scan(&available)
 	return available, err
 }

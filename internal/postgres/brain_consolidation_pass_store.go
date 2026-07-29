@@ -103,7 +103,8 @@ WHERE record.key=$1`, memoryConsolidationProposalIdempotencyKey(input, request.P
 		if err != nil {
 			return 0, errors.New("consolidation pass idempotency is unavailable")
 		}
-		if status.String != string(OutcomeSucceeded) || state.String != string(MemoryProposalPending) || !actionable.Bool {
+		if status.String != string(OutcomeSucceeded) || state.String == "" || state.String == "expired" ||
+			(state.String == string(MemoryProposalPending) && !actionable.Bool) {
 			return 0, errMemoryConsolidationProposalRejected
 		}
 	}
