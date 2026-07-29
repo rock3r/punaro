@@ -863,6 +863,9 @@ func TestBootstrapMigratesPristineWithoutPublishingAnInstallation(t *testing.T) 
 		sequence = append(sequence, "owner")
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
 	}
+	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{}, punaropostgres.ErrNotFound
+	}
 	var stdout, stderr bytes.Buffer
 	args := []string{"bootstrap", "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator"}
 	if code := run(args, &stdout, &stderr); code != 0 || strings.Join(sequence, ",") != "inspect,migrate,inspect,owner" || !strings.Contains(stdout.String(), `"status": "bootstrapped"`) {
@@ -870,6 +873,37 @@ func TestBootstrapMigratesPristineWithoutPublishingAnInstallation(t *testing.T) 
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 2 {
 		t.Fatalf("bootstrap must not publish an installation: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestBootstrapRecoversCompatibleSchemaWhenOwnerCreationPreviouslyFailed(t *testing.T) {
+	preserveDependencies(t)
+	root := t.TempDir()
+	for _, name := range []string{"owner.dsn", "app.dsn"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("postgres://invalid\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	migrateCalled := false
+	migratePristinePair = func(context.Context, string, string) (punaropostgres.SchemaState, error) {
+		migrateCalled = true
+		return punaropostgres.SchemaState{}, errors.New("must not migrate a compatible schema")
+	}
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+	}
+	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{}, punaropostgres.ErrNotFound
+	}
+	created := false
+	createOwner = func(context.Context, string, string) (punaropostgres.Principal, error) {
+		created = true
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"bootstrap", "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator"}
+	if code := run(args, &stdout, &stderr); code != 0 || migrateCalled || !created {
+		t.Fatalf("code=%d migrated=%t created=%t stdout=%q stderr=%q", code, migrateCalled, created, stdout.String(), stderr.String())
 	}
 }
 

@@ -364,25 +364,36 @@ func runBootstrap(args []string, stdout, stderr io.Writer) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *ownerDSN == "" || *appDSN == "" || *ownerName == "" {
 		return 2
 	}
-	state, err := inspectSchema(context.Background(), *appDSN)
-	if err != nil || state.Classification != punaropostgres.Pristine {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap requires a pristine application database")
+	ctx := context.Background()
+	state, err := inspectSchema(ctx, *appDSN)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not inspect the application database")
 		return 1
 	}
-	if _, err = migratePristinePair(context.Background(), *appDSN, *ownerDSN); err != nil {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap failed")
-		return 1
+	if state.Classification == punaropostgres.Pristine {
+		if _, err = migratePristinePair(ctx, *appDSN, *ownerDSN); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro bootstrap failed")
+			return 1
+		}
+		state, err = inspectSchema(ctx, *appDSN)
 	}
-	state, err = inspectSchema(context.Background(), *appDSN)
 	if err != nil || state.Classification != punaropostgres.Compatible {
 		_, _ = fmt.Fprintln(stderr, "punaro bootstrap did not produce a compatible database")
 		return 1
 	}
-	if err := verifyInstallationPair(context.Background(), *appDSN, *ownerDSN); err != nil {
+	if err := verifyInstallationPair(ctx, *appDSN, *ownerDSN); err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not verify database roles")
 		return 1
 	}
-	owner, err := createOwner(context.Background(), *ownerDSN, *ownerName)
+	owner, err := inspectOwner(ctx, *appDSN)
+	if err == nil {
+		return writeJSON(stdout, stderr, map[string]any{"status": "bootstrapped", "owner_principal_id": owner.ID})
+	}
+	if !errors.Is(err, punaropostgres.ErrNotFound) {
+		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not inspect the installation owner")
+		return 1
+	}
+	owner, err = createOwner(ctx, *ownerDSN, *ownerName)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro bootstrap failed")
 		return 1
