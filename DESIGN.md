@@ -89,7 +89,7 @@ The next opt-in resource-server boundary validates only RS256 JWTs from an
 advertised issuer through its HTTPS JWKS endpoint. It requires an expiry and
 the exact canonical MCP resource as audience, and never forwards the bearer
 token. A successful validation additionally requires an operator-configured,
-bounded one-to-one OAuth-subject binding to an existing opaque Punaro
+bounded one-to-one OAuth-subject binding to an existing enabled opaque Punaro
 principal; an unbound subject is forbidden. The binding is identity plumbing,
 not a project grant and not a client-provided authority claim. A successfully
 validated and bound request returns only the deliberate no-transport response

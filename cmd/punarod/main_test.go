@@ -174,11 +174,11 @@ func TestProductionRoutesKeepMemoryAPIDarkWhenHandlerIsAbsent(t *testing.T) {
 }
 
 func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadataAndChallenge(t *testing.T) {
-	handler, err := buildRemoteMCPMetadataHandler(config.Config{})
+	handler, err := buildRemoteMCPMetadataHandler(config.Config{}, nil)
 	if err != nil || handler != nil {
 		t.Fatalf("disabled handler=%v err=%v", handler, err)
 	}
-	handler, err = buildRemoteMCPMetadataHandler(config.Config{RemoteMCPMetadataEnabled: true, RemoteMCPResourceURL: "https://punaro.example/mcp", RemoteMCPAuthorizationServers: "https://auth.example"})
+	handler, err = buildRemoteMCPMetadataHandler(config.Config{RemoteMCPMetadataEnabled: true, RemoteMCPResourceURL: "https://punaro.example/mcp", RemoteMCPAuthorizationServers: "https://auth.example"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +196,34 @@ func TestBuildRemoteMCPMetadataHandlerIsDarkByDefaultAndMountsOnlyMetadataAndCha
 	if transport.Code != http.StatusUnauthorized {
 		t.Fatalf("transport status=%d", transport.Code)
 	}
+}
+
+func TestBuildRemoteMCPMetadataHandlerRejectsUnresolvedSubjectBinding(t *testing.T) {
+	cfg := config.Config{
+		RemoteMCPMetadataEnabled:        true,
+		RemoteMCPResourceURL:            "https://punaro.example/mcp",
+		RemoteMCPAuthorizationServers:   "https://auth.example",
+		RemoteMCPTokenValidationEnabled: true,
+		RemoteMCPIssuer:                 "https://auth.example",
+		RemoteMCPJWKSURL:                "https://auth.example/jwks",
+		RemoteMCPSubjectBindingsJSON:    `[{"subject":"operator-1","principal_id":"11111111-1111-4111-8111-111111111111"}]`,
+	}
+	if _, err := buildRemoteMCPMetadataHandler(cfg, subjectBindingDatabaseDouble{}); err == nil {
+		t.Fatal("unresolved subject binding mounted remote MCP metadata")
+	}
+	handler, err := buildRemoteMCPMetadataHandler(cfg, subjectBindingDatabaseDouble{exists: true})
+	if err != nil || handler == nil {
+		t.Fatalf("resolved subject binding handler=%v err=%v", handler, err)
+	}
+}
+
+type subjectBindingDatabaseDouble struct{ exists bool }
+
+func (subjectBindingDatabaseDouble) Ready(context.Context) error { return nil }
+func (subjectBindingDatabaseDouble) Close() error                { return nil }
+
+func (database subjectBindingDatabaseDouble) RemoteMCPPrincipalActive(context.Context, string) (bool, error) {
+	return database.exists, nil
 }
 
 type refusingPlatformDatabase struct {

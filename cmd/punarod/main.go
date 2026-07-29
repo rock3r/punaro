@@ -223,7 +223,7 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "punarod memory API configuration error: %v\n", err)
 		return 2
 	}
-	remoteMCPMetadataHandler, err := buildRemoteMCPMetadataHandler(cfg)
+	remoteMCPMetadataHandler, err := buildRemoteMCPMetadataHandler(cfg, platformDB)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punarod remote MCP configuration error: metadata is unavailable")
 		return 2
@@ -329,7 +329,11 @@ func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, tr
 	}
 }
 
-func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
+type remoteMCPPrincipalDatabase interface {
+	RemoteMCPPrincipalActive(context.Context, string) (bool, error)
+}
+
+func buildRemoteMCPMetadataHandler(cfg config.Config, database platformDatabase) (http.Handler, error) {
 	if !cfg.RemoteMCPMetadataEnabled {
 		return nil, nil
 	}
@@ -341,7 +345,11 @@ func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
 		if err != nil {
 			return nil, err
 		}
-		subjectBindings, err = remoteMCPSubjectBindings(cfg.RemoteMCPSubjectBindingsJSON)
+		principalDatabase, ok := database.(remoteMCPPrincipalDatabase)
+		if !ok {
+			return nil, errors.New("remote MCP principal database is unavailable")
+		}
+		subjectBindings, err = remoteMCPSubjectBindings(context.Background(), cfg.RemoteMCPSubjectBindingsJSON, principalDatabase)
 		if err != nil {
 			return nil, err
 		}
@@ -349,7 +357,7 @@ func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
 	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator, subjectBindings)
 }
 
-func remoteMCPSubjectBindings(raw string) (map[string]string, error) {
+func remoteMCPSubjectBindings(ctx context.Context, raw string, database remoteMCPPrincipalDatabase) (map[string]string, error) {
 	var bindings []struct {
 		Subject     string `json:"subject"`
 		PrincipalID string `json:"principal_id"`
@@ -361,6 +369,10 @@ func remoteMCPSubjectBindings(raw string) (map[string]string, error) {
 	for _, binding := range bindings {
 		if binding.Subject == "" || binding.PrincipalID == "" || result[binding.Subject] != "" {
 			return nil, errors.New("remote MCP subject bindings are invalid")
+		}
+		active, err := database.RemoteMCPPrincipalActive(ctx, binding.PrincipalID)
+		if err != nil || !active {
+			return nil, errors.New("remote MCP subject binding principal is unavailable")
 		}
 		result[binding.Subject] = binding.PrincipalID
 	}
