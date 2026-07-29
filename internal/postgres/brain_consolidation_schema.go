@@ -307,7 +307,7 @@ FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,rout
 }
 
 const (
-	memoryConsolidationPassCompleteRoutineMD5            = "d7f58b5f70dfbb28b99819193edd5f35"
+	memoryConsolidationPassCompleteRoutineMD5            = "1319f8b0c9b50efcbc1c6e1df68c7945"
 	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
 	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
 	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"
