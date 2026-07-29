@@ -58,6 +58,7 @@ type memoryConsolidationExecutorStore interface {
 	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error)
 	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) (MemoryConsolidationInput, []MemoryConsolidationProposal, error)
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
+	AbandonMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
 }
 
@@ -119,6 +120,9 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 		if err != nil {
 			return MemoryConsolidationExecutionResult{}, err
 		}
+		if len(input.Sources) == 0 && len(proposals) != 0 {
+			return MemoryConsolidationExecutionResult{}, errors.New("consolidation output requires source documents")
+		}
 		input, proposals, err = e.store.ReserveMemoryConsolidationPass(passCtx, input, request, proposals)
 		if err != nil {
 			return MemoryConsolidationExecutionResult{}, err
@@ -131,6 +135,11 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	for ordinal, proposal := range proposals {
 		staged := MemoryProposalCreateRequest{PrincipalID: request.PrincipalID, ProjectID: request.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, request.PrincipalID, request.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
 		if _, err := e.store.StageMemoryConsolidationProposal(passCtx, MemoryConsolidationProposalRequest{Input: input, Proposal: staged}); err != nil {
+			if errors.Is(err, ErrStaleMemoryConsolidationLease) {
+				if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, request); abandonErr != nil {
+					return MemoryConsolidationExecutionResult{}, abandonErr
+				}
+			}
 			return MemoryConsolidationExecutionResult{}, err
 		}
 	}

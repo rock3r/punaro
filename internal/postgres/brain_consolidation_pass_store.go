@@ -76,6 +76,23 @@ func (d *Database) CompleteMemoryConsolidationPass(ctx context.Context, input Me
 	return nil
 }
 
+// AbandonMemoryConsolidationPass releases an immutable pass whose source page
+// can no longer be staged. It deliberately retains the checkpoint cursor so a
+// later lease reads the newer source revision rather than replacing the stale
+// pass under the same fence.
+func (d *Database) AbandonMemoryConsolidationPass(ctx context.Context, input MemoryConsolidationInput, request MemoryConsolidationExecutionRequest) error {
+	var abandoned bool
+	err := d.db.QueryRowContext(ctx, `SELECT brain.abandon_memory_consolidation_pass($1,$2,$3,$4,$5,$6,$7,$8)`,
+		input.Lease.ScopeID, input.Lease.Token, input.Lease.Generation, input.TimelineID, input.Lease.Sequence, input.NextSequence, request.PrincipalID, request.ProjectID).Scan(&abandoned)
+	if err != nil {
+		return errors.New("consolidation pass cannot be abandoned")
+	}
+	if !abandoned {
+		return ErrStaleMemoryConsolidationLease
+	}
+	return nil
+}
+
 func (d *Database) readMemoryConsolidationPass(ctx context.Context, q queryer, lease MemoryConsolidationLease, request MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {
 	var storedSHA []byte
 	var timelineID, body, sourcesBody string

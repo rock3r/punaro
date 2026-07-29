@@ -16,7 +16,7 @@ CREATE TABLE brain.memory_consolidation_passes (
 
 CREATE FUNCTION brain.guard_memory_consolidation_pass()
 RETURNS trigger
-LANGUAGE plpgsql
+LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog
 AS $function$
 BEGIN
@@ -109,3 +109,41 @@ $function$;
 
 REVOKE ALL ON FUNCTION brain.complete_memory_consolidation_pass(uuid,uuid,bigint,uuid,bigint,bigint,uuid,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION brain.complete_memory_consolidation_pass(uuid,uuid,bigint,uuid,bigint,bigint,uuid,uuid) TO punaro_app;
+
+CREATE FUNCTION brain.abandon_memory_consolidation_pass(
+    requested_scope uuid,
+    requested_token uuid,
+    requested_generation bigint,
+    requested_timeline uuid,
+    requested_start_sequence bigint,
+    requested_next_sequence bigint,
+    requested_principal uuid,
+    requested_project uuid
+)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $function$
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    DELETE FROM brain.memory_consolidation_passes AS pass
+    USING brain.memory_consolidation_checkpoints AS checkpoint
+    WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
+      AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
+      AND checkpoint.timeline_id=requested_timeline AND checkpoint.change_sequence=requested_start_sequence
+      AND pass.scope_id=requested_scope AND pass.timeline_id=requested_timeline
+      AND pass.start_sequence=requested_start_sequence AND pass.next_sequence=requested_next_sequence
+      AND pass.principal_id=requested_principal AND pass.project_id=requested_project;
+    IF NOT FOUND THEN
+        RETURN false;
+    END IF;
+    UPDATE brain.memory_consolidation_checkpoints AS checkpoint
+    SET lease_holder=NULL,lease_token=NULL,lease_until=NULL,updated_at=statement_timestamp()
+    WHERE checkpoint.scope_id=requested_scope AND checkpoint.lease_token=requested_token
+      AND checkpoint.lease_generation=requested_generation AND checkpoint.lease_until>statement_timestamp()
+      AND checkpoint.timeline_id=requested_timeline AND checkpoint.change_sequence=requested_start_sequence;
+    RETURN FOUND;
+END
+$function$;
+
+REVOKE ALL ON FUNCTION brain.abandon_memory_consolidation_pass(uuid,uuid,bigint,uuid,bigint,bigint,uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION brain.abandon_memory_consolidation_pass(uuid,uuid,bigint,uuid,bigint,bigint,uuid,uuid) TO punaro_app;
