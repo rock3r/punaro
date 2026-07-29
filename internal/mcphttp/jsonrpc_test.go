@@ -33,3 +33,14 @@ func TestParseJSONRPCRequestRejectsMalformedUTF8(t *testing.T) {
 		t.Fatal("accepted malformed UTF-8")
 	}
 }
+
+func TestParseJSONRPCRequestRejectsUnpairedSurrogateEscape(t *testing.T) {
+	for _, raw := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/\ud800list"}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"query":"\udc00"}}`,
+	} {
+		if _, ok := parseJSONRPCRequest([]byte(raw)); ok {
+			t.Fatalf("accepted unpaired surrogate: %s", raw)
+		}
+	}
+}

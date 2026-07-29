@@ -22,7 +22,7 @@ type jsonRPCRequest struct {
 }
 
 func parseJSONRPCRequest(raw []byte) (jsonRPCRequest, bool) {
-	if len(raw) == 0 || len(raw) > maxJSONRPCRequestBytes || !utf8.Valid(raw) {
+	if len(raw) == 0 || len(raw) > maxJSONRPCRequestBytes || !utf8.Valid(raw) || !validJSONUnicodeEscapes(raw) {
 		return jsonRPCRequest{}, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
@@ -65,6 +65,74 @@ func parseJSONRPCRequest(raw []byte) (jsonRPCRequest, bool) {
 		return jsonRPCRequest{}, false
 	}
 	return request, true
+}
+
+func validJSONUnicodeEscapes(raw []byte) bool {
+	inString := false
+	for index := 0; index < len(raw); index++ {
+		if !inString {
+			if raw[index] == '"' {
+				inString = true
+			}
+			continue
+		}
+		if raw[index] == '"' {
+			inString = false
+			continue
+		}
+		if raw[index] != '\\' {
+			continue
+		}
+		index++
+		if index >= len(raw) {
+			return false
+		}
+		if raw[index] != 'u' {
+			continue
+		}
+		if index+4 >= len(raw) {
+			return false
+		}
+		unit, ok := jsonUTF16Unit(raw[index+1 : index+5])
+		if !ok {
+			return false
+		}
+		index += 4
+		if unit >= 0xd800 && unit <= 0xdbff {
+			if index+6 >= len(raw) || raw[index+1] != '\\' || raw[index+2] != 'u' {
+				return false
+			}
+			low, ok := jsonUTF16Unit(raw[index+3 : index+7])
+			if !ok || low < 0xdc00 || low > 0xdfff {
+				return false
+			}
+			index += 6
+		} else if unit >= 0xdc00 && unit <= 0xdfff {
+			return false
+		}
+	}
+	return !inString
+}
+
+func jsonUTF16Unit(raw []byte) (uint16, bool) {
+	if len(raw) != 4 {
+		return 0, false
+	}
+	var result uint16
+	for _, value := range raw {
+		result <<= 4
+		switch {
+		case value >= '0' && value <= '9':
+			result |= uint16(value - '0')
+		case value >= 'a' && value <= 'f':
+			result |= uint16(value-'a') + 10
+		case value >= 'A' && value <= 'F':
+			result |= uint16(value-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return result, true
 }
 
 func validJSONRPCMethod(method string) bool {
