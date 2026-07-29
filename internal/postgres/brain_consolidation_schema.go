@@ -280,13 +280,13 @@ WITH relation AS (
       AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O' AND tgattr='2 3'::int2vector
       AND tgqual IS NOT NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
-), expected_checks(name,definition) AS (
-    VALUES ('memory_consolidation_passes_start_sequence_check','CHECK ((start_sequence >= 0))'),
-           ('memory_consolidation_passes_next_sequence_check','CHECK ((next_sequence >= start_sequence))'),
-           ('memory_consolidation_passes_lease_generation_check','CHECK ((lease_generation >= 1))'),
-           ('memory_consolidation_passes_source_sha256_check','CHECK ((octet_length(source_sha256) = 32))')
+), expected_checks(name,expression) AS (
+    VALUES ('memory_consolidation_passes_start_sequence_check','(start_sequence >= 0)'),
+           ('memory_consolidation_passes_next_sequence_check','(next_sequence >= start_sequence)'),
+           ('memory_consolidation_passes_lease_generation_check','(lease_generation >= 1)'),
+           ('memory_consolidation_passes_source_sha256_check','(octet_length(source_sha256) = 32)')
 ), actual_checks AS (
-    SELECT conname,pg_get_constraintdef(oid) FROM pg_constraint,relation
+    SELECT conname,pg_get_expr(conbin,conrelid) FROM pg_constraint,relation
     WHERE conrelid=table_oid AND contype='c'
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
