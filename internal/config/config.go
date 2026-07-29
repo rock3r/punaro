@@ -3,8 +3,10 @@ package config
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -267,30 +269,59 @@ func validRemoteMCPSubjectBindings(raw string) bool {
 	if raw == "" || len(raw) > 16<<10 {
 		return false
 	}
-	var bindings []struct {
-		Subject     string `json:"subject"`
-		PrincipalID string `json:"principal_id"`
-	}
-	if json.Unmarshal([]byte(raw), &bindings) != nil || len(bindings) == 0 || len(bindings) > 128 {
+	decoder := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
 		return false
 	}
-	seen := make(map[string]struct{}, len(bindings))
-	principalIDs := make(map[string]struct{}, len(bindings))
-	for _, binding := range bindings {
-		principalID, err := uuid.Parse(binding.PrincipalID)
-		if binding.Subject == "" || len(binding.Subject) > 255 || strings.TrimSpace(binding.Subject) != binding.Subject || strings.ContainsAny(binding.Subject, "\x00\r\n") || err != nil || principalID == uuid.Nil || principalID.String() != binding.PrincipalID {
+	seen := map[string]struct{}{}
+	principalIDs := map[string]struct{}{}
+	for count := 0; decoder.More(); count++ {
+		if count >= 128 {
 			return false
 		}
-		if _, duplicate := seen[binding.Subject]; duplicate {
+		token, err = decoder.Token()
+		if err != nil || token != json.Delim('{') {
 			return false
 		}
-		if _, duplicate := principalIDs[binding.PrincipalID]; duplicate {
+		fields := map[string]json.RawMessage{}
+		for decoder.More() {
+			name, fieldErr := decoder.Token()
+			if fieldErr != nil {
+				return false
+			}
+			key, ok := name.(string)
+			if !ok || (key != "subject" && key != "principal_id") || fields[key] != nil {
+				return false
+			}
+			var value json.RawMessage
+			if decoder.Decode(&value) != nil {
+				return false
+			}
+			fields[key] = value
+		}
+		if token, err = decoder.Token(); err != nil || token != json.Delim('}') || len(fields) != 2 {
 			return false
 		}
-		seen[binding.Subject] = struct{}{}
-		principalIDs[binding.PrincipalID] = struct{}{}
+		var subject, principalRaw string
+		if json.Unmarshal(fields["subject"], &subject) != nil || json.Unmarshal(fields["principal_id"], &principalRaw) != nil {
+			return false
+		}
+		principalID, parseErr := uuid.Parse(principalRaw)
+		if subject == "" || len(subject) > 255 || strings.TrimSpace(subject) != subject || strings.ContainsAny(subject, "\x00\r\n") || parseErr != nil || principalID == uuid.Nil || principalID.String() != principalRaw {
+			return false
+		}
+		if _, duplicate := seen[subject]; duplicate {
+			return false
+		}
+		if _, duplicate := principalIDs[principalRaw]; duplicate {
+			return false
+		}
+		seen[subject] = struct{}{}
+		principalIDs[principalRaw] = struct{}{}
 	}
-	return true
+	token, err = decoder.Token()
+	return err == nil && token == json.Delim(']') && len(seen) > 0 && decoder.Decode(&struct{}{}) == io.EOF
 }
 
 func rejectRetiredAttachmentConfiguration() error {

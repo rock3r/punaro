@@ -89,6 +89,10 @@ func TestLoadRemoteMCPTokenValidationRequiresCanonicalOAuthAuthority(t *testing.
 	if _, err := Load(""); err == nil {
 		t.Fatal("remote MCP token validation accepted a noncanonical principal binding UUID")
 	}
+	t.Setenv("PUNARO_REMOTE_MCP_SUBJECT_BINDINGS_JSON", `[{"subject":"operator-1","principal_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","principal_id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"}]`)
+	if _, err := Load(""); err == nil {
+		t.Fatal("remote MCP token validation accepted duplicate binding fields")
+	}
 }
 
 func TestLoadOpenAIEmbeddingProviderRequiresCompleteSafeConfiguration(t *testing.T) {
