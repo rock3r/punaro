@@ -1,6 +1,9 @@
 package mcphttp
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestParseJSONRPCRequestAcceptsBoundedSingleRequest(t *testing.T) {
 	request, ok := parseJSONRPCRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
@@ -21,5 +24,12 @@ func TestParseJSONRPCRequestRejectsAmbiguousOrInvalidEnvelope(t *testing.T) {
 		if _, ok := parseJSONRPCRequest([]byte(raw)); ok {
 			t.Fatalf("accepted %s", raw)
 		}
+	}
+}
+
+func TestParseJSONRPCRequestRejectsMalformedUTF8(t *testing.T) {
+	raw := bytes.ReplaceAll([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"query":"x"}}`), []byte("x"), []byte{0xff})
+	if _, ok := parseJSONRPCRequest(raw); ok {
+		t.Fatal("accepted malformed UTF-8")
 	}
 }

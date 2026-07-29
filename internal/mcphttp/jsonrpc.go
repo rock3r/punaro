@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"strings"
+	"unicode/utf8"
 )
 
 const maxJSONRPCRequestBytes = 64 << 10
@@ -21,7 +22,7 @@ type jsonRPCRequest struct {
 }
 
 func parseJSONRPCRequest(raw []byte) (jsonRPCRequest, bool) {
-	if len(raw) == 0 || len(raw) > maxJSONRPCRequestBytes {
+	if len(raw) == 0 || len(raw) > maxJSONRPCRequestBytes || !utf8.Valid(raw) {
 		return jsonRPCRequest{}, false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
