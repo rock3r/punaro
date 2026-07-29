@@ -34,7 +34,8 @@ export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$owner_password"
 export PUNARO_POSTGRES_APP_PASSWORD_FILE="$app_password"
 export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach --wait postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" wait postgres-bootstrap
 PGPASSWORD='production-app-password' docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" exec --no-TTY postgres psql --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
 (cd "$root" && go run ./cmd/punaro bootstrap --owner-dsn-file "$owner_dsn" --app-dsn-file "$app_dsn" --owner-name 'production bootstrap')
 PGPASSWORD='production-app-password' docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" exec --no-TTY postgres psql --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
