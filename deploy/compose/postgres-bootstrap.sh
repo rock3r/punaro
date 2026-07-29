@@ -1,9 +1,8 @@
 #!/bin/sh
 set -eu
 
-app_password=$(cat /run/secrets/postgres_app_password)
 owner_password=$(cat /run/secrets/postgres_owner_password)
-if [ -z "$app_password" ]; then
+if [ ! -s /run/secrets/postgres_app_password ]; then
 	echo 'postgres application password must not be empty' >&2
 	exit 1
 fi
@@ -17,9 +16,11 @@ chmod 600 "$temporary/pgpass"
 export PGPASSFILE="$temporary/pgpass"
 
 psql --set=ON_ERROR_STOP=1 --host 127.0.0.1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
-	--set=app_password="$app_password" <<'SQL'
-SELECT format('CREATE ROLE punaro_app LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT', :'app_password')
+	<<'SQL'
+\set app_password `cat /run/secrets/postgres_app_password`
+SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
+ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 SQL
