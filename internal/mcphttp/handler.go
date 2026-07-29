@@ -35,7 +35,7 @@ type TokenValidator interface {
 // New creates the OAuth protected-resource metadata endpoint and a discovery
 // challenge for one canonical HTTPS MCP resource. It accepts no credentials and
 // does not mount an MCP transport.
-func New(resource string, authorizationServers []string, validator TokenValidator) (http.Handler, error) {
+func New(resource string, authorizationServers []string, validator TokenValidator, subjectBindings map[string]string) (http.Handler, error) {
 	resourcePath := resourcePath(resource)
 	if !validCanonicalHTTPSURL(resource, true) || resourcePath == "" || len(authorizationServers) == 0 {
 		return nil, errors.New("remote MCP metadata configuration is invalid")
@@ -75,9 +75,14 @@ func New(resource string, authorizationServers []string, validator TokenValidato
 			response.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		if _, err := validator.Validate(request.Context(), credential, time.Now().UTC()); err != nil {
+		claims, err := validator.Validate(request.Context(), credential, time.Now().UTC())
+		if err != nil {
 			response.Header().Set("WWW-Authenticate", challengeHeader(metadataURL, "error=\"invalid_token\", "))
 			response.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if subjectBindings[claims.Subject] == "" {
+			response.WriteHeader(http.StatusForbidden)
 			return
 		}
 		response.WriteHeader(http.StatusNotImplemented)

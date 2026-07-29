@@ -88,9 +88,13 @@ configured; Access is not application authorization.
 The next opt-in resource-server boundary validates only RS256 JWTs from an
 advertised issuer through its HTTPS JWKS endpoint. It requires an expiry and
 the exact canonical MCP resource as audience, and never forwards the bearer
-token. A successful validation returns only the deliberate no-transport
-response until a later slice maps the verified subject and scopes to Punaro
-project grants.
+token. A successful validation additionally requires an operator-configured,
+bounded one-to-one OAuth-subject binding to an existing opaque Punaro
+principal; an unbound subject is forbidden. The binding is identity plumbing,
+not a project grant and not a client-provided authority claim. A successfully
+validated and bound request returns only the deliberate no-transport response
+until a later slice checks both the verified scope and Punaro's authoritative
+project capability grant for that bound principal.
 The mutation slice is separately dark behind
 `PUNARO_MEMORY_MUTATIONS_ENABLED`, which requires the read API opt-in. It adds
 strict canonical create/update/archive/restore/purge and staged-proposal

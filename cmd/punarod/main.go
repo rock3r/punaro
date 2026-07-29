@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -333,14 +334,37 @@ func buildRemoteMCPMetadataHandler(cfg config.Config) (http.Handler, error) {
 		return nil, nil
 	}
 	var validator mcphttp.TokenValidator
+	subjectBindings := map[string]string(nil)
 	var err error
 	if cfg.RemoteMCPTokenValidationEnabled {
 		validator, err = mcpoauth.NewVerifier(mcpoauth.Config{Issuer: cfg.RemoteMCPIssuer, Audience: cfg.RemoteMCPResourceURL, JWKSURL: cfg.RemoteMCPJWKSURL}, nil)
 		if err != nil {
 			return nil, err
 		}
+		subjectBindings, err = remoteMCPSubjectBindings(cfg.RemoteMCPSubjectBindingsJSON)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator)
+	return mcphttp.New(cfg.RemoteMCPResourceURL, strings.Split(cfg.RemoteMCPAuthorizationServers, ","), validator, subjectBindings)
+}
+
+func remoteMCPSubjectBindings(raw string) (map[string]string, error) {
+	var bindings []struct {
+		Subject     string `json:"subject"`
+		PrincipalID string `json:"principal_id"`
+	}
+	if json.Unmarshal([]byte(raw), &bindings) != nil || len(bindings) == 0 {
+		return nil, errors.New("remote MCP subject bindings are invalid")
+	}
+	result := make(map[string]string, len(bindings))
+	for _, binding := range bindings {
+		if binding.Subject == "" || binding.PrincipalID == "" || result[binding.Subject] != "" {
+			return nil, errors.New("remote MCP subject bindings are invalid")
+		}
+		result[binding.Subject] = binding.PrincipalID
+	}
+	return result, nil
 }
 
 func buildMemoryHandler(cfg config.Config, platformDB platformDatabase) (http.Handler, error) {
