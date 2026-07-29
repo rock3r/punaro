@@ -31,7 +31,11 @@ func memoryConsolidationProposalRequestBody(input MemoryConsolidationInput, prop
 	}
 	sources := make([]sourceDigest, len(input.Sources))
 	for index, source := range input.Sources {
-		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(source.Document)}
+		document, err := canonicalMemoryDocument(source.Document)
+		if err != nil {
+			return nil, errors.New("consolidation proposal cannot be encoded")
+		}
+		sources[index] = sourceDigest{ItemID: source.ItemID, Revision: source.Revision, ChangeSequence: source.ChangeSequence, ContentSHA256: sha256.Sum256(document)}
 	}
 	body, err := json.Marshal(struct {
 		Proposal json.RawMessage `json:"proposal"`
