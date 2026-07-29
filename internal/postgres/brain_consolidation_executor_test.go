@@ -29,8 +29,8 @@ func TestMemoryConsolidationExecutorStagesWholePageBeforeAdvancing(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Sources != 1 || result.Staged != 1 || !result.Advanced || len(store.staged) != 1 || store.advanced != input.NextSequence {
-		t.Fatalf("result=%#v staged=%#v advanced=%d", result, store.staged, store.advanced)
+	if result.Sources != 1 || result.Staged != 1 || !result.Advanced || len(store.staged) != 1 || store.advanced != input.NextSequence || store.readLimit != 1 {
+		t.Fatalf("result=%#v staged=%#v advanced=%d readLimit=%d", result, store.staged, store.advanced, store.readLimit)
 	}
 	if got := store.staged[0]; !reflect.DeepEqual(got.Input, input) || got.Proposal.PrincipalID != "66666666-6666-4666-8666-666666666666" || got.Proposal.ProjectID != "77777777-7777-4777-8777-777777777777" || got.Proposal.IdempotencyKey == "" {
 		t.Fatalf("staged request=%#v", got)
@@ -191,9 +191,11 @@ type fakeMemoryConsolidationExecutorStore struct {
 	stagedKeys    map[string]struct{}
 	pass          []MemoryConsolidationProposal
 	passInput     MemoryConsolidationInput
+	readLimit     int
 }
 
-func (s *fakeMemoryConsolidationExecutorStore) ReadMemoryConsolidationInput(context.Context, MemoryConsolidationLease) (MemoryConsolidationInput, error) {
+func (s *fakeMemoryConsolidationExecutorStore) readMemoryConsolidationInput(_ context.Context, _ MemoryConsolidationLease, limit int) (MemoryConsolidationInput, error) {
+	s.readLimit = limit
 	return s.input, nil
 }
 func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(_ context.Context, lease MemoryConsolidationLease, _ MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {

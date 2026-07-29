@@ -113,7 +113,11 @@ func (request MemoryConsolidationProposalRequest) normalized() (MemoryConsolidat
 // read-only: advancing the cursor and staging proposals remain separate,
 // independently fenced operations.
 func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease MemoryConsolidationLease) (MemoryConsolidationInput, error) {
-	if !lease.valid() {
+	return d.readMemoryConsolidationInput(ctx, lease, maxMemoryConsolidationChanges)
+}
+
+func (d *Database) readMemoryConsolidationInput(ctx context.Context, lease MemoryConsolidationLease, maxChanges int) (MemoryConsolidationInput, error) {
+	if !lease.valid() || maxChanges < 1 || maxChanges > maxMemoryConsolidationChanges {
 		return MemoryConsolidationInput{}, errors.New("invalid consolidation lease")
 	}
 	rows, err := d.db.QueryContext(ctx, `SELECT timeline_id::text,item_id::text,revision,change_sequence,document::text,content_sha256,is_fence FROM brain.read_memory_consolidation_documents($1,$2,$3)`, lease.ScopeID, lease.Token, lease.Generation)
@@ -121,7 +125,7 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 		return MemoryConsolidationInput{}, errors.New("consolidation sources are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: lease.Sequence, Sources: make([]MemoryConsolidationSource, 0, maxMemoryConsolidationChanges)}
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: lease.Sequence, Sources: make([]MemoryConsolidationSource, 0, maxChanges)}
 	live := false
 	for rows.Next() {
 		var timelineID string
@@ -138,6 +142,9 @@ func (d *Database) ReadMemoryConsolidationInput(ctx context.Context, lease Memor
 				return MemoryConsolidationInput{}, ErrStaleMemoryConsolidationLease
 			}
 			live = true
+			continue
+		}
+		if len(input.Sources) >= maxChanges {
 			continue
 		}
 		if !itemID.Valid || !revision.Valid || !document.Valid || !sequence.Valid {
