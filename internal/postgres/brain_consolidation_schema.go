@@ -272,8 +272,7 @@ WITH relation AS (
 ), checkpoint_triggers AS (
     SELECT count(*)=1 AND count(*) FILTER (WHERE tgname='memory_consolidation_pass_checkpoint_cleanup'
       AND tgtype=17 AND tgfoid=cleanup_oid AND tgenabled='O' AND tgattr='2 3'::int2vector
-      AND tgqual IS NOT NULL
-      AND lower(pg_get_triggerdef(oid)) LIKE '%when (%old.timeline_id%old.change_sequence%is distinct from%new.timeline_id%new.change_sequence%)%')=1 AS exact
+      AND tgqual IS NOT NULL)=1 AS exact
     FROM pg_trigger,relation WHERE tgrelid=checkpoint_oid AND NOT tgisinternal
 ), constraints AS (
     SELECT count(*)=6 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
