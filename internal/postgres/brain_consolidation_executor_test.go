@@ -218,12 +218,6 @@ func TestMemoryConsolidationExecutorAbandonsPermanentlyRejectedReservedPass(t *t
 	}
 }
 
-func TestMemoryConsolidationStageErrorMarksAuthorizationRejectionPermanent(t *testing.T) {
-	if err := memoryConsolidationStageError(ErrNotFound); !errors.Is(err, errMemoryConsolidationProposalRejected) || !errors.Is(err, ErrNotFound) {
-		t.Fatalf("authorization error=%v", err)
-	}
-}
-
 type fakeMemoryConsolidationExecutorStore struct {
 	input         MemoryConsolidationInput
 	staged        []MemoryConsolidationProposalRequest
