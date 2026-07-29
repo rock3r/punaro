@@ -32,6 +32,7 @@ type TokenValidator interface {
 	Validate(context.Context, string, time.Time) (mcpoauth.Claims, error)
 }
 
+// PrincipalActive reports whether a bound principal remains enabled.
 type PrincipalActive func(context.Context, string) (bool, error)
 
 // New creates the OAuth protected-resource metadata endpoint and a discovery
