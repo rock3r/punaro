@@ -14,6 +14,10 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql
       - ./postgres-init.sh:/docker-entrypoint-initdb.d/10-punaro-app-role.sh:ro
+      - ./postgres-entrypoint.sh:/usr/local/bin/punaro-postgres-entrypoint.sh:ro
+    entrypoint: ["/usr/local/bin/punaro-postgres-entrypoint.sh"]
+    tmpfs:
+      - /run/punaro-secrets:mode=0700,size=1m
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     network_mode: host
     healthcheck:

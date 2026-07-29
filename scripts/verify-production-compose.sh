@@ -12,7 +12,11 @@ grep -Fq 'PUNARO_POSTGRES_DSN_FILE: /run/secrets/postgres_app_dsn' "$compose_fil
 grep -Fq 'POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password' "$compose_file"
 grep -Fq 'postgres_app_password' "$compose_file"
 grep -Fq '/docker-entrypoint-initdb.d/10-punaro-app-role.sh:ro' "$compose_file"
+grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
+grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
 grep -Fq 'CREATE ROLE punaro_app LOGIN PASSWORD' deploy/compose/postgres-init.sh
+grep -Fq '/run/punaro-secrets/postgres_app_password' deploy/compose/postgres-init.sh
+grep -Fq 'chown postgres:postgres "$staged_password"' deploy/compose/postgres-entrypoint.sh
 grep -Fq 'PUNARO_DEVICE_AUTH_ENABLED: "true"' "$compose_file"
 grep -Fq 'PUNARO_RELAY_STORE: sqlite' "$compose_file"
 grep -Fq 'read_only: true' "$compose_file"

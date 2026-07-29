@@ -36,7 +36,11 @@ permissions. The PostgreSQL owner-password file remains an operator-owned
 secret consumed only by the PostgreSQL entrypoint. The app-password secret is
 used only during fresh PostgreSQL-volume initialization to create the
 least-privilege `punaro_app` role; its value must match the password embedded
-in the application DSN.
+in the application DSN. The root-started PostgreSQL entrypoint copies that
+single secret into a private in-memory directory, changes it to the PostgreSQL
+user, and then invokes the upstream entrypoint; this allows the initialization
+script to read it after privilege drop without making the host file broader or
+persisting a second copy on disk.
 
 Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
 HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Always

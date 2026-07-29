@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-app_password=$(cat /run/secrets/postgres_app_password)
+app_password=$(cat /run/punaro-secrets/postgres_app_password)
 if [ -z "$app_password" ]; then
 	echo 'postgres application password must not be empty' >&2
 	exit 1
