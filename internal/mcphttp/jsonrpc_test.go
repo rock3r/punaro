@@ -2,6 +2,7 @@ package mcphttp
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,39 @@ func TestParseJSONRPCRequestPreservesValidLargeNumbers(t *testing.T) {
 		if _, ok := parseJSONRPCRequest([]byte(raw)); !ok {
 			t.Fatalf("rejected valid large number: %s", raw)
 		}
+	}
+}
+
+func TestParseJSONRPCRequestEnforcesSizeBoundary(t *testing.T) {
+	prefix := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"query":"`
+	suffix := `"}}`
+	accepted := []byte(prefix + strings.Repeat("x", maxJSONRPCRequestBytes-len(prefix)-len(suffix)) + suffix)
+	if len(accepted) != maxJSONRPCRequestBytes {
+		t.Fatalf("accepted length=%d", len(accepted))
+	}
+	if _, ok := parseJSONRPCRequest(accepted); !ok {
+		t.Fatal("rejected request at size limit")
+	}
+	if _, ok := parseJSONRPCRequest(append(accepted[:len(accepted)-len(suffix)], append([]byte("x"), []byte(suffix)...)...)); ok {
+		t.Fatal("accepted request over size limit")
+	}
+}
+
+func TestParseJSONRPCRequestEnforcesDepthBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		arrays  int
+		accepted bool
+	}{
+		{name: "at limit", arrays: maxJSONRPCDepth - 2, accepted: true},
+		{name: "over limit", arrays: maxJSONRPCDepth - 1, accepted: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"value":` + strings.Repeat("[", test.arrays) + "0" + strings.Repeat("]", test.arrays) + "}}"
+			if _, ok := parseJSONRPCRequest([]byte(raw)); ok != test.accepted {
+				t.Fatalf("accepted=%t want %t", ok, test.accepted)
+			}
+		})
 	}
 }
 
