@@ -238,7 +238,7 @@ WITH relation AS (
       ('scope_id','uuid',true,''),('timeline_id','uuid',true,''),('start_sequence','bigint',true,''),
       ('next_sequence','bigint',true,''),('principal_id','uuid',true,''),('project_id','uuid',true,''),
       ('lease_token','uuid',true,''),('lease_generation','bigint',true,''),('source_sha256','bytea',true,''),
-      ('proposals','jsonb',true,''),('created_at','timestamp with time zone',true,'statement_timestamp()')
+      ('sources','jsonb',true,''),('proposals','jsonb',true,''),('created_at','timestamp with time zone',true,'statement_timestamp()')
 ), actual_columns AS (
     SELECT attribute.attname,attribute.atttypid::regtype::text,attribute.attnotnull,COALESCE(pg_get_expr(default_value.adbin,default_value.adrelid),'')
     FROM pg_attribute AS attribute CROSS JOIN relation
@@ -259,6 +259,7 @@ WITH relation AS (
        AND has_column_privilege('punaro_app',table_oid,'lease_token','INSERT')
        AND has_column_privilege('punaro_app',table_oid,'lease_generation','INSERT')
        AND has_column_privilege('punaro_app',table_oid,'source_sha256','INSERT')
+       AND has_column_privilege('punaro_app',table_oid,'sources','INSERT')
        AND has_column_privilege('punaro_app',table_oid,'proposals','INSERT')
        AND NOT has_table_privilege('punaro_app',table_oid,'INSERT') AS exact
     FROM relation
@@ -281,6 +282,15 @@ WITH relation AS (
     SELECT count(*)=3 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
       AND proconfig=ARRAY['search_path=pg_catalog']::text[] AND NOT has_function_privilege('public',oid,'EXECUTE')) AS exact
     FROM pg_proc,relation WHERE oid=ANY(ARRAY[guard_oid,cleanup_oid,complete_oid])
+), completion_routine AS (
+    SELECT count(*)=1 AND bool_and(pg_get_userbyid(proowner)='punaro_owner' AND prokind='f' AND prosecdef AND provolatile='v'
+      AND NOT proretset AND prorettype='boolean'::regtype AND pronargs=8
+      AND proargtypes='2950 2950 20 2950 20 20 2950 2950'::oidvector
+      AND proargnames=ARRAY['requested_scope','requested_token','requested_generation','requested_timeline','requested_start_sequence','requested_next_sequence','requested_principal','requested_project']::text[]
+      AND prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
+      AND proconfig=ARRAY['search_path=pg_catalog']::text[]
+      AND md5(btrim(prosrc,E' \n\r\t'))=$1) AS exact
+    FROM pg_proc,relation WHERE oid=complete_oid
 ), complete_acl AS (
     SELECT has_function_privilege('punaro_app',complete_oid,'EXECUTE') AS app_exec,
            NOT has_function_privilege('public',complete_oid,'EXECUTE') AS no_public
@@ -291,12 +301,13 @@ SELECT relation.table_oid IS NOT NULL AND relation.checkpoint_oid IS NOT NULL AN
    AND NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
    AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
    AND table_acl.selects AND table_acl.no_writes AND table_acl.no_public AND insert_acl.exact
-   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND complete_acl.app_exec AND complete_acl.no_public
-FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,routines,complete_acl`).Scan(&available)
+   AND triggers.exact AND checkpoint_triggers.exact AND constraints.exact AND routines.exact AND completion_routine.exact AND complete_acl.app_exec AND complete_acl.no_public
+FROM relation,table_acl,insert_acl,triggers,checkpoint_triggers,constraints,routines,completion_routine,complete_acl`, memoryConsolidationPassCompleteRoutineMD5).Scan(&available)
 	return available, err
 }
 
 const (
+	memoryConsolidationPassCompleteRoutineMD5            = "d7f58b5f70dfbb28b99819193edd5f35"
 	memoryConsolidationProposalSourceGuardRoutineMD5     = "aaa45e19ae18202e97772cb7096ad117"
 	memoryConsolidationProposalSourceLockGuardRoutineMD5 = "88c2c1cf6aabfec6303afb7a155f3de0"
 	memoryConsolidationClaimRoutineMD5                   = "121df7d09493be8662f4618208aaf342"

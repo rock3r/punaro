@@ -211,6 +211,12 @@ func validateConsolidationInputSources(ctx context.Context, tx *sql.Tx, input Me
 			}
 			continue
 		}
+		// A reserved pass owns this exact bounded page. Later changes may extend
+		// a fresh read before replay, but they belong to the next pass and must
+		// neither replace nor invalidate the stored page.
+		if sequence.Int64 > input.NextSequence {
+			break
+		}
 		next = sequence.Int64
 		if !itemID.Valid {
 			continue

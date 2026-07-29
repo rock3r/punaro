@@ -55,7 +55,7 @@ func (request MemoryConsolidationExecutionRequest) valid() bool {
 
 type memoryConsolidationExecutorStore interface {
 	ReadMemoryConsolidationInput(context.Context, MemoryConsolidationLease) (MemoryConsolidationInput, error)
-	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) ([]MemoryConsolidationProposal, bool, error)
+	LoadMemoryConsolidationPass(context.Context, MemoryConsolidationLease, MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error)
 	ReserveMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest, []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error)
 	StageMemoryConsolidationProposal(context.Context, MemoryConsolidationProposalRequest) (MemoryProposalResult, error)
 	CompleteMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) error
@@ -97,16 +97,18 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	lease := request.Lease
 	passCtx, cancel := context.WithTimeout(ctx, e.policy.PassTimeout)
 	defer cancel()
-	input, err := e.store.ReadMemoryConsolidationInput(passCtx, lease)
+	input, proposals, found, err := e.store.LoadMemoryConsolidationPass(passCtx, lease, request)
 	if err != nil {
 		return MemoryConsolidationExecutionResult{}, err
+	}
+	if !found {
+		input, err = e.store.ReadMemoryConsolidationInput(passCtx, lease)
+		if err != nil {
+			return MemoryConsolidationExecutionResult{}, err
+		}
 	}
 	if input.Lease != lease || input.TimelineID != lease.TimelineID || !input.valid() || len(input.Sources) > e.policy.MaxChanges {
 		return MemoryConsolidationExecutionResult{}, errors.New("consolidation input is invalid")
-	}
-	proposals, found, err := e.store.LoadMemoryConsolidationPass(passCtx, input, request)
-	if err != nil {
-		return MemoryConsolidationExecutionResult{}, err
 	}
 	if !found {
 		proposals, err = e.planner.Propose(passCtx, input)

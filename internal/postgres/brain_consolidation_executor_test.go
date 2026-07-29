@@ -108,6 +108,8 @@ func TestMemoryConsolidationExecutorReplaysDurablePassWhenPlannerOutputChanges(t
 	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); err == nil {
 		t.Fatal("first pass unexpectedly completed")
 	}
+	store.input.NextSequence = 6
+	store.input.Sources = append(store.input.Sources, MemoryConsolidationSource{ItemID: "88888888-8888-4888-8888-888888888888", Revision: 1, ChangeSequence: 6, Document: json.RawMessage(`{"new":true}`)})
 	if result, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); err != nil || !result.Advanced {
 		t.Fatalf("replay result=%#v err=%v", result, err)
 	}
@@ -152,17 +154,24 @@ type fakeMemoryConsolidationExecutorStore struct {
 	stageErr      error
 	stagedKeys    map[string]struct{}
 	pass          []MemoryConsolidationProposal
+	passInput     MemoryConsolidationInput
 }
 
 func (s *fakeMemoryConsolidationExecutorStore) ReadMemoryConsolidationInput(context.Context, MemoryConsolidationLease) (MemoryConsolidationInput, error) {
 	return s.input, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(context.Context, MemoryConsolidationInput, MemoryConsolidationExecutionRequest) ([]MemoryConsolidationProposal, bool, error) {
-	return s.pass, s.pass != nil, nil
+func (s *fakeMemoryConsolidationExecutorStore) LoadMemoryConsolidationPass(_ context.Context, lease MemoryConsolidationLease, _ MemoryConsolidationExecutionRequest) (MemoryConsolidationInput, []MemoryConsolidationProposal, bool, error) {
+	if s.pass == nil {
+		return MemoryConsolidationInput{}, nil, false, nil
+	}
+	input := s.passInput
+	input.Lease = lease
+	return input, s.pass, true, nil
 }
-func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, _ MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
+func (s *fakeMemoryConsolidationExecutorStore) ReserveMemoryConsolidationPass(_ context.Context, input MemoryConsolidationInput, _ MemoryConsolidationExecutionRequest, proposals []MemoryConsolidationProposal) ([]MemoryConsolidationProposal, error) {
 	if s.pass == nil {
 		s.pass = proposals
+		s.passInput = input
 	}
 	return s.pass, nil
 }

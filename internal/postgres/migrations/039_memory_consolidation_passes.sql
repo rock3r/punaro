@@ -8,6 +8,7 @@ CREATE TABLE brain.memory_consolidation_passes (
     lease_token uuid NOT NULL,
     lease_generation bigint NOT NULL CHECK (lease_generation >= 1),
     source_sha256 bytea NOT NULL CHECK (octet_length(source_sha256)=32),
+    sources jsonb NOT NULL,
     proposals jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     PRIMARY KEY (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id)
@@ -46,7 +47,7 @@ FOR EACH STATEMENT EXECUTE FUNCTION jobs.guard_application_mutation();
 REVOKE ALL ON brain.memory_consolidation_passes FROM PUBLIC, punaro_app;
 REVOKE ALL ON FUNCTION brain.guard_memory_consolidation_pass() FROM PUBLIC;
 GRANT SELECT ON brain.memory_consolidation_passes TO punaro_app;
-GRANT INSERT (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id,lease_token,lease_generation,source_sha256,proposals)
+GRANT INSERT (scope_id,timeline_id,start_sequence,next_sequence,principal_id,project_id,lease_token,lease_generation,source_sha256,sources,proposals)
     ON brain.memory_consolidation_passes TO punaro_app;
 
 CREATE FUNCTION brain.clear_memory_consolidation_passes_on_checkpoint_move()
