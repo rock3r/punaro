@@ -1,6 +1,7 @@
-# Reference single-node production bundle. Run `punaro bootstrap` against the
-# PostgreSQL owner secret after starting only `postgres`; ordinary `up` never
-# migrates a schema. Both the image and pgvector digest are release inputs.
+# Reference single-node production bundle. Start `postgres-bootstrap`, then
+# run `punaro init` to publish the host-local lifecycle and migrate a pristine
+# schema; ordinary Compose startup never migrates an existing schema. Both the
+# daemon image and pgvector digest are release inputs.
 services:
   postgres:
     image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3

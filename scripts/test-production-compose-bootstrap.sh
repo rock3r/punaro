@@ -20,11 +20,15 @@ owner_password="$temporary/owner-password"
 app_password="$temporary/app-password"
 owner_dsn="$temporary/owner.dsn"
 app_dsn="$temporary/app.dsn"
+data_dir="$temporary/data"
+backup_dir="$temporary/backup"
+installation_dir="$temporary/installation"
 printf '%s\n' 'production-owner-password' >"$owner_password"
 printf '%s\n' 'production-app-password' >"$app_password"
 printf '%s\n' 'postgres://punaro_owner:production-owner-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
 printf '%s\n' 'postgres://punaro_app:production-app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
 chmod 600 "$owner_password" "$app_password" "$owner_dsn" "$app_dsn"
+mkdir -m 700 "$data_dir" "$backup_dir"
 
 export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 export PUNARO_RUNTIME_UID="$(id -u)"
@@ -37,5 +41,15 @@ export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" wait postgres-bootstrap
 PGPASSWORD='production-app-password' docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" exec --no-TTY postgres psql --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
-(cd "$root" && go run ./cmd/punaro bootstrap --owner-dsn-file "$owner_dsn" --app-dsn-file "$app_dsn" --owner-name 'production bootstrap')
+(cd "$root" && go run ./cmd/punaro init \
+	--directory "$installation_dir" \
+	--data-dir "$data_dir" \
+	--backup-dir "$backup_dir" \
+	--image "$PUNARO_IMAGE" \
+	--owner-dsn-file "$owner_dsn" \
+	--app-dsn-file "$app_dsn" \
+	--owner-name 'production bootstrap' \
+	--mode proxy \
+	--public-url "$PUNARO_PUBLIC_URL")
+test -f "$installation_dir/installation.json"
 PGPASSWORD='production-app-password' docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" exec --no-TTY postgres psql --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
