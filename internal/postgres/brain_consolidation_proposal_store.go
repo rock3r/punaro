@@ -9,9 +9,14 @@ import (
 	"errors"
 )
 
-// errMemoryConsolidationSourceStale distinguishes an irrecoverably changed
-// reserved page from a retryable lease or scan-coverage fence.
-var errMemoryConsolidationSourceStale = errors.New("consolidation source page is stale")
+var (
+	// errMemoryConsolidationSourceStale distinguishes an irrecoverably changed
+	// reserved page from a retryable lease or scan-coverage fence.
+	errMemoryConsolidationSourceStale = errors.New("consolidation source page is stale")
+	// errMemoryConsolidationProposalRejected marks immutable planner output that
+	// cannot be staged against the reserved source page.
+	errMemoryConsolidationProposalRejected = errors.New("consolidation proposal is permanently rejected")
+)
 
 // StageMemoryConsolidationProposal stages a proposal and its exact source page
 // only while the supplied consolidation lease remains live. It deliberately
@@ -91,16 +96,16 @@ WHERE scope.id=$1`, request.Input.Lease.ScopeID).Scan(&scopeProjectID, &canonica
 		}
 		items, err := lockAndValidateProposalItems(ctx, tx, project.ID, proposal.Steps, proposal.Evidence)
 		if err != nil {
-			return IdempotencyOutcome{}, err
+			return IdempotencyOutcome{}, memoryConsolidationStageError(err)
 		}
 		for _, step := range proposal.Steps {
 			if step.Operation == MemoryProposalStepCreate || step.Operation == MemoryProposalStepUpdate {
 				if err := guardMemoryDocument(ctx, tx, project.ID, step.Document); err != nil {
-					return IdempotencyOutcome{}, err
+					return IdempotencyOutcome{}, memoryConsolidationStageError(err)
 				}
 			}
 			if step.Operation == MemoryProposalStepArchive && (items[step.ItemID].State == MemoryArchived) == step.Archived {
-				return IdempotencyOutcome{}, ErrMemoryProposalAlreadySatisfied
+				return IdempotencyOutcome{}, memoryConsolidationStageError(ErrMemoryProposalAlreadySatisfied)
 			}
 		}
 		if err := checkMemoryProposalCapacity(ctx, tx, request.Input.Lease.ScopeID, proposal.PrincipalID); err != nil {
@@ -150,6 +155,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, proposalID, ordinal, step.Operation, n
 		return MemoryProposalResult{}, errors.New("consolidation proposal transaction could not commit")
 	}
 	return decodeMemoryProposalOutcome(outcome)
+}
+
+func memoryConsolidationStageError(err error) error {
+	var rejection MemorySecretRejection
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrStaleMemoryETag) || errors.Is(err, ErrMemoryProposalAlreadySatisfied) || errors.As(err, &rejection) {
+		return errors.Join(errMemoryConsolidationProposalRejected, err)
+	}
+	return err
 }
 
 // validateMemoryConsolidationProposalScope proves the requested direct project

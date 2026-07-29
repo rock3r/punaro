@@ -181,6 +181,23 @@ func TestMemoryConsolidationExecutorAbandonsStaleReservedPass(t *testing.T) {
 	}
 }
 
+func TestMemoryConsolidationExecutorAbandonsPermanentlyRejectedReservedPass(t *testing.T) {
+	lease := MemoryConsolidationLease{ScopeID: "11111111-1111-4111-8111-111111111111", TimelineID: "22222222-2222-4222-8222-222222222222", Sequence: 4, Holder: "33333333-3333-4333-8333-333333333333", Token: "44444444-4444-4444-8444-444444444444", Generation: 1, Until: time.Now().Add(time.Minute)}
+	input := MemoryConsolidationInput{Lease: lease, TimelineID: lease.TimelineID, NextSequence: 5, Sources: []MemoryConsolidationSource{{ItemID: "55555555-5555-4555-8555-555555555555", Revision: 1, ChangeSequence: 5, Document: json.RawMessage(`{"source":true}`)}}}
+	proposal := MemoryConsolidationProposal{Action: MemoryProposalCreate, Steps: []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "rejected-source", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":true}`)}}}
+	store := &fakeMemoryConsolidationExecutorStore{input: input, stageFailures: 1, stageErr: errMemoryConsolidationProposalRejected}
+	executor, err := NewMemoryConsolidationExecutor(store, fakeMemoryConsolidationPlanner{proposals: []MemoryConsolidationProposal{proposal, {
+		Action: MemoryProposalCreate,
+		Steps:  []MemoryProposalStepInput{{Operation: MemoryProposalStepCreate, LogicalKey: "rejected-source-second", Kind: "brief", Trust: "proposed", Document: json.RawMessage(`{"summary":true}`)}},
+	}}}, MemoryConsolidationPolicy{MaxChanges: 1, MaxProposals: 2, MaxEvidencePerProposal: 1, PassTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.Execute(context.Background(), testMemoryConsolidationExecutionRequest(lease)); !errors.Is(err, ErrStaleMemoryConsolidationLease) || !store.abandoned || store.advanced != input.NextSequence {
+		t.Fatalf("err=%v abandoned=%t advanced=%d", err, store.abandoned, store.advanced)
+	}
+}
+
 type fakeMemoryConsolidationExecutorStore struct {
 	input         MemoryConsolidationInput
 	staged        []MemoryConsolidationProposalRequest

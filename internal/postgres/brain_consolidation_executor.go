@@ -136,7 +136,7 @@ func (e *MemoryConsolidationExecutor) Execute(ctx context.Context, request Memor
 	for ordinal, proposal := range proposals {
 		staged := MemoryProposalCreateRequest{PrincipalID: effectiveRequest.PrincipalID, ProjectID: effectiveRequest.ProjectID, IdempotencyKey: memoryConsolidationProposalIdempotencyKey(input, effectiveRequest.PrincipalID, effectiveRequest.ProjectID, ordinal), Action: proposal.Action, Steps: proposal.Steps, Evidence: proposal.Evidence}
 		if _, err := e.store.StageMemoryConsolidationProposal(passCtx, MemoryConsolidationProposalRequest{Input: input, Proposal: staged}); err != nil {
-			if errors.Is(err, errMemoryConsolidationSourceStale) {
+			if errors.Is(err, errMemoryConsolidationSourceStale) || errors.Is(err, errMemoryConsolidationProposalRejected) {
 				if abandonErr := e.store.AbandonMemoryConsolidationPass(passCtx, input, effectiveRequest); abandonErr != nil {
 					return MemoryConsolidationExecutionResult{}, abandonErr
 				}
