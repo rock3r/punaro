@@ -163,7 +163,7 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, fmt.Errorf("memory mutations require PUNARO_MEMORY_API_ENABLED")
 	}
 	if remoteMCPMetadataEnabled {
-		if !postgresEnabled || !deviceAuthEnabled || (ingressMode != string(ingress.Proxy) && ingressMode != string(ingress.Internet)) || remoteMCPResourceURL != publicURL+"/mcp" || !validRemoteMCPHTTPSURL(remoteMCPResourceURL, true) || !validRemoteMCPAuthorizationServers(remoteMCPAuthorizationServers) {
+		if !postgresEnabled || !deviceAuthEnabled || (ingressMode != string(ingress.Proxy) && ingressMode != string(ingress.Internet)) || remoteMCPResourceURL != strings.TrimSuffix(publicURL, "/")+"/mcp" || !validRemoteMCPHTTPSURL(remoteMCPResourceURL, true) || !validRemoteMCPAuthorizationServers(remoteMCPAuthorizationServers) {
 			return Config{}, fmt.Errorf("remote MCP metadata requires authenticated proxy or Internet ingress, canonical resource URL, and HTTPS authorization servers")
 		}
 	} else if remoteMCPResourceURL != "" || remoteMCPAuthorizationServers != "" {

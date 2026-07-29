@@ -30,7 +30,7 @@ func TestProtectedResourceMetadataIsStrictAndDoesNotMountMCPTransport(t *testing
 }
 
 func TestProtectedResourceMetadataRejectsUnsafeConfiguration(t *testing.T) {
-	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment"} {
+	for _, resource := range []string{"http://mcp.example.test/mcp", "https://mcp.example.test/mcp?query=1", "https://mcp.example.test/mcp#fragment", "https://mcp.example.test//mcp"} {
 		if _, err := New(resource, []string{"https://auth.example.test"}); err == nil {
 			t.Fatalf("unsafe resource accepted: %q", resource)
 		}

@@ -361,6 +361,11 @@ func TestLoadRemoteMCPMetadataIsDarkByDefaultAndRequiresCanonicalOAuthAuthority(
 	if err != nil || !cfg.RemoteMCPMetadataEnabled || cfg.RemoteMCPResourceURL != "https://punaro.example/mcp" || cfg.RemoteMCPAuthorizationServers != "https://auth.example" {
 		t.Fatalf("remote MCP config=%#v err=%v", cfg, err)
 	}
+	t.Setenv("PUNARO_PUBLIC_URL", "https://punaro.example/")
+	cfg, err = Load("")
+	if err != nil || cfg.RemoteMCPResourceURL != "https://punaro.example/mcp" {
+		t.Fatalf("trailing-slash config=%#v err=%v", cfg, err)
+	}
 	t.Setenv("PUNARO_REMOTE_MCP_RESOURCE_URL", "http://punaro.example/mcp")
 	if _, err := Load(""); err == nil {
 		t.Fatal("remote MCP metadata accepted an unsafe resource URL")

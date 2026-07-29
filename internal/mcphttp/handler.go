@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -51,7 +52,7 @@ func New(resource string, authorizationServers []string) (http.Handler, error) {
 
 func validCanonicalHTTPSURL(raw string, permitPath bool) bool {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Host, "@") {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Host, "@") || (parsed.EscapedPath() != "" && path.Clean(parsed.EscapedPath()) != parsed.EscapedPath()) {
 		return false
 	}
 	if !permitPath && parsed.Path != "" && parsed.Path != "/" {
