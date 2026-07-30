@@ -348,6 +348,18 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(gate["is_success"])
 
+    def test_is_clean_bugbot_review_item_requires_cursor_clean_result(self):
+        self.assertTrue(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+        self.assertFalse(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor[bot]", "commit_id": "old",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+
     def test_summarize_bugbot_gate_prefers_pending_rerun_over_old_success(self):
         checks = [
             {

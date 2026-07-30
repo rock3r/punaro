@@ -973,6 +973,22 @@ def normalize_issue_comments(items):
     return out
 
 
+def is_clean_bugbot_review_item(review, head_sha):
+    """Return whether one review is Cursor's clean result for `head_sha`."""
+    if not isinstance(review, dict):
+        return False
+    if str(review.get("kind") or "review") != "review":
+        return False
+    if not is_bugbot_name(review.get("author")):
+        return False
+    if str(review.get("commit_id") or "") != str(head_sha or ""):
+        return False
+    if str(review.get("review_state") or "") != "COMMENTED":
+        return False
+    body = str(review.get("body") or "").strip().lower()
+    return "bugbot reviewed your changes and found no new issues" in body
+
+
 def has_clean_bugbot_review(reviews, head_sha):
     """Return whether Cursor explicitly reported a clean review for `head_sha`.
 
@@ -983,16 +999,7 @@ def has_clean_bugbot_review(reviews, head_sha):
     comment or an older clean review must never make the gate green.
     """
     for review in reviews:
-        if not isinstance(review, dict):
-            continue
-        if not is_bugbot_name(review.get("author")):
-            continue
-        if str(review.get("commit_id") or "") != str(head_sha or ""):
-            continue
-        if str(review.get("review_state") or "") != "COMMENTED":
-            continue
-        body = str(review.get("body") or "").strip().lower()
-        if "bugbot reviewed your changes and found no new issues" in body:
+        if is_clean_bugbot_review_item(review, head_sha):
             return True
     return False
 
@@ -1230,6 +1237,10 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
         kind = item["kind"]
         item_updated_at = str(item.get("updated_at") or item.get("created_at") or "")
 
+        if is_clean_bugbot_review_item(item, head_sha):
+            seen_review.add(item_id)
+            seen_review_updated_at[item_id] = item_updated_at
+            continue
         if kind == "review" and str(item.get("review_state") or "") == "APPROVED":
             seen_review.add(item_id)
             seen_review_updated_at[item_id] = item_updated_at
