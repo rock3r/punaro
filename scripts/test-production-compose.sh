@@ -64,6 +64,14 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 printf '%s' 'owner-password' >"$owner_password"
 
+printf '%s' 'owner/password' >"$owner_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a non-URL-safe owner password' >&2
+	exit 1
+fi
+printf '%s' 'owner-password' >"$owner_password"
+
 printf '\n' >"$app_password"
 base_env
 if "$runner" config >/dev/null 2>&1; then
