@@ -54,6 +54,7 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	echo 'production bootstrap rotated an application role with cross-database ownership' >&2
 	exit 1
 fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname postgres --command 'DROP DATABASE punaro_bootstrap_other WITH (FORCE)'
 (cd "$root" && go run ./cmd/punaro init \
 	--directory "$installation_dir" \
 	--data-dir "$data_dir" \
