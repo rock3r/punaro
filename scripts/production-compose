@@ -27,6 +27,14 @@ require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
 case "$PUNARO_COMPOSE_PROJECT_NAME" in
 	[!a-z0-9]*|*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, and hyphens' ;;
 esac
+case "$PUNARO_PUBLIC_URL" in https://*) ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
+case "$PUNARO_PUBLIC_URL" in
+	https://|https://*[@?#]*|https://*/*/*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+esac
+public_authority=${PUNARO_PUBLIC_URL#https://}
+case "$public_authority" in
+	localhost|localhost:*|127.*|[[]::1[]]|[[]::[]]|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback or wildcard address' ;;
+esac
 
 repository=${PUNARO_IMAGE%@sha256:*}
 digest=${PUNARO_IMAGE#*@sha256:}

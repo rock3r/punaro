@@ -62,6 +62,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='http://punaro.example'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a non-HTTPS public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_IMAGE='example.invalid/punaro:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 if "$runner" config >/dev/null 2>&1; then
   echo 'production runner accepted an image that punaro init rejects' >&2
