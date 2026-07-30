@@ -28,7 +28,13 @@ require_private_file() {
 	[ -f "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular file"
 	directory=${path%/*}
 	while [ "$directory" != / ]; do
-		if [ -L "$directory" ] && [ "$(file_owner "$directory")" != 0 ]; then fail "$name must not traverse untrusted symlinked directories"; fi
+		if [ -L "$directory" ]; then
+			[ "$(file_owner "$directory")" = 0 ] || fail "$name must not traverse untrusted symlinked directories"
+		fi
+		directory=${directory%/*}; directory=${directory:-/}
+	done
+	directory=$(CDPATH= cd -P -- "${path%/*}" && pwd) || fail "$name must use an existing directory"
+	while [ "$directory" != / ]; do
 		if stat -f '%u %Lp %p' "$directory" >/dev/null 2>&1; then set -- $(stat -f '%u %Lp %p' "$directory"); else set -- $(stat -c '%u %a %a' "$directory"); fi
 		[ "$1" = 0 ] || [ "$1" = "$(id -u)" ] || fail "$name must use directories owned by root or the current operator"
 		case "$2" in *[2367][0-7]|*[0-7][2367]) case "$3" in *1[0-7][0-7][0-7]) ;; *) fail "$name must not traverse group or world writable directories" ;; esac ;; esac
