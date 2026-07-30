@@ -319,14 +319,12 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|bootstrap|up|status|doctor|client|mail|backup|restore|update")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|mail|backup|restore|update")
 		return 2
 	}
 	switch args[0] {
 	case "init":
 		return runInit(args[1:], stdout, stderr)
-	case "bootstrap":
-		return runBootstrap(args[1:], stdout, stderr)
 	case "up":
 		return runUp(args[1:], stdout, stderr)
 	case "status":
@@ -350,55 +348,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	_, _ = fmt.Fprintln(stderr, "unsupported operator command")
 	return 2
-}
-
-// runBootstrap initializes a pristine PostgreSQL pair without publishing an
-// operator installation or generating a Compose stack. It is for an external
-// lifecycle authority such as the reference production Compose bundle.
-func runBootstrap(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	ownerDSN := flags.String("owner-dsn-file", "", "protected schema-owner DSN file")
-	appDSN := flags.String("app-dsn-file", "", "protected application DSN file")
-	ownerName := flags.String("owner-name", "", "first operator display name")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *ownerDSN == "" || *appDSN == "" || *ownerName == "" {
-		return 2
-	}
-	ctx := context.Background()
-	state, err := inspectSchema(ctx, *appDSN)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not inspect the application database")
-		return 1
-	}
-	if state.Classification == punaropostgres.Pristine {
-		if _, err = migratePristinePair(ctx, *appDSN, *ownerDSN); err != nil {
-			_, _ = fmt.Fprintln(stderr, "punaro bootstrap failed")
-			return 1
-		}
-		state, err = inspectSchema(ctx, *appDSN)
-	}
-	if err != nil || state.Classification != punaropostgres.Compatible {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap did not produce a compatible database")
-		return 1
-	}
-	if err := verifyInstallationPair(ctx, *appDSN, *ownerDSN); err != nil {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not verify database roles")
-		return 1
-	}
-	owner, err := inspectOwner(ctx, *appDSN)
-	if err == nil {
-		return writeJSON(stdout, stderr, map[string]any{"status": "bootstrapped", "owner_principal_id": owner.ID})
-	}
-	if !errors.Is(err, punaropostgres.ErrNotFound) {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap could not inspect the installation owner")
-		return 1
-	}
-	owner, err = createOwner(ctx, *ownerDSN, *ownerName)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "punaro bootstrap failed")
-		return 1
-	}
-	return writeJSON(stdout, stderr, map[string]any{"status": "bootstrapped", "owner_principal_id": owner.ID})
 }
 
 func runInit(args []string, stdout, stderr io.Writer) int {
