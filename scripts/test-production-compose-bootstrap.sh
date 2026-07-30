@@ -44,6 +44,7 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	echo 'production bootstrap unexpectedly accepted a DSN password different from its configured secret' >&2
 	exit 1
 fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'CREATE SCHEMA legacy; CREATE TABLE legacy.unsafe (); ALTER SCHEMA legacy OWNER TO punaro_app; ALTER TABLE legacy.unsafe OWNER TO punaro_app'
 printf '%s\n' 'production-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1

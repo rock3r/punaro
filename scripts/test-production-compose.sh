@@ -21,8 +21,8 @@ chmod 700 "$fakebin/docker"
 owner_password="$temporary/owner-password"
 app_password="$temporary/app-password"
 app_dsn="$temporary/app.dsn"
-printf '%s\n' 'owner-password' >"$owner_password"
-printf '%s\n' 'app-password' >"$app_password"
+printf '%s' 'owner-password' >"$owner_password"
+printf '%s' 'app-password' >"$app_password"
 
 printf '%s\n' 'postgres://punaro_app:app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
 chmod 600 "$owner_password" "$app_password" "$app_dsn"
@@ -40,15 +40,23 @@ base_env() {
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
 
-printf '%s\n' 'owner-password' >"$owner_password"
+printf '%s' 'owner-password' >"$owner_password"
 printf '%s' 'owner-password' >"$app_password"
 base_env
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted passwords with the same effective value' >&2
 	exit 1
 fi
+printf '%s' 'owner-password' >"$owner_password"
+printf '%s' 'app-password' >"$app_password"
+
 printf '%s\n' 'owner-password' >"$owner_password"
-printf '%s\n' 'app-password' >"$app_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an owner password containing a newline' >&2
+	exit 1
+fi
+printf '%s' 'owner-password' >"$owner_password"
 
 base_env
 PUNARO_POSTGRES_OWNER_PASSWORD_FILE='relative-owner-password'
@@ -143,13 +151,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 chmod 600 "$app_password"
 
-printf '%s\n' 'owner-password' >"$app_password"
+printf '%s' 'owner-password' >"$app_password"
 base_env
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted identical owner and application passwords' >&2
 	exit 1
 fi
-printf '%s\n' 'app-password' >"$app_password"
+printf '%s' 'app-password' >"$app_password"
 
 base_env
 PUNARO_IMAGE='example.invalid/punaro:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
