@@ -14,6 +14,10 @@ cat >"$fakebin/docker" <<'SH'
 if [ "${PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES:-}" = 1 ]; then
 	[ -z "${COMPOSE_PROFILES:-}" ] && [ -z "${COMPOSE_ENV_FILES:-}" ] && [ "${COMPOSE_DISABLE_ENV_FILE:-}" = 1 ] || exit 1
 fi
+if [ "${PUNARO_TEST_REQUIRE_RECOVERY_PLACEHOLDERS:-}" = 1 ]; then
+	[ -n "${PUNARO_IMAGE:-}" ] && [ -n "${PUNARO_RUNTIME_UID:-}" ] && [ -n "${PUNARO_RUNTIME_GID:-}" ] && [ -n "${PUNARO_PUBLIC_URL:-}" ] || exit 1
+	[ -f "${PUNARO_POSTGRES_OWNER_PASSWORD_FILE:-}" ] && [ -f "${PUNARO_POSTGRES_APP_PASSWORD_FILE:-}" ] && [ -f "${PUNARO_POSTGRES_APP_DSN_FILE:-}" ] || exit 1
+fi
 printf '%s\n' "$*" >"${PUNARO_TEST_DOCKER_ARGS:?}"
 SH
 chmod 700 "$fakebin/docker"
@@ -42,10 +46,12 @@ base_env() {
 
 export PATH="$fakebin:$PATH"
 export PUNARO_TEST_DOCKER_ARGS="$temporary/docker-args"
+export PUNARO_TEST_REQUIRE_RECOVERY_PLACEHOLDERS=1
 unset PUNARO_IMAGE PUNARO_RUNTIME_UID PUNARO_RUNTIME_GID PUNARO_PUBLIC_URL PUNARO_POSTGRES_OWNER_PASSWORD_FILE PUNARO_POSTGRES_APP_PASSWORD_FILE PUNARO_POSTGRES_APP_DSN_FILE
 export PUNARO_COMPOSE_PROJECT_NAME='punaro-production-recovery'
 "$runner" ps
 grep -Fqx "compose --project-name punaro-production-recovery -f $root/deploy/compose/production.yaml ps" "$temporary/docker-args"
+unset PUNARO_TEST_REQUIRE_RECOVERY_PLACEHOLDERS
 
 : >"$owner_password"
 base_env

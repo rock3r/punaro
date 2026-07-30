@@ -38,6 +38,12 @@ export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$owner_password"
 export PUNARO_POSTGRES_APP_PASSWORD_FILE="$app_password"
 export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 
+(
+	unset PUNARO_IMAGE PUNARO_RUNTIME_UID PUNARO_RUNTIME_GID PUNARO_PUBLIC_URL PUNARO_POSTGRES_OWNER_PASSWORD_FILE PUNARO_POSTGRES_APP_PASSWORD_FILE PUNARO_POSTGRES_APP_DSN_FILE
+	export PUNARO_COMPOSE_PROJECT_NAME="$project"
+	"$root/scripts/production-compose" ps
+)
+
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach --wait postgres
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' >/dev/null 2>&1; then

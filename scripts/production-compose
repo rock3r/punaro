@@ -61,6 +61,25 @@ esac
 case "$PUNARO_COMPOSE_PROJECT_NAME" in
 	[!a-z0-9]*|*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, and hyphens' ;;
 esac
+if [ "$recovery_command" -eq 1 ]; then
+	recovery_dir=$(umask 077 && mktemp -d) || fail 'could not create recovery Compose placeholders'
+	trap 'rm -rf "$recovery_dir"' EXIT INT TERM
+	: >"$recovery_dir/secret"
+	chmod 600 "$recovery_dir/secret"
+	export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+	export PUNARO_RUNTIME_UID=1 PUNARO_RUNTIME_GID=1 PUNARO_PUBLIC_URL='https://recovery.invalid'
+	export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$recovery_dir/secret"
+	export PUNARO_POSTGRES_APP_PASSWORD_FILE="$recovery_dir/secret"
+	export PUNARO_POSTGRES_APP_DSN_FILE="$recovery_dir/secret"
+	unset COMPOSE_PROFILES COMPOSE_ENV_FILES
+	export COMPOSE_DISABLE_ENV_FILE=1
+	if docker compose --project-name "$PUNARO_COMPOSE_PROJECT_NAME" -f "$root/deploy/compose/production.yaml" "$@"; then
+		status=0
+	else
+		status=$?
+	fi
+	exit "$status"
+fi
 if [ "$recovery_command" -eq 0 ]; then
 	: "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
 	: "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
