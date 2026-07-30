@@ -40,6 +40,14 @@ base_env() {
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
 
+: >"$owner_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an empty owner password' >&2
+	exit 1
+fi
+printf '%s' 'owner-password' >"$owner_password"
+
 printf '\n' >"$app_password"
 base_env
 if "$runner" config >/dev/null 2>&1; then
