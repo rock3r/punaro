@@ -118,7 +118,7 @@ case "$public_authority" in
 	\[*\]) bracket_host=${public_authority#\[}; bracket_host=${bracket_host%\]}; require_ipv6_literal "$bracket_host" ;;
 	\[*\]:*) bracket_host=${public_authority#\[}; bracket_host=${bracket_host%%]*}; require_ipv6_literal "$bracket_host"; port=${public_authority#*]}; case "$port" in :*) port=${port#:} ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac; case "$port" in ''|*[!0-9]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac; [ "$port" -gt 0 ] && [ "$port" -le 65535 ] || fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
 	\[*\]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
-	*:* ) port=${public_authority##*:}; case "$port" in ''|*[!0-9]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac; [ "$port" -gt 0 ] && [ "$port" -le 65535 ] || fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+	*:* ) host=${public_authority%:*}; port=${public_authority##*:}; case "$host" in ''|*:* ) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac; case "$port" in ''|*[!0-9]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac; [ "$port" -gt 0 ] && [ "$port" -le 65535 ] || fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
 esac
 case "$public_authority" in
 	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]0:0:0:0:0:0:0:1[]]|[[]0:0:0:0:0:0:0:1[]]:*|[[]::[]]|[[]::[]]:*|[[]::[fF][fF][fF][fF]:*[]]|[[]::[fF][fF][fF][fF]:*[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address' ;;

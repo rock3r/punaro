@@ -187,6 +187,20 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://:443'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an empty hostname with a port' >&2
+	exit 1
+fi
+
+base_env
+PUNARO_PUBLIC_URL='https://punaro.example:443:444'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a hostname with multiple port separators' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://[::1]:443'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted an IPv6 loopback public URL' >&2
