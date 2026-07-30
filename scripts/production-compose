@@ -36,10 +36,13 @@ fi
 case "$repository" in
 	*[!a-z0-9./:_-]*|*//*|/*|*/|*::*|*:) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
-repository_leaf=${repository##*/}
-case "$repository_leaf" in
-	*:*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
-esac
+if ! printf '%s\n' "$repository" | awk '
+	{
+		pattern = "^((([a-z0-9]([a-z0-9-]*[a-z0-9])?)(\\.([a-z0-9]([a-z0-9-]*[a-z0-9])?))*(\:[0-9]+)?/)?[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*(/[a-z0-9]+(([._]|__|-+)[a-z0-9]+)*)*)$"
+		exit !($0 ~ pattern)
+	}' >/dev/null; then
+	fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest'
+fi
 case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
