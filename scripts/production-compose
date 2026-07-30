@@ -105,6 +105,7 @@ case "${1:-}" in
 		require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
 		owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
 		app_password=$(cat "$PUNARO_POSTGRES_APP_PASSWORD_FILE")
+		[ "$(wc -l <"$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")" -le 1 ] || fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE must be a single line'
 		if [ "$owner_password" = "$app_password" ]; then fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'; fi
 		;;
 esac

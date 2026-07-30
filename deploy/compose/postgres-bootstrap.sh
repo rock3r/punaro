@@ -18,6 +18,7 @@ export PGPASSFILE="$temporary/pgpass"
 psql --set=ON_ERROR_STOP=1 --host 127.0.0.1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 	<<'SQL'
 \set app_password `cat /run/secrets/postgres_app_password`
+BEGIN;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
@@ -38,4 +39,5 @@ BEGIN
   END LOOP;
 END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
+COMMIT;
 SQL
