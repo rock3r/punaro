@@ -303,6 +303,51 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertEqual(gate["conclusion"], "failure")
         self.assertFalse(gate["is_success"])
 
+    def test_reconcile_clean_bugbot_review_accepts_sha_matched_neutral_check(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "skipped",
+                "is_success": False,
+                "source": "checks",
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "abc123",
+                    "review_state": "COMMENTED",
+                    "body": "✅ Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertTrue(gate["is_success"])
+        self.assertEqual(gate["conclusion"], "success")
+        self.assertEqual(gate["source"], "clean_bugbot_review")
+
+    def test_reconcile_clean_bugbot_review_rejects_old_review(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "neutral",
+                "is_success": False,
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "old-sha",
+                    "review_state": "COMMENTED",
+                    "body": "Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertFalse(gate["is_success"])
+
     def test_summarize_bugbot_gate_prefers_pending_rerun_over_old_success(self):
         checks = [
             {

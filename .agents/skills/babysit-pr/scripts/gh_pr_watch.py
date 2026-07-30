@@ -50,7 +50,9 @@ CODERABBIT_CHECK_KEYWORDS = {
 }
 # Workflow name keyword fragments used to identify Cursor Bugbot CI runs.
 # The merge gate is hard-blocked unless the latest Bugbot run for the current
-# head SHA is `completed` with conclusion `success`.
+# head SHA is `completed` with conclusion `success`. Cursor currently reports
+# a clean manual Bugbot review as a neutral/skipped check, though, so the
+# accompanying SHA-matched clean review is also accepted (see below).
 BUGBOT_WORKFLOW_KEYWORDS = {
     "cursor",
     "bugbot",
@@ -964,11 +966,60 @@ def normalize_issue_comments(items):
                 "body": str(item.get("body") or ""),
                 "path": None,
                 "line": None,
-                "commit_id": None,
+                "commit_id": str(item.get("commit_id") or ""),
                 "url": str(item.get("html_url") or ""),
             }
         )
     return out
+
+
+def has_clean_bugbot_review(reviews, head_sha):
+    """Return whether Cursor explicitly reported a clean review for `head_sha`.
+
+    Cursor Bugbot sometimes completes its GitHub check with a neutral/skipped
+    conclusion after a manually-triggered run, despite posting its authoritative
+    "found no new issues" review. Accept only that exact result from Cursor and
+    only when GitHub associates it with the current head SHA; a generic bot
+    comment or an older clean review must never make the gate green.
+    """
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        if not is_bugbot_name(review.get("author")):
+            continue
+        if str(review.get("commit_id") or "") != str(head_sha or ""):
+            continue
+        if str(review.get("review_state") or "") != "COMMENTED":
+            continue
+        body = str(review.get("body") or "").strip().lower()
+        if "bugbot reviewed your changes and found no new issues" in body:
+            return True
+    return False
+
+
+def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
+    """Accept Cursor's clean review when its completed check is neutral/skipped."""
+    if not isinstance(bugbot_gate, dict):
+        return bugbot_gate
+    if bugbot_gate.get("is_success"):
+        return bugbot_gate
+    if str(bugbot_gate.get("status") or "") != "completed":
+        return bugbot_gate
+    if str(bugbot_gate.get("conclusion") or "") not in {"neutral", "skipped"}:
+        return bugbot_gate
+    if not has_clean_bugbot_review(reviews, head_sha):
+        return bugbot_gate
+
+    reconciled = dict(bugbot_gate)
+    reconciled.update(
+        {
+            "conclusion": "success",
+            "is_success": True,
+            "source": "clean_bugbot_review",
+            "original_conclusion": bugbot_gate.get("conclusion"),
+        }
+    )
+    return reconciled
 
 
 def normalize_review_comments(items):
@@ -990,7 +1041,7 @@ def normalize_review_comments(items):
                 "body": str(item.get("body") or ""),
                 "path": item.get("path"),
                 "line": line,
-                "commit_id": str(item.get("commit_id") or ""),
+                "commit_id": None,
                 "url": str(item.get("html_url") or ""),
             }
         )
@@ -1019,7 +1070,7 @@ def normalize_reviews(items):
                 "review_state": str(item.get("state") or "").upper(),
                 "path": None,
                 "line": None,
-                "commit_id": None,
+                "commit_id": str(item.get("commit_id") or ""),
                 "url": str(item.get("html_url") or ""),
             }
         )
@@ -1549,7 +1600,22 @@ def collect_snapshot(args):
         fresh_state=fresh_state,
         authenticated_login=authenticated_login,
     )
-
+    # Cursor can post a successful review while exposing its check as neutral.
+    # Reconcile only that narrowly identified result before deriving actions.
+    # Its skipped check is then accounted for as an accepted Bugbot result;
+    # unrelated skipped checks remain merge blockers.
+    review_payload = gh_api_list_paginated(
+        comment_endpoints(pr["repo"], pr["number"])["review"], repo=pr["repo"]
+    )
+    all_reviews = normalize_reviews(review_payload)
+    bugbot_gate = reconcile_clean_bugbot_review(
+        bugbot_gate, all_reviews, pr["head_sha"]
+    )
+    if bugbot_gate.get("source") == "clean_bugbot_review":
+        checks_summary = dict(checks_summary)
+        checks_summary["skipping_count"] = max(
+            0, int(checks_summary.get("skipping_count") or 0) - 1
+        )
     # Track when checks first went all_terminal for the current head SHA.
     # This timestamp is used to enforce a grace period before emitting
     # stop_ready_to_merge, preventing a race where the script declares the PR
