@@ -71,6 +71,13 @@ BEGIN
     EXECUTE format('REVOKE %I FROM punaro_app', membership.rolname);
   END LOOP;
 END $$;
+DO $$
+DECLARE member_name record;
+BEGIN
+  FOR member_name IN SELECT member.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE parent.rolname = 'punaro_app' LOOP
+    EXECUTE format('REVOKE punaro_app FROM %I', member_name.rolname);
+  END LOOP;
+END $$;
 REVOKE CREATE ON DATABASE punaro FROM punaro_app;
 DO $$
 DECLARE schema_name record;
