@@ -79,4 +79,5 @@ if [ "$owner_password" = "$app_password" ]; then
 	fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'
 fi
 
+unset COMPOSE_PROFILES
 exec docker compose --project-name "$PUNARO_COMPOSE_PROJECT_NAME" -f "$root/deploy/compose/production.yaml" "$@"
