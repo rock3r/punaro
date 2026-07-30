@@ -30,6 +30,7 @@ account, then use it to own the DSN file:
 ```sh
 export PUNARO_RUNTIME_UID="$(id -u)"
 export PUNARO_RUNTIME_GID="$(id -g)"
+export PUNARO_COMPOSE_PROJECT_NAME='punaro-prod-a1b2c3'
 chown "$PUNARO_RUNTIME_UID:$PUNARO_RUNTIME_GID" APP_DSN_FILE
 chmod 0400 APP_DSN_FILE
 ```
@@ -53,6 +54,11 @@ Punaro lifecycle. The initial `punaro init` owns the daemon Compose artifact
 and writes the installation record required by `punaro update`; do not enable
 the `reference-daemon` profile or start the reference bundle's `punarod`
 service separately.
+
+Set `PUNARO_COMPOSE_PROJECT_NAME` once to a unique, lowercase installation ID
+(for example `punaro-prod-a1b2c3`). Every wrapper invocation passes it
+explicitly to Docker Compose, preventing another checkout or an ambient
+`COMPOSE_PROJECT_NAME` from sharing or deleting this installation's volumes.
 
 Create private, non-overlapping daemon data, backup, and installation
 directories outside the repository, then initialize and start the daemon:

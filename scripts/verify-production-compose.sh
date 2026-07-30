@@ -36,6 +36,7 @@ fi
 grep -Fq 'listen_addresses=127.0.0.1' "$compose_file"
 grep -Fq 'PUNARO_RUNTIME_UID' docs/production-compose.md
 grep -Fq 'PUNARO_RUNTIME_GID' docs/production-compose.md
+grep -Fq 'PUNARO_COMPOSE_PROJECT_NAME' docs/production-compose.md
 grep -Fq 'pinned by a lowercase sha256 digest' scripts/production-compose
 if grep -Eq '^[[:space:]]+ports:' "$compose_file"; then
 	echo "production services must not publish host ports" >&2

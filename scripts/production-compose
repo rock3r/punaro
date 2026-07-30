@@ -20,9 +20,13 @@ require_numeric_nonroot() {
 : "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
 : "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
 : "${PUNARO_RUNTIME_GID:?PUNARO_RUNTIME_GID is required}"
+: "${PUNARO_COMPOSE_PROJECT_NAME:?PUNARO_COMPOSE_PROJECT_NAME is required}"
 : "${PUNARO_PUBLIC_URL:?PUNARO_PUBLIC_URL is required}"
 require_numeric_nonroot PUNARO_RUNTIME_UID "$PUNARO_RUNTIME_UID"
 require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
+case "$PUNARO_COMPOSE_PROJECT_NAME" in
+	*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must contain only lowercase letters, digits, underscores, and hyphens' ;;
+esac
 
 repository=${PUNARO_IMAGE%@sha256:*}
 digest=${PUNARO_IMAGE#*@sha256:}
@@ -40,4 +44,4 @@ case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
 
-exec docker compose -f "$root/deploy/compose/production.yaml" "$@"
+exec docker compose --project-name "$PUNARO_COMPOSE_PROJECT_NAME" -f "$root/deploy/compose/production.yaml" "$@"

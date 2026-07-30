@@ -29,6 +29,7 @@ base_env() {
   export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   export PUNARO_RUNTIME_UID=1000
   export PUNARO_RUNTIME_GID=1000
+  export PUNARO_COMPOSE_PROJECT_NAME='punaro-production-test'
   export PUNARO_PUBLIC_URL='https://punaro.example'
   export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$owner_password"
   export PUNARO_POSTGRES_APP_PASSWORD_FILE="$app_password"
@@ -37,12 +38,19 @@ base_env() {
 
 base_env
 "$runner" config
-grep -Fqx "compose -f $root/deploy/compose/production.yaml config" "$temporary/docker-args"
+grep -Fqx "compose --project-name punaro-production-test -f $root/deploy/compose/production.yaml config" "$temporary/docker-args"
 
 base_env
 PUNARO_IMAGE='example.invalid/punaro:latest'
 if "$runner" config >/dev/null 2>&1; then
   echo 'production runner accepted an unpinned image' >&2
+  exit 1
+fi
+
+base_env
+PUNARO_COMPOSE_PROJECT_NAME='unsafe/name'
+if "$runner" config >/dev/null 2>&1; then
+  echo 'production runner accepted an unsafe Compose project name' >&2
   exit 1
 fi
 
