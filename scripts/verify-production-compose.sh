@@ -22,6 +22,10 @@ if [ "$(grep -Fc 'no-new-privileges:true' "$compose_file")" -lt 2 ]; then
 	echo "production bootstrap and daemon must forbid privilege escalation" >&2
 	exit 1
 fi
+grep -Fq '      - DAC_OVERRIDE' "$compose_file"
+grep -Fq '      - CHOWN' "$compose_file"
+grep -Fq '      - SETUID' "$compose_file"
+grep -Fq '      - SETGID' "$compose_file"
 grep -Fq 'service_completed_successfully' "$compose_file"
 grep -Fq 'pg_isready --host 127.0.0.1 -U punaro_owner -d punaro' "$compose_file"
 grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"
