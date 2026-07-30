@@ -215,6 +215,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://[0:0:0:0:0:0:0:0]'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an expanded IPv6 unspecified public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://[not-an-ip]'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted a non-IP bracketed public URL authority' >&2

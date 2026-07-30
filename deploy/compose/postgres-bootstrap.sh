@@ -60,6 +60,40 @@ END $$;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
+DO $$
+DECLARE object record;
+BEGIN
+  FOR object IN
+    SELECT namespace.nspname, relation.relname, relation.relkind
+    FROM pg_class relation
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+  LOOP
+    IF object.relkind = 'S' THEN
+      EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM punaro_app', object.nspname, object.relname);
+    ELSE
+      EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM punaro_app', object.nspname, object.relname);
+    END IF;
+  END LOOP;
+  FOR object IN
+    SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind
+    FROM pg_proc procedure
+    JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+    WHERE procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  LOOP
+    IF object.prokind = 'p' THEN
+      EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM punaro_app', object.nspname, object.proname, object.arguments);
+    ELSE
+      EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM punaro_app', object.nspname, object.proname, object.arguments);
+    END IF;
+  END LOOP;
+  FOR object IN
+    SELECT nspname FROM pg_namespace WHERE nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  LOOP
+    EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM punaro_app', object.nspname);
+  END LOOP;
+END $$;
 REASSIGN OWNED BY punaro_app TO punaro_owner;
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
 ALTER ROLE punaro_app RESET ALL;
