@@ -131,6 +131,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://punaro\example'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a backslash in its public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_IMAGE='example.invalid/punaro:latest'
 if "$runner" config >/dev/null 2>&1; then
   echo 'production runner accepted an unpinned image' >&2
@@ -211,6 +218,13 @@ base_env
 PUNARO_PUBLIC_URL='https://[0:0:0:0:0:0:0:1]'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted an expanded IPv6 loopback public URL' >&2
+	exit 1
+fi
+
+base_env
+PUNARO_PUBLIC_URL='https://[0::1]'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a compressed IPv6 loopback public URL' >&2
 	exit 1
 fi
 

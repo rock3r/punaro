@@ -44,16 +44,26 @@ require_safe_ipv6_literal() {
 	value=$1
 	require_ipv6_literal "$value"
 	if printf '%s\n' "$value" | awk '
-		function nonzero_groups(part,    count, item, i, values) {
-			if (part == "") return 0
+		function inspect_groups(part,    count, i, values) {
+			if (part == "") return
 			count = split(part, values, ":")
-			for (i = 1; i <= count; i++) if (values[i] !~ /^0+$/) return 1
-			return 0
+			for (i = 1; i <= count; i++) {
+				if (values[i] !~ /^0+$/) nonzero++
+				last = values[i]
+			}
 		}
 		{
 			first = index($0, "::")
-			if (first) exit nonzero_groups(substr($0, 1, first - 1)) || nonzero_groups(substr($0, first + 2))
-			exit nonzero_groups($0)
+			if (first) {
+				right = substr($0, first + 2)
+				inspect_groups(substr($0, 1, first - 1)); inspect_groups(right)
+				if (right != "" && nonzero == 1 && last ~ /^0*1$/) exit 0
+			} else {
+				inspect_groups($0)
+				if (nonzero == 1 && last ~ /^0*1$/) exit 0
+			}
+			if (nonzero == 0) exit 0
+			exit 1
 		}' >/dev/null; then
 		fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
 	fi
@@ -127,7 +137,7 @@ if [ "$recovery_command" -eq 0 ]; then
 	require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
 case "$PUNARO_PUBLIC_URL" in https://*) ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$PUNARO_PUBLIC_URL" in
-	https://|*[[:space:]]*|*'$'*|*'"'*|*"'"*|*'\\'*|*'%'*|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+	https://|*[[:space:]]*|*'$'*|*'"'*|*"'"*|*'\'*|*'%'*|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
 esac
 public_authority=${PUNARO_PUBLIC_URL#https://}
 case "$public_authority" in */) public_authority=${public_authority%/} ;; esac
