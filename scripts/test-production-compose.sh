@@ -62,8 +62,8 @@ base_env
 grep -Fqx "compose --project-name punaro-production-test -f $root/deploy/compose/production.yaml config" "$temporary/docker-args"
 
 base_env
-PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES=1
-COMPOSE_PROFILES=reference-daemon
+export PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES=1
+export COMPOSE_PROFILES=reference-daemon
 if ! "$runner" config >/dev/null 2>&1; then
 	echo 'production runner propagated ambient Compose profiles' >&2
 	exit 1
