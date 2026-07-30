@@ -12,13 +12,8 @@ services:
       POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     secrets:
       - postgres_owner_password
-      - postgres_app_password
     volumes:
       - postgres-data:/var/lib/postgresql
-      - ./postgres-entrypoint.sh:/usr/local/bin/punaro-postgres-entrypoint.sh:ro
-    entrypoint: ["/usr/local/bin/punaro-postgres-entrypoint.sh"]
-    tmpfs:
-      - /run/punaro-secrets:mode=0700,size=1m
     command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
     network_mode: host
     healthcheck:

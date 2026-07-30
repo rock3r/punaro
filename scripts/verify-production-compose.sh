@@ -12,7 +12,10 @@ grep -Fq 'PUNARO_POSTGRES_DSN_FILE: /run/secrets/postgres_app_dsn' "$compose_fil
 grep -Fq 'POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password' "$compose_file"
 grep -Fq 'POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256' "$compose_file"
 grep -Fq 'postgres_app_password' "$compose_file"
-grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
+if sed -n '/^  postgres:/,/^  postgres-bootstrap:/p' "$compose_file" | grep -Fq 'postgres_app_password'; then
+	echo 'postgres must not receive the application password secret' >&2
+	exit 1
+fi
 grep -Fq 'postgres-bootstrap:' "$compose_file"
 if [ "$(grep -Fc 'read_only: true' "$compose_file")" -lt 2 ]; then
 	echo "production bootstrap and daemon must use read-only filesystems" >&2
@@ -29,12 +32,13 @@ grep -Fq '      - SETGID' "$compose_file"
 grep -Fq 'service_completed_successfully' "$compose_file"
 grep -Fq 'pg_isready --host 127.0.0.1 -U punaro_owner -d punaro' "$compose_file"
 grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"
-grep -Fq '/run/punaro-secrets:mode=0700,size=1m' "$compose_file"
 grep -Fq "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')" deploy/compose/postgres-bootstrap.sh
 grep -Fq 'REASSIGN OWNED BY punaro_app TO punaro_owner;' deploy/compose/postgres-bootstrap.sh
 grep -Fq 'PUBLIC retains CREATE' deploy/compose/postgres-bootstrap.sh
 grep -Fq '\set app_password `cat /tmp/punaro-bootstrap-secrets/app-password`' deploy/compose/postgres-bootstrap.sh
 grep -Fq "ALTER ROLE punaro_app LOGIN PASSWORD :'app_password'" deploy/compose/postgres-bootstrap.sh
+grep -Fq 'ALTER ROLE punaro_app RESET ALL;' deploy/compose/postgres-bootstrap.sh
+grep -Fq 'ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;' deploy/compose/postgres-bootstrap.sh
 if grep -Fq -- '--set=app_password=' deploy/compose/postgres-bootstrap.sh; then
 	echo "production bootstrap must not expose the application password in psql argv" >&2
 	exit 1

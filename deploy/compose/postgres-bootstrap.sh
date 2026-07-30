@@ -62,6 +62,8 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
 REASSIGN OWNED BY punaro_app TO punaro_owner;
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+ALTER ROLE punaro_app RESET ALL;
+ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;
 DO $$
 DECLARE membership record;
 BEGIN
