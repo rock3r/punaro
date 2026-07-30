@@ -40,6 +40,13 @@ base_env() {
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
 
+export PATH="$fakebin:$PATH"
+export PUNARO_TEST_DOCKER_ARGS="$temporary/docker-args"
+unset PUNARO_IMAGE PUNARO_RUNTIME_UID PUNARO_RUNTIME_GID PUNARO_PUBLIC_URL PUNARO_POSTGRES_OWNER_PASSWORD_FILE PUNARO_POSTGRES_APP_PASSWORD_FILE PUNARO_POSTGRES_APP_DSN_FILE
+export PUNARO_COMPOSE_PROJECT_NAME='punaro-production-recovery'
+"$runner" ps
+grep -Fqx "compose --project-name punaro-production-recovery -f $root/deploy/compose/production.yaml ps" "$temporary/docker-args"
+
 : >"$owner_password"
 base_env
 if "$runner" config >/dev/null 2>&1; then

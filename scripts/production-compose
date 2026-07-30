@@ -53,16 +53,21 @@ require_private_file() {
 	case "$2" in *[1-7][0-7]|*[0-7][1-7]) fail "$name must not grant group or world permissions" ;; esac
 }
 
-: "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
-: "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
-: "${PUNARO_RUNTIME_GID:?PUNARO_RUNTIME_GID is required}"
+case "${1:-}" in
+	down|stop|logs|ps) recovery_command=1 ;;
+	*) recovery_command=0 ;;
+esac
 : "${PUNARO_COMPOSE_PROJECT_NAME:?PUNARO_COMPOSE_PROJECT_NAME is required}"
-: "${PUNARO_PUBLIC_URL:?PUNARO_PUBLIC_URL is required}"
-require_numeric_nonroot PUNARO_RUNTIME_UID "$PUNARO_RUNTIME_UID"
-require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
 case "$PUNARO_COMPOSE_PROJECT_NAME" in
 	[!a-z0-9]*|*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, and hyphens' ;;
 esac
+if [ "$recovery_command" -eq 0 ]; then
+	: "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
+	: "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
+	: "${PUNARO_RUNTIME_GID:?PUNARO_RUNTIME_GID is required}"
+	: "${PUNARO_PUBLIC_URL:?PUNARO_PUBLIC_URL is required}"
+	require_numeric_nonroot PUNARO_RUNTIME_UID "$PUNARO_RUNTIME_UID"
+	require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
 case "$PUNARO_PUBLIC_URL" in https://*) ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$PUNARO_PUBLIC_URL" in
 	https://|*[[:space:]]*|*'$'*|*'"'*|*"'"*|*'\\'*|*'%'*|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
@@ -98,6 +103,7 @@ fi
 case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
+fi
 case "${1:-}" in
 	down|stop|logs|ps) ;;
 	*)
