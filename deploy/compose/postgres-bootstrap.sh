@@ -19,6 +19,18 @@ psql --set=ON_ERROR_STOP=1 --host 127.0.0.1 --username "$POSTGRES_USER" --dbname
 	<<'SQL'
 \set app_password `cat /run/secrets/postgres_app_password`
 BEGIN;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_database database, aclexplode(coalesce(database.datacl, acldefault('d', database.datdba))) privilege
+    WHERE database.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE'
+  ) OR EXISTS (
+    SELECT 1 FROM pg_namespace schema, aclexplode(coalesce(schema.nspacl, acldefault('n', schema.nspowner))) privilege
+    WHERE schema.nspname !~ '^pg_' AND schema.nspname <> 'information_schema' AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE'
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while PUBLIC retains CREATE; revoke it and rerun bootstrap';
+  END IF;
+END $$;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
