@@ -96,6 +96,9 @@ BEGIN
 END $$;
 REASSIGN OWNED BY punaro_app TO punaro_owner;
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE usename = 'punaro_app' AND pid <> pg_backend_pid();
 ALTER ROLE punaro_app RESET ALL;
 ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;
 DO $$

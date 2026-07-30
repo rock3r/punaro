@@ -55,6 +55,16 @@ printf '%s\n' 'production-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "ALTER ROLE punaro_app SET default_transaction_read_only = on; ALTER ROLE punaro_app IN DATABASE punaro SET default_transaction_read_only = on; ALTER ROLE punaro_app CONNECTION LIMIT 0 VALID UNTIL '2000-01-01'"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
+(docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT pg_sleep(30)' >/dev/null 2>&1) & stale_session=$!
+sleep 1
+printf '%s\n' 'rotated-app-password' >"$app_password"
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+if wait "$stale_session"; then
+	echo 'production bootstrap retained an application session authenticated with the old password' >&2
+	exit 1
+fi
+printf '%s\n' 'production-app-password' >"$app_password"
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT * FROM legacy.unsafe' >/dev/null 2>&1; then
 	echo 'production bootstrap retained an explicit application-role grant on a reassigned legacy object' >&2
 	exit 1
