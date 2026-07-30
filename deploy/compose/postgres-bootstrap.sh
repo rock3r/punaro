@@ -6,9 +6,9 @@ if [ "$(id -u)" = 0 ]; then
 	(umask 077 && mkdir "$staging")
 	cp /run/secrets/postgres_owner_password "$staging/owner-password"
 	cp /run/secrets/postgres_app_password "$staging/app-password"
-	chown -R 999:999 "$staging"
 	chmod 700 "$staging"
 	chmod 600 "$staging/owner-password" "$staging/app-password"
+	chown -R 999:999 "$staging"
 	exec gosu 999:999 "$0" "$@"
 fi
 trap 'rm -rf "$staging"' EXIT INT TERM
