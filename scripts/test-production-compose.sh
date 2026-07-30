@@ -143,6 +143,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://[::ffff:7f00:1]'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a hexadecimal IPv4-mapped loopback public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://punaro.example/mcp'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted a non-root public URL path' >&2
