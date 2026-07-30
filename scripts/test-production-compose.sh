@@ -98,6 +98,14 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 chmod 600 "$app_password"
 
+printf '%s\n' 'owner-password' >"$app_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted identical owner and application passwords' >&2
+	exit 1
+fi
+printf '%s\n' 'app-password' >"$app_password"
+
 base_env
 PUNARO_IMAGE='example.invalid/punaro:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 if "$runner" config >/dev/null 2>&1; then

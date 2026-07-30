@@ -42,7 +42,7 @@ case "$PUNARO_COMPOSE_PROJECT_NAME" in
 esac
 case "$PUNARO_PUBLIC_URL" in https://*) ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$PUNARO_PUBLIC_URL" in
-	https://|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+	https://|*' '*|*'$'*|*'"'*|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
 esac
 public_authority=${PUNARO_PUBLIC_URL#https://}
 case "$public_authority" in */) public_authority=${public_authority%/} ;; esac
@@ -72,5 +72,8 @@ esac
 require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
 require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
 require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
+if cmp -s "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE" "$PUNARO_POSTGRES_APP_PASSWORD_FILE"; then
+	fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'
+fi
 
 exec docker compose --project-name "$PUNARO_COMPOSE_PROJECT_NAME" -f "$root/deploy/compose/production.yaml" "$@"
