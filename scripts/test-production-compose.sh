@@ -90,6 +90,14 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 chmod 600 "$owner_password"
 
+chmod 620 "$app_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a group-writable application password file' >&2
+	exit 1
+fi
+chmod 600 "$app_password"
+
 base_env
 PUNARO_IMAGE='example.invalid/punaro:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 if "$runner" config >/dev/null 2>&1; then
