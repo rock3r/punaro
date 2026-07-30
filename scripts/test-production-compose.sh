@@ -40,6 +40,22 @@ base_env() {
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
 
+printf '\n' >"$app_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an effectively empty application password' >&2
+	exit 1
+fi
+printf '%s' 'app-password' >"$app_password"
+
+printf '%s\n' 'postgres://punaro_app:wrong-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an application DSN with the wrong password' >&2
+	exit 1
+fi
+printf '%s\n' 'postgres://punaro_app:app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
+
 printf '%s' 'owner-password' >"$owner_password"
 printf '%s' 'owner-password' >"$app_password"
 base_env

@@ -14,6 +14,15 @@ grep -Fq 'POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256' "$compose_file"
 grep -Fq 'postgres_app_password' "$compose_file"
 grep -Fq '/usr/local/bin/punaro-postgres-entrypoint.sh' "$compose_file"
 grep -Fq 'postgres-bootstrap:' "$compose_file"
+grep -Fq 'user: "999:999"' "$compose_file"
+if [ "$(grep -Fc 'read_only: true' "$compose_file")" -lt 2 ]; then
+	echo "production bootstrap and daemon must use read-only filesystems" >&2
+	exit 1
+fi
+if [ "$(grep -Fc 'no-new-privileges:true' "$compose_file")" -lt 2 ]; then
+	echo "production bootstrap and daemon must forbid privilege escalation" >&2
+	exit 1
+fi
 grep -Fq 'service_completed_successfully' "$compose_file"
 grep -Fq 'pg_isready --host 127.0.0.1 -U punaro_owner -d punaro' "$compose_file"
 grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"

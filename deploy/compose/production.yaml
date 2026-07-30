@@ -32,6 +32,14 @@ services:
   postgres-bootstrap:
     image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3
     entrypoint: ["/usr/local/bin/punaro-postgres-bootstrap.sh"]
+    user: "999:999"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:mode=0700,noexec,nosuid,nodev,size=16m
     environment:
       POSTGRES_DB: punaro
       POSTGRES_USER: punaro_owner

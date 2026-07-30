@@ -40,7 +40,9 @@ permissions. The PostgreSQL owner-password file remains an operator-owned
 secret consumed only by PostgreSQL and its bootstrap service. The app-password secret is
 used by the idempotent role bootstrap service to create the
 least-privilege `punaro_app` role; its value must match the password embedded
-in the application DSN.
+in the application DSN. Use a non-empty URL-safe application password
+(`A-Z`, `a-z`, `0-9`, `.`, `_`, `~`, `-`) and the exact DSN form
+`postgres://punaro_app:APP_PASSWORD@127.0.0.1:5432/punaro?sslmode=disable`.
 
 The owner DSN is a regular non-symlink `0400` file owned by the deployment
 account, for example `postgres://punaro_owner:OWNER_PASSWORD@127.0.0.1:5432/punaro?sslmode=disable`.

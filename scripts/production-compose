@@ -106,6 +106,10 @@ case "${1:-}" in
 		owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
 		app_password=$(cat "$PUNARO_POSTGRES_APP_PASSWORD_FILE")
 		[ "$(wc -l <"$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")" -eq 0 ] || fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE must not contain a newline'
+		[ -n "$app_password" ] || fail 'PUNARO_POSTGRES_APP_PASSWORD_FILE must not be empty'
+		case "$app_password" in *[!A-Za-z0-9._~-]*) fail 'PUNARO_POSTGRES_APP_PASSWORD_FILE must use URL-safe characters' ;; esac
+		app_dsn=$(cat "$PUNARO_POSTGRES_APP_DSN_FILE")
+		[ "$app_dsn" = "postgres://punaro_app:$app_password@127.0.0.1:5432/punaro?sslmode=disable" ] || fail 'PUNARO_POSTGRES_APP_DSN_FILE must identify the configured local punaro_app role'
 		if [ "$owner_password" = "$app_password" ]; then fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'; fi
 		;;
 esac

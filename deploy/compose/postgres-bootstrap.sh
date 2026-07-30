@@ -2,7 +2,8 @@
 set -eu
 
 owner_password=$(cat /run/secrets/postgres_owner_password)
-if [ ! -s /run/secrets/postgres_app_password ]; then
+app_password=$(cat /run/secrets/postgres_app_password)
+if [ -z "$app_password" ]; then
 	echo 'postgres application password must not be empty' >&2
 	exit 1
 fi
