@@ -20,6 +20,7 @@ app_password="$temporary/app-password"
 app_dsn="$temporary/app.dsn"
 printf '%s\n' 'owner-password' >"$owner_password"
 printf '%s\n' 'app-password' >"$app_password"
+
 printf '%s\n' 'postgres://punaro_app:app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
 chmod 600 "$owner_password" "$app_password" "$app_dsn"
 
@@ -39,6 +40,13 @@ base_env() {
 base_env
 "$runner" config
 grep -Fqx "compose --project-name punaro-production-test -f $root/deploy/compose/production.yaml config" "$temporary/docker-args"
+
+base_env
+PUNARO_PUBLIC_URL="https://punaro.'example"
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an operator-unsafe public URL character' >&2
+	exit 1
+fi
 
 base_env
 PUNARO_IMAGE='example.invalid/punaro:latest'
