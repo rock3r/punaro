@@ -58,4 +58,4 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--mode proxy \
 	--public-url "$PUNARO_PUBLIC_URL")
 test -f "$installation_dir/installation.json"
-PGPASSWORD='production-app-password' docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" exec --no-TTY postgres psql --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
