@@ -67,6 +67,9 @@ public_authority=${PUNARO_PUBLIC_URL#https://}
 case "$public_authority" in */) public_authority=${public_authority%/} ;; esac
 case "$public_authority" in */*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$public_authority" in
+	*:[!0-9]*|*:) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+esac
+case "$public_authority" in
 	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]::[]]|[[]::[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback or wildcard address' ;;
 esac
 
