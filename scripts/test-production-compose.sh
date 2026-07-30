@@ -50,8 +50,15 @@ fi
 base_env
 PUNARO_COMPOSE_PROJECT_NAME='unsafe/name'
 if "$runner" config >/dev/null 2>&1; then
-  echo 'production runner accepted an unsafe Compose project name' >&2
-  exit 1
+	echo 'production runner accepted an unsafe Compose project name' >&2
+	exit 1
+fi
+
+base_env
+PUNARO_COMPOSE_PROJECT_NAME='-punaro-production-test'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a Compose project name with an invalid leading character' >&2
+	exit 1
 fi
 
 base_env

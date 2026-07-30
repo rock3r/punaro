@@ -38,8 +38,8 @@ export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$owner_password"
 export PUNARO_POSTGRES_APP_PASSWORD_FILE="$app_password"
 export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach postgres-bootstrap
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" wait postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" up --detach --wait postgres
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' >/dev/null 2>&1; then
 	echo 'production bootstrap unexpectedly accepted a DSN password different from its configured secret' >&2
 	exit 1

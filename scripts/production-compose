@@ -25,7 +25,7 @@ require_numeric_nonroot() {
 require_numeric_nonroot PUNARO_RUNTIME_UID "$PUNARO_RUNTIME_UID"
 require_numeric_nonroot PUNARO_RUNTIME_GID "$PUNARO_RUNTIME_GID"
 case "$PUNARO_COMPOSE_PROJECT_NAME" in
-	*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must contain only lowercase letters, digits, underscores, and hyphens' ;;
+	[!a-z0-9]*|*[!a-z0-9_-]*|'') fail 'PUNARO_COMPOSE_PROJECT_NAME must start with a lowercase letter or digit and contain only lowercase letters, digits, underscores, and hyphens' ;;
 esac
 
 repository=${PUNARO_IMAGE%@sha256:*}
