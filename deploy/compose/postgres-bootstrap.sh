@@ -22,5 +22,12 @@ SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHER
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+DO $$
+DECLARE membership record;
+BEGIN
+  FOR membership IN SELECT parent.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE member.rolname = 'punaro_app' LOOP
+    EXECUTE format('REVOKE %I FROM punaro_app', membership.rolname);
+  END LOOP;
+END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 SQL
