@@ -9,6 +9,7 @@ services:
       POSTGRES_DB: punaro
       POSTGRES_USER: punaro_owner
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_owner_password
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     secrets:
       - postgres_owner_password
       - postgres_app_password
