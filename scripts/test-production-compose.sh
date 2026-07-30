@@ -11,8 +11,8 @@ fakebin="$temporary/bin"
 mkdir -p "$fakebin"
 cat >"$fakebin/docker" <<'SH'
 #!/bin/sh
-if [ "${PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES:-}" = 1 ] && [ -n "${COMPOSE_PROFILES:-}" ]; then
-	exit 1
+if [ "${PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES:-}" = 1 ]; then
+	[ -z "${COMPOSE_PROFILES:-}" ] && [ -z "${COMPOSE_ENV_FILES:-}" ] && [ "${COMPOSE_DISABLE_ENV_FILE:-}" = 1 ] || exit 1
 fi
 printf '%s\n' "$*" >"${PUNARO_TEST_DOCKER_ARGS:?}"
 SH
@@ -64,11 +64,12 @@ grep -Fqx "compose --project-name punaro-production-test -f $root/deploy/compose
 base_env
 export PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES=1
 export COMPOSE_PROFILES=reference-daemon
+export COMPOSE_ENV_FILES='/untrusted/compose.env'
 if ! "$runner" config >/dev/null 2>&1; then
 	echo 'production runner propagated ambient Compose profiles' >&2
 	exit 1
 fi
-unset PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES COMPOSE_PROFILES
+unset PUNARO_TEST_REQUIRE_CLEAN_COMPOSE_PROFILES COMPOSE_PROFILES COMPOSE_ENV_FILES
 
 base_env
 PUNARO_PUBLIC_URL="https://punaro.'example"
