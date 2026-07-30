@@ -97,14 +97,17 @@ fi
 case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
-require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
-require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
-require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
-owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
-app_password=$(cat "$PUNARO_POSTGRES_APP_PASSWORD_FILE")
-if [ "$owner_password" = "$app_password" ]; then
-	fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'
-fi
+case "${1:-}" in
+	down|stop|logs|ps) ;;
+	*)
+		require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
+		require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
+		require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
+		owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
+		app_password=$(cat "$PUNARO_POSTGRES_APP_PASSWORD_FILE")
+		if [ "$owner_password" = "$app_password" ]; then fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'; fi
+		;;
+esac
 
 unset COMPOSE_PROFILES COMPOSE_ENV_FILES
 export COMPOSE_DISABLE_ENV_FILE=1

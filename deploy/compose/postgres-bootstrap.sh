@@ -29,5 +29,13 @@ BEGIN
     EXECUTE format('REVOKE %I FROM punaro_app', membership.rolname);
   END LOOP;
 END $$;
+REVOKE CREATE ON DATABASE punaro FROM punaro_app;
+DO $$
+DECLARE schema_name record;
+BEGIN
+  FOR schema_name IN SELECT nspname FROM pg_namespace WHERE has_schema_privilege('punaro_app', oid, 'CREATE') LOOP
+    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
+  END LOOP;
+END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 SQL
