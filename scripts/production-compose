@@ -17,6 +17,19 @@ require_numeric_nonroot() {
 	[ "$value" -gt 0 ] || fail "$name must be a non-zero numeric ID"
 }
 
+require_private_file() {
+	name=$1
+	path=$2
+	[ -f "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular file"
+	if stat -f '%u %Lp' "$path" >/dev/null 2>&1; then
+		set -- $(stat -f '%u %Lp' "$path")
+	else
+		set -- $(stat -c '%u %a' "$path")
+	fi
+	[ "$1" = "$(id -u)" ] || fail "$name must be owned by the current operator"
+	case "$2" in *[4567][0-7]|*[0-7][4567]) fail "$name must not be group- or world-readable" ;; esac
+}
+
 : "${PUNARO_IMAGE:?PUNARO_IMAGE is required}"
 : "${PUNARO_RUNTIME_UID:?PUNARO_RUNTIME_UID is required}"
 : "${PUNARO_RUNTIME_GID:?PUNARO_RUNTIME_GID is required}"
@@ -29,9 +42,11 @@ case "$PUNARO_COMPOSE_PROJECT_NAME" in
 esac
 case "$PUNARO_PUBLIC_URL" in https://*) ;; *) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$PUNARO_PUBLIC_URL" in
-	https://|https://*[@?#]*|https://*/*/*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
+	https://|https://*[@?#]*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;;
 esac
 public_authority=${PUNARO_PUBLIC_URL#https://}
+case "$public_authority" in */) public_authority=${public_authority%/} ;; esac
+case "$public_authority" in */*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$public_authority" in
 	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]::[]]|[[]::[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback or wildcard address' ;;
 esac
@@ -54,5 +69,8 @@ fi
 case "$digest" in
 	*[!0-9a-f]*) fail 'PUNARO_IMAGE must be an explicit repository reference pinned by a lowercase sha256 digest' ;;
 esac
+require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
+require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
+require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
 
 exec docker compose --project-name "$PUNARO_COMPOSE_PROJECT_NAME" -f "$root/deploy/compose/production.yaml" "$@"

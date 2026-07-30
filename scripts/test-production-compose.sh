@@ -76,6 +76,21 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://punaro.example/mcp'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a non-root public URL path' >&2
+	exit 1
+fi
+
+chmod 644 "$owner_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a broadly readable owner password file' >&2
+	exit 1
+fi
+chmod 600 "$owner_password"
+
+base_env
 PUNARO_IMAGE='example.invalid/punaro:release@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 if "$runner" config >/dev/null 2>&1; then
   echo 'production runner accepted an image that punaro init rejects' >&2
