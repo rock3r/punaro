@@ -1,15 +1,26 @@
 #!/bin/sh
 set -eu
 
-owner_password=$(cat /run/secrets/postgres_owner_password)
-app_password=$(cat /run/secrets/postgres_app_password)
+staging=/tmp/punaro-bootstrap-secrets
+if [ "$(id -u)" = 0 ]; then
+	(umask 077 && mkdir "$staging")
+	cp /run/secrets/postgres_owner_password "$staging/owner-password"
+	cp /run/secrets/postgres_app_password "$staging/app-password"
+	chown -R 999:999 "$staging"
+	chmod 700 "$staging"
+	chmod 600 "$staging/owner-password" "$staging/app-password"
+	exec gosu 999:999 "$0" "$@"
+fi
+trap 'rm -rf "$staging"' EXIT INT TERM
+
+owner_password=$(cat "$staging/owner-password")
+app_password=$(cat "$staging/app-password")
 if [ -z "$app_password" ]; then
 	echo 'postgres application password must not be empty' >&2
 	exit 1
 fi
 
 temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"' EXIT INT TERM
 chmod 700 "$temporary"
 escaped_password=$(printf '%s' "$owner_password" | sed 's/\\/\\\\/g; s/:/\\:/g')
 printf '127.0.0.1:5432:%s:%s:%s\n' "$POSTGRES_DB" "$POSTGRES_USER" "$escaped_password" >"$temporary/pgpass"
@@ -18,7 +29,7 @@ export PGPASSFILE="$temporary/pgpass"
 
 psql --set=ON_ERROR_STOP=1 --host 127.0.0.1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" \
 	<<'SQL'
-\set app_password `cat /run/secrets/postgres_app_password`
+\set app_password `cat /tmp/punaro-bootstrap-secrets/app-password`
 BEGIN;
 DO $$
 BEGIN
