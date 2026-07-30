@@ -129,6 +129,7 @@ if [ "$recovery_command" -eq 1 ]; then
 	export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 	export PUNARO_RUNTIME_UID=1 PUNARO_RUNTIME_GID=1 PUNARO_PUBLIC_URL='https://recovery.invalid'
 	export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$recovery_dir/secret"
+	export PUNARO_POSTGRES_OWNER_DSN_FILE="$recovery_dir/secret"
 	export PUNARO_POSTGRES_APP_PASSWORD_FILE="$recovery_dir/secret"
 	export PUNARO_POSTGRES_APP_DSN_FILE="$recovery_dir/secret"
 	unset COMPOSE_PROFILES COMPOSE_ENV_FILES
@@ -193,6 +194,7 @@ case "${1:-}" in
 	down|stop|logs|ps) ;;
 	*)
 		require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
+		require_private_file PUNARO_POSTGRES_OWNER_DSN_FILE "$PUNARO_POSTGRES_OWNER_DSN_FILE"
 		require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
 		require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
 		owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
@@ -202,6 +204,8 @@ case "${1:-}" in
 		[ -n "$app_password" ] || fail 'PUNARO_POSTGRES_APP_PASSWORD_FILE must not be empty'
 		case "$app_password" in *[!A-Za-z0-9._~-]*) fail 'PUNARO_POSTGRES_APP_PASSWORD_FILE must use URL-safe characters' ;; esac
 		app_dsn=$(cat "$PUNARO_POSTGRES_APP_DSN_FILE")
+		owner_dsn=$(cat "$PUNARO_POSTGRES_OWNER_DSN_FILE")
+		[ "$owner_dsn" = "postgres://punaro_owner:$owner_password@127.0.0.1:5432/punaro?sslmode=disable" ] || fail 'PUNARO_POSTGRES_OWNER_DSN_FILE must identify the configured local punaro_owner role'
 		[ "$app_dsn" = "postgres://punaro_app:$app_password@127.0.0.1:5432/punaro?sslmode=disable" ] || fail 'PUNARO_POSTGRES_APP_DSN_FILE must identify the configured local punaro_app role'
 		if [ "$owner_password" = "$app_password" ]; then fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'; fi
 		;;

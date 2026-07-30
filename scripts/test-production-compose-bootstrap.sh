@@ -53,12 +53,17 @@ fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'CREATE SCHEMA legacy; CREATE TABLE legacy.unsafe (); ALTER SCHEMA legacy OWNER TO punaro_app; ALTER TABLE legacy.unsafe OWNER TO punaro_app; GRANT USAGE ON SCHEMA legacy TO punaro_app; GRANT SELECT ON legacy.unsafe TO punaro_app'
 printf '%s\n' 'production-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "ALTER ROLE punaro_app SET default_transaction_read_only = on; ALTER ROLE punaro_app IN DATABASE punaro SET default_transaction_read_only = on; ALTER ROLE punaro_app CONNECTION LIMIT 0 VALID UNTIL '2000-01-01'"
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted an application-role grant on a legacy object' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE ALL PRIVILEGES ON SCHEMA legacy FROM punaro_app; REVOKE ALL PRIVILEGES ON legacy.unsafe FROM punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
 stale_output="$temporary/stale-session"
-(docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT pg_backend_pid(); SELECT pg_sleep(30)' >"$stale_output" 2>&1) & stale_session=$!
-for attempt in $(seq 1 30); do grep -Eq '^[0-9]+$' "$stale_output" && break; sleep 1; done
-grep -Eq '^[0-9]+$' "$stale_output" || { echo 'production stale-session test did not authenticate its application client' >&2; exit 1; }
+(docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint env -e PGAPPNAME=production-stale-session -e PGPASSWORD='production-app-password' postgres-bootstrap psql --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT pg_sleep(30)' >"$stale_output" 2>&1) & stale_session=$!
+for attempt in $(seq 1 30); do docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-stale-session'" | grep -Fxq 1 && break; sleep 1; done
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-stale-session'" | grep -Fxq 1 || { echo 'production stale-session test did not authenticate its application client' >&2; exit 1; }
 printf '%s\n' 'rotated-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if wait "$stale_session"; then

@@ -23,13 +23,15 @@ SH
 chmod 700 "$fakebin/docker"
 
 owner_password="$temporary/owner-password"
+owner_dsn="$temporary/owner.dsn"
 app_password="$temporary/app-password"
 app_dsn="$temporary/app.dsn"
 printf '%s' 'owner-password' >"$owner_password"
 printf '%s' 'app-password' >"$app_password"
+printf '%s\n' 'postgres://punaro_owner:owner-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
 
 printf '%s\n' 'postgres://punaro_app:app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
-chmod 600 "$owner_password" "$app_password" "$app_dsn"
+chmod 600 "$owner_password" "$owner_dsn" "$app_password" "$app_dsn"
 
 base_env() {
   export PATH="$fakebin:$PATH"
@@ -40,6 +42,7 @@ base_env() {
   export PUNARO_COMPOSE_PROJECT_NAME='punaro-production-test'
   export PUNARO_PUBLIC_URL='https://punaro.example'
   export PUNARO_POSTGRES_OWNER_PASSWORD_FILE="$owner_password"
+  export PUNARO_POSTGRES_OWNER_DSN_FILE="$owner_dsn"
   export PUNARO_POSTGRES_APP_PASSWORD_FILE="$app_password"
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
@@ -47,7 +50,7 @@ base_env() {
 export PATH="$fakebin:$PATH"
 export PUNARO_TEST_DOCKER_ARGS="$temporary/docker-args"
 export PUNARO_TEST_REQUIRE_RECOVERY_PLACEHOLDERS=1
-unset PUNARO_IMAGE PUNARO_RUNTIME_UID PUNARO_RUNTIME_GID PUNARO_PUBLIC_URL PUNARO_POSTGRES_OWNER_PASSWORD_FILE PUNARO_POSTGRES_APP_PASSWORD_FILE PUNARO_POSTGRES_APP_DSN_FILE
+unset PUNARO_IMAGE PUNARO_RUNTIME_UID PUNARO_RUNTIME_GID PUNARO_PUBLIC_URL PUNARO_POSTGRES_OWNER_PASSWORD_FILE PUNARO_POSTGRES_OWNER_DSN_FILE PUNARO_POSTGRES_APP_PASSWORD_FILE PUNARO_POSTGRES_APP_DSN_FILE
 export PUNARO_COMPOSE_PROJECT_NAME='punaro-production-recovery'
 "$runner" ps
 grep -Fqx "compose --project-name punaro-production-recovery -f $root/deploy/compose/production.yaml ps" "$temporary/docker-args"
@@ -76,6 +79,14 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 printf '%s\n' 'postgres://punaro_app:app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
+
+printf '%s\n' 'postgres://punaro_owner:wrong-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an owner DSN with the wrong password' >&2
+	exit 1
+fi
+printf '%s\n' 'postgres://punaro_owner:owner-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
 
 printf '%s' 'owner-password' >"$owner_password"
 printf '%s' 'owner-password' >"$app_password"
