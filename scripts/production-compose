@@ -22,6 +22,14 @@ require_private_file() {
 	path=$2
 	case "$path" in /*) ;; *) fail "$name must be an absolute path" ;; esac
 	[ -f "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular file"
+	directory=${path%/*}
+	while [ "$directory" != / ]; do
+		if [ -L "$directory" ] && [ "$(stat -f '%u' "$directory")" != 0 ]; then fail "$name must not traverse untrusted symlinked directories"; fi
+		if stat -f '%u %Lp %p' "$directory" >/dev/null 2>&1; then set -- $(stat -f '%u %Lp %p' "$directory"); else set -- $(stat -c '%u %a %a' "$directory"); fi
+		[ "$1" = 0 ] || [ "$1" = "$(id -u)" ] || fail "$name must use directories owned by root or the current operator"
+		case "$2" in *[2367][0-7]|*[0-7][2367]) case "$3" in *1[0-7][0-7][0-7]) ;; *) fail "$name must not traverse group or world writable directories" ;; esac ;; esac
+		directory=${directory%/*}; directory=${directory:-/}
+	done
 	if stat -f '%u %Lp' "$path" >/dev/null 2>&1; then
 		set -- $(stat -f '%u %Lp' "$path")
 	else
