@@ -33,7 +33,7 @@ case "$PUNARO_PUBLIC_URL" in
 esac
 public_authority=${PUNARO_PUBLIC_URL#https://}
 case "$public_authority" in
-	localhost|localhost:*|127.*|[[]::1[]]|[[]::[]]|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback or wildcard address' ;;
+	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]::[]]|[[]::[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback or wildcard address' ;;
 esac
 
 repository=${PUNARO_IMAGE%@sha256:*}
