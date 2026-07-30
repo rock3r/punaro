@@ -8,6 +8,10 @@ fail() {
 	exit 1
 }
 
+file_owner() {
+	if stat -f '%u' "$1" >/dev/null 2>&1; then stat -f '%u' "$1"; else stat -c '%u' "$1"; fi
+}
+
 require_numeric_nonroot() {
 	name=$1
 	value=$2
@@ -24,7 +28,7 @@ require_private_file() {
 	[ -f "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular file"
 	directory=${path%/*}
 	while [ "$directory" != / ]; do
-		if [ -L "$directory" ] && [ "$(stat -f '%u' "$directory")" != 0 ]; then fail "$name must not traverse untrusted symlinked directories"; fi
+		if [ -L "$directory" ] && [ "$(file_owner "$directory")" != 0 ]; then fail "$name must not traverse untrusted symlinked directories"; fi
 		if stat -f '%u %Lp %p' "$directory" >/dev/null 2>&1; then set -- $(stat -f '%u %Lp %p' "$directory"); else set -- $(stat -c '%u %a %a' "$directory"); fi
 		[ "$1" = 0 ] || [ "$1" = "$(id -u)" ] || fail "$name must use directories owned by root or the current operator"
 		case "$2" in *[2367][0-7]|*[0-7][2367]) case "$3" in *1[0-7][0-7][0-7]) ;; *) fail "$name must not traverse group or world writable directories" ;; esac ;; esac
