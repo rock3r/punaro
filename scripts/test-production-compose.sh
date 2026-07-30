@@ -214,6 +214,15 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 
+for localhost_origin in 'https://LOCALHOST' 'https://localhost.'; do
+	base_env
+	PUNARO_PUBLIC_URL="$localhost_origin"
+	if "$runner" config >/dev/null 2>&1; then
+		echo 'production runner accepted a normalized localhost public URL' >&2
+		exit 1
+	fi
+done
+
 base_env
 PUNARO_PUBLIC_URL='https://[0:0:0:0:0:0:0:1]'
 if "$runner" config >/dev/null 2>&1; then
