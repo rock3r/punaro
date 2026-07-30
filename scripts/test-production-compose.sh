@@ -146,6 +146,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https:///'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a public URL with an empty authority' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://punaro.example:abc'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted a malformed public URL port' >&2

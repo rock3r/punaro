@@ -43,6 +43,20 @@ BEGIN
     RAISE EXCEPTION 'refusing to rotate punaro_app while PUBLIC retains CREATE; revoke it and rerun bootstrap';
   END IF;
 END $$;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_shdepend dependency
+    JOIN pg_roles role ON role.oid = dependency.refobjid
+    WHERE dependency.refclassid = 'pg_authid'::regclass
+      AND dependency.deptype = 'o'
+      AND role.rolname = 'punaro_app'
+      AND dependency.dbid <> (SELECT oid FROM pg_database WHERE datname = current_database())
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it owns objects outside the punaro database; repair them and rerun bootstrap';
+  END IF;
+END $$;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec

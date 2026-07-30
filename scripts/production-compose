@@ -69,6 +69,7 @@ case "$PUNARO_PUBLIC_URL" in
 esac
 public_authority=${PUNARO_PUBLIC_URL#https://}
 case "$public_authority" in */) public_authority=${public_authority%/} ;; esac
+[ -n "$public_authority" ] || fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL'
 case "$public_authority" in */*) fail 'PUNARO_PUBLIC_URL must be a canonical HTTPS public URL' ;; esac
 case "$public_authority" in
 	\[*\]) ;;

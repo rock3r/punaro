@@ -43,7 +43,7 @@ services:
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:mode=0700,noexec,nosuid,nodev,size=16m
+      - /tmp:uid=999,gid=999,mode=0700,noexec,nosuid,nodev,size=16m
     environment:
       POSTGRES_DB: punaro
       POSTGRES_USER: punaro_owner
