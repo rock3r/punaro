@@ -20,6 +20,7 @@ require_numeric_nonroot() {
 require_private_file() {
 	name=$1
 	path=$2
+	case "$path" in /*) ;; *) fail "$name must be an absolute path" ;; esac
 	[ -f "$path" ] && [ ! -L "$path" ] || fail "$name must be a regular file"
 	if stat -f '%u %Lp' "$path" >/dev/null 2>&1; then
 		set -- $(stat -f '%u %Lp' "$path")
@@ -72,7 +73,9 @@ esac
 require_private_file PUNARO_POSTGRES_OWNER_PASSWORD_FILE "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE"
 require_private_file PUNARO_POSTGRES_APP_PASSWORD_FILE "$PUNARO_POSTGRES_APP_PASSWORD_FILE"
 require_private_file PUNARO_POSTGRES_APP_DSN_FILE "$PUNARO_POSTGRES_APP_DSN_FILE"
-if cmp -s "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE" "$PUNARO_POSTGRES_APP_PASSWORD_FILE"; then
+owner_password=$(cat "$PUNARO_POSTGRES_OWNER_PASSWORD_FILE")
+app_password=$(cat "$PUNARO_POSTGRES_APP_PASSWORD_FILE")
+if [ "$owner_password" = "$app_password" ]; then
 	fail 'PUNARO_POSTGRES_OWNER_PASSWORD_FILE and PUNARO_POSTGRES_APP_PASSWORD_FILE must differ'
 fi
 

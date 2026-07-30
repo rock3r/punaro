@@ -37,6 +37,23 @@ base_env() {
   export PUNARO_POSTGRES_APP_DSN_FILE="$app_dsn"
 }
 
+printf '%s\n' 'owner-password' >"$owner_password"
+printf '%s' 'owner-password' >"$app_password"
+base_env
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted passwords with the same effective value' >&2
+	exit 1
+fi
+printf '%s\n' 'owner-password' >"$owner_password"
+printf '%s\n' 'app-password' >"$app_password"
+
+base_env
+PUNARO_POSTGRES_OWNER_PASSWORD_FILE='relative-owner-password'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a relative owner password path' >&2
+	exit 1
+fi
+
 base_env
 "$runner" config
 grep -Fqx "compose --project-name punaro-production-test -f $root/deploy/compose/production.yaml config" "$temporary/docker-args"
