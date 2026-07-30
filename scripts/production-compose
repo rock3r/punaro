@@ -44,25 +44,37 @@ require_safe_ipv6_literal() {
 	value=$1
 	require_ipv6_literal "$value"
 	if printf '%s\n' "$value" | awk '
-		function inspect_groups(part,    count, i, values) {
+		function hex_value(value,    i, result, digit) {
+			result = 0
+			for (i = 1; i <= length(value); i++) {
+				digit = index("0123456789abcdef", tolower(substr(value, i, 1))) - 1
+				result = result * 16 + digit
+			}
+			return result
+		}
+		function append_groups(part,    count, i, values) {
 			if (part == "") return
 			count = split(part, values, ":")
-			for (i = 1; i <= count; i++) {
-				if (values[i] !~ /^0+$/) nonzero++
-				last = values[i]
-			}
+			for (i = 1; i <= count; i++) groups[++group_count] = hex_value(values[i])
 		}
 		{
 			first = index($0, "::")
 			if (first) {
 				right = substr($0, first + 2)
-				inspect_groups(substr($0, 1, first - 1)); inspect_groups(right)
-				if (right != "" && nonzero == 1 && last ~ /^0*1$/) exit 0
+				left = substr($0, 1, first - 1)
+				append_groups(left)
+				right_count = right == "" ? 0 : split(right, right_groups, ":")
+				while (group_count + right_count < 8) groups[++group_count] = 0
+				append_groups(right)
 			} else {
-				inspect_groups($0)
-				if (nonzero == 1 && last ~ /^0*1$/) exit 0
+				append_groups($0)
 			}
-			if (nonzero == 0) exit 0
+			for (i = 1; i <= 8; i++) if (groups[i] != 0) break
+			if (i == 9) exit 0
+			for (i = 1; i <= 7; i++) if (groups[i] != 0) break
+			if (i == 8 && groups[8] == 1) exit 0
+			for (i = 1; i <= 5; i++) if (groups[i] != 0) break
+			if (i == 6 && groups[6] == 65535) exit 0
 			exit 1
 		}' >/dev/null; then
 		fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
