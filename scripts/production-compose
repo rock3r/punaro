@@ -202,6 +202,12 @@ if printf '%s\n' "$host_for_loopback" | awk '
 '; then
 	fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
 fi
+if printf '%s\n' "$host_for_loopback" | awk '
+  /^0x[0-9a-f]+(\.(0x[0-9a-f]+|[0-9]+))*$/ { exit 0 }
+  { exit 1 }
+'; then
+	fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
+fi
 case "$public_authority" in
 	\[*\]*) ;;
 	*)

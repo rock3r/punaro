@@ -256,6 +256,15 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 
+for hexadecimal_loopback_origin in 'https://0x7f000001' 'https://0x7f.0.0.1'; do
+	base_env
+	PUNARO_PUBLIC_URL="$hexadecimal_loopback_origin"
+	if "$runner" config >/dev/null 2>&1; then
+		echo 'production runner accepted a hexadecimal IPv4 loopback public URL' >&2
+		exit 1
+	fi
+done
+
 for invalid_hostname_origin in 'https://.' 'https://-'; do
 	base_env
 	PUNARO_PUBLIC_URL="$invalid_hostname_origin"
