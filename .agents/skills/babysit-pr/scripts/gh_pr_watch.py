@@ -57,6 +57,9 @@ BUGBOT_WORKFLOW_KEYWORDS = {
     "cursor",
     "bugbot",
 }
+# Cursor's authenticated GitHub identity for review records. This must stay
+# separate from the loose check/workflow name matcher above.
+CURSOR_BUGBOT_LOGIN = "cursor[bot]"
 TRUSTED_AUTHOR_ASSOCIATIONS = {
     "OWNER",
     "MEMBER",
@@ -979,7 +982,7 @@ def is_clean_bugbot_review_item(review, head_sha):
         return False
     if str(review.get("kind") or "review") != "review":
         return False
-    if not is_bugbot_name(review.get("author")):
+    if str(review.get("author") or "").lower() != CURSOR_BUGBOT_LOGIN:
         return False
     if str(review.get("commit_id") or "") != str(head_sha or ""):
         return False
@@ -998,10 +1001,24 @@ def has_clean_bugbot_review(reviews, head_sha):
     only when GitHub associates it with the current head SHA; a generic bot
     comment or an older clean review must never make the gate green.
     """
-    for review in reviews:
-        if is_clean_bugbot_review_item(review, head_sha):
-            return True
-    return False
+    matching = [
+        review for review in reviews
+        if isinstance(review, dict)
+        and str(review.get("kind") or "review") == "review"
+        and str(review.get("author") or "").lower() == CURSOR_BUGBOT_LOGIN
+        and str(review.get("commit_id") or "") == str(head_sha or "")
+        and str(review.get("review_state") or "") == "COMMENTED"
+    ]
+    if not matching:
+        return False
+    matching.sort(
+        key=lambda review: (
+            str(review.get("updated_at") or ""),
+            str(review.get("created_at") or ""),
+            str(review.get("id") or ""),
+        )
+    )
+    return is_clean_bugbot_review_item(matching[-1], head_sha)
 
 
 def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):

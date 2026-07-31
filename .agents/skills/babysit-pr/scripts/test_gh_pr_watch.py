@@ -360,6 +360,28 @@ class RetryEligibilityTests(unittest.TestCase):
             "body": "Bugbot reviewed your changes and found no new issues!",
         }, "abc123"))
 
+    def test_is_clean_bugbot_review_item_rejects_cursor_lookalike(self):
+        self.assertFalse(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor-helper", "commit_id": "abc123",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+
+    def test_has_clean_bugbot_review_requires_latest_matching_review_to_be_clean(self):
+        reviews = [
+            {
+                "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+                "review_state": "COMMENTED", "created_at": "2026-01-01T00:00:00Z",
+                "body": "Bugbot reviewed your changes and found no new issues!",
+            },
+            {
+                "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+                "review_state": "COMMENTED", "created_at": "2026-01-01T00:01:00Z",
+                "body": "### A real finding",
+            },
+        ]
+        self.assertFalse(watch.has_clean_bugbot_review(reviews, "abc123"))
+
     def test_summarize_bugbot_gate_prefers_pending_rerun_over_old_success(self):
         checks = [
             {
