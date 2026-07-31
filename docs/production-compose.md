@@ -47,6 +47,15 @@ in the application DSN. Use a non-empty URL-safe application password
 The owner DSN is a regular non-symlink `0400` file owned by the deployment
 account, for example `postgres://punaro_owner:OWNER_PASSWORD@127.0.0.1:5432/punaro?sslmode=disable`.
 
+Export the absolute paths to the credential files before invoking the wrapper:
+
+```sh
+export PUNARO_POSTGRES_OWNER_PASSWORD_FILE=OWNER_PASSWORD_FILE
+export PUNARO_POSTGRES_OWNER_DSN_FILE=OWNER_DSN_FILE
+export PUNARO_POSTGRES_APP_PASSWORD_FILE=APP_PASSWORD_FILE
+export PUNARO_POSTGRES_APP_DSN_FILE=APP_DSN_FILE
+```
+
 Set `PUNARO_IMAGE` to a release digest and `PUNARO_PUBLIC_URL` to the canonical
 HTTPS ingress URL for an authenticated local tunnel or reverse proxy. Always
 invoke the database bundle through `scripts/production-compose`: it refuses a
