@@ -96,9 +96,9 @@ BEGIN
   END IF;
   IF EXISTS (
     SELECT 1
-    FROM pg_largeobject_metadata object
-    CROSS JOIN LATERAL aclexplode(object.lomacl) privilege
-    WHERE object.lomacl IS NOT NULL
+    FROM pg_largeobject_metadata large_object
+    CROSS JOIN LATERAL aclexplode(large_object.lomacl) privilege
+    WHERE large_object.lomacl IS NOT NULL
       AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains large-object grants; revoke them and rerun bootstrap';
@@ -134,6 +134,7 @@ BEGIN
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM punaro_app', object.nspname);
   END LOOP;
 END $$;
+ALTER ROLE punaro_app NOLOGIN;
 REASSIGN OWNED BY punaro_app TO punaro_owner;
 COMMIT;
 SELECT pg_terminate_backend(pid)

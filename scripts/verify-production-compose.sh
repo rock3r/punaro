@@ -39,6 +39,10 @@ grep -Fq '\set app_password `cat /tmp/punaro-bootstrap-secrets/app-password`' de
 grep -Fq "ALTER ROLE punaro_app LOGIN PASSWORD :'app_password'" deploy/compose/postgres-bootstrap.sh
 grep -Fq 'ALTER ROLE punaro_app RESET ALL;' deploy/compose/postgres-bootstrap.sh
 grep -Fq 'ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;' deploy/compose/postgres-bootstrap.sh
+if ! sed -n '/^BEGIN;$/,/^COMMIT;$/p' deploy/compose/postgres-bootstrap.sh | grep -Fxq 'ALTER ROLE punaro_app NOLOGIN;'; then
+	echo 'production bootstrap must fence application login before the ownership handoff commits' >&2
+	exit 1
+fi
 if grep -Fq -- '--set=app_password=' deploy/compose/postgres-bootstrap.sh; then
 	echo "production bootstrap must not expose the application password in psql argv" >&2
 	exit 1
