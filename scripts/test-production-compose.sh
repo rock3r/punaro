@@ -265,6 +265,15 @@ for hexadecimal_loopback_origin in 'https://0x7f000001' 'https://0x7f.0.0.1'; do
 	fi
 done
 
+for mixed_base_loopback_origin in 'https://127.0x0.1' 'https://0177.0x0.1'; do
+	base_env
+	PUNARO_PUBLIC_URL="$mixed_base_loopback_origin"
+	if "$runner" config >/dev/null 2>&1; then
+		echo 'production runner accepted a mixed-base IPv4 loopback public URL' >&2
+		exit 1
+	fi
+done
+
 for invalid_hostname_origin in 'https://.' 'https://-'; do
 	base_env
 	PUNARO_PUBLIC_URL="$invalid_hostname_origin"
