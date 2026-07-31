@@ -1046,6 +1046,19 @@ def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
     return reconciled
 
 
+def reconcile_clean_bugbot_checks_summary(checks_summary, bugbot_gate):
+    """Remove only Bugbot's own skipped check after accepting its clean review."""
+    summary = dict(checks_summary)
+    if (
+        bugbot_gate.get("source") == "clean_bugbot_review"
+        and str(bugbot_gate.get("original_conclusion") or "") == "skipped"
+    ):
+        summary["skipping_count"] = max(
+            0, int(summary.get("skipping_count") or 0) - 1
+        )
+    return summary
+
+
 def normalize_review_comments(items):
     out = []
     for item in items:
@@ -1639,11 +1652,9 @@ def collect_snapshot(args):
     bugbot_gate = reconcile_clean_bugbot_review(
         bugbot_gate, all_reviews, pr["head_sha"]
     )
-    if bugbot_gate.get("source") == "clean_bugbot_review":
-        checks_summary = dict(checks_summary)
-        checks_summary["skipping_count"] = max(
-            0, int(checks_summary.get("skipping_count") or 0) - 1
-        )
+    checks_summary = reconcile_clean_bugbot_checks_summary(
+        checks_summary, bugbot_gate
+    )
     # Track when checks first went all_terminal for the current head SHA.
     # This timestamp is used to enforce a grace period before emitting
     # stop_ready_to_merge, preventing a race where the script declares the PR

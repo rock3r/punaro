@@ -81,6 +81,15 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_proc procedure
+    CROSS JOIN LATERAL aclexplode(coalesce(procedure.proacl, acldefault('f'::"char", procedure.proowner))) privilege
+    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND procedure.proowner <> (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains routine grants; revoke them and rerun bootstrap';
+  END IF;
   FOR object IN
     SELECT namespace.nspname, relation.relname, relation.relkind
     FROM pg_class relation

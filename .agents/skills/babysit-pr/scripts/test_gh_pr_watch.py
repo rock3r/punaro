@@ -348,6 +348,20 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(gate["is_success"])
 
+    def test_clean_bugbot_reconciliation_keeps_unrelated_skipped_checks(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 2},
+            {"source": "clean_bugbot_review", "original_conclusion": "neutral"},
+        )
+        self.assertEqual(summary["skipping_count"], 2)
+
+    def test_clean_bugbot_reconciliation_removes_its_skipped_check(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 2},
+            {"source": "clean_bugbot_review", "original_conclusion": "skipped"},
+        )
+        self.assertEqual(summary["skipping_count"], 1)
+
     def test_is_clean_bugbot_review_item_requires_cursor_clean_result(self):
         self.assertTrue(watch.is_clean_bugbot_review_item({
             "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
