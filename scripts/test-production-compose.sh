@@ -304,6 +304,15 @@ base_env
 PUNARO_PUBLIC_URL='https://[2001:db8::192.0.2.1]'
 "$runner" config
 
+for embedded_loopback_origin in 'https://[::127.0.0.1]' 'https://[::0.0.0.0]'; do
+	base_env
+	PUNARO_PUBLIC_URL="$embedded_loopback_origin"
+	if "$runner" config >/dev/null 2>&1; then
+		echo 'production runner accepted an IPv4-embedded IPv6 loopback or wildcard public URL' >&2
+		exit 1
+	fi
+done
+
 base_env
 PUNARO_PUBLIC_URL='https://[::ffff:127.0.0.1]'
 if "$runner" config >/dev/null 2>&1; then

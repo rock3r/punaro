@@ -110,3 +110,7 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--public-url "$PUNARO_PUBLIC_URL")
 test -f "$installation_dir/installation.json"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'CREATE TEMPORARY TABLE forbidden_temp ()' >/dev/null 2>&1; then
+	echo 'production bootstrap retained PUBLIC TEMPORARY privilege for the application role' >&2
+	exit 1
+fi

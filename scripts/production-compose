@@ -21,7 +21,7 @@ require_numeric_nonroot() {
 	[ "$value" -gt 0 ] || fail "$name must be a non-zero numeric ID"
 }
 
-require_ipv6_literal() {
+normalize_ipv6_literal() {
 	value=$1
 	case "$value" in
 		*.*)
@@ -38,6 +38,11 @@ require_ipv6_literal() {
 			value=${value%:*}:$ipv4_groups
 			;;
 	esac
+	printf '%s\n' "$value"
+}
+
+require_ipv6_literal() {
+	value=$(normalize_ipv6_literal "$1")
 	printf '%s\n' "$value" | awk '
 	function groups(part,    count, item, i, values) {
 		if (part == "") return 0
@@ -56,7 +61,7 @@ require_ipv6_literal() {
 }
 
 require_safe_ipv6_literal() {
-	value=$1
+	value=$(normalize_ipv6_literal "$1")
 	require_ipv6_literal "$value"
 	if printf '%s\n' "$value" | awk '
 		function hex_value(value,    i, result, digit) {
@@ -90,6 +95,8 @@ require_safe_ipv6_literal() {
 			if (i == 8 && groups[8] == 1) exit 0
 			for (i = 1; i <= 5; i++) if (groups[i] != 0) break
 			if (i == 6 && groups[6] == 65535) exit 0
+			for (i = 1; i <= 6; i++) if (groups[i] != 0) break
+			if (i == 7 && (groups[7] == 0 && groups[8] == 0 || int(groups[7] / 256) == 127)) exit 0
 			exit 1
 		}' >/dev/null; then
 		fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
