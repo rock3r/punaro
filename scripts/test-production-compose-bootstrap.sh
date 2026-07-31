@@ -75,12 +75,25 @@ fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM punaro_app'
 stale_output="$temporary/stale-session"
 (docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint env -e PGAPPNAME=production-stale-session -e PGPASSWORD='production-app-password' postgres-bootstrap psql --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT pg_sleep(30)' >"$stale_output" 2>&1) & stale_session=$!
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE ROLE punaro_legacy_member LOGIN PASSWORD 'legacy-member-password'; GRANT punaro_app TO punaro_legacy_member"
+member_stale_output="$temporary/member-stale-session"
+(docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint env -e PGAPPNAME=production-member-stale-session -e PGPASSWORD='legacy-member-password' postgres-bootstrap psql --host 127.0.0.1 --username punaro_legacy_member --dbname punaro --command 'SET ROLE punaro_app; SELECT pg_sleep(30)' >"$member_stale_output" 2>&1) & member_stale_session=$!
 for attempt in $(seq 1 30); do docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-stale-session'" | grep -Fxq 1 && break; sleep 1; done
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-stale-session'" | grep -Fxq 1 || { echo 'production stale-session test did not authenticate its application client' >&2; exit 1; }
+for attempt in $(seq 1 30); do docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-member-stale-session'" | grep -Fxq 1 && break; sleep 1; done
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-member-stale-session'" | grep -Fxq 1 || { echo 'production member stale-session test did not assume its application role' >&2; exit 1; }
 printf '%s\n' 'rotated-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if wait "$stale_session"; then
 	echo 'production bootstrap retained an application session authenticated with the old password' >&2
+	exit 1
+fi
+if wait "$member_stale_session"; then
+	echo 'production bootstrap retained a member session that had assumed the application role' >&2
+	exit 1
+fi
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='legacy-member-password' postgres-bootstrap --host 127.0.0.1 --username punaro_legacy_member --dbname punaro --command 'SET ROLE punaro_app' >/dev/null 2>&1; then
+	echo 'production bootstrap retained application-role membership for a legacy login role' >&2
 	exit 1
 fi
 printf '%s\n' 'production-app-password' >"$app_password"

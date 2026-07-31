@@ -60,6 +60,13 @@ END $$;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
+CREATE TEMPORARY TABLE punaro_app_member_sessions (role_name name PRIMARY KEY) ON COMMIT PRESERVE ROWS;
+INSERT INTO punaro_app_member_sessions (role_name)
+SELECT member.rolname
+FROM pg_auth_members members
+JOIN pg_roles parent ON parent.oid = members.roleid
+JOIN pg_roles member ON member.oid = members.member
+WHERE parent.rolname = 'punaro_app';
 DO $$
 DECLARE object record;
 BEGIN
@@ -134,16 +141,6 @@ BEGIN
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM punaro_app', object.nspname);
   END LOOP;
 END $$;
-ALTER ROLE punaro_app NOLOGIN;
-REASSIGN OWNED BY punaro_app TO punaro_owner;
-COMMIT;
-SELECT pg_terminate_backend(pid)
-FROM pg_stat_activity
-WHERE usename = 'punaro_app' AND pid <> pg_backend_pid();
-BEGIN;
-ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
-ALTER ROLE punaro_app RESET ALL;
-ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;
 DO $$
 DECLARE membership record;
 BEGIN
@@ -158,6 +155,17 @@ BEGIN
     EXECUTE format('REVOKE punaro_app FROM %I', member_name.rolname);
   END LOOP;
 END $$;
+ALTER ROLE punaro_app NOLOGIN;
+REASSIGN OWNED BY punaro_app TO punaro_owner;
+COMMIT;
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE (usename = 'punaro_app' OR usename IN (SELECT role_name FROM punaro_app_member_sessions))
+  AND pid <> pg_backend_pid();
+BEGIN;
+ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
+ALTER ROLE punaro_app RESET ALL;
+ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;
 REVOKE CREATE ON DATABASE punaro FROM punaro_app;
 REVOKE TEMPORARY ON DATABASE punaro FROM PUBLIC;
 REVOKE TEMPORARY ON DATABASE punaro FROM punaro_app;

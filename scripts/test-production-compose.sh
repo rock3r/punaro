@@ -250,6 +250,13 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://017700000001'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted an undotted octal IPv4 loopback public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://0177.0.0.1'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted an octal dotted IPv4 loopback public URL' >&2

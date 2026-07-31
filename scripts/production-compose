@@ -224,6 +224,7 @@ case "$public_authority" in
 		;;
 esac
 if printf '%s\n' "$host_for_loopback" | awk '
+  /^0[0-9]+$/ { exit 0 }
   /^[0-9]+$/ {
     numeric = $0 + 0
     exit !(numeric >= 0 && numeric <= 4294967295 && (numeric == 0 || int(numeric / 16777216) == 127))
