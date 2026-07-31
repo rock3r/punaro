@@ -167,6 +167,15 @@ case "$host_for_loopback" in \[*\]) host_for_loopback= ;; esac
 host_for_loopback=$(printf '%s' "$host_for_loopback" | tr '[:upper:]' '[:lower:]')
 while [ "${host_for_loopback%?}" != "$host_for_loopback" ] && [ "${host_for_loopback#${host_for_loopback%?}}" = . ]; do host_for_loopback=${host_for_loopback%?}; done
 case "$host_for_loopback" in localhost) fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address' ;; esac
+if printf '%s\n' "$host_for_loopback" | awk '
+  /^[0-9]+$/ {
+    numeric = $0 + 0
+    exit !(numeric >= 0 && numeric <= 4294967295 && (numeric == 0 || int(numeric / 16777216) == 127))
+  }
+  { exit 1 }
+'; then
+	fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
+fi
 case "$public_authority" in
 	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]0:0:0:0:0:0:0:1[]]|[[]0:0:0:0:0:0:0:1[]]:*|[[]::[]]|[[]::[]]:*|[[]::[fF][fF][fF][fF]:*[]]|[[]::[fF][fF][fF][fF]:*[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address' ;;
 esac

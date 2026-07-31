@@ -243,6 +243,13 @@ for localhost_origin in 'https://LOCALHOST' 'https://localhost.'; do
 done
 
 base_env
+PUNARO_PUBLIC_URL='https://2130706433'
+if "$runner" config >/dev/null 2>&1; then
+	echo 'production runner accepted a numeric IPv4 loopback public URL' >&2
+	exit 1
+fi
+
+base_env
 PUNARO_PUBLIC_URL='https://[0:0:0:0:0:0:0:1]'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted an expanded IPv6 loopback public URL' >&2

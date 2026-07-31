@@ -136,6 +136,7 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
   END LOOP;
 END $$;
+REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 COMMIT;
 SQL
