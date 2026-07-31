@@ -119,9 +119,10 @@ BEGIN
     SELECT 1 FROM pg_largeobject_metadata large_object
     CROSS JOIN LATERAL aclexplode(large_object.lomacl) privilege
     WHERE large_object.lomacl IS NOT NULL
-      AND privilege.grantee IN (0, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+      AND large_object.lomowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND privilege.grantee <> large_object.lomowner
   ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains large-object or PUBLIC large-object grants; revoke them and rerun bootstrap';
+    RAISE EXCEPTION 'refusing to rotate punaro_app while its large objects retain non-owner grants; revoke them and rerun bootstrap';
   END IF;
 END $$;
 DO $$
