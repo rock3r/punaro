@@ -214,7 +214,7 @@ BEGIN
   LOOP
     FOR grant_role IN
       SELECT role.rolname FROM aclexplode(coalesce(object.relacl, acldefault(CASE WHEN object.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, object.relowner))) privilege JOIN pg_roles role ON role.oid = privilege.grantee
-      WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+      WHERE privilege.grantee NOT IN (0, object.relowner)
     LOOP
       IF object.relkind = 'S' THEN EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
       ELSE EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
@@ -229,7 +229,7 @@ BEGIN
       AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
   LOOP
     FOR grant_role IN SELECT role.rolname FROM aclexplode(object.attacl) privilege JOIN pg_roles role ON role.oid = privilege.grantee
-      WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+      WHERE privilege.grantee NOT IN (0, object.relowner)
     LOOP
       EXECUTE format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM %I', object.attname, object.nspname, object.relname, grant_role.rolname);
     END LOOP;
