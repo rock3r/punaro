@@ -88,6 +88,10 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	exit 1
 fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname postgres --command 'CREATE DATABASE punaro_bootstrap_other'
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro_bootstrap_other --command 'SELECT 1' >/dev/null 2>&1; then
+	echo 'production HBA allowed the application role to connect outside the Punaro database' >&2
+	exit 1
+fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro_bootstrap_other --command 'CREATE SCHEMA legacy; CREATE TABLE legacy.unsafe (); ALTER SCHEMA legacy OWNER TO punaro_app; ALTER TABLE legacy.unsafe OWNER TO punaro_app'
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
 	echo 'production bootstrap rotated an application role with cross-database ownership' >&2

@@ -143,13 +143,6 @@ BEGIN
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
   END LOOP;
 END $$;
-DO $$
-DECLARE database record;
-BEGIN
-  FOR database IN SELECT datname FROM pg_database WHERE datallowconn AND datname <> 'punaro' LOOP
-    EXECUTE format('REVOKE CONNECT ON DATABASE %I FROM PUBLIC', database.datname);
-  END LOOP;
-END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 COMMIT;
 SELECT pg_terminate_backend(pid)

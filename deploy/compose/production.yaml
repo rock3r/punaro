@@ -14,7 +14,10 @@ services:
       - postgres_owner_password
     volumes:
       - postgres-data:/var/lib/postgresql
-    command: ["postgres", "-c", "listen_addresses=127.0.0.1"]
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "hba_file=/etc/punaro/pg_hba.conf"]
+    configs:
+      - source: postgres_hba
+        target: /etc/punaro/pg_hba.conf
     network_mode: host
     healthcheck:
       test: ["CMD-SHELL", "pg_isready --host 127.0.0.1 -U punaro_owner -d punaro"]
@@ -95,6 +98,10 @@ secrets:
     file: ${PUNARO_POSTGRES_APP_DSN_FILE:?required}
   postgres_app_password:
     file: ${PUNARO_POSTGRES_APP_PASSWORD_FILE:?required}
+
+configs:
+  postgres_hba:
+    file: ./postgres-hba.conf
 
 volumes:
   postgres-data:
