@@ -167,7 +167,7 @@ DECLARE object record;
 DECLARE grant_role record;
 BEGIN
   FOR object IN
-    SELECT namespace.nspname, relation.relname, relation.relkind
+    SELECT namespace.nspname, relation.relname, relation.relkind, relation.relacl, relation.relowner
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
@@ -178,6 +178,18 @@ BEGIN
     ELSE
       EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM punaro_app', object.nspname, object.relname);
     END IF;
+    FOR grant_role IN
+      SELECT role.rolname
+      FROM aclexplode(coalesce(object.relacl, acldefault(CASE WHEN object.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, object.relowner))) privilege
+      JOIN pg_roles role ON role.oid = privilege.grantee
+      WHERE privilege.grantee <> object.relowner AND privilege.grantee <> 0
+    LOOP
+      IF object.relkind = 'S' THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
+      ELSE
+        EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
+      END IF;
+    END LOOP;
   END LOOP;
   FOR object IN
     SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind, procedure.proacl, procedure.proowner

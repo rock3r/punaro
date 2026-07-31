@@ -380,6 +380,10 @@ class RetryEligibilityTests(unittest.TestCase):
         )
         self.assertFalse(gate["is_success"])
 
+    def test_primary_bugbot_check_excludes_autofix_sibling(self):
+        self.assertFalse(watch.is_primary_bugbot_check({"name": "Cursor Bugbot Autofix", "workflow": "Cursor Bugbot"}))
+        self.assertTrue(watch.is_primary_bugbot_check({"name": "Cursor Bugbot", "workflow": "Cursor Bugbot"}))
+
     def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},

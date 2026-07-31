@@ -542,6 +542,13 @@ def is_bugbot_name(name):
     return any(keyword in lower for keyword in BUGBOT_WORKFLOW_KEYWORDS)
 
 
+def is_primary_bugbot_check(check):
+    """Return whether a check is the review gate, not a sibling Cursor task."""
+    name = str(check.get("name") or "").lower()
+    workflow = str(check.get("workflow") or "").lower()
+    return is_bugbot_name(name) and "autofix" not in name and "autofix" not in workflow
+
+
 def bugbot_check_activity_sort_key(check):
     started = str(check.get("startedAt") or "")
     completed = str(check.get("completedAt") or "")
@@ -621,7 +628,7 @@ def summarize_bugbot_gate_from_checks(checks):
         "workflow_name": str(latest.get("name") or ""),
         "html_url": str(latest.get("link") or ""),
         "started_at": str(latest.get("startedAt") or ""),
-        "matching_check_count": len(bugbot_checks),
+        "matching_check_count": sum(1 for check in bugbot_checks if is_primary_bugbot_check(check)),
         "source": "checks",
     }
 
