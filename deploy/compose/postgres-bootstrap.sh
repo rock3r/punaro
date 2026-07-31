@@ -94,8 +94,12 @@ BEGIN
     FROM pg_default_acl default_acl
     CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
     WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+       OR (
+         privilege.grantee = 0
+         AND default_acl.defaclobjtype IN ('r', 'S')
+       )
   ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access; revoke them and rerun bootstrap';
+    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table or sequence default privileges remain; revoke them and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1
@@ -190,12 +194,16 @@ DECLARE parameter_name record;
 BEGIN
   IF to_regclass('pg_catalog.pg_parameter_acl') IS NOT NULL THEN
     FOR parameter_name IN EXECUTE $query$
-      SELECT parameter_acl.parname
+      SELECT parameter_acl.parname, privilege.grantee
       FROM pg_parameter_acl parameter_acl
       CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) privilege
-      WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      WHERE privilege.grantee IN (0, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
     $query$ LOOP
-      EXECUTE format('REVOKE ALL PRIVILEGES ON PARAMETER %I FROM punaro_app', parameter_name.parname);
+      IF parameter_name.grantee = 0 THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON PARAMETER %I FROM PUBLIC', parameter_name.parname);
+      ELSE
+        EXECUTE format('REVOKE ALL PRIVILEGES ON PARAMETER %I FROM punaro_app', parameter_name.parname);
+      END IF;
     END LOOP;
   END IF;
 END $$;
