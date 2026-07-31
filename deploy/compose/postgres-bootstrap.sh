@@ -150,4 +150,7 @@ COMMIT;
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
 WHERE usename = 'punaro_app' AND pid <> pg_backend_pid();
+BEGIN;
+REASSIGN OWNED BY punaro_app TO punaro_owner;
+COMMIT;
 SQL
