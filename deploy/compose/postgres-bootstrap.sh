@@ -146,4 +146,7 @@ END $$;
 REVOKE CONNECT ON DATABASE postgres FROM PUBLIC;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 COMMIT;
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE usename = 'punaro_app' AND pid <> pg_backend_pid();
 SQL
