@@ -620,6 +620,7 @@ def summarize_bugbot_gate_from_checks(checks):
         "run_id": None,
         "workflow_name": str(latest.get("name") or ""),
         "html_url": str(latest.get("link") or ""),
+        "started_at": str(latest.get("startedAt") or ""),
         "source": "checks",
     }
 
@@ -669,6 +670,7 @@ def summarize_bugbot_gate_from_runs(runs, head_sha):
         "run_id": latest.get("id"),
         "workflow_name": latest.get("name") or latest.get("display_title") or "",
         "html_url": str(latest.get("html_url") or ""),
+        "started_at": str(latest.get("created_at") or ""),
         "source": "actions_runs",
     }
 
@@ -992,7 +994,7 @@ def is_clean_bugbot_review_item(review, head_sha):
     return "bugbot reviewed your changes and found no new issues" in body
 
 
-def has_clean_bugbot_review(reviews, head_sha):
+def has_clean_bugbot_review(reviews, head_sha, not_before=""):
     """Return whether Cursor explicitly reported a clean review for `head_sha`.
 
     Cursor Bugbot sometimes completes its GitHub check with a neutral/skipped
@@ -1008,6 +1010,10 @@ def has_clean_bugbot_review(reviews, head_sha):
         and str(review.get("author") or "").lower() == CURSOR_BUGBOT_LOGIN
         and str(review.get("commit_id") or "") == str(head_sha or "")
         and str(review.get("review_state") or "") == "COMMENTED"
+        and (
+            not not_before
+            or str(review.get("created_at") or "") >= str(not_before)
+        )
     ]
     if not matching:
         return False
@@ -1031,7 +1037,7 @@ def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
         return bugbot_gate
     if str(bugbot_gate.get("conclusion") or "") not in {"neutral", "skipped"}:
         return bugbot_gate
-    if not has_clean_bugbot_review(reviews, head_sha):
+    if not has_clean_bugbot_review(reviews, head_sha, bugbot_gate.get("started_at")):
         return bugbot_gate
 
     reconciled = dict(bugbot_gate)

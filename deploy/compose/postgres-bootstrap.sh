@@ -174,6 +174,20 @@ BEGIN;
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
 ALTER ROLE punaro_app RESET ALL;
 ALTER ROLE punaro_app IN DATABASE punaro RESET ALL;
+DO $$
+DECLARE parameter_name record;
+BEGIN
+  IF to_regclass('pg_catalog.pg_parameter_acl') IS NOT NULL THEN
+    FOR parameter_name IN EXECUTE $query$
+      SELECT parameter_acl.parname
+      FROM pg_parameter_acl parameter_acl
+      CROSS JOIN LATERAL aclexplode(parameter_acl.paracl) privilege
+      WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+    $query$ LOOP
+      EXECUTE format('REVOKE ALL PRIVILEGES ON PARAMETER %I FROM punaro_app', parameter_name.parname);
+    END LOOP;
+  END IF;
+END $$;
 REVOKE CREATE ON DATABASE punaro FROM punaro_app;
 REVOKE TEMPORARY ON DATABASE punaro FROM PUBLIC;
 REVOKE TEMPORARY ON DATABASE punaro FROM punaro_app;

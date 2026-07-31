@@ -73,6 +73,12 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	exit 1
 fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM punaro_app'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT SET ON PARAMETER session_replication_role TO punaro_app'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SET session_replication_role = replica' >/dev/null 2>&1; then
+	echo 'production bootstrap retained an application-role parameter grant' >&2
+	exit 1
+fi
 stale_output="$temporary/stale-session"
 (docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint env -e PGAPPNAME=production-stale-session -e PGPASSWORD='production-app-password' postgres-bootstrap psql --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT pg_sleep(30)' >"$stale_output" 2>&1) & stale_session=$!
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE ROLE punaro_legacy_group NOLOGIN; CREATE ROLE punaro_legacy_member LOGIN PASSWORD 'legacy-member-password'; GRANT punaro_app TO punaro_legacy_group; GRANT punaro_legacy_group TO punaro_legacy_member"

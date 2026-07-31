@@ -348,6 +348,30 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(gate["is_success"])
 
+    def test_reconcile_clean_bugbot_review_rejects_review_before_current_check_started(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "skipped",
+                "is_success": False,
+                "source": "checks",
+                "started_at": "2026-07-31T12:00:00Z",
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "abc123",
+                    "review_state": "COMMENTED",
+                    "created_at": "2026-07-31T11:59:59Z",
+                    "body": "Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertFalse(gate["is_success"])
+
     def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},
