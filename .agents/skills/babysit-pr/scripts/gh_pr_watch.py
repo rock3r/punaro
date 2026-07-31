@@ -570,7 +570,8 @@ def summarize_bugbot_gate_from_checks(checks):
         workflow_name = str(check.get("workflow") or "")
         if not is_bugbot_name(check_name) and not is_bugbot_name(workflow_name):
             continue
-        bugbot_checks.append(check)
+        if is_primary_bugbot_check(check):
+            bugbot_checks.append(check)
 
     if not bugbot_checks:
         return {
@@ -628,7 +629,7 @@ def summarize_bugbot_gate_from_checks(checks):
         "workflow_name": str(latest.get("name") or ""),
         "html_url": str(latest.get("link") or ""),
         "started_at": str(latest.get("startedAt") or ""),
-        "matching_check_count": sum(1 for check in bugbot_checks if is_primary_bugbot_check(check)),
+        "matching_check_count": len(bugbot_checks),
         "source": "checks",
     }
 
