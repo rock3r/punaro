@@ -396,6 +396,13 @@ class RetryEligibilityTests(unittest.TestCase):
         ]
         self.assertFalse(watch.has_clean_bugbot_review(reviews, "abc123"))
 
+    def test_has_clean_bugbot_review_orders_tied_review_ids_numerically(self):
+        reviews = [
+            {"kind": "review", "author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "id": "9", "created_at": "2026-01-01T00:00:00Z", "body": "Bugbot reviewed your changes and found no new issues!"},
+            {"kind": "review", "author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "id": "10", "created_at": "2026-01-01T00:00:00Z", "body": "### A real finding"},
+        ]
+        self.assertFalse(watch.has_clean_bugbot_review(reviews, "abc123"))
+
     def test_summarize_bugbot_gate_prefers_pending_rerun_over_old_success(self):
         checks = [
             {

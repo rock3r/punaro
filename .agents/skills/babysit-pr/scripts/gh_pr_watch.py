@@ -1015,7 +1015,7 @@ def has_clean_bugbot_review(reviews, head_sha):
         key=lambda review: (
             str(review.get("updated_at") or ""),
             str(review.get("created_at") or ""),
-            str(review.get("id") or ""),
+            int(str(review.get("id") or "0")) if str(review.get("id") or "0").isdigit() else 0,
         )
     )
     return is_clean_bugbot_review_item(matching[-1], head_sha)

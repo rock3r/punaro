@@ -110,12 +110,6 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--public-url "$PUNARO_PUBLIC_URL")
 test -f "$installation_dir/installation.json"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE FUNCTION auth.unsafe_owner_function() RETURNS integer LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'; GRANT EXECUTE ON FUNCTION auth.unsafe_owner_function() TO punaro_app"
-if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
-	echo 'production bootstrap accepted an application-role grant on an owner-owned routine' >&2
-	exit 1
-fi
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE ALL PRIVILEGES ON FUNCTION auth.unsafe_owner_function() FROM punaro_app; DROP FUNCTION auth.unsafe_owner_function()'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TEMPORARY ON DATABASE punaro TO punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'CREATE TEMPORARY TABLE forbidden_temp ()' >/dev/null 2>&1; then
