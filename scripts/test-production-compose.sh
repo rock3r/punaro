@@ -301,6 +301,10 @@ if "$runner" config >/dev/null 2>&1; then
 fi
 
 base_env
+PUNARO_PUBLIC_URL='https://[2001:db8::192.0.2.1]'
+"$runner" config
+
+base_env
 PUNARO_PUBLIC_URL='https://[::ffff:127.0.0.1]'
 if "$runner" config >/dev/null 2>&1; then
 	echo 'production runner accepted an IPv4-mapped loopback public URL' >&2

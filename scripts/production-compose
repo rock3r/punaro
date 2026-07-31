@@ -23,6 +23,21 @@ require_numeric_nonroot() {
 
 require_ipv6_literal() {
 	value=$1
+	case "$value" in
+		*.*)
+			ipv4_tail=${value##*:}
+			ipv4_groups=$(printf '%s\n' "$ipv4_tail" | awk '
+				/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+					count = split($0, octets, ".")
+					for (i = 1; i <= count; i++) if (octets[i] !~ /^(0|[1-9][0-9]*)$/ || octets[i] + 0 > 255) exit 1
+					printf "%x:%x\n", octets[1] * 256 + octets[2], octets[3] * 256 + octets[4]
+					exit 0
+				}
+				{ exit 1 }
+			') || fail 'PUNARO_PUBLIC_URL must contain a valid bracketed IPv6 address'
+			value=${value%:*}:$ipv4_groups
+			;;
+	esac
 	printf '%s\n' "$value" | awk '
 	function groups(part,    count, item, i, values) {
 		if (part == "") return 0
