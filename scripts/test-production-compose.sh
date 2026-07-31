@@ -249,6 +249,15 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 
+for invalid_hostname_origin in 'https://.' 'https://-'; do
+	base_env
+	PUNARO_PUBLIC_URL="$invalid_hostname_origin"
+	if "$runner" config >/dev/null 2>&1; then
+		echo 'production runner accepted an invalid DNS public URL hostname' >&2
+		exit 1
+	fi
+done
+
 base_env
 PUNARO_PUBLIC_URL='https://[0:0:0:0:0:0:0:1]'
 if "$runner" config >/dev/null 2>&1; then
