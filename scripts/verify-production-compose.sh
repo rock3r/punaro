@@ -35,6 +35,7 @@ grep -Fq 'profiles: ["reference-daemon"]' "$compose_file"
 grep -Fq "WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')" deploy/compose/postgres-bootstrap.sh
 grep -Fq 'REASSIGN OWNED BY punaro_app TO punaro_owner;' deploy/compose/postgres-bootstrap.sh
 grep -Fq 'PUBLIC retains CREATE' deploy/compose/postgres-bootstrap.sh
+grep -Fq 'refusing to rotate elevated punaro_app role attributes' deploy/compose/postgres-bootstrap.sh
 grep -Fq '\set app_password `cat /tmp/punaro-bootstrap-secrets/app-password`' deploy/compose/postgres-bootstrap.sh
 grep -Fq "ALTER ROLE punaro_app LOGIN PASSWORD :'app_password'" deploy/compose/postgres-bootstrap.sh
 grep -Fq 'ALTER ROLE punaro_app RESET ALL;' deploy/compose/postgres-bootstrap.sh

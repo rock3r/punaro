@@ -57,6 +57,17 @@ BEGIN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it owns objects outside the punaro database; repair them and rerun bootstrap';
   END IF;
 END $$;
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_roles
+    WHERE rolname = 'punaro_app'
+      AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate elevated punaro_app role attributes; repair them and rerun bootstrap';
+  END IF;
+END $$;
 SELECT 'CREATE ROLE punaro_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT'
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec

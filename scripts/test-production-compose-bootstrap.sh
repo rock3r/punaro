@@ -50,6 +50,13 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	echo 'production bootstrap unexpectedly accepted a DSN password different from its configured secret' >&2
 	exit 1
 fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER ROLE punaro_app SUPERUSER'
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted an elevated application role' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER ROLE punaro_app NOSUPERUSER'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'CREATE SCHEMA legacy; CREATE TABLE legacy.unsafe (); ALTER SCHEMA legacy OWNER TO punaro_app; ALTER TABLE legacy.unsafe OWNER TO punaro_app; GRANT USAGE ON SCHEMA legacy TO punaro_app; GRANT SELECT ON legacy.unsafe TO punaro_app'
 printf '%s\n' 'production-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "ALTER ROLE punaro_app SET default_transaction_read_only = on; ALTER ROLE punaro_app IN DATABASE punaro SET default_transaction_read_only = on; ALTER ROLE punaro_app CONNECTION LIMIT 0 VALID UNTIL '2000-01-01'"
