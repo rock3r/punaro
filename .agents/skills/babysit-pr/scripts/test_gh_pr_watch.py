@@ -351,14 +351,33 @@ class RetryEligibilityTests(unittest.TestCase):
     def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},
-            {"source": "clean_bugbot_review", "original_conclusion": "neutral"},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "checks",
+                "original_conclusion": "neutral",
+            },
         )
         self.assertEqual(summary["skipping_count"], 1)
 
     def test_clean_bugbot_reconciliation_removes_its_skipped_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},
-            {"source": "clean_bugbot_review", "original_conclusion": "skipped"},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "checks",
+                "original_conclusion": "skipped",
+            },
+        )
+        self.assertEqual(summary["skipping_count"], 1)
+
+    def test_clean_bugbot_reconciliation_preserves_unrelated_skipped_check_for_actions_fallback(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 1},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "actions_runs",
+                "original_conclusion": "skipped",
+            },
         )
         self.assertEqual(summary["skipping_count"], 1)
 

@@ -62,11 +62,19 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'punaro_app')
 \gexec
 CREATE TEMPORARY TABLE punaro_app_member_sessions (role_name name PRIMARY KEY) ON COMMIT PRESERVE ROWS;
 INSERT INTO punaro_app_member_sessions (role_name)
+WITH RECURSIVE app_members(role_oid) AS (
+  SELECT members.member
+  FROM pg_auth_members members
+  JOIN pg_roles parent ON parent.oid = members.roleid
+  WHERE parent.rolname = 'punaro_app'
+  UNION
+  SELECT members.member
+  FROM pg_auth_members members
+  JOIN app_members ON app_members.role_oid = members.roleid
+)
 SELECT member.rolname
-FROM pg_auth_members members
-JOIN pg_roles parent ON parent.oid = members.roleid
-JOIN pg_roles member ON member.oid = members.member
-WHERE parent.rolname = 'punaro_app';
+FROM app_members
+JOIN pg_roles member ON member.oid = app_members.role_oid;
 DO $$
 DECLARE object record;
 BEGIN

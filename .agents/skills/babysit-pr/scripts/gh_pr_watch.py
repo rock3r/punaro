@@ -1040,6 +1040,7 @@ def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
             "conclusion": "success",
             "is_success": True,
             "source": "clean_bugbot_review",
+            "original_source": bugbot_gate.get("source"),
             "original_conclusion": bugbot_gate.get("conclusion"),
         }
     )
@@ -1051,6 +1052,7 @@ def reconcile_clean_bugbot_checks_summary(checks_summary, bugbot_gate):
     summary = dict(checks_summary)
     if (
         bugbot_gate.get("source") == "clean_bugbot_review"
+        and bugbot_gate.get("original_source") == "checks"
         and str(bugbot_gate.get("original_conclusion") or "") in {"neutral", "skipped"}
     ):
         summary["skipping_count"] = max(
