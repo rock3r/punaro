@@ -1051,7 +1051,7 @@ def reconcile_clean_bugbot_checks_summary(checks_summary, bugbot_gate):
     summary = dict(checks_summary)
     if (
         bugbot_gate.get("source") == "clean_bugbot_review"
-        and str(bugbot_gate.get("original_conclusion") or "") == "skipped"
+        and str(bugbot_gate.get("original_conclusion") or "") in {"neutral", "skipped"}
     ):
         summary["skipping_count"] = max(
             0, int(summary.get("skipping_count") or 0) - 1

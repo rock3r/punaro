@@ -94,6 +94,14 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains column grants outside Punaro schemas; revoke them and rerun bootstrap';
   END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_largeobject_metadata object
+    CROSS JOIN LATERAL aclexplode(coalesce(object.lomacl, acldefault('L'::"char", object.lomowner))) privilege
+    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains large-object grants; revoke them and rerun bootstrap';
+  END IF;
   FOR object IN
     SELECT namespace.nspname, relation.relname, relation.relkind
     FROM pg_class relation
