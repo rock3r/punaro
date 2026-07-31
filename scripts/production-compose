@@ -233,7 +233,7 @@ if printf '%s\n' "$host_for_loopback" | awk '
 	fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address'
 fi
 case "$public_authority" in
-	localhost|localhost:*|127.*|[[]::1[]]|[[]::1[]]:*|[[]0:0:0:0:0:0:0:1[]]|[[]0:0:0:0:0:0:0:1[]]:*|[[]::[]]|[[]::[]]:*|[[]::[fF][fF][fF][fF]:*[]]|[[]::[fF][fF][fF][fF]:*[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address' ;;
+	localhost|localhost:*|[[]::1[]]|[[]::1[]]:*|[[]0:0:0:0:0:0:0:1[]]|[[]0:0:0:0:0:0:0:1[]]:*|[[]::[]]|[[]::[]]:*|[[]::[fF][fF][fF][fF]:*[]]|[[]::[fF][fF][fF][fF]:*[]]:*|0.0.0.0|0.0.0.0:*) fail 'PUNARO_PUBLIC_URL must not name a loopback, wildcard, or IPv4-mapped address' ;;
 esac
 
 repository=${PUNARO_IMAGE%@sha256:*}

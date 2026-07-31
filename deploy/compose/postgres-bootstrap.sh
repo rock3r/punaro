@@ -157,6 +157,15 @@ BEGIN
   FOR schema_name IN SELECT nspname FROM pg_namespace WHERE has_schema_privilege('punaro_app', oid, 'CREATE') LOOP
     EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
   END LOOP;
+  FOR schema_name IN
+    SELECT nspname
+    FROM pg_namespace
+    WHERE nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public', 'information_schema')
+      AND nspname !~ '^pg_'
+      AND has_schema_privilege('punaro_app', oid, 'USAGE')
+  LOOP
+    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
+  END LOOP;
 END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 COMMIT;

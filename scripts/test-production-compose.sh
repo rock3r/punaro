@@ -256,6 +256,10 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 
+base_env
+PUNARO_PUBLIC_URL='https://127.example.com'
+"$runner" config
+
 for hexadecimal_loopback_origin in 'https://0x7f000001' 'https://0x7f.0.0.1'; do
 	base_env
 	PUNARO_PUBLIC_URL="$hexadecimal_loopback_origin"
