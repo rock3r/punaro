@@ -6,7 +6,8 @@ bootstrap_script="$root/deploy/compose/postgres-bootstrap.sh"
 fence_line=$(grep -n -m 1 '^ALTER ROLE punaro_app NOLOGIN;$' "$bootstrap_script" | cut -d: -f1)
 terminate_line=$(grep -n -m 1 '^SELECT pg_terminate_backend(pid)$' "$bootstrap_script" | cut -d: -f1)
 reassign_line=$(grep -n -m 1 '^REASSIGN OWNED BY punaro_app TO punaro_owner;$' "$bootstrap_script" | cut -d: -f1)
-if [ -z "$fence_line" ] || [ -z "$terminate_line" ] || [ -z "$reassign_line" ] || [ "$fence_line" -ge "$terminate_line" ] || [ "$terminate_line" -ge "$reassign_line" ]; then
+public_function_revoke_line=$(grep -n -m 1 -F 'REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM PUBLIC' "$bootstrap_script" | cut -d: -f1)
+if [ -z "$fence_line" ] || [ -z "$terminate_line" ] || [ -z "$reassign_line" ] || [ -z "$public_function_revoke_line" ] || [ "$fence_line" -ge "$terminate_line" ] || [ "$terminate_line" -ge "$reassign_line" ]; then
 	echo 'production bootstrap does not terminate pre-existing application sessions before ownership cleanup' >&2
 	exit 1
 fi
@@ -81,9 +82,19 @@ fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE ALL PRIVILEGES ON SCHEMA legacy_columns FROM punaro_app; REVOKE ALL PRIVILEGES ON legacy_columns.records FROM punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'CREATE FUNCTION public.bootstrap_public_definer() RETURNS name LANGUAGE sql SECURITY DEFINER AS $$SELECT current_user$$; ALTER FUNCTION public.bootstrap_public_definer() OWNER TO punaro_app; GRANT EXECUTE ON FUNCTION public.bootstrap_public_definer() TO PUBLIC'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT public.bootstrap_public_definer()' >/dev/null 2>&1; then
+	echo 'production bootstrap retained PUBLIC execution on a reassigned security-definer function' >&2
+	exit 1
+fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO punaro_app'
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
 	echo 'production bootstrap accepted unsafe default privileges for the application role' >&2
+	exit 1
+fi
+if ! docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT 1' >/dev/null 2>&1; then
+	echo 'production bootstrap disabled the application role after refusing unsafe default privileges' >&2
 	exit 1
 fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM punaro_app'

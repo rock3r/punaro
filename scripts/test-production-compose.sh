@@ -233,7 +233,7 @@ if "$runner" config >/dev/null 2>&1; then
 	exit 1
 fi
 
-for localhost_origin in 'https://LOCALHOST' 'https://localhost.'; do
+for localhost_origin in 'https://LOCALHOST' 'https://localhost.' 'https://foo.localhost' 'https://foo.localhost.:8443'; do
 	base_env
 	PUNARO_PUBLIC_URL="$localhost_origin"
 	if "$runner" config >/dev/null 2>&1; then

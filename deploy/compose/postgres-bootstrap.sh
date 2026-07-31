@@ -87,6 +87,44 @@ SELECT member.rolname
 FROM app_members
 JOIN pg_roles member ON member.oid = app_members.role_oid;
 DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_default_acl default_acl
+    CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
+    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+       OR (privilege.grantee = 0 AND default_acl.defaclobjtype IN ('r', 'S'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table or sequence default privileges remain; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
+    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
+    WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains column grants outside Punaro schemas; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_largeobject_metadata large_object
+    CROSS JOIN LATERAL aclexplode(large_object.lomacl) privilege
+    WHERE large_object.lomacl IS NOT NULL
+      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains large-object grants; revoke them and rerun bootstrap';
+  END IF;
+END $$;
+DO $$
 DECLARE membership record;
 BEGIN
   FOR membership IN SELECT parent.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE member.rolname = 'punaro_app' LOOP
@@ -127,50 +165,6 @@ BEGIN;
 DO $$
 DECLARE object record;
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM pg_default_acl default_acl
-    CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
-    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-       OR (
-         privilege.grantee = 0
-         AND default_acl.defaclobjtype IN ('r', 'S')
-       )
-  ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table or sequence default privileges remain; revoke them and rerun bootstrap';
-  END IF;
-  IF EXISTS (
-    SELECT 1
-    FROM pg_class relation
-    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
-    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
-  ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
-  END IF;
-  IF EXISTS (
-    SELECT 1
-    FROM pg_attribute attribute
-    JOIN pg_class relation ON relation.oid = attribute.attrelid
-    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-    CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
-    WHERE attribute.attnum > 0
-      AND NOT attribute.attisdropped
-      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
-  ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains column grants outside Punaro schemas; revoke them and rerun bootstrap';
-  END IF;
-  IF EXISTS (
-    SELECT 1
-    FROM pg_largeobject_metadata large_object
-    CROSS JOIN LATERAL aclexplode(large_object.lomacl) privilege
-    WHERE large_object.lomacl IS NOT NULL
-      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-  ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains large-object grants; revoke them and rerun bootstrap';
-  END IF;
   FOR object IN
     SELECT namespace.nspname, relation.relname, relation.relkind
     FROM pg_class relation
@@ -192,8 +186,10 @@ BEGIN
   LOOP
     IF object.prokind = 'p' THEN
       EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM punaro_app', object.nspname, object.proname, object.arguments);
+      EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
     ELSE
       EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM punaro_app', object.nspname, object.proname, object.arguments);
+      EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
     END IF;
   END LOOP;
   FOR object IN
