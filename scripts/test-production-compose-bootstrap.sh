@@ -60,6 +60,12 @@ fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE ALL PRIVILEGES ON SCHEMA legacy FROM punaro_app; REVOKE ALL PRIVILEGES ON legacy.unsafe FROM punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1' | grep -Fxq 1
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO punaro_app'
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted unsafe default privileges for the application role' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM punaro_app'
 stale_output="$temporary/stale-session"
 (docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint env -e PGAPPNAME=production-stale-session -e PGPASSWORD='production-app-password' postgres-bootstrap psql --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT pg_sleep(30)' >"$stale_output" 2>&1) & stale_session=$!
 for attempt in $(seq 1 30); do docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --tuples-only --no-align --command "SELECT 1 FROM pg_stat_activity WHERE application_name = 'production-stale-session'" | grep -Fxq 1 && break; sleep 1; done

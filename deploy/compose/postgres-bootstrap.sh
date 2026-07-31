@@ -65,6 +65,14 @@ DECLARE object record;
 BEGIN
   IF EXISTS (
     SELECT 1
+    FROM pg_default_acl default_acl
+    CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
+    WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1
     FROM pg_class relation
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
@@ -105,7 +113,6 @@ BEGIN
   END LOOP;
 END $$;
 REASSIGN OWNED BY punaro_app TO punaro_owner;
-ALTER ROLE punaro_app NOLOGIN;
 COMMIT;
 SELECT pg_terminate_backend(pid)
 FROM pg_stat_activity
