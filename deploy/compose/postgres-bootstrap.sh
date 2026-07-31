@@ -87,6 +87,44 @@ SELECT member.rolname
 FROM app_members
 JOIN pg_roles member ON member.oid = app_members.role_oid;
 DO $$
+DECLARE membership record;
+BEGIN
+  FOR membership IN SELECT parent.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE member.rolname = 'punaro_app' LOOP
+    EXECUTE format('REVOKE %I FROM punaro_app', membership.rolname);
+  END LOOP;
+END $$;
+DO $$
+DECLARE member_name record;
+BEGIN
+  FOR member_name IN SELECT member.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE parent.rolname = 'punaro_app' LOOP
+    EXECUTE format('REVOKE punaro_app FROM %I', member_name.rolname);
+  END LOOP;
+END $$;
+ALTER ROLE punaro_app NOLOGIN;
+REVOKE CREATE ON DATABASE punaro FROM punaro_app;
+DO $$
+DECLARE schema_name record;
+BEGIN
+  FOR schema_name IN SELECT nspname FROM pg_namespace WHERE has_schema_privilege('punaro_app', oid, 'CREATE') LOOP
+    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
+  END LOOP;
+  FOR schema_name IN
+    SELECT nspname
+    FROM pg_namespace
+    WHERE nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public', 'information_schema')
+      AND nspname !~ '^pg_'
+      AND has_schema_privilege('punaro_app', oid, 'USAGE')
+  LOOP
+    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
+  END LOOP;
+END $$;
+COMMIT;
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE (usename = 'punaro_app' OR usename IN (SELECT role_name FROM punaro_app_member_sessions))
+  AND pid <> pg_backend_pid();
+BEGIN;
+DO $$
 DECLARE object record;
 BEGIN
   IF EXISTS (
@@ -164,27 +202,8 @@ BEGIN
     EXECUTE format('REVOKE ALL PRIVILEGES ON SCHEMA %I FROM punaro_app', object.nspname);
   END LOOP;
 END $$;
-DO $$
-DECLARE membership record;
-BEGIN
-  FOR membership IN SELECT parent.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE member.rolname = 'punaro_app' LOOP
-    EXECUTE format('REVOKE %I FROM punaro_app', membership.rolname);
-  END LOOP;
-END $$;
-DO $$
-DECLARE member_name record;
-BEGIN
-  FOR member_name IN SELECT member.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE parent.rolname = 'punaro_app' LOOP
-    EXECUTE format('REVOKE punaro_app FROM %I', member_name.rolname);
-  END LOOP;
-END $$;
-ALTER ROLE punaro_app NOLOGIN;
 REASSIGN OWNED BY punaro_app TO punaro_owner;
 COMMIT;
-SELECT pg_terminate_backend(pid)
-FROM pg_stat_activity
-WHERE (usename = 'punaro_app' OR usename IN (SELECT role_name FROM punaro_app_member_sessions))
-  AND pid <> pg_backend_pid();
 BEGIN;
 ALTER ROLE punaro_app LOGIN PASSWORD :'app_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 VALID UNTIL 'infinity';
 ALTER ROLE punaro_app RESET ALL;
@@ -207,25 +226,8 @@ BEGIN
     END LOOP;
   END IF;
 END $$;
-REVOKE CREATE ON DATABASE punaro FROM punaro_app;
 REVOKE TEMPORARY ON DATABASE punaro FROM PUBLIC;
 REVOKE TEMPORARY ON DATABASE punaro FROM punaro_app;
-DO $$
-DECLARE schema_name record;
-BEGIN
-  FOR schema_name IN SELECT nspname FROM pg_namespace WHERE has_schema_privilege('punaro_app', oid, 'CREATE') LOOP
-    EXECUTE format('REVOKE CREATE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
-  END LOOP;
-  FOR schema_name IN
-    SELECT nspname
-    FROM pg_namespace
-    WHERE nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public', 'information_schema')
-      AND nspname !~ '^pg_'
-      AND has_schema_privilege('punaro_app', oid, 'USAGE')
-  LOOP
-    EXECUTE format('REVOKE USAGE ON SCHEMA %I FROM punaro_app', schema_name.nspname);
-  END LOOP;
-END $$;
 GRANT CONNECT ON DATABASE punaro TO punaro_app;
 COMMIT;
 SELECT pg_terminate_backend(pid)

@@ -1,12 +1,19 @@
 #!/bin/sh
 set -eu
 
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+bootstrap_script="$root/deploy/compose/postgres-bootstrap.sh"
+fence_line=$(grep -n -m 1 '^ALTER ROLE punaro_app NOLOGIN;$' "$bootstrap_script" | cut -d: -f1)
+terminate_line=$(grep -n -m 1 '^SELECT pg_terminate_backend(pid)$' "$bootstrap_script" | cut -d: -f1)
+reassign_line=$(grep -n -m 1 '^REASSIGN OWNED BY punaro_app TO punaro_owner;$' "$bootstrap_script" | cut -d: -f1)
+if [ -z "$fence_line" ] || [ -z "$terminate_line" ] || [ -z "$reassign_line" ] || [ "$fence_line" -ge "$terminate_line" ] || [ "$terminate_line" -ge "$reassign_line" ]; then
+	echo 'production bootstrap does not terminate pre-existing application sessions before ownership cleanup' >&2
+	exit 1
+fi
 if ! docker compose version >/dev/null 2>&1; then
 	echo 'production Compose bootstrap test requires Docker Compose v2' >&2
 	exit 0
 fi
-
-root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(mktemp -d)
 project="punaro-production-bootstrap-${GITHUB_RUN_ID:-local}-$$"
 cleanup() {
