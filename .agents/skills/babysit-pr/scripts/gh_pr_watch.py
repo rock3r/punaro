@@ -621,6 +621,7 @@ def summarize_bugbot_gate_from_checks(checks):
         "workflow_name": str(latest.get("name") or ""),
         "html_url": str(latest.get("link") or ""),
         "started_at": str(latest.get("startedAt") or ""),
+        "matching_check_count": len(bugbot_checks),
         "source": "checks",
     }
 
@@ -1036,6 +1037,11 @@ def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
     if str(bugbot_gate.get("status") or "") != "completed":
         return bugbot_gate
     if str(bugbot_gate.get("conclusion") or "") not in {"neutral", "skipped"}:
+        return bugbot_gate
+    # GitHub's legacy check view does not expose a per-review run identifier.
+    # A clean review is therefore authoritative only when there is one Cursor
+    # check for this head; overlapping runs cannot be correlated safely.
+    if int(bugbot_gate.get("matching_check_count") or 1) != 1:
         return bugbot_gate
     if not has_clean_bugbot_review(reviews, head_sha, bugbot_gate.get("started_at")):
         return bugbot_gate

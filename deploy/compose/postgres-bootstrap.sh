@@ -164,6 +164,7 @@ WHERE (usename = 'punaro_app' OR usename IN (SELECT role_name FROM punaro_app_me
 BEGIN;
 DO $$
 DECLARE object record;
+DECLARE grant_role record;
 BEGIN
   FOR object IN
     SELECT namespace.nspname, relation.relname, relation.relkind
@@ -179,7 +180,7 @@ BEGIN
     END IF;
   END LOOP;
   FOR object IN
-    SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind
+    SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind, procedure.proacl, procedure.proowner
     FROM pg_proc procedure
     JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
     WHERE procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
@@ -191,6 +192,18 @@ BEGIN
       EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM punaro_app', object.nspname, object.proname, object.arguments);
       EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
     END IF;
+    FOR grant_role IN
+      SELECT role.rolname
+      FROM aclexplode(coalesce(object.proacl, acldefault('f'::"char", object.proowner))) privilege
+      JOIN pg_roles role ON role.oid = privilege.grantee
+      WHERE privilege.grantee <> object.proowner AND privilege.grantee <> 0
+    LOOP
+      IF object.prokind = 'p' THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM %I', object.nspname, object.proname, object.arguments, grant_role.rolname);
+      ELSE
+        EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM %I', object.nspname, object.proname, object.arguments, grant_role.rolname);
+      END IF;
+    END LOOP;
   END LOOP;
   FOR object IN
     SELECT nspname FROM pg_namespace WHERE nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')

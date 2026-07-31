@@ -372,6 +372,14 @@ class RetryEligibilityTests(unittest.TestCase):
 
         self.assertFalse(gate["is_success"])
 
+    def test_reconcile_clean_bugbot_review_rejects_overlapping_checks(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {"required": True, "status": "completed", "conclusion": "skipped", "is_success": False, "matching_check_count": 2},
+            [{"author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "body": "Bugbot reviewed your changes and found no new issues!"}],
+            "abc123",
+        )
+        self.assertFalse(gate["is_success"])
+
     def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},
