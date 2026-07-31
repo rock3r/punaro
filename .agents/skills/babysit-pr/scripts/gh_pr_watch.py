@@ -680,6 +680,7 @@ def summarize_bugbot_gate_from_runs(runs, head_sha):
         "workflow_name": latest.get("name") or latest.get("display_title") or "",
         "html_url": str(latest.get("html_url") or ""),
         "started_at": str(latest.get("created_at") or ""),
+        "matching_check_count": len(bugbot_runs),
         "source": "actions_runs",
     }
 

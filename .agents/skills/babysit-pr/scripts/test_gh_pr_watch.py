@@ -384,6 +384,13 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertFalse(watch.is_primary_bugbot_check({"name": "Cursor Bugbot Autofix", "workflow": "Cursor Bugbot"}))
         self.assertTrue(watch.is_primary_bugbot_check({"name": "Cursor Bugbot", "workflow": "Cursor Bugbot"}))
 
+    def test_summarize_bugbot_runs_counts_same_head_overlaps(self):
+        gate = watch.summarize_bugbot_gate_from_runs([
+            {"id": 1, "head_sha": "abc123", "name": "Cursor Bugbot", "status": "completed", "conclusion": "skipped", "created_at": "2026-07-31T12:00:00Z"},
+            {"id": 2, "head_sha": "abc123", "name": "Cursor Bugbot", "status": "completed", "conclusion": "skipped", "created_at": "2026-07-31T12:01:00Z"},
+        ], "abc123")
+        self.assertEqual(gate["matching_check_count"], 2)
+
     def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
         summary = watch.reconcile_clean_bugbot_checks_summary(
             {"skipping_count": 2},
