@@ -98,12 +98,28 @@ BEGIN
     RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table or sequence default privileges remain; revoke them and rerun bootstrap';
   END IF;
   IF EXISTS (
+    SELECT 1 FROM pg_default_acl default_acl
+    CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
+    WHERE default_acl.defaclobjtype IN ('r', 'S')
+      AND privilege.grantee NOT IN (0, default_acl.defaclrole, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while table or sequence default privileges grant a third-party role access; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
       AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
+    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND privilege.grantee NOT IN (0, relation.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro relation grants a third-party role access; revoke it and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid
