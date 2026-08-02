@@ -114,6 +114,16 @@ BEGIN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains object grants outside Punaro schemas; revoke them and rerun bootstrap';
   END IF;
   IF EXISTS (
+    SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
+    WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND (privilege.is_grantable OR (relation.relkind = 'S' AND privilege.privilege_type NOT IN ('USAGE', 'SELECT')) OR (relation.relkind <> 'S' AND privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains an unexpected grant on a Punaro relation; revoke it and rerun bootstrap';
+  END IF;
+  IF EXISTS (
     SELECT 1 FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid
     JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
@@ -122,6 +132,33 @@ BEGIN
       AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while it retains column grants outside Punaro schemas; revoke them and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_attribute attribute JOIN pg_class relation ON relation.oid = attribute.attrelid
+    JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(attribute.attacl, acldefault('c'::"char", relation.relowner))) privilege
+    WHERE attribute.attnum > 0 AND NOT attribute.attisdropped
+      AND relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+      AND (privilege.is_grantable OR privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while it retains an unexpected column grant on a Punaro relation; revoke it and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+      AND relation.relowner NOT IN ((SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner'), (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro relation has an unexpected owner; repair ownership and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_proc procedure JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+    WHERE namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND procedure.proowner NOT IN ((SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner'), (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro routine has an unexpected owner; repair ownership and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_largeobject_metadata large_object
@@ -214,7 +251,7 @@ BEGIN
   LOOP
     FOR grant_role IN
       SELECT role.rolname FROM aclexplode(coalesce(object.relacl, acldefault(CASE WHEN object.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, object.relowner))) privilege JOIN pg_roles role ON role.oid = privilege.grantee
-      WHERE privilege.grantee NOT IN (0, object.relowner)
+      WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
     LOOP
       IF object.relkind = 'S' THEN EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
       ELSE EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', object.nspname, object.relname, grant_role.rolname);
@@ -229,9 +266,31 @@ BEGIN
       AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
   LOOP
     FOR grant_role IN SELECT role.rolname FROM aclexplode(object.attacl) privilege JOIN pg_roles role ON role.oid = privilege.grantee
-      WHERE privilege.grantee NOT IN (0, object.relowner)
+      WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
     LOOP
       EXECUTE format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM %I', object.attname, object.nspname, object.relname, grant_role.rolname);
+    END LOOP;
+  END LOOP;
+  FOR object IN
+    SELECT namespace.nspname, procedure.proname, pg_get_function_identity_arguments(procedure.oid) AS arguments, procedure.prokind, procedure.proacl, procedure.proowner
+    FROM pg_proc procedure JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+    WHERE procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+  LOOP
+    IF object.prokind = 'p' THEN
+      EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
+    ELSE
+      EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
+    END IF;
+    FOR grant_role IN
+      SELECT role.rolname FROM aclexplode(coalesce(object.proacl, acldefault('f'::"char", object.proowner))) privilege JOIN pg_roles role ON role.oid = privilege.grantee
+      WHERE privilege.grantee NOT IN (0, object.proowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+    LOOP
+      IF object.prokind = 'p' THEN
+        EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM %I', object.nspname, object.proname, object.arguments, grant_role.rolname);
+      ELSE
+        EXECUTE format('REVOKE ALL PRIVILEGES ON FUNCTION %I.%I(%s) FROM %I', object.nspname, object.proname, object.arguments, grant_role.rolname);
+      END IF;
     END LOOP;
   END LOOP;
   FOR object IN
