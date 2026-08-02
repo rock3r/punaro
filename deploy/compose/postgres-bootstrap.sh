@@ -171,6 +171,23 @@ BEGIN
   END IF;
 END $$;
 DO $$
+BEGIN
+  IF EXISTS (
+    WITH RECURSIVE owner_members(role_oid) AS (
+      SELECT members.member
+      FROM pg_auth_members members
+      WHERE members.roleid = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      UNION
+      SELECT members.member
+      FROM pg_auth_members members
+      JOIN owner_members ON owner_members.role_oid = members.roleid
+    )
+    SELECT 1 FROM owner_members
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while another role inherits punaro_owner; revoke the membership and rerun bootstrap';
+  END IF;
+END $$;
+DO $$
 DECLARE membership record;
 BEGIN
   FOR membership IN SELECT parent.rolname FROM pg_auth_members members JOIN pg_roles parent ON parent.oid = members.roleid JOIN pg_roles member ON member.oid = members.member WHERE member.rolname = 'punaro_app' LOOP
