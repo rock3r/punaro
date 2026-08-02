@@ -546,7 +546,7 @@ def is_primary_bugbot_check(check):
     """Return whether a check is the review gate, not a sibling Cursor task."""
     name = str(check.get("name") or "").lower()
     workflow = str(check.get("workflow") or "").lower()
-    return is_bugbot_name(name) and "autofix" not in name and "autofix" not in workflow
+    return (is_bugbot_name(name) or is_bugbot_name(workflow)) and "autofix" not in name and "autofix" not in workflow
 
 
 def bugbot_check_activity_sort_key(check):

@@ -249,6 +249,9 @@ BEGIN
       AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
       AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
   LOOP
+    IF object.relkind = 'S' THEN EXECUTE format('REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM PUBLIC', object.nspname, object.relname);
+    ELSE EXECUTE format('REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM PUBLIC', object.nspname, object.relname);
+    END IF;
     FOR grant_role IN
       SELECT role.rolname FROM aclexplode(coalesce(object.relacl, acldefault(CASE WHEN object.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, object.relowner))) privilege JOIN pg_roles role ON role.oid = privilege.grantee
       WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
@@ -265,6 +268,7 @@ BEGIN
       AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
       AND attribute.attnum > 0 AND NOT attribute.attisdropped AND attribute.attacl IS NOT NULL
   LOOP
+    EXECUTE format('REVOKE ALL PRIVILEGES (%I) ON TABLE %I.%I FROM PUBLIC', object.attname, object.nspname, object.relname);
     FOR grant_role IN SELECT role.rolname FROM aclexplode(object.attacl) privilege JOIN pg_roles role ON role.oid = privilege.grantee
       WHERE privilege.grantee NOT IN (0, object.relowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
     LOOP
