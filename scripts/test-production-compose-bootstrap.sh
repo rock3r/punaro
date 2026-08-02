@@ -150,20 +150,6 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 fi
 printf '%s\n' 'production-app-password' >"$app_password"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT 1 FROM relay.projects LIMIT 1'
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TRUNCATE ON relay.projects TO punaro_app'
-if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
-	echo 'production bootstrap accepted an excessive application table privilege' >&2
-	exit 1
-fi
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE TRUNCATE ON relay.projects FROM punaro_app'
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE FUNCTION relay.bootstrap_owner_definer() RETURNS name LANGUAGE sql SECURITY DEFINER AS \$\$SELECT current_user\$\$"
-docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
-if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT relay.bootstrap_owner_definer()' >/dev/null 2>&1; then
-	echo 'production bootstrap retained PUBLIC execution on an owner security-definer function' >&2
-	exit 1
-fi
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT * FROM legacy.unsafe' >/dev/null 2>&1; then
 	echo 'production bootstrap retained an explicit application-role grant on a reassigned legacy object' >&2
 	exit 1
@@ -196,6 +182,20 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--public-url "$PUNARO_PUBLIC_URL")
 test -f "$installation_dir/installation.json"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT 1 FROM relay.projects LIMIT 1'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TRUNCATE ON relay.projects TO punaro_app'
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted an excessive application table privilege' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE TRUNCATE ON relay.projects FROM punaro_app'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE FUNCTION relay.bootstrap_owner_definer() RETURNS name LANGUAGE sql SECURITY DEFINER AS \$\$SELECT current_user\$\$"
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT relay.bootstrap_owner_definer()' >/dev/null 2>&1; then
+	echo 'production bootstrap retained PUBLIC execution on an owner security-definer function' >&2
+	exit 1
+fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TEMPORARY ON DATABASE punaro TO punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'CREATE TEMPORARY TABLE forbidden_temp ()' >/dev/null 2>&1; then

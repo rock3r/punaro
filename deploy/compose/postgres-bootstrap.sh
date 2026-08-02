@@ -276,6 +276,13 @@ BEGIN
     FROM pg_proc procedure JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
     WHERE procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
       AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend dependency
+        WHERE dependency.classid = 'pg_proc'::regclass
+          AND dependency.objid = procedure.oid
+          AND dependency.refclassid = 'pg_extension'::regclass
+          AND dependency.deptype = 'e'
+      )
   LOOP
     IF object.prokind = 'p' THEN
       EXECUTE format('REVOKE ALL PRIVILEGES ON PROCEDURE %I.%I(%s) FROM PUBLIC', object.nspname, object.proname, object.arguments);
