@@ -161,6 +161,15 @@ BEGIN
     RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro routine has an unexpected owner; repair ownership and rerun bootstrap';
   END IF;
   IF EXISTS (
+    SELECT 1 FROM pg_namespace namespace
+    CROSS JOIN LATERAL aclexplode(coalesce(namespace.nspacl, acldefault('n'::"char", namespace.nspowner))) privilege
+    WHERE namespace.nspowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND privilege.grantee NOT IN (namespace.nspowner, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while an owner Punaro schema grants a third-party role access; revoke it and rerun bootstrap';
+  END IF;
+  IF EXISTS (
     SELECT 1 FROM pg_largeobject_metadata large_object
     CROSS JOIN LATERAL aclexplode(large_object.lomacl) privilege
     WHERE large_object.lomacl IS NOT NULL
