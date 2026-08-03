@@ -534,6 +534,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
+		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
+			if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+			}
+		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES(?,?,?) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("upsert conversation member: %w", err)
 		}

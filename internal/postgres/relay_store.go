@@ -318,6 +318,11 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			return relay.ControlEvent{}, false, relay.ErrConflict
 		}
 	}
+	if input.Operation == relay.ControlUpsertMember && err == nil && previous&relay.CapReceive != 0 && input.Member.Capabilities&relay.CapReceive == 0 {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		}
+	}
 	if input.Operation == relay.ControlUpsertMember {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
@@ -612,6 +617,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230609))`, input.SenderMachineID, input.IdempotencyKey); err != nil {
 		return relay.Message{}, false, errors.New("message retry lock is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
+		return relay.Message{}, false, errors.New("message conversation lock is unavailable")
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
