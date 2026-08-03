@@ -513,7 +513,7 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 	}
 	var activeRoles int
 	if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM role_bindings
-		WHERE machine_id=? AND session_endpoint=? AND lease_until>? AND role<>?`, machineID, sessionEndpoint, now.UnixMilli(), role).Scan(&activeRoles); err != nil {
+		WHERE machine_id=? AND session_endpoint=? AND ownership_generation=? AND lease_until>? AND role<>?`, machineID, sessionEndpoint, generation, now.UnixMilli(), role).Scan(&activeRoles); err != nil {
 		return fmt.Errorf("count active durable roles: %w", err)
 	}
 	if activeRoles >= MaxActiveRolesPerSession {

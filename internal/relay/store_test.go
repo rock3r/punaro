@@ -348,6 +348,15 @@ func TestStoreBoundsActiveRolesPerSession(t *testing.T) {
 	if err := store.BindRoleToSession("machine-owner", fmt.Sprintf("role/bound-%03d", MaxActiveRolesPerSession), "agent/owner/session", now, time.Minute); !errors.Is(err, ErrConflict) {
 		t.Fatalf("over-bound session err=%v, want ErrConflict", err)
 	}
+	if err := store.AdvertiseEndpoints("machine-owner", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now.Add(2*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-owner", fmt.Sprintf("role/bound-%03d", MaxActiveRolesPerSession), "agent/owner/session", now.Add(2*time.Second), time.Minute); err != nil {
+		t.Fatalf("fenced roles exhausted replacement session cap: %v", err)
+	}
 }
 
 func TestStoreKeepsRoleDeliveryKeysDistinctFromEndpointNames(t *testing.T) {
