@@ -195,7 +195,7 @@ BEGIN
     FROM pg_depend dependency
     JOIN pg_proc procedure ON procedure.oid = dependency.refobjid
     WHERE dependency.refclassid = 'pg_proc'::regclass
-      AND dependency.classid IN ('pg_constraint'::regclass, 'pg_attrdef'::regclass, 'pg_class'::regclass)
+      AND dependency.classid IN ('pg_constraint'::regclass, 'pg_attrdef'::regclass, 'pg_class'::regclass, 'pg_policy'::regclass)
       AND procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while a stored expression references an application-owned function; remove the dependency and rerun bootstrap';
