@@ -47,8 +47,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	installedServicePath := filepath.Join(receiverHome, "Library", "LaunchAgents", "org.punaro.adapter.plist")
 	launchDomain := "gui/" + strconvItoa(os.Getuid())
 
-	relayAddress := e2eFreeLoopbackAddress(t)
-	healthAddress := e2eFreeLoopbackAddress(t)
+	relayAddress, healthAddress := e2eDistinctLoopbackAddresses(t)
 	proxy := e2eStartRelayProxy(t, relayAddress)
 	relayURL := "https://" + proxy.listener.Addr().String()
 
@@ -170,6 +169,19 @@ func e2eFreeLoopbackAddress(t *testing.T) string {
 		t.Fatal("release disposable loopback address")
 	}
 	return address
+}
+
+func e2eDistinctLoopbackAddresses(t *testing.T) (string, string) {
+	t.Helper()
+	relayAddress := e2eFreeLoopbackAddress(t)
+	for attempts := 0; attempts < 10; attempts++ {
+		healthAddress := e2eFreeLoopbackAddress(t)
+		if healthAddress != relayAddress {
+			return relayAddress, healthAddress
+		}
+	}
+	t.Fatal("allocate distinct disposable relay and health addresses")
+	return "", ""
 }
 
 func e2eStartRelayProxy(t *testing.T, relayAddress string) *e2eRelayProxy {
@@ -311,8 +323,8 @@ func e2eRejectUnauthorizedLease(t *testing.T, relayURL, senderHome, receiverEndp
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := client.Lease(ctx, receiverEndpoint); err == nil {
-		t.Fatal("enrolled sender could lease the receiver endpoint")
+	if _, err := client.Lease(ctx, receiverEndpoint); err == nil || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatal("enrolled sender lease was not rejected as forbidden")
 	}
 }
 
