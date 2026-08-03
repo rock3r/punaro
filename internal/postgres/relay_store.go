@@ -689,15 +689,18 @@ func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, co
 	if err != nil {
 		return nil, errors.New("recipient cursor authorization is unavailable")
 	}
-	defer rows.Close()
 	cursors := make(map[string]int64, len(conversationIDs))
 	for rows.Next() {
 		var conversationID string
 		var cursor int64
 		if err := rows.Scan(&conversationID, &cursor); err != nil {
+			_ = rows.Close()
 			return nil, errors.New("recipient cursor is malformed")
 		}
 		cursors[conversationID] = cursor
+	}
+	if err := rows.Close(); err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
 	}
 	if err := rows.Err(); err != nil {
 		return nil, errors.New("recipient cursor authorization is unavailable")
@@ -950,18 +953,6 @@ func postgresEndpointOwnershipLocked(tx *sql.Tx, endpoint, machineID string, now
 	var until time.Time
 	var generation int64
 	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until,ownership_generation FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpoint).Scan(&owner, &until, &generation); errors.Is(err, sql.ErrNoRows) || owner != machineID || !until.After(now) {
-		return 0, relay.ErrForbidden
-	} else if err != nil {
-		return 0, errors.New("endpoint ownership is unavailable")
-	}
-	return generation, nil
-}
-
-func postgresEndpointOwnership(tx *sql.Tx, endpoint, machineID string, now time.Time) (int64, error) {
-	var owner string
-	var until time.Time
-	var generation int64
-	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until,ownership_generation FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint).Scan(&owner, &until, &generation); errors.Is(err, sql.ErrNoRows) || owner != machineID || !until.After(now) {
 		return 0, relay.ErrForbidden
 	} else if err != nil {
 		return 0, errors.New("endpoint ownership is unavailable")
