@@ -1721,6 +1721,9 @@ VALUES ($1,$2,$3,1,statement_timestamp()+interval '1 day')`, role, readerEndpoin
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.recipient_grants(artifact_id,recipient_principal_id,message_id) VALUES ($1,$2,$3)`, artifactID, reader.ID, messageID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability=$3 AND revoked_at IS NULL`, reader.ID, targetProject, CapabilityMemoryWrite); err != nil {
+		t.Fatal(err)
+	}
 	purgeFirstTarget, err := app.CreateMemory(ctx, MemoryCreateRequest{
 		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171750",
 		LogicalKey: "evidence.purge-first-target", Kind: "decision", Trust: "curated", Document: json.RawMessage(`{"race":"purge-first"}`),
