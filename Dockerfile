@@ -5,6 +5,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
+COPY Dockerfile .dockerignore docker-compose.memory-onboarding-e2e.yml ./
+COPY scripts/install-client.sh scripts/install-adapter.sh ./scripts/
+COPY scripts/verify-deployment-files.sh ./scripts/
+COPY deploy/systemd/user/punaro-adapter.service ./deploy/systemd/user/
+RUN mkdir -p /home/punaro/tmp \
+ && chown 65532:65532 /home/punaro /home/punaro/tmp \
+ && chmod 700 /home/punaro /home/punaro/tmp
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro ./cmd/punaro \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punarod ./cmd/punarod \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-migrate ./cmd/punaro-migrate \
