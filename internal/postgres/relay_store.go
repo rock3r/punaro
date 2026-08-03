@@ -304,6 +304,9 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	sort.Strings(orderedRoles)
 	for _, role := range orderedRoles {
 		owner := roles[role]
+		if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, role); err != nil {
+			return relay.Conversation{}, errors.New("durable role creation lock is unavailable")
+		}
 		var existingOwner string
 		err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1`, role).Scan(&existingOwner)
 		switch {
