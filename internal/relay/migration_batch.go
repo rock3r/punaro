@@ -167,7 +167,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	if manifest.Phase != MigrationSourcePrepared {
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
-	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings" || table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency") {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) {
 		return MigrationSourceBatch{Done: true}, nil
 	}
 	var keyValues []any
