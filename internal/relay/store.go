@@ -574,6 +574,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES(?,?,?) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("upsert conversation member: %w", err)
 		}
+		if input.Member.Capabilities&CapReceive != 0 {
+			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, err
+			}
+		}
 	} else {
 		var targetCapabilities Capability
 		err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint).Scan(&targetCapabilities)

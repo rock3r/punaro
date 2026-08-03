@@ -330,6 +330,11 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
 		}
+		if input.Member.Capabilities&relay.CapReceive != 0 {
+			if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return relay.ControlEvent{}, false, err
+			}
+		}
 	} else {
 		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")

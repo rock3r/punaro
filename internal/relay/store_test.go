@@ -179,6 +179,59 @@ func TestStoreControlRevokesDetachedExistingMember(t *testing.T) {
 	}
 }
 
+func TestStoreControlCanRetainInvokeCapability(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 30, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive | CapInvoke}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapSend | CapInvoke}, IdempotencyKey: "retain-invoke", Now: now})
+	if err != nil || event.Member.Capabilities != CapSend|CapInvoke {
+		t.Fatalf("invoke control=%#v err=%v", event, err)
+	}
+}
+
+func TestStoreControlGrantReceiveStartsAtCurrentConversationCursor(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 45, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "before membership", IdempotencyKey: "before-membership", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "grant-receive", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-b", "agent/b", conversation.ID, now); err != nil || cursor != message.Sequence {
+		t.Fatalf("cursor=%d err=%v, want current sequence %d", cursor, err, message.Sequence)
+	}
+}
+
 func TestStoreControlRetirementAdvancesRecipientCursor(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
