@@ -247,6 +247,37 @@ func TestMigrationSourceAcceptsInvokeCapabilityBeforePreparation(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRejectsControlAuditWithoutRetryRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 10, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "orphaned-control", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM conversation_control_idempotency WHERE control_id=?", event.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("migration source accepted a control audit event without its retry record")
+	}
+}
+
 func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

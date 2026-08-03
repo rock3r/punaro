@@ -308,6 +308,13 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, input.Member.Endpoint).Scan(&until); err != nil || !until.After(input.Now) {
 			return relay.ControlEvent{}, false, relay.ErrForbidden
 		}
+		var members int
+		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid`, input.ConversationID).Scan(&members); err != nil {
+			return relay.ControlEvent{}, false, errors.New("conversation member count is unavailable")
+		}
+		if members >= 256 {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
 	}
 	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
 		var remaining int

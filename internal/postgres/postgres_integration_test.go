@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1544,6 +1545,26 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	}
 	if err := app.AckDelivery(roleMachine, sessionA, stale.ID, stale.LeaseToken, stale.LeaseGeneration, now.Add(7*time.Second)); !errors.Is(err, relay.ErrForbidden) {
 		t.Fatalf("expired role binding rebind acknowledged stale lease: %v", err)
+	}
+	limitMembers := make([]relay.Member, 0, 256)
+	limitEndpoints := make([]string, 0, 257)
+	limitMembers = append(limitMembers, relay.Member{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin})
+	limitEndpoints = append(limitEndpoints, endpointA)
+	for index := 1; index < 256; index++ {
+		endpoint := fmt.Sprintf("agent/postgres-control/member-%03d", index)
+		limitMembers = append(limitMembers, relay.Member{Endpoint: endpoint, Capabilities: relay.CapReceive})
+		limitEndpoints = append(limitEndpoints, endpoint)
+	}
+	limitEndpoints = append(limitEndpoints, endpointC)
+	if err := app.AdvertiseEndpoints(machineA, limitEndpoints, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	limited, err := app.CreateConversationIdempotent(relay.CreateConversationInput{MachineID: machineA, IdempotencyKey: "postgres-control-member-limit-create", CreatorEndpoint: endpointA, Now: now, Members: limitMembers})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ApplyControl(relay.ControlInput{ConversationID: limited.ID, ActorMachineID: machineA, ActorEndpoint: endpointA, Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: endpointC, Capabilities: relay.CapReceive}, IdempotencyKey: "postgres-control-member-limit", Now: now}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("overflow control error=%v, want conflict", err)
 	}
 }
 

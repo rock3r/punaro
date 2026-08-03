@@ -202,6 +202,36 @@ func TestStoreControlCanRetainInvokeCapability(t *testing.T) {
 	}
 }
 
+func TestStoreControlRejectsNewMemberBeyondConversationLimit(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 35, 0, 0, time.UTC)
+	members := make([]Member, 0, 256)
+	endpoints := make([]string, 0, 257)
+	members = append(members, Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin})
+	endpoints = append(endpoints, "agent/a")
+	for index := 1; index < 256; index++ {
+		endpoint := fmt.Sprintf("agent/member-%03d", index)
+		members = append(members, Member{Endpoint: endpoint, Capabilities: CapReceive})
+		endpoints = append(endpoints, endpoint)
+	}
+	endpoints = append(endpoints, "agent/overflow")
+	if err := store.AdvertiseEndpoints("machine-a", endpoints, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", members, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/overflow", Capabilities: CapReceive}, IdempotencyKey: "member-limit", Now: now}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overflow upsert error=%v, want conflict", err)
+	}
+}
+
 func TestStoreControlGrantReceiveStartsAtCurrentConversationCursor(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

@@ -550,6 +550,13 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			if err := endpointActive(tx, input.Member.Endpoint, input.Now); err != nil {
 				return ControlEvent{}, false, err
 			}
+			var members int
+			if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=?", input.ConversationID).Scan(&members); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("count conversation members: %w", err)
+			}
+			if members >= 256 {
+				return ControlEvent{}, false, ErrConflict
+			}
 		}
 		if err == nil && previous&CapAdmin != 0 && input.Member.Capabilities&CapAdmin == 0 {
 			var remaining int
