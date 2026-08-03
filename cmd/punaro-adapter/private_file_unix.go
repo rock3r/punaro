@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,7 +22,7 @@ func readPrivateFile(path, label string, maximum int) ([]byte, error) {
 	file := os.NewFile(uintptr(fd), path)
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !isPrivateRegularFile(info, fd) {
 		return nil, fmt.Errorf("%s file must be a private regular file", label)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
@@ -32,4 +33,17 @@ func readPrivateFile(path, label string, maximum int) ([]byte, error) {
 		return nil, fmt.Errorf("invalid %s file", label)
 	}
 	return raw, nil
+}
+
+func isPrivateRegularFile(info os.FileInfo, fd int) bool {
+	return info.Mode().IsRegular() &&
+		info.Mode().Perm()&0o077 == 0 &&
+		isOwnedByEffectiveUser(info) &&
+		!hasExtendedACL(fd)
+}
+
+func isOwnedByEffectiveUser(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	// #nosec G115 -- os.Geteuid returns the platform uid_t, represented as a non-negative int.
+	return ok && stat.Uid == uint32(os.Geteuid())
 }

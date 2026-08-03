@@ -41,7 +41,7 @@ for expected in \
 	'<string>org.punaro.adapter</string>' \
 	'<key>KeepAlive</key>' \
 	'<true/>' \
-	'<string>set -a; . "$HOME/.config/punaro/adapter.env"; set +a; exec "$HOME/.local/bin/punaro-adapter"</string>'; do
+	'<string>exec "$HOME/.local/bin/punaro-adapter"</string>'; do
 	if ! grep -Fq "$expected" "$launch_agent"; then
 		printf '%s\n' "adapter LaunchAgent is missing required setting: $expected" >&2
 		exit 1
@@ -74,8 +74,8 @@ for expected in \
 	fi
 done
 
-if ! grep -Fqx 'EnvironmentFile=%h/.config/punaro/adapter.env' "$unit"; then
-	printf '%s\n' 'adapter user unit must read the owner-only adapter environment file' >&2
+if grep -Fqx 'EnvironmentFile=%h/.config/punaro/adapter.env' "$unit"; then
+	printf '%s\n' 'adapter user unit must let punaro-adapter validate and load its own profile' >&2
 	exit 1
 fi
 

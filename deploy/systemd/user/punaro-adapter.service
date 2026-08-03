@@ -3,7 +3,6 @@ Description=Punaro machine mailbox adapter
 
 [Service]
 Type=exec
-EnvironmentFile=%h/.config/punaro/adapter.env
 ExecStart=%h/.local/bin/punaro-adapter
 Restart=on-failure
 RestartSec=3
