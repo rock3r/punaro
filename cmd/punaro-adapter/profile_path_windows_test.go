@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,6 +41,9 @@ func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	protectWindowsFixture(t, configDir)
+	protectWindowsFixture(t, keyFile)
+	protectWindowsFixture(t, profile)
 
 	config, err := loadConfig()
 	if err != nil {
@@ -47,5 +51,17 @@ func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 	}
 	if config.machineID != "windows-profile-machine" {
 		t.Fatalf("machine ID=%q, want Windows profile value", config.machineID)
+	}
+}
+
+func protectWindowsFixture(t *testing.T, path string) {
+	t.Helper()
+	user := os.Getenv("USERNAME")
+	if user == "" {
+		t.Fatal("Windows user name is unavailable")
+	}
+	command := exec.Command("icacls.exe", path, "/inheritance:r", "/grant:r", user+":(F)")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("protect test fixture: %v (%s)", err, output)
 	}
 }
