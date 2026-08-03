@@ -65,8 +65,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eRewriteRelayURL(t, senderProfile, "http://"+proxy.listener.Addr().String())
 	e2eRewriteRelayURL(t, receiverProfile, "http://"+proxy.listener.Addr().String())
 	receiverAdapter := filepath.Join(receiverHome, ".local", "bin", "punaro-adapter")
-	servicePath, serviceLabel := e2eIsolatedLaunchAgent(t, installedServicePath, receiverHome, receiverProfile, receiverAdapter, fixture)
-	serviceTarget := launchDomain + "/" + serviceLabel
+	servicePath := e2eIsolatedLaunchAgent(t, installedServicePath, receiverHome, receiverProfile, receiverAdapter, fixture)
 	t.Cleanup(func() { _ = e2eLaunchctl("bootout", launchDomain, servicePath) })
 
 	senderEndpoint := "agent/" + senderMachineID + "/session"
@@ -126,7 +125,11 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eMailbox(t, receiverMailboxState, "ack", "--delivery", claim.DeliveryID, "--lease-token", claim.LeaseToken)
 	e2eEventually(t, 10*time.Second, func() bool { return proxy.firstAckRejected.Load() }, "receiver did not reach the forced acknowledgement retry boundary")
 
-	if err := e2eLaunchctl("kickstart", "-k", serviceTarget); err != nil {
+	if err := e2eLaunchctl("bootout", launchDomain, servicePath); err != nil {
+		t.Fatal("stop installed receiver service before retry restart")
+	}
+	proxy.retryAcknowledged.Store(false)
+	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
 		t.Fatal("restart installed receiver service for retry")
 	}
 	// A restarted adapter uses a fresh consumer identity. The relay must retain
@@ -283,7 +286,7 @@ func e2eRewriteRelayURL(t *testing.T, profile, relayURL string) {
 	}
 }
 
-func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, binary, fixture string) (string, string) {
+func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, binary, fixture string) string {
 	t.Helper()
 	raw, err := os.ReadFile(installedServicePath)
 	if err != nil {
@@ -302,7 +305,7 @@ func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, b
 	if err := os.WriteFile(path, rewritten, 0o600); err != nil {
 		t.Fatal("write isolated receiver service definition")
 	}
-	return path, label
+	return path
 }
 
 func e2eCreateConversation(t *testing.T, binary, profile, sender, receiver string) string {
