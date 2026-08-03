@@ -57,8 +57,9 @@ operator, and never attach it to CI logs or the release record. Its shape is:
 `candidate_commit` must be the deployed 40-character lowercase Git commit.
 `endpoint` and `resource` must be the same canonical HTTPS MCP resource;
 `authorization_server` is the canonical HTTPS issuer. The tool arguments must
-be JSON objects with no duplicate keys. `protocol_version` is the MCP protocol
-version the disposable client must negotiate with the candidate. Every token and the redaction probe
+be JSON objects with no duplicate keys. `protocol_version` must be the supported
+MCP version `2024-11-05`, which the disposable client negotiates with the
+candidate. Every token and the redaction probe
 must be a distinct, at-least-16-character OAuth bearer value made only of
 letters, digits, `-._~+/=`. Values above are placeholders, not usable
 credentials. `authorized_tool.expected_result` must be the exact non-error MCP

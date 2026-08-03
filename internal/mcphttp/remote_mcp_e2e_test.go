@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	remoteMCPE2EConfigEnv   = "PUNARO_REMOTE_MCP_E2E_CONFIG"
-	remoteMCPE2ELiveEnv     = "PUNARO_REMOTE_MCP_E2E_LIVE"
-	maxRemoteMCPE2EConfig   = 64 << 10
-	maxRemoteMCPE2EResponse = 1 << 20
+	remoteMCPE2EConfigEnv       = "PUNARO_REMOTE_MCP_E2E_CONFIG"
+	remoteMCPE2ELiveEnv         = "PUNARO_REMOTE_MCP_E2E_LIVE"
+	maxRemoteMCPE2EConfig       = 64 << 10
+	maxRemoteMCPE2EResponse     = 1 << 20
+	remoteMCPE2EProtocolVersion = "2024-11-05"
 )
 
 type remoteMCPE2EConfig struct {
@@ -103,6 +104,8 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 		bytes.Replace(valid, []byte(`"token":"ffffffffffffffff","expected_status":403`), []byte(`"token":"ffffffffffffffff","expected_status":418`), 1),
 		bytes.Replace(valid, []byte(`"valid":"aaaaaaaaaaaaaaaa"`), []byte(`"valid":""`), 1),
 		bytes.Replace(valid, []byte(`"valid":"aaaaaaaaaaaaaaaa"`), []byte(`"valid":"bad\nvalue"`), 1),
+		bytes.Replace(valid, []byte(`"protocol_version":"2024-11-05"`), []byte(`"protocol_version":"1"`), 1),
+		bytes.Replace(valid, []byte(`"protocol_version":"2024-11-05"`), []byte(`"protocol_version":"2025-03-26"`), 1),
 		bytes.Replace(valid, []byte(`"redaction_probe":"not-a-secret-redaction-probe"`), []byte(`"redaction_probe":"bad\"value"`), 1),
 		bytes.Replace(valid, []byte(`{"query":"e2e"}`), []byte(`{"query":"e2e","query":"other"}`), 1),
 		bytes.Replace(valid, []byte(`"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}`), []byte(`"expected_result":{}`), 1),
@@ -190,6 +193,18 @@ func TestRemoteMCPE2EOAuthErrorChallengeIsStructured(t *testing.T) {
 	invalid := remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Www-Authenticate": []string{`Basic error="invalid_token"`}}}
 	if validRemoteMCPE2EOAuthErrorChallenge(invalid, "invalid_token") {
 		t.Fatal("non-Bearer error challenge accepted")
+	}
+}
+
+func TestRemoteMCPE2EOAuthFailureDoesNotExposeJSONRPCResult(t *testing.T) {
+	if !validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusUnauthorized}) {
+		t.Fatal("empty OAuth failure response rejected")
+	}
+	if !validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"error":"invalid_token"}`)}) {
+		t.Fatal("non-JSON-RPC OAuth error response rejected")
+	}
+	if validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"tools":[]}}`)}) {
+		t.Fatal("OAuth failure response exposing a JSON-RPC result accepted")
 	}
 }
 
@@ -496,15 +511,7 @@ func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
 }
 
 func validRemoteMCPE2EProtocolVersion(value string) bool {
-	if len(value) == 0 || len(value) > 32 || strings.TrimSpace(value) != value {
-		return false
-	}
-	for _, character := range value {
-		if !(character >= '0' && character <= '9' || character == '-') {
-			return false
-		}
-	}
-	return true
+	return value == remoteMCPE2EProtocolVersion
 }
 
 func validCommit(raw string) bool {
@@ -615,6 +622,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		response := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, token, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 		remoteMCPE2ERequireStatus(t, response, http.StatusUnauthorized)
 		remoteMCPE2ERedacted(t, response, config.sensitiveValues())
+		if !validRemoteMCPE2EOAuthFailureBody(response) {
+			t.Fatal("invalid bearer token response exposed a JSON-RPC result")
+		}
 		if !validRemoteMCPE2EOAuthErrorChallenge(response, "invalid_token") {
 			t.Fatal("invalid bearer token did not return the OAuth invalid-token challenge")
 		}
@@ -977,6 +987,22 @@ func remoteMCPE2ERequireJSONRPCFailure(t *testing.T, response remoteMCPE2ERespon
 
 func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
 	return validRemoteMCPE2EJSONRPCFailureWithExpectedID(response, nil)
+}
+
+func validRemoteMCPE2EOAuthFailureBody(response remoteMCPE2EResponse) bool {
+	payload, supported := remoteMCPE2EJSONRPCPayload(response)
+	if !supported || len(payload) == 0 {
+		return true
+	}
+	if !validJSONRPCValue(payload, maxJSONRPCDepth) {
+		return false
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(payload, &object) != nil {
+		return false
+	}
+	_, hasResult := object["result"]
+	return !hasResult
 }
 
 func remoteMCPE2ERequireJSONRPCFailureWithExpectedID(t *testing.T, response remoteMCPE2EResponse, expectedID json.RawMessage) {
