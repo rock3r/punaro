@@ -271,12 +271,33 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, member.Endpoint).Scan(&memberLease); err != nil || !memberLease.After(now) {
 		return relay.ErrForbidden
 	}
+	if member.Endpoint != previousEndpoint {
+		var previousExists, replacementExists bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2), EXISTS(SELECT 1 FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$3)`, conversationID, previousEndpoint, member.Endpoint).Scan(&previousExists, &replacementExists); err != nil {
+			return errors.New("conversation membership rebind is unavailable")
+		}
+		if previousExists && replacementExists {
+			return relay.ErrForbidden
+		}
+	}
 	if member.Capabilities&relay.CapAdmin == 0 {
 		var otherAdministrators int
 		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint<>$2 AND (capabilities & $3) <> 0`, conversationID, previousEndpoint, relay.CapAdmin).Scan(&otherAdministrators); err != nil {
 			return errors.New("remaining conversation administrators are unavailable")
 		}
 		if otherAdministrators == 0 {
+			return relay.ErrForbidden
+		}
+	}
+	if member.Capabilities&relay.CapReceive == 0 {
+		var pendingDeliveries bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(
+			SELECT 1 FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+			WHERE delivery.recipient_endpoint=$1 AND delivery.acked_at IS NULL AND message.conversation_id=$2::uuid
+		)`, previousEndpoint, conversationID).Scan(&pendingDeliveries); err != nil {
+			return errors.New("pending recipient deliveries are unavailable")
+		}
+		if pendingDeliveries {
 			return relay.ErrForbidden
 		}
 	}
@@ -1023,8 +1044,10 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))')
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((role = ''''::text) OR ((char_length(role) >= 1) AND (char_length(role) <= 64) AND (octet_length(role) <= 256) AND (btrim(role) = role) AND (role !~ ''[[:cntrl:]]''::text)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence > 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
+       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[7]::smallint[] AND pg_get_expr(conbin,conrelid)='((target_role = ''''::text) OR ((char_length(target_role) >= 1) AND (char_length(target_role) <= 64) AND (octet_length(target_role) <= 256) AND (btrim(target_role) = target_role) AND (target_role !~ ''[[:cntrl:]]''::text)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[4,5,7,8,9]::smallint[] AND conkey <@ ARRAY[4,5,7,8,9]::smallint[] AND pg_get_expr(conbin,conrelid)='(((lease_machine_id IS NULL) AND (lease_token IS NULL) AND (ownership_generation IS NULL) AND (consumer_generation IS NULL) AND (lease_until IS NULL)) OR ((lease_machine_id IS NOT NULL) AND (lease_token IS NOT NULL) AND (ownership_generation IS NOT NULL) AND (consumer_generation IS NOT NULL) AND (lease_until IS NOT NULL)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=cursors_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence >= 0)')

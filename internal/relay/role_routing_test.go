@@ -44,6 +44,9 @@ func TestRoleAddressedRoutingTargetsOnlyActiveRoleMembersAndPreservesRetry(t *te
 	if err != nil || len(page.Deliveries) != 0 {
 		t.Fatalf("non-role recipient page=%#v err=%v", page, err)
 	}
+	if err := store.UpdateMembership(conversation.ID, "machine-a", "agent/a", "agent/reviewer-1", Member{Endpoint: "agent/reviewer-2", Capabilities: CapReceive, Role: "reviewer"}, now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("rebind to existing member err=%v", err)
+	}
 	if err := store.UpdateMembership(conversation.ID, "machine-a", "agent/a", "agent/reviewer-1", Member{Endpoint: "agent/reviewer-1", Capabilities: CapReceive, Role: "implementer"}, now); err != nil {
 		t.Fatalf("change reviewer role: %v", err)
 	}
@@ -133,6 +136,9 @@ func TestMembershipRoleChangesRequireAdminAndSurviveRestart(t *testing.T) {
 	}
 	if _, duplicate, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-admin", FromEndpoint: "agent/admin", Body: "queued for reviewer", TargetRole: "reviewer", IdempotencyKey: "before-rebind", Now: now}); err != nil || duplicate {
 		t.Fatalf("queue before rebind duplicate=%t err=%v", duplicate, err)
+	}
+	if err := store.UpdateMembership(conversation.ID, "machine-admin", "agent/admin", "agent/old", Member{Endpoint: "agent/old", Capabilities: CapSend, Role: "reviewer"}, now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("remove receive with pending delivery err=%v", err)
 	}
 	if err := store.UpdateMembership(conversation.ID, "machine-member", "agent/old", "", Member{Endpoint: "agent/new", Capabilities: CapReceive, Role: "implementer"}, now); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("non-admin role change err=%v", err)

@@ -651,12 +651,33 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 	if err := endpointActive(tx, member.Endpoint, now); err != nil {
 		return err
 	}
+	if member.Endpoint != previousEndpoint {
+		var previousExists, replacementExists bool
+		if err := tx.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM memberships WHERE conversation_id=? AND endpoint=?), EXISTS(SELECT 1 FROM memberships WHERE conversation_id=? AND endpoint=?)", conversationID, previousEndpoint, conversationID, member.Endpoint).Scan(&previousExists, &replacementExists); err != nil {
+			return fmt.Errorf("inspect conversation membership rebind: %w", err)
+		}
+		if previousExists && replacementExists {
+			return ErrForbidden
+		}
+	}
 	if member.Capabilities&CapAdmin == 0 {
 		var otherAdministrators int
 		if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND endpoint<>? AND (capabilities & ?) <> 0", conversationID, previousEndpoint, CapAdmin).Scan(&otherAdministrators); err != nil {
 			return fmt.Errorf("count remaining conversation administrators: %w", err)
 		}
 		if otherAdministrators == 0 {
+			return ErrForbidden
+		}
+	}
+	if member.Capabilities&CapReceive == 0 {
+		var pendingDeliveries bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(
+			SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id
+			WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?
+		)`, previousEndpoint, conversationID).Scan(&pendingDeliveries); err != nil {
+			return fmt.Errorf("inspect pending recipient deliveries: %w", err)
+		}
+		if pendingDeliveries {
 			return ErrForbidden
 		}
 	}
