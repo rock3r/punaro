@@ -110,6 +110,11 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
+var roleMigrationTableSpecs = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
+	return append(specs, migrationTableSpecs[13])
+}()
+
 var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"endpoints", "endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until", "endpoint"},
 	{"conversations", "id,next_sequence,created_at", "id"},
@@ -123,6 +128,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 }
 
 const migrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
+const roleMigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 const legacyMigrationSourceSchema = "punaro-relay-sqlite-v1:endpoints;conversations;memberships;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 
 // InspectMigrationSource reads an existing source without creating, migrating,
@@ -356,10 +362,19 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('roles','role_memberships','role_bindings')`).Scan(&roleTables); err != nil || roleTables != 0 && roleTables != 3 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var controlTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('conversation_controls','conversation_control_idempotency')`).Scan(&controlTables); err != nil || controlTables != 0 && controlTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
 	manifest := MigrationSourceManifest{Version: 3}
 	tableSpecs, schema := migrationTableSpecs, migrationSourceSchema
 	if roleTables == 0 {
+		if controlTables != 0 {
+			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
+	} else if controlTables == 0 {
+		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
 	}
 	var storedFingerprint sql.NullString
 	var controlRows int
@@ -383,7 +398,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -453,11 +468,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q)
+	return verifyMigrationSourceSchema(ctx, q, controls)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -492,7 +507,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -507,6 +522,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		names = append(names, name)
 	}
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	if !controls {
+		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -526,6 +544,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		"conversation_control_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"request_nonces":                   {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
 		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+	}
+	if !controls {
+		delete(expectedColumns, "conversation_controls")
+		delete(expectedColumns, "conversation_control_idempotency")
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -565,6 +587,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		"conversation_controls":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
 		"conversation_control_idempotency": {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
 	}
+	if !controls {
+		delete(expectedForeignKeys, "conversation_controls")
+		delete(expectedForeignKeys, "conversation_control_idempotency")
+	}
 	for table := range expectedColumns {
 		foreignKeys, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
 		if err != nil {
@@ -602,6 +628,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		"conversation_controls:1:pk:0:id",
 		"conversation_control_idempotency:1:pk:0:machine_id,key",
 		"request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+	}
+	if !controls {
+		expectedIndexes = expectedIndexes[:len(expectedIndexes)-2]
 	}
 	var actualIndexes []string
 	for table := range expectedColumns {
@@ -686,7 +715,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != 42 {
+	wantTriggers := 42
+	if !controls {
+		wantTriggers = 36
+	}
+	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")
 	}
 	var integrity string
@@ -701,8 +734,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 	if foreignKeyRows.Next() || foreignKeyRows.Err() != nil {
 		return errors.New("relay migration source foreign keys are invalid")
 	}
-	var invalidLogicalState bool
-	if err := q.QueryRowContext(ctx, `WITH uuid_values(value) AS (
+	logicalStateQuery := `WITH uuid_values(value) AS (
 		SELECT id FROM conversations UNION ALL SELECT conversation_id FROM memberships
 		UNION ALL SELECT id FROM messages UNION ALL SELECT conversation_id FROM messages
 		UNION ALL SELECT id FROM deliveries UNION ALL SELECT message_id FROM deliveries
@@ -754,8 +786,42 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		OR EXISTS (SELECT 1 FROM conversation_controls WHERE typeof(actor_endpoint)<>'text' OR typeof(operation)<>'text' OR typeof(member_endpoint)<>'text' OR typeof(member_capabilities)<>'integer' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM request_nonces WHERE typeof(machine_id)<>'text' OR typeof(nonce)<>'text' OR typeof(expires_at)<>'integer')
-		OR EXISTS (SELECT 1 FROM relay_migration_control WHERE typeof(source_id)<>'text' OR typeof(phase)<>'text' OR (epoch_id IS NOT NULL AND typeof(epoch_id)<>'text') OR (target_identity IS NOT NULL AND typeof(target_identity)<>'text') OR (fingerprint IS NOT NULL AND typeof(fingerprint)<>'text') OR (last_epoch_id IS NOT NULL AND typeof(last_epoch_id)<>'text') OR (last_target_identity IS NOT NULL AND typeof(last_target_identity)<>'text') OR (last_expected_fingerprint IS NOT NULL AND typeof(last_expected_fingerprint)<>'text') OR (last_result_fingerprint IS NOT NULL AND typeof(last_result_fingerprint)<>'text') OR (last_cutoff IS NOT NULL AND typeof(last_cutoff)<>'integer') OR (last_transition IS NOT NULL AND typeof(last_transition)<>'text') OR typeof(changed_at)<>'integer')`).Scan(&invalidLogicalState); err != nil || invalidLogicalState {
+		OR EXISTS (SELECT 1 FROM relay_migration_control WHERE typeof(source_id)<>'text' OR typeof(phase)<>'text' OR (epoch_id IS NOT NULL AND typeof(epoch_id)<>'text') OR (target_identity IS NOT NULL AND typeof(target_identity)<>'text') OR (fingerprint IS NOT NULL AND typeof(fingerprint)<>'text') OR (last_epoch_id IS NOT NULL AND typeof(last_epoch_id)<>'text') OR (last_target_identity IS NOT NULL AND typeof(last_target_identity)<>'text') OR (last_expected_fingerprint IS NOT NULL AND typeof(last_expected_fingerprint)<>'text') OR (last_result_fingerprint IS NOT NULL AND typeof(last_result_fingerprint)<>'text') OR (last_cutoff IS NOT NULL AND typeof(last_cutoff)<>'integer') OR (last_transition IS NOT NULL AND typeof(last_transition)<>'text') OR typeof(changed_at)<>'integer')`
+	if !controls {
+		for _, clause := range []string{
+			" UNION ALL SELECT id FROM conversation_controls UNION ALL SELECT conversation_id FROM conversation_controls\n\t\tUNION ALL SELECT control_id FROM conversation_control_idempotency",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15 OR (operation='upsert_member' AND member_capabilities=0) OR (operation='remove_member' AND member_capabilities<>0))",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls WHERE typeof(actor_endpoint)<>'text' OR typeof(operation)<>'text' OR typeof(member_endpoint)<>'text' OR typeof(member_capabilities)<>'integer' OR typeof(created_at)<>'integer')",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')",
+		} {
+			logicalStateQuery = strings.ReplaceAll(logicalStateQuery, clause, "")
+		}
+	}
+	var invalidLogicalState bool
+	if err := q.QueryRowContext(ctx, logicalStateQuery).Scan(&invalidLogicalState); err != nil || invalidLogicalState {
 		return errors.New("relay migration source logical constraints are invalid")
+	}
+	if !controls {
+		return nil
+	}
+	controlRows, err := q.QueryContext(ctx, `SELECT retry.request_hash,control.conversation_id,control.actor_endpoint,control.operation,control.member_endpoint,control.member_capabilities
+		FROM conversation_control_idempotency AS retry
+		JOIN conversation_controls AS control ON control.id=retry.control_id`)
+	if err != nil {
+		return errors.New("relay migration source control retry binding is unavailable")
+	}
+	defer func() { _ = controlRows.Close() }()
+	for controlRows.Next() {
+		var requestHash, conversationID, actorEndpoint, operation, memberEndpoint string
+		var capabilities Capability
+		if err := controlRows.Scan(&requestHash, &conversationID, &actorEndpoint, &operation, &memberEndpoint, &capabilities); err != nil || requestHash != ControlRequestHash(ControlInput{ConversationID: conversationID, ActorEndpoint: actorEndpoint, Operation: ControlOperation(operation), Member: Member{Endpoint: memberEndpoint, Capabilities: capabilities}}) {
+			return errors.New("relay migration source control retry binding is invalid")
+		}
+	}
+	if err := controlRows.Err(); err != nil {
+		return errors.New("relay migration source control retry binding is unavailable")
 	}
 	return nil
 }
