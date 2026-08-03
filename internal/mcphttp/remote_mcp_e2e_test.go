@@ -251,6 +251,17 @@ func TestRemoteMCPE2EJSONRPCResponseRequiresSupportedMediaType(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPE2ESSEPayloadRequiresTerminatingBlankLine(t *testing.T) {
+	valid := []byte("data: {\"jsonrpc\":\"2.0\"}\n\n")
+	if _, ok := remoteMCPE2ESSEPayload(valid); !ok {
+		t.Fatal("terminated SSE event rejected")
+	}
+	unterminated := []byte("data: {\"jsonrpc\":\"2.0\"}\n")
+	if _, ok := remoteMCPE2ESSEPayload(unterminated); ok {
+		t.Fatal("unterminated SSE event accepted")
+	}
+}
+
 func TestRemoteMCPE2ECandidateCommitMustMatchCheckout(t *testing.T) {
 	if err := validateRemoteMCPE2ECandidateCommit("0123456789abcdef0123456789abcdef01234567", "0123456789abcdef0123456789abcdef01234567"); err != nil {
 		t.Fatalf("matching candidate commit rejected: %v", err)
@@ -984,8 +995,7 @@ func remoteMCPE2ESSEPayload(body []byte) ([]byte, bool) {
 			lines = append(lines, strings.TrimPrefix(value, " "))
 		}
 	}
-	dispatch()
-	if scanner.Err() != nil || len(eventData) != 1 {
+	if scanner.Err() != nil || len(lines) != 0 || len(eventData) != 1 {
 		return nil, false
 	}
 	return eventData[0], true
