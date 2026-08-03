@@ -76,7 +76,7 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 		}
 	}
 	for index, hash := range hashes {
-		if manifest.Version == 1 && index >= 3 && index <= 5 && hash == "" {
+		if manifest.Version == 1 && ((index >= 3 && index <= 5) || (index >= 11 && index <= 12)) && hash == "" {
 			continue
 		}
 		if !mailCutoverDigestPattern.MatchString(hash) {
