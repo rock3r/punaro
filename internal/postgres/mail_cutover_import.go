@@ -355,9 +355,17 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 	case "mail_conversation_idempotency":
 		return manifest.Counts.ConversationIdempotency, manifest.TableSHA256.ConversationIdempotency
 	case "mail_conversation_controls":
-		return manifest.Counts.ControlEvents, manifest.TableSHA256.ControlEvents
+		digest := manifest.TableSHA256.ControlEvents
+		if digest == "" && manifest.Counts.ControlEvents == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.ControlEvents, digest
 	case "mail_conversation_control_idempotency":
-		return manifest.Counts.ControlIdempotency, manifest.TableSHA256.ControlIdempotency
+		digest := manifest.TableSHA256.ControlIdempotency
+		if digest == "" && manifest.Counts.ControlIdempotency == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.ControlIdempotency, digest
 	case "mail_request_nonces":
 		return manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces
 	default:
