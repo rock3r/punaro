@@ -30,13 +30,29 @@ WITH objects AS (
            (retries_oid,'created_at','timestamptz'::regtype,true))) AS exact
     FROM objects JOIN pg_attribute AS attribute ON attribute.attrelid=ANY(ARRAY[controls_oid,retries_oid])
        AND attribute.attnum>0 AND NOT attribute.attisdropped
-), constraints AS (
-    SELECT count(*) FILTER (WHERE constraint_.contype='p')=2
-       AND count(*) FILTER (WHERE constraint_.contype='u')=1
-       AND count(*) FILTER (WHERE constraint_.contype='f')=2
-       AND count(*) FILTER (WHERE constraint_.contype='c')=4
-       AND bool_and(constraint_.convalidated AND NOT constraint_.condeferrable AND NOT constraint_.condeferred) AS exact
+), expected_constraints(table_oid,constraint_name,constraint_type,column_keys,foreign_table_oid,foreign_column_keys,delete_type,check_expression) AS (
+    SELECT expected.* FROM objects, LATERAL (VALUES
+        (controls_oid,'mail_conversation_controls_pkey','p'::"char",ARRAY[1]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
+        (controls_oid,'mail_conversation_controls_conversation_id_fkey','f'::"char",ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[],'a'::"char",NULL::text),
+        (controls_oid,'mail_conversation_controls_operation_check','c'::"char",ARRAY[4]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'(operation = ANY (ARRAY[''upsert_member''::text, ''remove_member''::text]))'),
+        (controls_oid,'mail_conversation_controls_member_capabilities_check','c'::"char",ARRAY[6]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'((member_capabilities >= 0) AND (member_capabilities <= 7))'),
+        (retries_oid,'mail_conversation_control_idempotency_pkey','p'::"char",ARRAY[1,2]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
+        (retries_oid,'mail_conversation_control_idempotency_key_check','c'::"char",ARRAY[2]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))'),
+        (retries_oid,'mail_conversation_control_idempotency_request_hash_check','c'::"char",ARRAY[3]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'(request_hash ~ ''^[0-9a-f]{64}$''::text)'),
+        (retries_oid,'mail_conversation_control_idempotency_control_id_key','u'::"char",ARRAY[4]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
+        (retries_oid,'mail_conversation_control_idempotency_control_id_fkey','f'::"char",ARRAY[4]::smallint[],controls_oid,ARRAY[1]::smallint[],'c'::"char",NULL::text)
+    ) AS expected(table_oid,constraint_name,constraint_type,column_keys,foreign_table_oid,foreign_column_keys,delete_type,check_expression)
+), actual_constraints AS (
+    SELECT constraint_.conrelid,constraint_.conname,constraint_.contype,constraint_.conkey,
+           NULLIF(constraint_.confrelid,0),constraint_.confkey,
+           CASE WHEN constraint_.contype='f' THEN constraint_.confdeltype END,
+           CASE WHEN constraint_.contype='c' THEN pg_get_expr(constraint_.conbin,constraint_.conrelid) END
     FROM objects JOIN pg_constraint AS constraint_ ON constraint_.conrelid=ANY(ARRAY[controls_oid,retries_oid])
+    WHERE constraint_.convalidated AND NOT constraint_.condeferrable AND NOT constraint_.condeferred
+), constraints AS (
+    SELECT NOT EXISTS (SELECT * FROM expected_constraints EXCEPT SELECT * FROM actual_constraints)
+       AND NOT EXISTS (SELECT * FROM actual_constraints EXCEPT SELECT * FROM expected_constraints) AS exact
+    FROM expected_constraints
 ), guards AS (
     SELECT count(*)=2 AND bool_and(trigger.tgfoid=guard_oid AND trigger.tgenabled='O' AND NOT trigger.tgisinternal
        AND trigger.tgtype=30 AND trigger.tgconstraint=0 AND NOT trigger.tgdeferrable AND NOT trigger.tginitdeferred

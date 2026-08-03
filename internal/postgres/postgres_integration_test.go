@@ -484,6 +484,8 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
 	testMailCutoverSubstrate(ctx, t, app, ownerDB)
+	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
+	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1403,6 +1405,31 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 	testDurableRoleRebindFencesPostgresDelivery(t, app)
+}
+
+func testRelayMembershipControlSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_request_hash_check; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_request_hash_check CHECK (request_hash IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive membership-control request-hash constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_request_hash_check; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_request_hash_check CHECK (request_hash ~ '^[0-9a-f]{64}$')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT replacement_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id) ON DELETE CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("renamed membership-control foreign key state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT replacement_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id) ON DELETE CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("membership-control constraint restoration did not recover readiness: %v", err)
+	}
 }
 
 func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
