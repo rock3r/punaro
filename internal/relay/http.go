@@ -391,7 +391,7 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 		// This only accelerates the adapter's durable invocation lease. As with a
 		// message wake, loss or duplication of the hint cannot change the start
 		// decision and carries no control body.
-		h.notifier.Publish(invocation.TargetMachineID, invocation.ConversationID, 0)
+		h.notifier.Publish(invocation.TargetMachineID, invocation.ConversationID, 1)
 	}
 	writeJSON(w, status, invocation)
 }
