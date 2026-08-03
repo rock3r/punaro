@@ -35,6 +35,25 @@ type adapterConfig struct {
 	invokerCommand string
 }
 
+const (
+	adapterProfileFileEnv = "PUNARO_ADAPTER_PROFILE_FILE"
+	maxAdapterProfileSize = 16 << 10
+)
+
+var adapterProfileKeys = map[string]struct{}{
+	"PUNARO_ADAPTER_RELAY_URL":        {},
+	"PUNARO_MACHINE_ID":               {},
+	"PUNARO_MACHINE_PRIVATE_KEY_FILE": {},
+	"PUNARO_ATTACHED_GROUP":           {},
+	"PUNARO_ADAPTER_DATA_DIR":         {},
+	"PUNARO_MAILBOX_STATE_DIR":        {},
+	"PUNARO_ADAPTER_POLL_INTERVAL":    {},
+	"PUNARO_AGENT_MAILBOX_BIN":        {},
+	"PUNARO_CF_ACCESS_CLIENT_ID":      {},
+	"PUNARO_CF_ACCESS_CLIENT_SECRET":  {},
+	"PUNARO_INVOKER_COMMAND":          {},
+}
+
 func main() {
 	var err error
 	switch {
@@ -382,18 +401,27 @@ func runNotifications(ctx context.Context, client *adapter.HTTPRelayClient, wake
 }
 
 func loadConfig() (adapterConfig, error) {
-	relayURL := strings.TrimSpace(os.Getenv("PUNARO_ADAPTER_RELAY_URL"))
-	machineID := strings.TrimSpace(os.Getenv("PUNARO_MACHINE_ID"))
-	keyFile := strings.TrimSpace(os.Getenv("PUNARO_MACHINE_PRIVATE_KEY_FILE"))
-	group := strings.TrimSpace(os.Getenv("PUNARO_ATTACHED_GROUP"))
+	settings, err := loadAdapterProfile()
+	if err != nil {
+		return adapterConfig{}, err
+	}
+	for key := range adapterProfileKeys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			settings[key] = value
+		}
+	}
+	relayURL := settings["PUNARO_ADAPTER_RELAY_URL"]
+	machineID := settings["PUNARO_MACHINE_ID"]
+	keyFile := settings["PUNARO_MACHINE_PRIVATE_KEY_FILE"]
+	group := settings["PUNARO_ATTACHED_GROUP"]
 	if relayURL == "" || machineID == "" || keyFile == "" || group == "" {
-		return adapterConfig{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, PUNARO_MACHINE_PRIVATE_KEY_FILE, and PUNARO_ATTACHED_GROUP are required")
+		return adapterConfig{}, errors.New("adapter configuration is incomplete")
 	}
 	key, err := loadPrivateKey(keyFile)
 	if err != nil {
 		return adapterConfig{}, err
 	}
-	dataDir := strings.TrimSpace(os.Getenv("PUNARO_ADAPTER_DATA_DIR"))
+	dataDir := settings["PUNARO_ADAPTER_DATA_DIR"]
 	if dataDir == "" {
 		dataDir = "./data"
 	}
@@ -404,21 +432,70 @@ func loadConfig() (adapterConfig, error) {
 		}
 	}
 	pollInterval := 30 * time.Second
-	if raw := strings.TrimSpace(os.Getenv("PUNARO_ADAPTER_POLL_INTERVAL")); raw != "" {
+	if raw := settings["PUNARO_ADAPTER_POLL_INTERVAL"]; raw != "" {
 		pollInterval, err = time.ParseDuration(raw)
 		if err != nil || pollInterval < 5*time.Second || pollInterval > 5*time.Minute {
 			return adapterConfig{}, fmt.Errorf("PUNARO_ADAPTER_POLL_INTERVAL must be between 5s and 5m")
 		}
 	}
-	mailboxBinary := strings.TrimSpace(os.Getenv("PUNARO_AGENT_MAILBOX_BIN"))
+	mailboxBinary := settings["PUNARO_AGENT_MAILBOX_BIN"]
 	if mailboxBinary == "" {
 		mailboxBinary = "agent-mailbox"
 	}
-	accessToken := adapter.AccessServiceToken{ClientID: strings.TrimSpace(os.Getenv("PUNARO_CF_ACCESS_CLIENT_ID")), ClientSecret: strings.TrimSpace(os.Getenv("PUNARO_CF_ACCESS_CLIENT_SECRET"))}
+	accessToken := adapter.AccessServiceToken{ClientID: settings["PUNARO_CF_ACCESS_CLIENT_ID"], ClientSecret: settings["PUNARO_CF_ACCESS_CLIENT_SECRET"]}
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
-	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: strings.TrimSpace(os.Getenv("PUNARO_MAILBOX_STATE_DIR")), dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, invokerCommand: strings.TrimSpace(os.Getenv("PUNARO_INVOKER_COMMAND"))}, nil
+	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, invokerCommand: settings["PUNARO_INVOKER_COMMAND"]}, nil
+}
+
+// loadAdapterProfile reads the installer-managed profile as plain data rather
+// than evaluating it as shell or service-manager syntax. A non-empty process
+// environment setting intentionally overrides the corresponding profile entry.
+func loadAdapterProfile() (map[string]string, error) {
+	path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv))
+	explicitPath := path != ""
+	if !explicitPath {
+		var err error
+		path, err = installedAdapterProfilePath()
+		if err != nil {
+			return nil, errors.New("adapter profile is unavailable")
+		}
+	}
+	if !filepath.IsAbs(path) {
+		return nil, errors.New("adapter profile is unsafe")
+	}
+	// #nosec G703 -- this is the fixed installer profile location or an explicit
+	// local operator override; remote data never selects it.
+	if _, err := os.Lstat(path); err != nil {
+		if !explicitPath && errors.Is(err, os.ErrNotExist) {
+			return map[string]string{}, nil
+		}
+		return nil, errors.New("adapter profile is unavailable")
+	}
+	raw, err := readPrivateFile(path, "adapter profile", maxAdapterProfileSize)
+	if err != nil {
+		return nil, errors.New("adapter profile is unsafe")
+	}
+	settings := make(map[string]string)
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		name, value, found := strings.Cut(line, "=")
+		if !found || strings.TrimSpace(name) != name || strings.ContainsRune(value, '\x00') {
+			return nil, errors.New("adapter profile is invalid")
+		}
+		if _, allowed := adapterProfileKeys[name]; !allowed {
+			return nil, errors.New("adapter profile is invalid")
+		}
+		if _, duplicate := settings[name]; duplicate {
+			return nil, errors.New("adapter profile is invalid")
+		}
+		settings[name] = strings.TrimSpace(value)
+	}
+	return settings, nil
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {

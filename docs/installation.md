@@ -165,6 +165,21 @@ and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
 follow the [alpha onboarding revocation procedure](alpha-text-relay.md#onboard-and-revoke-a-machine): remove attached aliases, remove the relay enrollment, revoke the machine's Access token, stop the service, and securely erase its key.
 
+### Adapter profile for direct commands and the service
+
+The installed `punaro-adapter` validates and reads the same owner-only,
+non-symlinked profile for direct `create`, `send`, and `attachment-notify`
+commands and for the managed adapter service. On macOS and Linux that profile
+is `~/.config/punaro/adapter.env`; on Windows it is
+`%LOCALAPPDATA%\Punaro\config\adapter.env`. Do not source the file in a shell
+or copy its values into a command line.
+
+A non-empty adapter setting in the process environment intentionally overrides
+the corresponding profile setting, for controlled service-manager or debugging
+use. `PUNARO_ADAPTER_PROFILE_FILE` is the explicit alternative profile path;
+it must be absolute and satisfy the same private regular-file checks. The
+default profile remains the supported interactive path.
+
 ## 4. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree

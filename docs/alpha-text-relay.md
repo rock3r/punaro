@@ -119,8 +119,9 @@ another machine.
 
 For a macOS agent machine, install the reviewed
 `deploy/launchd/punaro-adapter.plist` template as
-`~/Library/LaunchAgents/org.punaro.adapter.plist`. It sources the same
-owner-only `~/.config/punaro/adapter.env` rather than embedding credentials in
+`~/Library/LaunchAgents/org.punaro.adapter.plist`. The adapter itself validates
+and reads the same owner-only `~/.config/punaro/adapter.env` profile used by
+interactive commands, rather than embedding or shell-sourcing credentials in
 the plist. Validate it with `plutil -lint`, then bootstrap it as the interactive
 user with `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.punaro.adapter.plist`.
 Use `launchctl print gui/$(id -u)/org.punaro.adapter` to verify it is running.
@@ -180,6 +181,10 @@ punaro-adapter send \
 
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
+It automatically uses the installed adapter profile. A deliberately supplied
+non-empty adapter environment setting overrides its matching profile value;
+use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute, owner-only
+profile.
 
 ## Retired v3 attachment evidence
 
