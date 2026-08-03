@@ -66,9 +66,11 @@ tool result for the disposable probe. It must contain at least one non-empty
 text content item; the harness validates it and the request ID exactly.
 
 Prepare a token suite that proves each distinct failure boundary. `valid` must
-invoke only the configured read-only `authorized_tool`. `no_scope` must be a
-valid token without any required MCP default scope. `insufficient_scope` must
-be valid but lack the operation-specific scope for `forbidden_tool`.
+invoke the configured read-only `authorized_tool` but be denied the
+`forbidden_tool`. `no_scope` must be a valid token without any required MCP
+default scope. `insufficient_scope` must invoke `authorized_tool` successfully
+but lack the operation-specific scope for `forbidden_tool`, which must return
+`403` for both scoped credentials.
 `wrong_issuer`, `wrong_audience`, `expired`, and `revoked` must each fail for
 that stated reason at the candidate boundary, not merely be arbitrary malformed
 strings. Set `revoked.expected_status` to `401` for a revoked token (which must
@@ -95,6 +97,8 @@ The test logs only the candidate commit on success and intentionally withholds
 the endpoint, tokens, request bodies, response bodies, and topology on failure.
 Its own TLS-backed fixture validates the complete harness flow locally; the
 release command remains the authoritative deployed-candidate check.
+`candidate_commit` must match `git rev-parse HEAD` in the checkout that runs
+the command, so release evidence cannot be attributed to another build.
 Record its CI job URL, exact command result, candidate commit, deployment image
 digest, approvers, residual risk, and rollback reference in the final
 release-evidence record under `docs/release-evidence/` only after the release
