@@ -123,6 +123,29 @@ func TestSyncerPrunesTerminalJournalRowsAfterCrashRecoveryWindow(t *testing.T) {
 	}
 }
 
+func TestSyncerRetainsRecoveryJournalBeyondRelayWindow(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	acceptedAt := now.Add(-25 * time.Hour) // Beyond the relay window, inside the local skew margin.
+	if _, err := journal.ensureInvocation("accepted", "accepted-fence", acceptedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.markInvocationAccepted("accepted", "accepted-fence", acceptedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.pruneInvocationRecoveryRows(now); err != nil {
+		t.Fatal(err)
+	}
+	var retained int
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 1 {
+		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
+	}
+}
+
 func TestSyncerFinalRecoveryNeverReinvokesWithoutAcceptedJournal(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
 	if err != nil {

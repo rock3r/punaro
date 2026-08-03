@@ -258,10 +258,11 @@ type invocationState string
 const (
 	invocationPending  invocationState = "pending"
 	invocationAccepted invocationState = "accepted"
-	// Keep an accepted local fence through the relay's pending crash-recovery
-	// window. After that, an unreported accepted outcome has expired remotely
-	// and can no longer be leased to cause a duplicate runtime start.
-	invocationJournalRetention = 24 * time.Hour
+	// Keep local recovery fences beyond the relay's 24-hour pending window. The
+	// adapter timestamps before a lease request while the relay timestamps its
+	// recovery window after it, so this margin covers ordinary latency and clock
+	// skew without letting a recovered accepted start lose its journal fence.
+	invocationJournalRetention = 48 * time.Hour
 )
 
 // Journal records the local side of the delivery transaction. It is deliberately
