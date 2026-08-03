@@ -141,6 +141,9 @@ func TestRemoteMCPE2ECleanCheckoutRejectsTrackedChanges(t *testing.T) {
 	if validRemoteMCPE2ECleanCheckoutStatus(" M internal/mcphttp/remote_mcp_e2e_test.go\n") {
 		t.Fatal("tracked checkout change accepted")
 	}
+	if validRemoteMCPE2ECleanCheckoutStatus("?? internal/mcphttp/override_test.go\n") {
+		t.Fatal("untracked checkout change accepted")
+	}
 }
 
 func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.T) {
@@ -381,7 +384,7 @@ func checkedOutRemoteMCPE2ECommit() (string, error) {
 	if err != nil {
 		return "", errors.New("candidate commit unavailable")
 	}
-	status, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output() // #nosec G204 -- fixed local Git command rejects tracked changes from release evidence.
+	status, err := exec.Command("git", "status", "--porcelain").Output() // #nosec G204 -- fixed local Git command rejects checkout changes from release evidence.
 	if err != nil || !validRemoteMCPE2ECleanCheckoutStatus(string(status)) {
 		return "", errors.New("candidate checkout is not clean")
 	}
