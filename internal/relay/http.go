@@ -141,7 +141,7 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 		FromEndpoint string `json:"from_endpoint"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid invocation request")
+		writeError(w, http.StatusBadRequest, "invalid sender validation request")
 		return
 	}
 	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
@@ -370,7 +370,11 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 		FromEndpoint   string `json:"from_endpoint"`
 		TargetEndpoint string `json:"target_endpoint"`
 	}
-	if err := decodeJSON(body, &request); err != nil || !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid invocation request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}

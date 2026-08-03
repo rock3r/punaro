@@ -135,6 +135,38 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, err
 	}
 	defer rollback(tx)
+	// A role may have attached after its caller observed it offline. Terminally
+	// consume that old request before leasing anything: attachment is the
+	// authoritative proof that starting another copy is no longer allowed.
+	onlineRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
+		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
+		WHERE invocation.target_machine_id=? AND invocation.status=? AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("find online invocation targets: %w", err)
+	}
+	var onlineIDs []string
+	for onlineRows.Next() {
+		var invocationID string
+		if err := onlineRows.Scan(&invocationID); err != nil {
+			_ = onlineRows.Close()
+			return nil, fmt.Errorf("read online invocation target: %w", err)
+		}
+		onlineIDs = append(onlineIDs, invocationID)
+	}
+	if err := onlineRows.Close(); err != nil {
+		return nil, fmt.Errorf("close online invocation targets: %w", err)
+	}
+	if err := onlineRows.Err(); err != nil {
+		return nil, fmt.Errorf("find online invocation targets: %w", err)
+	}
+	for _, invocationID := range onlineIDs {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationAlreadyRunning, invocationID); err != nil {
+			return nil, fmt.Errorf("record online invocation target: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocationID, "already_running", now); err != nil {
+			return nil, err
+		}
+	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,lease_generation FROM invocations
 		WHERE target_machine_id=? AND status=? AND not_before<=? AND (lease_until IS NULL OR lease_until<=? OR (lease_machine_id=? AND lease_consumer_id=?))
 		ORDER BY created_at,id LIMIT ?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli(), machineID, consumerID, limit)

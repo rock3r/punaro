@@ -124,3 +124,43 @@ func TestInvokeRejectsUnauthorizedAndDoesNotQueueAlreadyRunningTarget(t *testing
 		t.Fatalf("already-running target leased=%#v err=%v", leased, err)
 	}
 }
+
+func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	invocation, _, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)})
+	if err != nil || invocation.Status != InvocationPending {
+		t.Fatalf("invocation=%#v err=%v", invocation, err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now.Add(3*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(3*time.Second), time.Minute, 10); err != nil || len(leased) != 0 {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	audit, err := store.InvocationAudit(invocation.ID)
+	if err != nil || len(audit) != 2 || audit[1].Action != "already_running" {
+		t.Fatalf("audit=%#v err=%v", audit, err)
+	}
+}
