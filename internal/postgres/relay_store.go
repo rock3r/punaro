@@ -1123,10 +1123,13 @@ WITH objects AS (
         (messages_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(messages_oid,ARRAY[4]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
 		(role_memberships_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(role_memberships_oid,ARRAY[2]::smallint[],roles_oid,ARRAY[1]::smallint[]),
 		(role_bindings_oid,ARRAY[1]::smallint[],roles_oid,ARRAY[1]::smallint[]),(role_bindings_oid,ARRAY[2]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
-		(deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
+		(deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(deliveries_oid,ARRAY[3]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
+		(cursors_oid,ARRAY[1]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
         (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[])
     ) AS expected(table_oid,column_keys,foreign_table_oid,foreign_column_keys)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+	WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid
+	                     AND NOT (expected.table_oid=deliveries_oid AND expected.column_keys=ARRAY[3]::smallint[])
+	                     AND NOT (expected.table_oid=cursors_oid AND expected.column_keys=ARRAY[1]::smallint[]))
 ), actual_foreign_keys AS (
     SELECT con.conrelid,con.conkey,con.confrelid,con.confkey
     FROM objects JOIN pg_constraint AS con
