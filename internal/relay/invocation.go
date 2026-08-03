@@ -136,7 +136,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		// retrying the same key after the endpoint detached could unexpectedly
 		// become a new start request.
 		invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationAlreadyRunning}
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at,terminal_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 			return Invocation{}, false, fmt.Errorf("record already-running invocation: %w", err)
 		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
@@ -192,7 +192,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 
 func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
 	cutoff := now.Add(-invocationTerminalRetention).UnixMilli()
-	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE created_at<? AND (status IN (?,?) OR (status=? AND not_before<?))`, cutoff, InvocationAlreadyRunning, InvocationFailed, InvocationSucceeded, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE terminal_at IS NOT NULL AND terminal_at<?`, cutoff); err != nil {
 		return fmt.Errorf("prune terminal invocations: %w", err)
 	}
 	return nil
@@ -252,7 +252,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, fmt.Errorf("find invocation ownership changes: %w", err)
 	}
 	for _, invocationID := range staleOwnerIDs {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, invocationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), invocationID); err != nil {
 			return nil, fmt.Errorf("fail stale invocation owner: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocationID, "failed", now); err != nil {
@@ -278,7 +278,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, fmt.Errorf("find stale invocations: %w", err)
 	}
 	for _, invocationID := range staleIDs {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=? WHERE id=?`, InvocationFailed, invocationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=? WHERE id=?`, InvocationFailed, now.UnixMilli(), invocationID); err != nil {
 			return nil, fmt.Errorf("fail stale invocation: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocationID, "failed", now); err != nil {
@@ -311,7 +311,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, fmt.Errorf("find online invocation targets: %w", err)
 	}
 	for _, invocationID := range onlineIDs {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationAlreadyRunning, invocationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationAlreadyRunning, now.UnixMilli(), invocationID); err != nil {
 			return nil, fmt.Errorf("record online invocation target: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocationID, "already_running", now); err != nil {
@@ -340,7 +340,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 			// consume one bounded runtime-start attempt. Releasing a still-live
 			// lease to the same adapter does not.
 			if attempts >= maxInvocationAttempts {
-				if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, invocation.ID); err != nil {
+				if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), invocation.ID); err != nil {
 					return nil, fmt.Errorf("fail exhausted invocation: %w", err)
 				}
 				if err := recordInvocationAudit(tx, invocation.ID, "failed", now); err != nil {
@@ -406,7 +406,7 @@ func (s *Store) ReportInvocation(machineID, invocationID, token string, generati
 		return fmt.Errorf("read invocation lease: %w", err)
 	}
 	if accepted {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,not_before=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationSucceeded, now.Add(maxInvocationBackoff).UnixMilli(), invocationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,not_before=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationSucceeded, now.Add(maxInvocationBackoff).UnixMilli(), now.UnixMilli(), invocationID); err != nil {
 			return fmt.Errorf("accept invocation: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocationID, "accepted", now); err != nil {
@@ -422,7 +422,11 @@ func (s *Store) ReportInvocation(machineID, invocationID, token string, generati
 		if status == InvocationPending {
 			notBefore = now.Add(invocationBackoff(attempts))
 		}
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,attempts=?,not_before=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, status, attempts, notBefore.UnixMilli(), invocationID); err != nil {
+		var terminalAt any
+		if status != InvocationPending {
+			terminalAt = now.UnixMilli()
+		}
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,attempts=?,not_before=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, status, attempts, notBefore.UnixMilli(), terminalAt, invocationID); err != nil {
 			return fmt.Errorf("retry invocation: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocationID, action, now); err != nil {
@@ -511,6 +515,7 @@ func (s *Store) ensureInvocationSchema() error {
 			lease_generation INTEGER NOT NULL DEFAULT 0,
 			target_ownership_generation INTEGER NOT NULL DEFAULT 0,
 			lease_until INTEGER,
+			terminal_at INTEGER,
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS invocation_idempotency (
@@ -528,13 +533,16 @@ func (s *Store) ensureInvocationSchema() error {
 			PRIMARY KEY(invocation_id, ordinal)
 		)`,
 		`CREATE INDEX IF NOT EXISTS invocations_machine_pending ON invocations(target_machine_id, status, not_before, lease_until)`,
-		`CREATE INDEX IF NOT EXISTS invocations_terminal_retention ON invocations(status, created_at)`,
+		`CREATE INDEX IF NOT EXISTS invocations_terminal_at ON invocations(terminal_at)`,
 	} {
 		if _, err := s.db.ExecContext(context.Background(), statement); err != nil {
 			return fmt.Errorf("initialize invocation state: %w", err)
 		}
 	}
 	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "target_ownership_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "terminal_at", "INTEGER"); err != nil {
 		return err
 	}
 	return nil

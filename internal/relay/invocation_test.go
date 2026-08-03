@@ -254,10 +254,10 @@ func TestInvokeRetentionPreservesAnAcceptedAttachmentFence(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
-	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, 2*invocationTerminalRetention); err != nil {
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, 3*invocationTerminalRetention); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, 2*invocationTerminalRetention); err != nil {
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, 3*invocationTerminalRetention); err != nil {
 		t.Fatal(err)
 	}
 	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
@@ -267,7 +267,7 @@ func TestInvokeRetentionPreservesAnAcceptedAttachmentFence(t *testing.T) {
 	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), 2*invocationTerminalRetention); err != nil {
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), 3*invocationTerminalRetention); err != nil {
 		t.Fatal(err)
 	}
 	request := InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)}
@@ -291,6 +291,11 @@ func TestInvokeRetentionPreservesAnAcceptedAttachmentFence(t *testing.T) {
 	var remaining int
 	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM invocations WHERE id=?`, invocation.ID).Scan(&remaining); err != nil || remaining != 1 {
 		t.Fatalf("accepted fence rows=%d err=%v", remaining, err)
+	}
+	request.IdempotencyKey = "invoke-after-retention"
+	request.Now = acceptedAt.Add(invocationTerminalRetention + time.Millisecond)
+	if replacement, duplicate, err := store.RequestInvocation(request); err != nil || duplicate || replacement.ID == invocation.ID || replacement.Status != InvocationPending {
+		t.Fatalf("expired terminal=%#v duplicate=%t err=%v", replacement, duplicate, err)
 	}
 }
 

@@ -369,9 +369,10 @@ fenced at-least-once handoff acknowledgement, not an unsupported claim of
 exactly-once process creation.
 
 Terminal invocation records, their idempotency bindings, and their body-free
-audit trail are retained for 24 hours to serve bounded client retries, then
-pruned atomically by later invoke traffic. Pending handoffs and the short
-accepted-attachment fence are never pruned by this retention path.
+audit trail are retained for 24 hours from their terminal transition to serve
+bounded client retries, then pruned atomically by later invoke traffic. Pending
+handoffs and the short accepted-attachment fence are never pruned by this
+retention path.
 
 The lease response is the source of truth. It contains bounded durable
 deliveries plus a map of conversation IDs to the recipient's highest contiguous
