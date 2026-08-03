@@ -363,10 +363,14 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 // ReportInvocation accepts a durable local handoff or returns it to the queue
 // with bounded retry. A stale or foreign lease cannot change the result.
 func (s *Store) ReportInvocation(machineID, invocationID, token string, generation int64, accepted bool, now time.Time) error {
-	if err := s.ensureInvocationSchema(); err != nil {
+	if !ValidMachineID(machineID) || strings.TrimSpace(invocationID) == "" || !ValidRequestToken(token) || generation < 1 {
+		return ErrForbidden
+	}
+	exists, err := s.invocationSchemaExists()
+	if err != nil {
 		return err
 	}
-	if !ValidMachineID(machineID) || strings.TrimSpace(invocationID) == "" || !ValidRequestToken(token) || generation < 1 {
+	if !exists {
 		return ErrForbidden
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
