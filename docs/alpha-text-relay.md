@@ -79,6 +79,20 @@ PUNARO_ADAPTER_DATA_DIR=/var/lib/punaro-adapter
 PUNARO_ADAPTER_POLL_INTERVAL=30s
 ```
 
+To enable offline-role invocation, additionally configure
+`PUNARO_INVOKER_COMMAND` with an absolute, protected executable owned by the
+local operator. Punaro invokes it only as:
+
+```text
+COMMAND invoke --invocation-id ID --conversation ID --endpoint ENDPOINT --fence FENCE
+```
+
+It receives no message body. It must persist the fence before starting or
+attaching the role, treat the same fence as an idempotent no-op after a crash,
+and return success only after that durable acceptance. Without this local
+runtime configuration the adapter continues normal mail delivery but does not
+lease invoke work.
+
 For an Access service-token policy, provision both
 `PUNARO_CF_ACCESS_CLIENT_ID` and `PUNARO_CF_ACCESS_CLIENT_SECRET` through the
 same private environment that starts the adapter. The adapter rejects a partial

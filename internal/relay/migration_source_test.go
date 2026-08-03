@@ -222,6 +222,30 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRejectsInvokeCapabilityBeforePreparation(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a", Now: now, Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("invoke-capability source was accepted for incompatible PostgreSQL cutover")
+	}
+	if got := migrationSourcePhase(t, store); got != MigrationSourceActive {
+		t.Fatalf("rejected source inspection changed phase to %q", got)
+	}
+}
+
 func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

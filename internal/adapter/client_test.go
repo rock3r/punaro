@@ -119,6 +119,35 @@ func TestHTTPRelayClientValidatesSenderWithoutMessageMutation(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientLeasesOneInvocationPerSync(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/invocations/lease" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		var request struct {
+			ConsumerID string `json:"consumer_id"`
+			Limit      int    `json:"limit"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.ConsumerID != "adapter-a" || request.Limit != 1 {
+			t.Fatalf("request=%#v err=%v", request, err)
+		}
+		_, _ = w.Write([]byte(`{"invocations":[]}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", machinePrivate, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.consumerID = "adapter-a"
+	if invocations, err := client.LeaseInvocations(context.Background()); err != nil || len(invocations) != 0 {
+		t.Fatalf("invocations=%#v err=%v", invocations, err)
+	}
+}
+
 func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
