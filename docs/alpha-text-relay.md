@@ -167,6 +167,39 @@ punaro-adapter send \
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
 
+## Durable conversation roles
+
+Endpoint members keep the existing behavior: membership follows that exact
+currently attached mailbox address. To keep a conversation member stable while
+an agent process reconnects, create a role member owned by its enrolled machine
+instead. The role is a durable identity, not a mailbox address:
+
+```sh
+punaro-adapter create \
+  --creator agent/workstation-review/operator-session \
+  --member agent/workstation-review/operator-session:send,receive,admin \
+  --role-member role/plan-reviewer@workstation-review:send,receive \
+  --idempotency-key create-review-room-1
+```
+
+Whenever the reviewer has a current attached session, renew its explicit
+binding before it sends or receives for that role:
+
+```sh
+punaro-adapter bind-role \
+  --role role/plan-reviewer \
+  --session agent/workstation-review/reviewer-session
+```
+
+Only the role's configured machine may bind it, and only to one of that
+machine's currently advertised sessions. The binding has the same bounded
+renewal horizon as endpoint advertisement: later advertisements renew a binding
+only for that exact still-owned session. It expires on missed renewal and is
+replaced (not inherited) when a new session is bound. After an adapter or relay
+restart, advertise the new session and bind the role again. No membership edit
+is needed, but a stale session can neither send, receive, nor acknowledge as
+the role.
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production

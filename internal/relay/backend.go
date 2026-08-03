@@ -26,6 +26,11 @@ func ValidMachineID(value string) bool { return validBoundedText(value, 128, 512
 // ValidEndpoint reports whether a mailbox address has portable durable bounds.
 func ValidEndpoint(value string) bool { return validBoundedText(value, 512, 2048) }
 
+// ValidRole reports whether a durable conversation-role identity has portable
+// storage bounds. Roles and session endpoints deliberately occupy separate
+// namespaces in the relay model even when their textual labels are similar.
+func ValidRole(value string) bool { return validBoundedText(value, 512, 2048) }
+
 // ValidRequestToken bounds nonces, idempotency keys, and consumer identities.
 func ValidRequestToken(value string) bool { return validBoundedText(value, 128, 512) }
 
@@ -71,6 +76,13 @@ type Backend interface {
 // Legacy backends remain mail-only and need not implement it.
 type PrincipalEndpointBackend interface {
 	AdvertiseEndpointsForPrincipal(machineID string, authority PrincipalAuthority, endpoints []string, now time.Time, ttl time.Duration) error
+}
+
+// RoleBindingBackend is implemented by stores that persist durable role
+// identities. Binding always proves the caller owns the currently attached
+// session; the binding itself has a bounded renewable lease.
+type RoleBindingBackend interface {
+	BindRoleToSession(machineID, role, sessionEndpoint string, now time.Time, ttl time.Duration) error
 }
 
 // PrincipalAuthority is the non-secret, generation-fenced result of device

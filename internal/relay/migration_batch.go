@@ -120,12 +120,15 @@ var migrationBatchSpecs = []migrationBatchSpec{
 	{target: "mail_endpoints", source: migrationTableSpecs[0], keyColumns: []string{"endpoint"}},
 	{target: "mail_conversations", source: migrationTableSpecs[1], keyColumns: []string{"id"}},
 	{target: "mail_memberships", source: migrationTableSpecs[2], keyColumns: []string{"conversation_id", "endpoint"}},
-	{target: "mail_messages", source: migrationTableSpecs[3], keyColumns: []string{"id"}},
-	{target: "mail_deliveries", source: migrationTableSpecs[4], keyColumns: []string{"id"}},
-	{target: "mail_recipient_cursors", source: migrationTableSpecs[5], keyColumns: []string{"recipient_endpoint", "conversation_id"}},
-	{target: "mail_message_idempotency", source: migrationTableSpecs[6], keyColumns: []string{"machine_id", "key"}},
-	{target: "mail_conversation_idempotency", source: migrationTableSpecs[7], keyColumns: []string{"machine_id", "key"}},
-	{target: "mail_request_nonces", source: migrationTableSpecs[8], keyColumns: []string{"machine_id", "nonce"}},
+	{target: "mail_roles", source: migrationTableSpecs[3], keyColumns: []string{"role"}},
+	{target: "mail_role_memberships", source: migrationTableSpecs[4], keyColumns: []string{"conversation_id", "role"}},
+	{target: "mail_role_bindings", source: migrationTableSpecs[5], keyColumns: []string{"role"}},
+	{target: "mail_messages", source: migrationTableSpecs[6], keyColumns: []string{"id"}},
+	{target: "mail_deliveries", source: migrationTableSpecs[7], keyColumns: []string{"id"}},
+	{target: "mail_recipient_cursors", source: migrationTableSpecs[8], keyColumns: []string{"recipient_endpoint", "conversation_id"}},
+	{target: "mail_message_idempotency", source: migrationTableSpecs[9], keyColumns: []string{"machine_id", "key"}},
+	{target: "mail_conversation_idempotency", source: migrationTableSpecs[10], keyColumns: []string{"machine_id", "key"}},
+	{target: "mail_request_nonces", source: migrationTableSpecs[11], keyColumns: []string{"machine_id", "nonce"}},
 }
 
 // ReadMigrationSourceBatch reads one bounded page from the exact prepared

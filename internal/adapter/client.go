@@ -190,6 +190,18 @@ func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.D
 	return response.Deliveries, err
 }
 
+// BindRole renewably connects one durable role to a currently advertised local
+// session. The relay verifies both the role's configured machine owner and the
+// session attachment. Advertisements renew a binding only while they retain
+// that exact live session generation; a new or reclaimed session must bind.
+func (c *HTTPRelayClient) BindRole(ctx context.Context, role, sessionEndpoint string) error {
+	if !relay.ValidRole(role) || !relay.ValidEndpoint(sessionEndpoint) {
+		return fmt.Errorf("role and session endpoint are required")
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/roles/bindings", map[string]any{"role": role, "session_endpoint": sessionEndpoint}, nil)
+	return err
+}
+
 // CreateConversation bootstraps an explicit, membership-scoped room from an
 // attached local endpoint. The relay still verifies endpoint ownership.
 func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, idempotencyKey string) (relay.Conversation, error) {
@@ -198,7 +210,14 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 	}
 	encoded := make([]map[string]any, 0, len(members))
 	for _, member := range members {
-		encoded = append(encoded, map[string]any{"endpoint": member.Endpoint, "capabilities": capabilityNames(member.Capabilities)})
+		encodedMember := map[string]any{"capabilities": capabilityNames(member.Capabilities)}
+		if member.Role != "" {
+			encodedMember["role"] = member.Role
+			encodedMember["role_machine_id"] = member.RoleMachineID
+		} else {
+			encodedMember["endpoint"] = member.Endpoint
+		}
+		encoded = append(encoded, encodedMember)
 	}
 	var conversation relay.Conversation
 	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "members": encoded}, idempotencyKey, &conversation)

@@ -18,7 +18,7 @@ import (
 )
 
 var tables = []string{
-	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_messages", "mail_deliveries",
+	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_request_nonces",
 }
 
@@ -313,6 +313,12 @@ func tableEvidence(manifest relay.MigrationSourceManifest, table string) (int64,
 		return manifest.Counts.Conversations, manifest.TableSHA256.Conversations
 	case "mail_memberships":
 		return manifest.Counts.Memberships, manifest.TableSHA256.Memberships
+	case "mail_roles":
+		return manifest.Counts.Roles, manifest.TableSHA256.Roles
+	case "mail_role_memberships":
+		return manifest.Counts.RoleMemberships, manifest.TableSHA256.RoleMemberships
+	case "mail_role_bindings":
+		return manifest.Counts.RoleBindings, manifest.TableSHA256.RoleBindings
 	case "mail_messages":
 		return manifest.Counts.Messages, manifest.TableSHA256.Messages
 	case "mail_deliveries":

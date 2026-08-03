@@ -43,10 +43,12 @@ func main() {
 		err = runSend(os.Args[2:])
 	case os.Args[1] == "create":
 		err = runCreate(os.Args[2:])
+	case os.Args[1] == "bind-role":
+		err = runBindRole(os.Args[2:])
 	case os.Args[1] == "attachment-notify":
 		err = runAttachmentNotify(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, attachment-notify)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, attachment-notify)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
@@ -69,36 +71,55 @@ func parseCreateArgs(args []string) (createRequest, error) {
 	flags.SetOutput(io.Discard)
 	var request createRequest
 	var members memberFlags
+	var roleMembers memberFlags
 	flags.StringVar(&request.creator, "creator", "", "attached creator endpoint")
 	flags.Var(&members, "member", "endpoint:send,receive,admin (repeatable)")
+	flags.Var(&roleMembers, "role-member", "role@machine:send,receive,admin (repeatable)")
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.creator == "" || request.idempotencyKey == "" || len(members) == 0 {
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.creator == "" || request.idempotencyKey == "" || len(members)+len(roleMembers) == 0 {
 		return createRequest{}, fmt.Errorf("--creator, at least one --member, and --idempotency-key are required")
 	}
 	for _, raw := range members {
 		endpoint, permissions, found := strings.Cut(raw, ":")
-		if !found || endpoint == "" || permissions == "" {
+		capability, err := parseMemberCapabilities(permissions, found)
+		if err != nil || endpoint == "" {
 			return createRequest{}, fmt.Errorf("invalid --member")
-		}
-		var capability relay.Capability
-		for _, item := range strings.Split(permissions, ",") {
-			switch item {
-			case "send":
-				capability |= relay.CapSend
-			case "receive":
-				capability |= relay.CapReceive
-			case "admin":
-				capability |= relay.CapAdmin
-			default:
-				return createRequest{}, fmt.Errorf("invalid member capability")
-			}
-		}
-		if capability == 0 {
-			return createRequest{}, fmt.Errorf("invalid member capability")
 		}
 		request.members = append(request.members, relay.Member{Endpoint: endpoint, Capabilities: capability})
 	}
+	for _, raw := range roleMembers {
+		role, remainder, found := strings.Cut(raw, "@")
+		machineID, permissions, hasPermissions := strings.Cut(remainder, ":")
+		capability, err := parseMemberCapabilities(permissions, found && hasPermissions)
+		if err != nil || !relay.ValidRole(role) || !relay.ValidMachineID(machineID) {
+			return createRequest{}, fmt.Errorf("invalid --role-member")
+		}
+		request.members = append(request.members, relay.Member{Role: role, RoleMachineID: machineID, Capabilities: capability})
+	}
 	return request, nil
+}
+
+func parseMemberCapabilities(permissions string, present bool) (relay.Capability, error) {
+	if !present || permissions == "" {
+		return 0, fmt.Errorf("missing member capability")
+	}
+	var capability relay.Capability
+	for _, item := range strings.Split(permissions, ",") {
+		switch item {
+		case "send":
+			capability |= relay.CapSend
+		case "receive":
+			capability |= relay.CapReceive
+		case "admin":
+			capability |= relay.CapAdmin
+		default:
+			return 0, fmt.Errorf("invalid member capability")
+		}
+	}
+	if capability == 0 {
+		return 0, fmt.Errorf("invalid member capability")
+	}
+	return capability, nil
 }
 
 func runCreate(args []string) error {
@@ -120,6 +141,39 @@ func runCreate(args []string) error {
 	}
 	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q}\n", conversation.ID)
 	return err
+}
+
+type bindRoleRequest struct {
+	role    string
+	session string
+}
+
+func parseBindRoleArgs(args []string) (bindRoleRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter bind-role", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request bindRoleRequest
+	flags.StringVar(&request.role, "role", "", "durable role identity")
+	flags.StringVar(&request.session, "session", "", "currently attached session endpoint")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !relay.ValidRole(request.role) || !relay.ValidEndpoint(request.session) {
+		return bindRoleRequest{}, fmt.Errorf("--role and --session are required")
+	}
+	return request, nil
+}
+
+func runBindRole(args []string) error {
+	request, err := parseBindRoleArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClient(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken)
+	if err != nil {
+		return err
+	}
+	return client.BindRole(context.Background(), request.role, request.session)
 }
 
 type sendRequest struct {

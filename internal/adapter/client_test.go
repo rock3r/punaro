@@ -579,6 +579,14 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"conversation-created"}`))
+		case "/v1/roles/bindings":
+			var binding struct {
+				Role            string `json:"role"`
+				SessionEndpoint string `json:"session_endpoint"`
+			}
+			if err := json.Unmarshal(body, &binding); err != nil || binding.Role != "role/plan-reviewer" || binding.SessionEndpoint != "agent/a/session" {
+				t.Fatalf("role binding body=%s err=%v", body, err)
+			}
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}
@@ -602,6 +610,49 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")
 	if err != nil || conversation.ID != "conversation-created" {
 		t.Fatalf("create=%#v err=%v", conversation, err)
+	}
+	if err := client.BindRole(context.Background(), "role/plan-reviewer", "agent/a/session"); err != nil {
+		t.Fatalf("bind durable role: %v", err)
+	}
+}
+
+func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("role conversation request was not signed")
+		}
+		var payload struct {
+			Members []map[string]any `json:"members"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || len(payload.Members) != 2 {
+			t.Fatalf("conversation payload=%s err=%v", body, err)
+		}
+		if payload.Members[0]["endpoint"] != "agent/a/session" || payload.Members[0]["role"] != nil || payload.Members[1]["role"] != "role/plan-reviewer" || payload.Members[1]["role_machine_id"] != "machine-b" || payload.Members[1]["endpoint"] != nil {
+			t.Fatalf("members=%#v", payload.Members)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"role-conversation"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := client.CreateConversation(context.Background(), "agent/a/session", []relay.Member{
+		{Endpoint: "agent/a/session", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Role: "role/plan-reviewer", RoleMachineID: "machine-b", Capabilities: relay.CapReceive},
+	}, "create-role-member")
+	if err != nil || conversation.ID != "role-conversation" {
+		t.Fatalf("conversation=%#v err=%v", conversation, err)
 	}
 }
 

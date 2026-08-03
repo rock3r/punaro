@@ -39,6 +39,20 @@ func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
 	}
 }
 
+func TestParseCreateArgsAcceptsDurableRoleMemberAndBinding(t *testing.T) {
+	request, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", "role/plan-reviewer@machine-b:send,receive", "--idempotency-key", "create-role-1"})
+	if err != nil || len(request.members) != 1 || request.members[0].Role != "role/plan-reviewer" || request.members[0].RoleMachineID != "machine-b" {
+		t.Fatalf("role member request=%#v err=%v", request, err)
+	}
+	binding, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer", "--session", "agent/b/new-session"})
+	if err != nil || binding.role != "role/plan-reviewer" || binding.session != "agent/b/new-session" {
+		t.Fatalf("role binding=%#v err=%v", binding, err)
+	}
+	if _, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer"}); err == nil {
+		t.Fatal("incomplete role binding accepted")
+	}
+}
+
 func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
 	t.Setenv("PUNARO_MACHINE_ID", "machine-a")

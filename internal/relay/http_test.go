@@ -271,6 +271,40 @@ func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	}
 }
 
+func TestHTTPRoleBindingRequiresOwningMachineAndLiveSession(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"role":"role/plan-reviewer","role_machine_id":"machine-b","capabilities":["receive"]}]}`, "create-role", "create-role-1")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create role conversation status=%d body=%s", create.Code, create.Body.String())
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/roles/bindings", `{"role":"role/plan-reviewer","session_endpoint":"agent/a/session"}`, "bind-other-machine", ""); response.Code != http.StatusForbidden {
+		t.Fatalf("cross-machine role bind status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/roles/bindings", `{"role":"role/plan-reviewer","session_endpoint":"agent/b/session"}`, "bind-owner", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("owner role bind status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPRelayReportsMaintenanceDuringAuthentication(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

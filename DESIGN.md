@@ -264,12 +264,13 @@ ranking or lookup. The current Ed25519 machine enrollment below remains a
 staged migration source and is disabled only after intended clients exchange
 credentials or are explicitly retired.
 
-Punaro separates three principals:
+Punaro separates four principals:
 
 | Principal | Example | Purpose |
 | --- | --- | --- |
 | Machine | `workstation-a` | A single enrolled adapter installation. |
 | Endpoint | `agent/build-review` | A locally attached agent session advertised by one machine. |
+| Role | `role/plan-reviewer` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. |
 | Conversation | `conv_01…` | The durable room/thread which has members and messages. |
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
@@ -277,6 +278,26 @@ can only advertise endpoints in its configured namespace (for example,
 `agent/`) and only after local attachment is confirmed. A machine may instead
 be enrolled for a named exact legacy endpoint; exact enrollment is equality
 only, never an implicit client-wide namespace.
+
+An endpoint member remains the compatible, session-address membership model.
+A role member is a separate durable subject with an immutable owning machine,
+not an alias or prefix rule for an endpoint. Conversation creation may name a
+role with `role_machine_id`; the server rejects an unknown machine and rejects
+any later attempt to reuse that role for another machine. A role may be a member
+of many conversations, but it has one active session binding at a time.
+
+The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
+the role and one of its currently advertised endpoints. The server verifies the
+request signature, the machine's endpoint namespace, the durable role owner,
+and the live endpoint ownership generation before recording it. The binding
+expires no later than the endpoint lease. Later advertisements of that exact
+still-owned session renew the binding together with its attachment lease; a
+new session still needs an explicit binding. A detached, expired, or reclaimed
+session cannot retain or revive a role. Binding a new session replaces the old
+binding. Sending, leasing, acknowledging, room
+listing, and wake routing authorize an active role binding as well as an
+existing endpoint member, while legacy endpoint membership retains its current
+behavior unchanged.
 
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. The Telegram gateway is a distinct principal; only
@@ -717,6 +738,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
+| `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |

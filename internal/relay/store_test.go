@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -256,5 +257,177 @@ func TestStoreListsOnlyConversationsForActiveMachineEndpoints(t *testing.T) {
 	listed, err = store.ConversationsForMachine("machine-a", now.Add(2*time.Minute))
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("expired listed=%#v err=%v", listed, err)
+	}
+}
+
+func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-sender", []string{"agent/sender/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-reviewer", []string{"agent/reviewer/first-session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/sender/session", []Member{
+		{Endpoint: "agent/sender/session", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/plan-reviewer", RoleMachineID: "machine-reviewer", Capabilities: CapSend | CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-reviewer", "role/plan-reviewer", "agent/reviewer/first-session", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender/session", Body: "review this", IdempotencyKey: "send-role-reconnect", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipients, err := store.RecipientMachines(message.ID, now)
+	if err != nil || len(recipients) != 1 || recipients[0] != "machine-reviewer" {
+		t.Fatalf("durable role wake recipients=%#v err=%v", recipients, err)
+	}
+	if err := store.AdvertiseEndpoints("machine-reviewer", []string{"agent/reviewer/second-session"}, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-reviewer", "role/plan-reviewer", "agent/reviewer/second-session", now.Add(time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries("machine-reviewer", "reviewer-reconnected", "agent/reviewer/second-session", conversation.ID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Body != "review this" {
+		t.Fatalf("role delivery after session replacement page=%#v err=%v", page, err)
+	}
+	if err := store.AuthorizeSender(conversation.ID, "machine-reviewer", "agent/reviewer/second-session", now.Add(2*time.Second)); err != nil {
+		t.Fatalf("rebound role sender authorization: %v", err)
+	}
+}
+
+func TestStoreDurableRoleSurvivesRestartButRequiresFreshBinding(t *testing.T) {
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-sender", []string{"agent/sender/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/sender/session", []Member{
+		{Endpoint: "agent/sender/session", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/windows-validator", RoleMachineID: "machine-validator", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender/session", Body: "validate", IdempotencyKey: "send-restart", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-validator", []string{"agent/validator/restarted-session"}, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LeaseDeliveries("machine-validator", "validator-after-restart", "agent/validator/restarted-session", conversation.ID, now.Add(time.Second), time.Minute, 10); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unbound role lease after restart err=%v", err)
+	}
+	if err := store.BindRoleToSession("machine-validator", "role/windows-validator", "agent/validator/restarted-session", now.Add(time.Second), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries("machine-validator", "validator-after-restart", "agent/validator/restarted-session", conversation.ID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Body != "validate" {
+		t.Fatalf("role delivery after restart page=%#v err=%v", page, err)
+	}
+}
+
+func TestStoreRejectsUnauthorizedOrExpiredRoleBindings(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-attacker", []string{"agent/attacker/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/owner/session", []Member{
+		{Endpoint: "agent/owner/session", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/owner-only", RoleMachineID: "machine-owner", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-attacker", "role/owner-only", "agent/attacker/session", now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("cross-machine role binding err=%v", err)
+	}
+	if err := store.BindRoleToSession("machine-owner", "role/owner-only", "agent/attacker/session", now, time.Minute); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("foreign session role binding err=%v", err)
+	}
+	if err := store.BindRoleToSession("machine-owner", "role/owner-only", "agent/owner/session", now, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-owner", FromEndpoint: "agent/owner/session", Body: "role expiry", IdempotencyKey: "role-expiry", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries("machine-owner", "owner-expired-role", "agent/owner/session", conversation.ID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 0 {
+		t.Fatalf("expired binding lease page=%#v err=%v", page, err)
+	}
+}
+
+func TestStoreRenewsRoleBindingOnlyForTheSameLiveSession(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-creator", []string{"agent/creator/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/creator/session", []Member{
+		{Endpoint: "agent/creator/session", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/renewed", RoleMachineID: "machine-owner", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-owner", "role/renewed", "agent/owner/session", now, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-creator", FromEndpoint: "agent/creator/session", Body: "renew me", IdempotencyKey: "renew-role", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now.Add(500*time.Millisecond), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries("machine-owner", "owner-renewed-role", "agent/owner/session", conversation.ID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Body != "renew me" {
+		t.Fatalf("renewed role lease page=%#v err=%v", page, err)
+	}
+	if err := store.AdvertiseEndpoints("machine-owner", nil, now.Add(3*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	page, err = store.LeaseDeliveries("machine-owner", "owner-reclaimed-role", "agent/owner/session", conversation.ID, now.Add(4*time.Second), time.Minute, 10)
+	if !errors.Is(err, ErrForbidden) || len(page.Deliveries) != 0 {
+		t.Fatalf("reclaimed session revived role binding page=%#v err=%v", page, err)
 	}
 }

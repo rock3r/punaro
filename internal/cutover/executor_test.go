@@ -324,7 +324,7 @@ func testManifest(phase relay.MigrationSourcePhase) relay.MigrationSourceManifes
 	count, digest := hasher.Evidence()
 	empty := sha256.Sum256(nil)
 	emptyDigest := hex.EncodeToString(empty[:])
-	return relay.MigrationSourceManifest{Version: 1, SourceID: "019f7f07-9b88-7c12-a394-b663274a6555", Phase: phase, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), Fingerprint: strings.Repeat("b", 64), ExpectedFingerprint: strings.Repeat("b", 64), Counts: relay.MigrationSourceCounts{Endpoints: count}, TableSHA256: relay.MigrationSourceHashes{Endpoints: digest, Conversations: emptyDigest, Memberships: emptyDigest, Messages: emptyDigest, Deliveries: emptyDigest, RecipientCursors: emptyDigest, MessageIdempotency: emptyDigest, ConversationIdempotency: emptyDigest, RequestNonces: emptyDigest}}
+	return relay.MigrationSourceManifest{Version: 2, SourceID: "019f7f07-9b88-7c12-a394-b663274a6555", Phase: phase, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), Fingerprint: strings.Repeat("b", 64), ExpectedFingerprint: strings.Repeat("b", 64), Counts: relay.MigrationSourceCounts{Endpoints: count}, TableSHA256: relay.MigrationSourceHashes{Endpoints: digest, Conversations: emptyDigest, Memberships: emptyDigest, Roles: emptyDigest, RoleMemberships: emptyDigest, RoleBindings: emptyDigest, Messages: emptyDigest, Deliveries: emptyDigest, RecipientCursors: emptyDigest, MessageIdempotency: emptyDigest, ConversationIdempotency: emptyDigest, RequestNonces: emptyDigest}}
 }
 
 func testEndpointRow() relay.MigrationSourceRow {
