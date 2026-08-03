@@ -359,11 +359,11 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_conversations(id,next_sequence,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'next_sequence')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversations' ORDER BY row_key COLLATE "C"`,
-	`INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities)
-	 SELECT (payload->>'conversation_id')::uuid,payload->>'endpoint',(payload->>'capabilities')::smallint
+	`INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities,role)
+	 SELECT (payload->>'conversation_id')::uuid,payload->>'endpoint',(payload->>'capabilities')::smallint,payload->>'role'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_memberships' ORDER BY row_key COLLATE "C"`,
-	`INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at)
-	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint,payload->>'from_endpoint',payload->>'body',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	`INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,target_role,body,created_at)
+	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint,payload->>'from_endpoint',payload->>'target_role',payload->>'body',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_messages' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'message_id')::uuid,payload->>'recipient_endpoint',payload->>'lease_machine_id',(payload->>'lease_token')::uuid,(payload->>'lease_generation')::bigint,(payload->>'ownership_generation')::bigint,(payload->>'consumer_generation')::bigint,

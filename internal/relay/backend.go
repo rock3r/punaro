@@ -26,6 +26,10 @@ func ValidMachineID(value string) bool { return validBoundedText(value, 128, 512
 // ValidEndpoint reports whether a mailbox address has portable durable bounds.
 func ValidEndpoint(value string) bool { return validBoundedText(value, 512, 2048) }
 
+// ValidRole reports whether a durable role label has portable, unambiguous
+// bounds. The empty value denotes the existing unaddressed/broadcast behavior.
+func ValidRole(value string) bool { return value == "" || validBoundedText(value, 64, 256) }
+
 // ValidRequestToken bounds nonces, idempotency keys, and consumer identities.
 func ValidRequestToken(value string) bool { return validBoundedText(value, 128, 512) }
 
@@ -57,6 +61,7 @@ type Backend interface {
 	AdvertiseEndpoints(machineID string, endpoints []string, now time.Time, ttl time.Duration) error
 	AssertEndpointOwnership(machineID, endpoint string, now time.Time) error
 	CreateConversationIdempotent(CreateConversationInput) (Conversation, error)
+	UpdateMembership(conversationID, machineID, adminEndpoint, previousEndpoint string, member Member, now time.Time) error
 	AuthorizeSender(conversationID, machineID, endpoint string, now time.Time) error
 	AppendMessage(AppendInput) (Message, bool, error)
 	LeaseDeliveries(machineID, consumerID, endpoint, conversationID string, now time.Time, ttl time.Duration, limit int) (DeliveryLeasePage, error)

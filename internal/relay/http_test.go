@@ -100,6 +100,52 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPRoleAddressingRequiresAuthorizedActiveRecipient(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/reviewer","agent/b/other"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"],"role":"coordinator"},{"endpoint":"agent/b/reviewer","capabilities":["receive"],"role":"reviewer"},{"endpoint":"agent/b/other","capabilities":["receive"],"role":"implementer"}]}`, "create", "role-create")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	unauthorized := serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/conversations/"+conversation.ID+"/memberships", `{"from_endpoint":"agent/b/reviewer","previous_endpoint":"agent/b/reviewer","member":{"endpoint":"agent/b/reviewer","capabilities":["receive"],"role":"implementer"}}`, "non-admin-change", "")
+	if unauthorized.Code != http.StatusForbidden {
+		t.Fatalf("non-admin change=%d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	message := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"reviewer","body":"please review"}`, "role-send", "role-send")
+	if message.Code != http.StatusCreated {
+		t.Fatalf("role send=%d %s", message.Code, message.Body.String())
+	}
+	missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"missing","body":"please review"}`, "missing-send", "missing-send")
+	if missing.Code != http.StatusUnprocessableEntity || !strings.Contains(missing.Body.String(), "no eligible recipient") {
+		t.Fatalf("missing role=%d %s", missing.Code, missing.Body.String())
+	}
+	leaseReviewer := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/reviewer","consumer_id":"reviewer-consumer"}`, "lease-reviewer", "")
+	leaseOther := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/other","consumer_id":"other-consumer"}`, "lease-other", "")
+	if !strings.Contains(leaseReviewer.Body.String(), "please review") || strings.Contains(leaseOther.Body.String(), "please review") {
+		t.Fatalf("role leases reviewer=%s other=%s", leaseReviewer.Body.String(), leaseOther.Body.String())
+	}
+}
+
 type principalEndpointRecordingBackend struct {
 	Backend
 	plainCalls     int

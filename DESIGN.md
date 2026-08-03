@@ -279,7 +279,8 @@ be enrolled for a named exact legacy endpoint; exact enrollment is equality
 only, never an implicit client-wide namespace.
 
 Each conversation has an explicit membership table with `send`, `receive`,
-and `admin` capabilities. The Telegram gateway is a distinct principal; only
+and `admin` capabilities plus an optional validated durable role label. The
+Telegram gateway is a distinct principal; only
 the configured Telegram user ID may control it. Neither a friendly endpoint
 name nor a client-provided `from` field is proof of identity.
 
@@ -384,6 +385,17 @@ and lease token. A lease that expires without an acknowledgement becomes
 available again. The recipient must tolerate duplicate delivery by durably
 recording the Punaro message UUID before local injection, or by using it as the
 local mailbox idempotency key.
+
+A message may name one membership `target_role`. The relay validates the role
+and the sender's current `send` authority in the append transaction, then
+creates deliveries only for other currently attached `receive` members holding
+that role. If none is eligible, it returns a stable no-recipient error before
+allocating a sequence, message, or idempotency record. Omitting `target_role`
+preserves existing broadcast behavior, including durable delivery to detached
+receivers. Only a current `admin` member may replace a membership role/binding;
+the new endpoint must be live and the operation atomically moves the role's
+unacknowledged deliveries and cursor, preserving at-least-once delivery across
+restart and rebinding.
 
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired
@@ -755,6 +767,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
+| `PUT` | `/v1/conversations/{id}/memberships` | Admin-authorized role/binding replacement. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
 | `POST` | `/v1/invocations/lease` | Lease content-free runtime handoffs for the authenticated machine. |

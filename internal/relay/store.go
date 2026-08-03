@@ -33,6 +33,10 @@ var (
 	// ErrConflict denotes a valid request that conflicts with durable state,
 	// such as reusing an idempotency key with another request body.
 	ErrConflict = errors.New("relay state conflict")
+	// ErrNoEligibleRecipient means an authorized role-addressed send could not
+	// find a currently attached member with that role. It does not allocate a
+	// message or consume the sender's retry key.
+	ErrNoEligibleRecipient = errors.New("no eligible recipient for addressed role")
 	// ErrMaintenance is a retryable, payload-free refusal while the durable
 	// update fence owns application mutations.
 	ErrMaintenance = errors.New("relay maintenance in progress")
@@ -63,6 +67,7 @@ const (
 type Member struct {
 	Endpoint     string
 	Capabilities Capability
+	Role         string
 }
 
 // Conversation is an immutable identifier returned when a room is created.
@@ -77,6 +82,7 @@ type Message struct {
 	ConversationID string    `json:"conversation_id"`
 	Sequence       int64     `json:"sequence"`
 	FromEndpoint   string    `json:"from_endpoint"`
+	TargetRole     string    `json:"target_role,omitempty"`
 	Body           string    `json:"body"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -107,6 +113,7 @@ type AppendInput struct {
 	CredentialLookupID   string
 	CredentialGeneration int64
 	FromEndpoint         string
+	TargetRole           string
 	Body                 string
 	ArtifactIDs          []string
 	IdempotencyKey       string
@@ -275,6 +282,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
 			endpoint TEXT NOT NULL,
 			capabilities INTEGER NOT NULL,
+			role TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (conversation_id, endpoint)
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
@@ -282,6 +290,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
 			sequence INTEGER NOT NULL,
 			from_endpoint TEXT NOT NULL,
+			target_role TEXT NOT NULL DEFAULT '',
 			body TEXT NOT NULL,
 			created_at INTEGER NOT NULL,
 			UNIQUE (conversation_id, sequence)
@@ -378,6 +387,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"endpoints", "consumer_lease_until", "INTEGER"},
 		{"deliveries", "ownership_generation", "INTEGER"},
 		{"deliveries", "consumer_generation", "INTEGER"},
+		{"memberships", "role", "TEXT NOT NULL DEFAULT ''"},
+		{"messages", "target_role", "TEXT NOT NULL DEFAULT ''"},
 		{"relay_migration_control", "last_epoch_id", "TEXT"},
 		{"relay_migration_control", "last_target_identity", "TEXT"},
 		{"relay_migration_control", "last_expected_fingerprint", "TEXT"},
@@ -393,7 +404,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
-	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" {
+	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "memberships" && table != "messages" && table != "relay_migration_control" {
 		return errors.New("invalid relay migration table")
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")") // #nosec G202 -- table is restricted above to fixed internal names.
@@ -546,7 +557,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 	seen := make(map[string]struct{}, len(members))
 	creatorAdmin := false
 	for _, member := range members {
-		if !ValidEndpoint(member.Endpoint) || member.Capabilities == 0 || member.Capabilities & ^(CapSend|CapReceive|CapAdmin|CapInvoke) != 0 {
+		if !ValidEndpoint(member.Endpoint) || !ValidRole(member.Role) || member.Capabilities == 0 || member.Capabilities & ^(CapSend|CapReceive|CapAdmin|CapInvoke) != 0 {
 			return Conversation{}, fmt.Errorf("invalid conversation member")
 		}
 		if _, duplicate := seen[member.Endpoint]; duplicate {
@@ -601,7 +612,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
 	for _, member := range members {
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, member.Endpoint, member.Capabilities); err != nil {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities, role) VALUES (?, ?, ?, ?)", conversation.ID, member.Endpoint, member.Capabilities, member.Role); err != nil {
 			return Conversation{}, fmt.Errorf("add conversation member: %w", err)
 		}
 	}
@@ -614,6 +625,61 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 		return Conversation{}, err
 	}
 	return conversation, nil
+}
+
+// UpdateMembership replaces one member under a live administrator's authority.
+// The prior endpoint may be detached, so an administrator can rebind a durable
+// role after the old local session has stopped; the new endpoint must be active.
+func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previousEndpoint string, member Member, now time.Time) error {
+	if strings.TrimSpace(conversationID) == "" || !ValidMachineID(machineID) || !ValidEndpoint(adminEndpoint) || !ValidEndpoint(previousEndpoint) || !ValidEndpoint(member.Endpoint) || !ValidRole(member.Role) || member.Capabilities == 0 || member.Capabilities&^(CapSend|CapReceive|CapAdmin) != 0 {
+		return ErrForbidden
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, adminEndpoint, machineID, now); err != nil {
+		return err
+	}
+	var adminCapabilities Capability
+	if err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, adminEndpoint).Scan(&adminCapabilities); errors.Is(err, sql.ErrNoRows) || adminCapabilities&CapAdmin == 0 {
+		return ErrForbidden
+	} else if err != nil {
+		return fmt.Errorf("authorize membership administrator: %w", err)
+	}
+	if err := endpointActive(tx, member.Endpoint, now); err != nil {
+		return err
+	}
+	if member.Endpoint != previousEndpoint {
+		// Keep the role's unacknowledged stream durable across session rebinding.
+		// Advancing the cursor with the greater of either endpoint's history avoids
+		// reopening an acknowledged gap while moving pending delivery ownership.
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO recipient_cursors(recipient_endpoint, conversation_id, sequence)
+			SELECT ?, conversation_id, sequence FROM recipient_cursors WHERE recipient_endpoint=? AND conversation_id=?
+			ON CONFLICT(recipient_endpoint, conversation_id) DO UPDATE SET sequence=MAX(sequence, excluded.sequence)`, member.Endpoint, previousEndpoint, conversationID); err != nil {
+			return fmt.Errorf("preserve rebound recipient cursor: %w", err)
+		}
+		if _, err := tx.ExecContext(context.Background(), "DELETE FROM recipient_cursors WHERE recipient_endpoint=? AND conversation_id=?", previousEndpoint, conversationID); err != nil {
+			return fmt.Errorf("remove prior recipient cursor: %w", err)
+		}
+		if _, err := tx.ExecContext(context.Background(), `UPDATE deliveries SET recipient_endpoint=?
+			WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)`, member.Endpoint, previousEndpoint, conversationID); err != nil {
+			return fmt.Errorf("rebind pending deliveries: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(context.Background(), "UPDATE memberships SET endpoint=?, capabilities=?, role=? WHERE conversation_id=? AND endpoint=?", member.Endpoint, member.Capabilities, member.Role, conversationID, previousEndpoint)
+	if err != nil {
+		return fmt.Errorf("update conversation member: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check conversation member update: %w", err)
+	}
+	if changed != 1 {
+		return ErrForbidden
+	}
+	return tx.Commit()
 }
 
 // AuthorizeSender proves the exact live endpoint may append to a conversation
@@ -645,7 +711,7 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRole(input.TargetRole) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
 	}
 	if len(input.Body) > maxMessageBodyBytes {
@@ -689,30 +755,51 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, fmt.Errorf("read idempotency key: %w", err)
 	}
-	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
+	var recipients []string
+	if input.TargetRole == "" {
+		rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
+		if err != nil {
+			return Message{}, false, fmt.Errorf("find recipients: %w", err)
+		}
+		for rows.Next() {
+			var endpoint string
+			if err := rows.Scan(&endpoint); err != nil {
+				_ = rows.Close()
+				return Message{}, false, err
+			}
+			recipients = append(recipients, endpoint)
+		}
+		if err := rows.Close(); err != nil {
+			return Message{}, false, err
+		}
+	} else {
+		rows, err := tx.QueryContext(context.Background(), "SELECT membership.endpoint FROM memberships AS membership JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE membership.conversation_id=? AND membership.role=? AND (membership.capabilities & ?) != 0 AND membership.endpoint<>? AND endpoint.lease_until>?", input.ConversationID, input.TargetRole, CapReceive, input.FromEndpoint, input.Now.UnixMilli())
+		if err != nil {
+			return Message{}, false, fmt.Errorf("find role recipients: %w", err)
+		}
+		for rows.Next() {
+			var endpoint string
+			if err := rows.Scan(&endpoint); err != nil {
+				_ = rows.Close()
+				return Message{}, false, err
+			}
+			recipients = append(recipients, endpoint)
+		}
+		if err := rows.Close(); err != nil {
+			return Message{}, false, err
+		}
+		if len(recipients) == 0 {
+			return Message{}, false, ErrNoEligibleRecipient
+		}
+	}
+	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, TargetRole: input.TargetRole, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
 	} else if err != nil {
 		return Message{}, false, fmt.Errorf("allocate message sequence: %w", err)
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, target_role, body, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.TargetRole, message.Body, message.CreatedAt.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("append message: %w", err)
-	}
-	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
-	if err != nil {
-		return Message{}, false, fmt.Errorf("find recipients: %w", err)
-	}
-	var recipients []string
-	for rows.Next() {
-		var endpoint string
-		if err := rows.Scan(&endpoint); err != nil {
-			_ = rows.Close()
-			return Message{}, false, err
-		}
-		recipients = append(recipients, endpoint)
-	}
-	if err := rows.Close(); err != nil {
-		return Message{}, false, err
 	}
 	for _, endpoint := range recipients {
 		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
@@ -766,7 +853,7 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		return DeliveryLeasePage{}, fmt.Errorf("claim endpoint consumer lease: %w", err)
 	}
 	query := `SELECT d.id, d.lease_machine_id, d.lease_token, d.lease_generation, d.ownership_generation, d.consumer_generation, d.lease_until,
-		m.id, m.conversation_id, m.sequence, m.from_endpoint, m.body, m.created_at
+		m.id, m.conversation_id, m.sequence, m.from_endpoint, m.target_role, m.body, m.created_at
 		FROM deliveries d JOIN messages m ON m.id = d.message_id
 		WHERE d.recipient_endpoint = ? AND d.acked_at IS NULL
 		AND (d.lease_until IS NULL OR d.lease_until <= ? OR d.ownership_generation IS NULL OR d.ownership_generation <> ? OR d.consumer_generation IS NULL OR d.consumer_generation <> ? OR d.lease_machine_id = ?)`
@@ -791,7 +878,7 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		var leaseUntil, leaseOwnership, leaseConsumer sql.NullInt64
 		var createdAt int64
 		delivery.RecipientEndpoint = endpoint
-		if err := rows.Scan(&delivery.ID, &leaseMachine, &leaseToken, &delivery.LeaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &delivery.Message.ID, &delivery.Message.ConversationID, &delivery.Message.Sequence, &delivery.Message.FromEndpoint, &delivery.Message.Body, &createdAt); err != nil {
+		if err := rows.Scan(&delivery.ID, &leaseMachine, &leaseToken, &delivery.LeaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &delivery.Message.ID, &delivery.Message.ConversationID, &delivery.Message.Sequence, &delivery.Message.FromEndpoint, &delivery.Message.TargetRole, &delivery.Message.Body, &createdAt); err != nil {
 			return DeliveryLeasePage{}, err
 		}
 		delivery.Message.CreatedAt = fromMillis(createdAt)
@@ -1061,7 +1148,7 @@ func endpointOwnership(tx *sql.Tx, endpoint, machineID string, now time.Time) (i
 func messageByID(tx *sql.Tx, messageID string) (Message, error) {
 	var message Message
 	var createdAt int64
-	err := tx.QueryRowContext(context.Background(), "SELECT id, conversation_id, sequence, from_endpoint, body, created_at FROM messages WHERE id = ?", messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &createdAt)
+	err := tx.QueryRowContext(context.Background(), "SELECT id, conversation_id, sequence, from_endpoint, target_role, body, created_at FROM messages WHERE id = ?", messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.TargetRole, &message.Body, &createdAt)
 	if err != nil {
 		return Message{}, fmt.Errorf("read idempotent message: %w", err)
 	}
@@ -1081,6 +1168,9 @@ func createConversationHash(creatorEndpoint string, members []Member) string {
 	normalized := append([]Member(nil), members...)
 	sort.Slice(normalized, func(left, right int) bool {
 		if normalized[left].Endpoint == normalized[right].Endpoint {
+			if normalized[left].Capabilities == normalized[right].Capabilities {
+				return normalized[left].Role < normalized[right].Role
+			}
 			return normalized[left].Capabilities < normalized[right].Capabilities
 		}
 		return normalized[left].Endpoint < normalized[right].Endpoint
@@ -1088,14 +1178,14 @@ func createConversationHash(creatorEndpoint string, members []Member) string {
 	parts := make([]string, 1, 1+len(normalized)*2)
 	parts[0] = creatorEndpoint
 	for _, member := range normalized {
-		parts = append(parts, member.Endpoint, fmt.Sprintf("%d", member.Capabilities))
+		parts = append(parts, member.Endpoint, fmt.Sprintf("%d", member.Capabilities), member.Role)
 	}
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
 }
 
 func appendHash(input AppendInput) string {
-	parts := []string{input.ConversationID, input.FromEndpoint, input.Body}
+	parts := []string{input.ConversationID, input.FromEndpoint, input.TargetRole, input.Body}
 	if len(input.ArtifactIDs) != 0 {
 		parts = append(parts, input.PrincipalID)
 		parts = append(parts, input.ArtifactIDs...)

@@ -106,6 +106,13 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.requestInvocation(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/memberships"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/memberships")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.updateMembership(w, body, machineID, conversationID, now)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/sender-validation"):
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/sender-validation")
 		if conversationID == "" || strings.Contains(conversationID, "/") {
@@ -285,6 +292,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		Members         []struct {
 			Endpoint     string   `json:"endpoint"`
 			Capabilities []string `json:"capabilities"`
+			Role         string   `json:"role"`
 		} `json:"members"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
@@ -306,7 +314,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 			writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
 			return
 		}
-		members = append(members, Member{Endpoint: member.Endpoint, Capabilities: capabilities})
+		members = append(members, Member{Endpoint: member.Endpoint, Capabilities: capabilities, Role: member.Role})
 	}
 	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
 	if err != nil {
@@ -323,6 +331,7 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 	}
 	var request struct {
 		FromEndpoint string   `json:"from_endpoint"`
+		TargetRole   string   `json:"target_role"`
 		Body         string   `json:"body"`
 		ArtifactIDs  []string `json:"artifact_ids"`
 	}
@@ -334,7 +343,7 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}
-	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
+	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, TargetRole: request.TargetRole, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -458,6 +467,36 @@ func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *handler) updateMembership(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
+	var request struct {
+		FromEndpoint     string `json:"from_endpoint"`
+		PreviousEndpoint string `json:"previous_endpoint"`
+		Member           struct {
+			Endpoint     string   `json:"endpoint"`
+			Capabilities []string `json:"capabilities"`
+			Role         string   `json:"role"`
+		} `json:"member"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid membership update")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	capabilities, err := parseCapabilities(request.Member.Capabilities)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
+		return
+	}
+	if err := h.store.UpdateMembership(conversationID, machineID, request.FromEndpoint, request.PreviousEndpoint, Member{Endpoint: request.Member.Endpoint, Capabilities: capabilities, Role: request.Member.Role}, now); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
 	var request struct {
 		Endpoint       string `json:"endpoint"`
@@ -561,6 +600,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "request conflicts with durable state")
+	case errors.Is(err, ErrNoEligibleRecipient):
+		writeError(w, http.StatusUnprocessableEntity, "no eligible recipient for addressed role")
 	case errors.Is(err, ErrMaintenance):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")
