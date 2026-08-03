@@ -64,6 +64,12 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	if err != nil || len(first) != 1 || first[0].Fence != invocation.Fence || first[0].LeaseGeneration != 1 {
 		t.Fatalf("first=%#v err=%v", first, err)
 	}
+	// A runtime may have durably accepted this start before its adapter crashes
+	// and the lease expires. Keep its endpoint reserved through the recovery
+	// window so another machine cannot mint a second process-start fence.
+	if err := store.AdvertiseEndpoints("replacement-machine", []string{"agent/recipient"}, now.Add(3*time.Second), time.Hour); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replacement claimed expired pending handoff: %v", err)
+	}
 	if err := store.ReportInvocation("recipient-machine", first[0].ID, first[0].LeaseToken, first[0].LeaseGeneration, false, now.Add(2*time.Second)); err != nil {
 		t.Fatal(err)
 	}

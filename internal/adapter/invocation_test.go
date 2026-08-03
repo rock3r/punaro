@@ -97,6 +97,29 @@ func TestSyncerReportsFailedRuntimeHandoffForBoundedRelayRetry(t *testing.T) {
 	}
 }
 
+func TestSyncerPrunesAcceptedJournalRowAfterTerminalReportCrashWindow(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if _, err := journal.ensureInvocation("invoke-1", "stable-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.markInvocationAccepted("invoke-1", "stable-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	syncer := Syncer{Journal: journal}
+	if err := syncer.syncInvocations(context.Background(), &fakeInvocationRelay{fakeRelay: fakeRelay{deliveries: map[string][]relay.Delivery{}}}, now); err != nil {
+		t.Fatal(err)
+	}
+	var retained int
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
+		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
+	}
+}
+
 func TestSyncerDoesNotInvokeRoleThatAttachedDuringCycle(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
 	if err != nil {

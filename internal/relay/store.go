@@ -455,7 +455,7 @@ func (s *Store) AdvertiseEndpoints(machineID string, endpoints []string, now tim
 	if invocationSchemaExists {
 		for endpoint := range seen {
 			var handoffReserved bool
-			err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM invocations WHERE target_endpoint=? AND target_machine_id<>? AND ((status=? AND lease_machine_id IS NOT NULL AND lease_until>?) OR (status=? AND not_before>?)))`, endpoint, machineID, InvocationPending, now.UnixMilli(), InvocationSucceeded, now.UnixMilli()).Scan(&handoffReserved)
+			err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM invocations WHERE target_endpoint=? AND target_machine_id<>? AND ((status=? AND (lease_machine_id IS NOT NULL AND lease_until>? OR (lease_generation>0 AND last_activity_at>?))) OR (status=? AND not_before>?)))`, endpoint, machineID, InvocationPending, now.UnixMilli(), now.Add(-invocationPendingRetention).UnixMilli(), InvocationSucceeded, now.UnixMilli()).Scan(&handoffReserved)
 			if err != nil {
 				return fmt.Errorf("inspect live invocation lease: %w", err)
 			}

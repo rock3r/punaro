@@ -114,6 +114,9 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 }
 
 func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRelayClient, now time.Time) error {
+	if err := s.Journal.pruneAcceptedInvocations(now); err != nil {
+		return fmt.Errorf("prune accepted invocation recovery rows: %w", err)
+	}
 	invocations, err := relayClient.LeaseInvocations(ctx)
 	if err != nil {
 		return fmt.Errorf("lease runtime invocations: %w", err)
@@ -243,6 +246,10 @@ type invocationState string
 const (
 	invocationPending  invocationState = "pending"
 	invocationAccepted invocationState = "accepted"
+	// Keep an accepted local fence through the relay's pending crash-recovery
+	// window. After that, an unreported accepted outcome has expired remotely
+	// and can no longer be leased to cause a duplicate runtime start.
+	invocationJournalRetention = 24 * time.Hour
 )
 
 // Journal records the local side of the delivery transaction. It is deliberately
@@ -349,6 +356,13 @@ func (j *Journal) ensureInvocation(invocationID, fence string, now time.Time) (i
 		return "", fmt.Errorf("invocation ID was reused with another fence")
 	}
 	return state, nil
+}
+
+// pruneAcceptedInvocations bounds recovery rows left by a crash after the
+// relay commits an accepted outcome but before the adapter can remove it.
+func (j *Journal) pruneAcceptedInvocations(now time.Time) error {
+	_, err := j.db.ExecContext(context.Background(), `DELETE FROM inbound_invocations WHERE state=? AND updated_at<?`, invocationAccepted, now.Add(-invocationJournalRetention).UnixMilli())
+	return err
 }
 
 func (j *Journal) markInvocationAccepted(invocationID, fence string, now time.Time) error {
