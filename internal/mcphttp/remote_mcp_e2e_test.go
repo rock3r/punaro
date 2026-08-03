@@ -285,16 +285,25 @@ func TestRemoteMCPE2EJSONRPCResponseRequiresSupportedMediaType(t *testing.T) {
 }
 
 func TestRemoteMCPE2EToolListRequiresConfiguredTool(t *testing.T) {
-	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object"}}]}}`)}
-	if !validRemoteMCPE2EToolList(valid, "punaro_memory_search") {
+	arguments := json.RawMessage(`{"query":"e2e"}`)
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}}`)}
+	if !validRemoteMCPE2EToolList(valid, "punaro_memory_search", arguments) {
 		t.Fatal("configured tool listing rejected")
 	}
-	if validRemoteMCPE2EToolList(valid, "punaro_memory_propose") {
+	if validRemoteMCPE2EToolList(valid, "punaro_memory_propose", arguments) {
 		t.Fatal("listing without configured tool accepted")
 	}
 	missingSchema := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search"}]}}`)}
-	if validRemoteMCPE2EToolList(missingSchema, "punaro_memory_search") {
+	if validRemoteMCPE2EToolList(missingSchema, "punaro_memory_search", arguments) {
 		t.Fatal("configured tool without input schema accepted")
+	}
+	malformedSchema := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object","properties":[]}}]}}`)}
+	if validRemoteMCPE2EToolList(malformedSchema, "punaro_memory_search", arguments) {
+		t.Fatal("configured tool with malformed input schema accepted")
+	}
+	missingArgumentSchema := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object","properties":{"other":{"type":"string"}}}}]}}`)}
+	if validRemoteMCPE2EToolList(missingArgumentSchema, "punaro_memory_search", arguments) {
+		t.Fatal("configured tool schema without configured argument accepted")
 	}
 }
 
@@ -406,7 +415,7 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 			return
 		}
 		if bytes.Contains(body, []byte(`"method":"tools/list"`)) {
-			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object"}}]}}`))
+			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object","properties":{"query":{"type":"string"}}}}]}}`))
 			return
 		}
 		if bytes.Contains(body, []byte(`"name":"punaro_memory_propose"`)) {
@@ -686,7 +695,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		remoteMCPE2ERequireJSONRPCFailureWithExpectedID(t, malformed, malformedRequest.expectedID)
 	}
 	listed := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, remoteMCPE2ERequestWithID(t, "remote-mcp-e2e-tools-list", "tools/list", map[string]any{}))
-	if !validRemoteMCPE2EToolList(listed, config.AuthorizedTool.Name) {
+	if !validRemoteMCPE2EToolList(listed, config.AuthorizedTool.Name, config.AuthorizedTool.Arguments) {
 		t.Fatal("authenticated MCP tool listing did not advertise the authorized tool")
 	}
 
@@ -904,7 +913,7 @@ func validRemoteMCPE2EJSONRPCSuccess(response remoteMCPE2EResponse, expectedResu
 	return validRemoteMCPE2EToolResult(envelope.Result)
 }
 
-func validRemoteMCPE2EToolList(response remoteMCPE2EResponse, expectedTool string) bool {
+func validRemoteMCPE2EToolList(response remoteMCPE2EResponse, expectedTool string, expectedArguments json.RawMessage) bool {
 	payload, supported := remoteMCPE2EJSONRPCPayload(response)
 	if response.Status != http.StatusOK || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
 		return false
@@ -924,21 +933,53 @@ func validRemoteMCPE2EToolList(response remoteMCPE2EResponse, expectedTool strin
 		return false
 	}
 	for _, tool := range envelope.Result.Tools {
-		if tool.Name == expectedTool && validRemoteMCPE2EToolInputSchema(tool.InputSchema) {
+		if tool.Name == expectedTool && validRemoteMCPE2EToolInputSchema(tool.InputSchema, expectedArguments) {
 			return true
 		}
 	}
 	return false
 }
 
-func validRemoteMCPE2EToolInputSchema(raw json.RawMessage) bool {
+func validRemoteMCPE2EToolInputSchema(raw, expectedArguments json.RawMessage) bool {
 	if !validJSONObject(raw, maxJSONRPCDepth) {
 		return false
 	}
 	var schema struct {
-		Type string `json:"type"`
+		Type       string                     `json:"type"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Required   []string                   `json:"required"`
 	}
-	return json.Unmarshal(raw, &schema) == nil && schema.Type == "object"
+	if json.Unmarshal(raw, &schema) != nil || schema.Type != "object" || !validJSONObject(expectedArguments, maxJSONRPCDepth) {
+		return false
+	}
+	for name, property := range schema.Properties {
+		if name == "" || !validJSONObject(property, maxJSONRPCDepth) {
+			return false
+		}
+	}
+	required := make(map[string]struct{}, len(schema.Required))
+	for _, name := range schema.Required {
+		if name == "" {
+			return false
+		}
+		if _, duplicate := required[name]; duplicate {
+			return false
+		}
+		required[name] = struct{}{}
+		if _, found := schema.Properties[name]; !found {
+			return false
+		}
+	}
+	var arguments map[string]json.RawMessage
+	if json.Unmarshal(expectedArguments, &arguments) != nil {
+		return false
+	}
+	for name := range arguments {
+		if _, found := schema.Properties[name]; !found {
+			return false
+		}
+	}
+	return true
 }
 
 func jsonRawMessageEquals(left, right json.RawMessage) bool {
