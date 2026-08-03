@@ -660,7 +660,10 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 	}
 	defer rollback(tx)
 	capabilities, err := sessionCapabilities(tx, conversationID, machineID, endpoint, now)
-	if err != nil || capabilities&CapSend == 0 {
+	if err != nil {
+		return err
+	}
+	if capabilities&CapSend == 0 {
 		return ErrForbidden
 	}
 	return tx.Commit()
@@ -685,7 +688,10 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	defer rollback(tx)
 	capabilities, err := sessionCapabilities(tx, input.ConversationID, input.SenderMachineID, input.FromEndpoint, input.Now)
-	if err != nil || capabilities&CapSend == 0 {
+	if err != nil {
+		return Message{}, false, err
+	}
+	if capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
 	}
 	var existingID, existingHash string

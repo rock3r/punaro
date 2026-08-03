@@ -363,7 +363,10 @@ func (d *Database) AuthorizeSender(conversationID, machineID, endpoint string, n
 		return err
 	}
 	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, endpoint, now)
-	if err != nil || capabilities&relay.CapSend == 0 {
+	if err != nil {
+		return err
+	}
+	if capabilities&relay.CapSend == 0 {
 		return relay.ErrForbidden
 	}
 	return tx.Commit()
@@ -411,8 +414,14 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
+	if err := postgresLockSessionRoleBindings(tx, input.SenderMachineID, input.FromEndpoint, input.Now); err != nil {
+		return relay.Message{}, false, err
+	}
 	capabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.SenderMachineID, input.FromEndpoint, input.Now)
-	if err != nil || capabilities&relay.CapSend == 0 {
+	if err != nil {
+		return relay.Message{}, false, err
+	}
+	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
 	hash := relay.AppendRequestHash(input)
@@ -511,6 +520,9 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	defer func() { _ = tx.Rollback() }()
 	ownershipGeneration, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
 	if err != nil {
+		return relay.DeliveryLeasePage{}, err
+	}
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
 		return relay.DeliveryLeasePage{}, err
 	}
 	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, ownershipGeneration, now)
@@ -664,6 +676,9 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	defer func() { _ = tx.Rollback() }()
 	ownershipGeneration, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
 	if err != nil {
+		return err
+	}
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
 		return err
 	}
 	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, ownershipGeneration, now)
@@ -919,6 +934,30 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 		return 0, errors.New("session authorization is malformed")
 	}
 	return relay.Capability(capabilities), nil
+}
+
+// postgresLockSessionRoleBindings serializes a live session's role-authorized
+// work with a rebind. Role bindings are mutable fences, unlike immutable role
+// ownership records, so operations that lease, acknowledge, or append through
+// them must hold a shared lock until commit.
+func postgresLockSessionRoleBindings(tx *sql.Tx, machineID, endpoint string, now time.Time) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT binding.role FROM relay.mail_role_bindings AS binding
+		WHERE binding.machine_id=$1 AND binding.session_endpoint=$2 AND binding.lease_until>$3
+		FOR SHARE OF binding`, machineID, endpoint, now.UTC())
+	if err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return errors.New("session role binding is malformed")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	return nil
 }
 
 func postgresSessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generation int64, now time.Time) ([]string, error) {
