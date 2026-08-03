@@ -992,7 +992,7 @@ func validRemoteMCPE2EJSONRPCFailureWithExpectedID(response remoteMCPE2EResponse
 		if !supported || len(payload) == 0 {
 			return true
 		}
-		return validRemoteMCPE2EJSONRPCErrorEnvelope(payload, nil)
+		return validRemoteMCPE2EJSONRPCErrorEnvelope(payload, expectedID)
 	}
 	payload, supported := remoteMCPE2EJSONRPCPayload(response)
 	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
