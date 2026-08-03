@@ -924,7 +924,7 @@ func (d *Database) relayPool() *sql.DB {
 	return d.db
 }
 
-func relayControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func relayControlsAvailable(ctx context.Context, q queryer, version int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -940,6 +940,7 @@ WITH objects AS (
            to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
            to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
            to_regclass('relay.mail_request_nonces_expiry') AS nonces_index_oid,
+           to_regclass('relay.mail_memberships_role_active') AS roles_index_oid,
            to_regprocedure('relay.consume_mail_request_nonce(text,text,timestamp with time zone,timestamp with time zone)') AS consume_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS cutover_guard_oid
@@ -953,9 +954,9 @@ WITH objects AS (
         (endpoints_oid,'consumer_id','text'::regtype,false),(endpoints_oid,'consumer_generation','bigint'::regtype,true),
         (endpoints_oid,'consumer_lease_until','timestamptz'::regtype,false),
         (conversations_oid,'id','uuid'::regtype,true),(conversations_oid,'next_sequence','bigint'::regtype,true),(conversations_oid,'created_at','timestamptz'::regtype,true),
-        (memberships_oid,'conversation_id','uuid'::regtype,true),(memberships_oid,'endpoint','text'::regtype,true),(memberships_oid,'capabilities','smallint'::regtype,true),(memberships_oid,'role','text'::regtype,true),
+        (memberships_oid,'conversation_id','uuid'::regtype,true),(memberships_oid,'endpoint','text'::regtype,true),(memberships_oid,'capabilities','smallint'::regtype,true),
         (messages_oid,'id','uuid'::regtype,true),(messages_oid,'conversation_id','uuid'::regtype,true),(messages_oid,'sequence','bigint'::regtype,true),
-        (messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),(messages_oid,'target_role','text'::regtype,true),
+        (messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),
         (deliveries_oid,'id','uuid'::regtype,true),(deliveries_oid,'message_id','uuid'::regtype,true),(deliveries_oid,'recipient_endpoint','text'::regtype,true),
         (deliveries_oid,'lease_machine_id','text'::regtype,false),(deliveries_oid,'lease_token','uuid'::regtype,false),(deliveries_oid,'lease_generation','bigint'::regtype,true),
         (deliveries_oid,'ownership_generation','bigint'::regtype,false),(deliveries_oid,'consumer_generation','bigint'::regtype,false),
@@ -967,6 +968,8 @@ WITH objects AS (
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
+    UNION ALL SELECT memberships_oid,'role','text'::regtype,true FROM objects WHERE $1 >= 40
+    UNION ALL SELECT messages_oid,'target_role','text'::regtype,true FROM objects WHERE $1 >= 40
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
@@ -982,10 +985,11 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'ownership_generation','1'),(endpoints_oid,'consumer_generation','0'),
         (conversations_oid,'id','gen_random_uuid()'),(conversations_oid,'next_sequence','0'),(conversations_oid,'created_at','statement_timestamp()'),
-        (memberships_oid,'role',quote_literal('') || '::text'),
-        (messages_oid,'id','gen_random_uuid()'),(messages_oid,'target_role',quote_literal('') || '::text'),(deliveries_oid,'id','gen_random_uuid()'),(deliveries_oid,'lease_generation','0'),
+        (messages_oid,'id','gen_random_uuid()'),(deliveries_oid,'id','gen_random_uuid()'),(deliveries_oid,'lease_generation','0'),
         (cursors_oid,'sequence','0')
     ) AS expected(table_oid,column_name,expression)
+    UNION ALL SELECT memberships_oid,'role',quote_literal('') || '::text' FROM objects WHERE $1 >= 40
+    UNION ALL SELECT messages_oid,'target_role',quote_literal('') || '::text' FROM objects WHERE $1 >= 40
 ), actual_defaults AS (
     SELECT default_value.adrelid,attribute.attname,pg_get_expr(default_value.adbin,default_value.adrelid)
     FROM objects JOIN pg_attrdef AS default_value
@@ -1027,12 +1031,14 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,ARRAY[1]::smallint[]),(endpoints_oid,ARRAY[2]::smallint[]),(endpoints_oid,ARRAY[4]::smallint[]),
         (endpoints_oid,ARRAY[5]::smallint[]),(endpoints_oid,ARRAY[6]::smallint[]),(endpoints_oid,ARRAY[5,7]::smallint[]),
-        (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),(memberships_oid,ARRAY[4]::smallint[]),
-        (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),(messages_oid,ARRAY[7]::smallint[]),
+        (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
+        (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
         (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
+    UNION ALL SELECT memberships_oid,ARRAY[4]::smallint[] FROM objects WHERE $1 >= 40
+    UNION ALL SELECT messages_oid,ARRAY[7]::smallint[] FROM objects WHERE $1 >= 40
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
@@ -1050,10 +1056,10 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))')
-       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((role = ''''::text) OR ((char_length(role) >= 1) AND (char_length(role) <= 64) AND (octet_length(role) <= 256) AND (btrim(role) = role) AND (role !~ ''[[:cntrl:]]''::text)))')
+       AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((role = ''''::text) OR ((char_length(role) >= 1) AND (char_length(role) <= 64) AND (octet_length(role) <= 256) AND (btrim(role) = role) AND (role !~ ''[[:cntrl:]]''::text)))'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence > 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
-       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[7]::smallint[] AND pg_get_expr(conbin,conrelid)='((target_role = ''''::text) OR ((char_length(target_role) >= 1) AND (char_length(target_role) <= 64) AND (octet_length(target_role) <= 256) AND (btrim(target_role) = target_role) AND (target_role !~ ''[[:cntrl:]]''::text)))')
+       AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[7]::smallint[] AND pg_get_expr(conbin,conrelid)='((target_role = ''''::text) OR ((char_length(target_role) >= 1) AND (char_length(target_role) <= 64) AND (octet_length(target_role) <= 256) AND (btrim(target_role) = target_role) AND (target_role !~ ''[[:cntrl:]]''::text)))'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[4,5,7,8,9]::smallint[] AND conkey <@ ARRAY[4,5,7,8,9]::smallint[] AND pg_get_expr(conbin,conrelid)='(((lease_machine_id IS NULL) AND (lease_token IS NULL) AND (ownership_generation IS NULL) AND (consumer_generation IS NULL) AND (lease_until IS NULL)) OR ((lease_machine_id IS NOT NULL) AND (lease_token IS NOT NULL) AND (ownership_generation IS NOT NULL) AND (consumer_generation IS NOT NULL) AND (lease_until IS NOT NULL)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=cursors_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence >= 0)')
@@ -1067,7 +1073,7 @@ WITH objects AS (
     SELECT count(*) FILTER (WHERE con.contype='p')=9
        AND count(*) FILTER (WHERE con.contype='u')=4
 	       AND count(*) FILTER (WHERE con.contype='f')=10
-	       AND count(*) FILTER (WHERE con.contype='c')=20
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 40 THEN 20 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
@@ -1106,25 +1112,27 @@ WITH objects AS (
        AND md5(regexp_replace(proc.prosrc,'^\s+|\s+$','','g'))='4c348d98b79375c10c6c53728b7368fb') AS exact
     FROM objects JOIN pg_proc AS proc ON proc.oid=consume_oid
 ), index_safety AS (
-    SELECT count(*)=3 AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
+    SELECT count(*)=CASE WHEN $1 >= 40 THEN 4 ELSE 3 END AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
        AND index.indnkeyatts=index.indnatts AND access_method.amname='btree'
        AND pg_get_userbyid(relation.relowner)='punaro_owner'
        AND CASE index.indexrelid
            WHEN objects.endpoints_index_oid THEN index.indrelid=objects.endpoints_oid AND index.indkey::text='2 3 1'
            WHEN objects.deliveries_index_oid THEN index.indrelid=objects.deliveries_oid AND index.indkey::text='3 10 9 1'
            WHEN objects.nonces_index_oid THEN index.indrelid=objects.nonces_oid AND index.indkey::text='3 1 2'
+           WHEN objects.roles_index_oid THEN index.indrelid=objects.memberships_oid AND index.indkey::text='1 4 2' AND pg_get_expr(index.indpred,index.indrelid)='((capabilities & 2) <> 0)'
            ELSE false END) AS exact
-    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,deliveries_index_oid,nonces_index_oid])
+    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,deliveries_index_oid,nonces_index_oid,roles_index_oid])
     JOIN pg_class AS relation ON relation.oid=index.indexrelid
     JOIN pg_am AS access_method ON access_method.oid=relation.relam
 ), expected_table_acl(table_oid,privilege_type) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'SELECT'),(endpoints_oid,'INSERT'),(conversations_oid,'SELECT'),(conversations_oid,'INSERT'),
         (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
-        (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),(cursors_oid,'DELETE'),
+        (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
         (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
+    UNION ALL SELECT cursors_oid,'DELETE' FROM objects WHERE $1 >= 40
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
@@ -1140,11 +1148,14 @@ WITH objects AS (
         (endpoints_oid,'machine_id','UPDATE'),(endpoints_oid,'lease_until','UPDATE'),(endpoints_oid,'ownership_generation','UPDATE'),
         (endpoints_oid,'consumer_id','UPDATE'),(endpoints_oid,'consumer_generation','UPDATE'),(endpoints_oid,'consumer_lease_until','UPDATE'),
         (conversations_oid,'next_sequence','UPDATE'),
-        (memberships_oid,'endpoint','UPDATE'),(memberships_oid,'capabilities','UPDATE'),(memberships_oid,'role','UPDATE'),
 		(deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
-		(deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),(deliveries_oid,'recipient_endpoint','UPDATE'),
+		(deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
         (cursors_oid,'sequence','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
+    UNION ALL SELECT memberships_oid,'endpoint','UPDATE' FROM objects WHERE $1 >= 40
+    UNION ALL SELECT memberships_oid,'capabilities','UPDATE' FROM objects WHERE $1 >= 40
+    UNION ALL SELECT memberships_oid,'role','UPDATE' FROM objects WHERE $1 >= 40
+    UNION ALL SELECT deliveries_oid,'recipient_endpoint','UPDATE' FROM objects WHERE $1 >= 40
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
@@ -1161,6 +1172,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
    AND endpoints_index_oid IS NOT NULL AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
+   AND ($1 < 40 OR roles_index_oid IS NOT NULL)
    AND consume_oid IS NOT NULL AND (legacy_guard_oid IS NOT NULL OR cutover_guard_oid IS NOT NULL)
 	   AND table_ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND guards.exact AND function_safety.exact AND index_safety.exact
 	   AND table_acl.exact AND column_acl.exact
@@ -1205,10 +1217,10 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'created_at','UPDATE')
    AND has_table_privilege('punaro_app',memberships_oid,'SELECT') AND has_table_privilege('punaro_app',memberships_oid,'INSERT')
-	   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE')
-	   AND has_column_privilege('punaro_app',memberships_oid,'endpoint','UPDATE')
-	   AND has_column_privilege('punaro_app',memberships_oid,'capabilities','UPDATE')
-	   AND has_column_privilege('punaro_app',memberships_oid,'role','UPDATE')
+	   AND ($1 < 40 OR (NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE')
+	       AND has_column_privilege('punaro_app',memberships_oid,'endpoint','UPDATE')
+	       AND has_column_privilege('punaro_app',memberships_oid,'capabilities','UPDATE')
+	       AND has_column_privilege('punaro_app',memberships_oid,'role','UPDATE')))
    AND has_table_privilege('punaro_app',messages_oid,'SELECT') AND has_table_privilege('punaro_app',messages_oid,'INSERT')
 	   AND has_table_privilege('punaro_app',deliveries_oid,'SELECT') AND has_table_privilege('punaro_app',deliveries_oid,'INSERT')
 	   AND NOT has_table_privilege('punaro_app',deliveries_oid,'UPDATE')
@@ -1221,8 +1233,10 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND has_column_privilege('punaro_app',deliveries_oid,'acked_at','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',deliveries_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',deliveries_oid,'message_id','UPDATE')
-	   AND has_column_privilege('punaro_app',deliveries_oid,'recipient_endpoint','UPDATE')
-	   AND has_table_privilege('punaro_app',cursors_oid,'SELECT') AND has_table_privilege('punaro_app',cursors_oid,'INSERT') AND has_table_privilege('punaro_app',cursors_oid,'DELETE')
+	   AND ($1 < 40 OR has_column_privilege('punaro_app',deliveries_oid,'recipient_endpoint','UPDATE'))
+	   AND ($1 >= 40 OR NOT has_column_privilege('punaro_app',deliveries_oid,'recipient_endpoint','UPDATE'))
+	   AND has_table_privilege('punaro_app',cursors_oid,'SELECT') AND has_table_privilege('punaro_app',cursors_oid,'INSERT')
+	   AND ($1 < 40 OR has_table_privilege('punaro_app',cursors_oid,'DELETE'))
 	   AND NOT has_table_privilege('punaro_app',cursors_oid,'UPDATE')
 	   AND has_column_privilege('punaro_app',cursors_oid,'sequence','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',cursors_oid,'recipient_endpoint','UPDATE')
@@ -1232,12 +1246,13 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',nonces_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',endpoints_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversations_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND ($1 >= 40 OR NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE'))
    AND NOT has_table_privilege('punaro_app',memberships_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',messages_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',deliveries_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',cursors_oid,'UPDATE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',message_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversation_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_ownership,columns,defaults,constraints,guards,function_safety,index_safety,table_acl,column_acl`).Scan(&available)
+FROM objects,table_ownership,columns,defaults,constraints,guards,function_safety,index_safety,table_acl,column_acl`, version).Scan(&available)
 	return available, err
 }

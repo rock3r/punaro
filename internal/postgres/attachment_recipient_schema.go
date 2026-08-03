@@ -5,7 +5,7 @@ import "context"
 // attachmentRecipientControlsAvailable verifies the exact schema-v11 stable
 // principal snapshot and download authority. Application code receives only
 // narrow routine execution, never direct lifecycle-table authority.
-func attachmentRecipientControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func attachmentRecipientControlsAvailable(ctx context.Context, q queryer, version int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -100,8 +100,8 @@ WITH objects AS (
     WHERE relation.oid = ANY(ARRAY[endpoint_oid,conversation_oid,message_oid,grant_oid,evidence_oid])
 ), constraint_safety AS (
     SELECT count(*) = 27 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
-       AND count(*) FILTER (WHERE contype = 'f' AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's') = 12
-       AND count(*) FILTER (WHERE conname = 'recipient_grant_endpoints_delivery_fkey' AND contype = 'f' AND confupdtype = 'c' AND confdeltype = 'a' AND confmatchtype = 's') = 1 AS exact
+       AND count(*) FILTER (WHERE contype = 'f' AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's') = CASE WHEN $1 >= 40 THEN 12 ELSE 13 END
+       AND ($1 < 40 OR count(*) FILTER (WHERE conname = 'recipient_grant_endpoints_delivery_fkey' AND contype = 'f' AND confupdtype = 'c' AND confdeltype = 'a' AND confmatchtype = 's') = 1) AS exact
     FROM pg_constraint, objects
     WHERE conrelid = ANY(ARRAY[endpoint_oid,conversation_oid,message_oid,grant_oid,evidence_oid])
       AND contype <> 'n'
@@ -207,6 +207,6 @@ SELECT endpoint_oid IS NOT NULL AND conversation_oid IS NOT NULL AND message_oid
    AND has_function_privilege('punaro_app',message_bind_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',project_records_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',download_oid,'EXECUTE')
-FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, check_safety, index_safety`).Scan(&available)
+FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, check_safety, index_safety`, version).Scan(&available)
 	return available, err
 }
