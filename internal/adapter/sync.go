@@ -141,6 +141,9 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 				if err := relayClient.ReportInvocation(ctx, invocation, true); err != nil {
 					return fmt.Errorf("record locally attached invocation %q: %w", invocation.ID, err)
 				}
+				if err := s.Journal.removeInvocation(invocation.ID, invocation.Fence); err != nil {
+					return fmt.Errorf("remove locally attached invocation %q: %w", invocation.ID, err)
+				}
 				continue
 			}
 			if err := s.Invoker.Invoke(ctx, invocation); err != nil {
