@@ -114,8 +114,8 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 }
 
 func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRelayClient, now time.Time) error {
-	if err := s.Journal.pruneAcceptedInvocations(now); err != nil {
-		return fmt.Errorf("prune accepted invocation recovery rows: %w", err)
+	if err := s.Journal.pruneInvocationRecoveryRows(now); err != nil {
+		return fmt.Errorf("prune invocation recovery rows: %w", err)
 	}
 	invocations, err := relayClient.LeaseInvocations(ctx)
 	if err != nil {
@@ -128,6 +128,18 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 		}
 		accepted := state == invocationAccepted
 		if !accepted {
+			if invocation.RecoveryOnly {
+				// The relay has exhausted runtime-start attempts. A missing local
+				// acceptance record means we cannot safely cross the start boundary
+				// again; terminalize the handoff instead.
+				if err := relayClient.ReportInvocation(ctx, invocation, false); err != nil {
+					return fmt.Errorf("report unconfirmed recovery invocation %q: %w", invocation.ID, err)
+				}
+				if err := s.Journal.removeInvocation(invocation.ID, invocation.Fence); err != nil {
+					return fmt.Errorf("remove unconfirmed recovery invocation %q: %w", invocation.ID, err)
+				}
+				return fmt.Errorf("recovery-only invocation %q has no accepted local handoff", invocation.ID)
+			}
 			attached, err := s.Mailbox.Attached(ctx)
 			if err != nil {
 				return fmt.Errorf("recheck attached mailbox sessions: %w", err)
@@ -358,10 +370,11 @@ func (j *Journal) ensureInvocation(invocationID, fence string, now time.Time) (i
 	return state, nil
 }
 
-// pruneAcceptedInvocations bounds recovery rows left by a crash after the
-// relay commits an accepted outcome but before the adapter can remove it.
-func (j *Journal) pruneAcceptedInvocations(now time.Time) error {
-	_, err := j.db.ExecContext(context.Background(), `DELETE FROM inbound_invocations WHERE state=? AND updated_at<?`, invocationAccepted, now.Add(-invocationJournalRetention).UnixMilli())
+// pruneInvocationRecoveryRows bounds rows left by a crash after a terminal
+// relay outcome. The relay closes previously leased pending work before that
+// same recovery window can be leased again.
+func (j *Journal) pruneInvocationRecoveryRows(now time.Time) error {
+	_, err := j.db.ExecContext(context.Background(), `DELETE FROM inbound_invocations WHERE updated_at<?`, now.Add(-invocationJournalRetention).UnixMilli())
 	return err
 }
 

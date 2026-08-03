@@ -163,11 +163,18 @@ func TestInvokeCrashLeasesAreBounded(t *testing.T) {
 			t.Fatalf("attempt=%d leased=%#v err=%v", attempt, leased, err)
 		}
 	}
-	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(8*time.Second), time.Second, 10); err != nil || len(leased) != 0 {
-		t.Fatalf("exhausted leased=%#v err=%v", leased, err)
+	recovery, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(8*time.Second), time.Second, 10)
+	if err != nil || len(recovery) != 1 || recovery[0].Fence != invocation.Fence || !recovery[0].RecoveryOnly {
+		t.Fatalf("recovery=%#v err=%v", recovery, err)
+	}
+	if err := store.ReportInvocation("recipient-machine", recovery[0].ID, recovery[0].LeaseToken, recovery[0].LeaseGeneration, false, now.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(9*time.Second), time.Second, 10); err != nil || len(leased) != 0 {
+		t.Fatalf("terminal leased=%#v err=%v", leased, err)
 	}
 	audit, err := store.InvocationAudit(invocation.ID)
-	if err != nil || len(audit) != 5 || audit[4].Action != "failed" {
+	if err != nil || len(audit) != 6 || audit[5].Action != "failed" {
 		t.Fatalf("audit=%#v err=%v", audit, err)
 	}
 }

@@ -28,7 +28,7 @@ func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T)
 		t.Fatalf("runtime calls=%d fences=%#v", runtime.calls, runtime.fences)
 	}
 	relayClient.reportErr = nil
-	invocation.LeaseToken, invocation.LeaseGeneration = "lease-2", 2
+	invocation.LeaseToken, invocation.LeaseGeneration, invocation.RecoveryOnly = "lease-2", 2, true
 	relayClient.invocations = []relay.Invocation{invocation}
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -97,17 +97,20 @@ func TestSyncerReportsFailedRuntimeHandoffForBoundedRelayRetry(t *testing.T) {
 	}
 }
 
-func TestSyncerPrunesAcceptedJournalRowAfterTerminalReportCrashWindow(t *testing.T) {
+func TestSyncerPrunesTerminalJournalRowsAfterCrashRecoveryWindow(t *testing.T) {
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
-	if _, err := journal.ensureInvocation("invoke-1", "stable-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
+	if _, err := journal.ensureInvocation("accepted", "accepted-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if err := journal.markInvocationAccepted("invoke-1", "stable-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
+	if err := journal.markInvocationAccepted("accepted", "accepted-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := journal.ensureInvocation("failed", "failed-fence", now.Add(-invocationJournalRetention-time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	syncer := Syncer{Journal: journal}
@@ -117,6 +120,24 @@ func TestSyncerPrunesAcceptedJournalRowAfterTerminalReportCrashWindow(t *testing
 	var retained int
 	if err := journal.db.QueryRowContext(context.Background(), `SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
 		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
+	}
+}
+
+func TestSyncerFinalRecoveryNeverReinvokesWithoutAcceptedJournal(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	invocation := relay.Invocation{ID: "invoke-1", ConversationID: "conversation-1", TargetEndpoint: "agent/offline", TargetMachineID: "machine-a", Fence: "stable-fence", LeaseToken: "lease-4", LeaseGeneration: 4, RecoveryOnly: true}
+	relayClient := &fakeInvocationRelay{fakeRelay: fakeRelay{deliveries: map[string][]relay.Delivery{}}, invocations: []relay.Invocation{invocation}}
+	runtime := &fakeInvoker{}
+	syncer := Syncer{Mailbox: &fakeMailbox{}, Relay: relayClient, Journal: journal, Invoker: runtime}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("unconfirmed final recovery reported success")
+	}
+	if runtime.calls != 0 || len(relayClient.reports) != 1 || relayClient.reports[0].accepted {
+		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
 	}
 }
 

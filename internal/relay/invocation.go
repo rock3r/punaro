@@ -418,15 +418,14 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 			// consume one bounded runtime-start attempt. Releasing a still-live
 			// lease to the same adapter does not.
 			if attempts >= maxInvocationAttempts {
-				if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), invocation.ID); err != nil {
-					return nil, fmt.Errorf("fail exhausted invocation: %w", err)
-				}
-				if err := recordInvocationAudit(tx, invocation.ID, "failed", now); err != nil {
-					return nil, err
-				}
-				continue
+				// The final leased attempt may have crossed the runtime start
+				// boundary before its adapter crashed. Reissue its stable fence only
+				// for journal/outcome recovery; the adapter must never start work
+				// from this lease when it lacks a durable accepted record.
+				invocation.RecoveryOnly = true
+			} else {
+				attempts++
 			}
-			attempts++
 		}
 		token, err := randomToken()
 		if err != nil {

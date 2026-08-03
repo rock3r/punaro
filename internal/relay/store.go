@@ -166,6 +166,7 @@ type Invocation struct {
 	LeaseToken      string           `json:"lease_token,omitempty"`
 	LeaseGeneration int64            `json:"lease_generation,omitempty"`
 	LeaseUntil      time.Time        `json:"lease_until,omitempty"`
+	RecoveryOnly    bool             `json:"recovery_only,omitempty"`
 }
 
 // InvocationAuditEvent is body-free durable evidence of authorization,
