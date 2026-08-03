@@ -2,8 +2,9 @@ package postgres
 
 import "context"
 
-// memoryEvidenceControlsAvailable verifies the exact schema-v17 evidence authority.
-func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+// memoryEvidenceControlsAvailable verifies the exact evidence authority for the
+// installed schema version. Schema v40 extends it to active durable roles.
+func memoryEvidenceControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `WITH objects AS (
     SELECT to_regclass('brain.memory_items') AS items_oid,
@@ -131,10 +132,10 @@ func memoryEvidenceControlsAvailable(ctx context.Context, q queryer) (bool, erro
         AND routine.proconfig=ARRAY['search_path=pg_catalog']::text[]
         AND ((routine.oid=authorize_oid AND routine.prorettype='boolean'::regtype AND routine.pronargs=5
               AND language.lanname='sql' AND routine.provolatile='s'
-		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='87f442f8d737d5f13d747304c45d3403')
+		      AND md5(btrim(routine.prosrc, E' \n\r\t'))=CASE WHEN $1>=40 THEN '01a5a4bdb6ae4916d1948ee0f072fb4a' ELSE '87f442f8d737d5f13d747304c45d3403' END)
           OR (routine.oid=lock_oid AND routine.prorettype='boolean'::regtype AND routine.pronargs=5
               AND language.lanname='plpgsql' AND routine.provolatile='v'
-		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='7baec7f39e031ad9db527cfeac3fd707')
+		      AND md5(btrim(routine.prosrc, E' \n\r\t'))=CASE WHEN $1>=40 THEN '16cb627c80212f73a70ca32839deac0b' ELSE '7baec7f39e031ad9db527cfeac3fd707' END)
           OR (routine.oid=record_claim_oid AND routine.prorettype='uuid'::regtype AND routine.pronargs=7
               AND language.lanname='plpgsql' AND routine.provolatile='v'
 		      AND md5(btrim(routine.prosrc, E' \n\r\t'))='a7b66d8aad85cf3237eed2e52744047d')
@@ -182,6 +183,6 @@ SELECT items_oid IS NOT NULL AND sources_oid IS NOT NULL AND edges_oid IS NOT NU
    AND has_function_privilege('punaro_app',lock_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',record_claim_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',copy_claims_oid,'EXECUTE')
-FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl`).Scan(&available)
+FROM objects,table_safety,constraint_safety,index_safety,fence_safety,routine_safety,routine_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

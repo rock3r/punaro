@@ -212,3 +212,248 @@ BEGIN
     END IF;
 END
 $function$;
+
+-- Evidence sources use the same current, fenced role binding as attachment
+-- downloads.  A durable delivery grants no standing principal entitlement:
+-- it is visible only while the role has an active session whose principal,
+-- machine and ownership generation still agree.
+CREATE OR REPLACE FUNCTION brain.authorize_evidence_source(
+    requested_principal uuid,
+    requested_kind text,
+    requested_project uuid,
+    requested_resource uuid,
+    requested_revision bigint
+)
+RETURNS boolean
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = pg_catalog
+AS $function$
+SELECT EXISTS (
+    SELECT 1
+    FROM auth.principals AS principal
+    JOIN relay.projects AS project ON project.id = requested_project AND project.merged_into IS NULL
+    WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
+      AND (
+        (requested_kind = 'message' AND requested_revision IS NULL
+         AND EXISTS (
+             SELECT 1
+             FROM auth.capability_grants AS capability_grant
+             WHERE capability_grant.principal_id = requested_principal
+               AND capability_grant.revoked_at IS NULL
+               AND capability_grant.capability = 'conversation.receive'
+               AND ((capability_grant.scope = 'project' AND capability_grant.project_id = requested_project)
+                    OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+         )
+         AND EXISTS (
+             SELECT 1
+             FROM relay.mail_messages AS message
+             JOIN attachment.conversation_projects AS binding
+               ON binding.conversation_id = message.conversation_id AND binding.project_id = requested_project
+             WHERE message.id = requested_resource
+               AND (EXISTS (
+                       SELECT 1 FROM attachment.endpoint_principals AS endpoint
+                       WHERE endpoint.endpoint = message.from_endpoint
+                         AND endpoint.principal_id = requested_principal
+                    )
+                    OR EXISTS (
+                       SELECT 1
+                       FROM relay.mail_deliveries AS delivery
+                       JOIN attachment.endpoint_principals AS endpoint
+                         ON endpoint.endpoint = delivery.recipient_endpoint
+                       WHERE delivery.message_id = message.id
+                         AND endpoint.principal_id = requested_principal
+                    )
+                    OR EXISTS (
+                       SELECT 1
+                       FROM relay.mail_deliveries AS delivery
+                       JOIN relay.mail_role_bindings AS role_binding
+                         ON delivery.recipient_endpoint = chr(30) || 'role:' || role_binding.role
+                       JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint = role_binding.session_endpoint
+                       JOIN attachment.endpoint_principals AS recipient_endpoint ON recipient_endpoint.endpoint = endpoint.endpoint
+                       WHERE delivery.message_id = message.id
+                         AND recipient_endpoint.principal_id = requested_principal
+                         AND recipient_endpoint.machine_id = role_binding.machine_id
+                         AND recipient_endpoint.ownership_generation = role_binding.ownership_generation
+                         AND endpoint.machine_id = role_binding.machine_id
+                         AND endpoint.ownership_generation = role_binding.ownership_generation
+                         AND endpoint.lease_until > statement_timestamp()
+                         AND role_binding.lease_until > statement_timestamp()
+                    ))
+         ))
+        OR
+        (requested_kind = 'attachment' AND requested_revision IS NULL
+         AND EXISTS (
+             SELECT 1
+             FROM auth.capability_grants AS capability_grant
+             WHERE capability_grant.principal_id = requested_principal
+               AND capability_grant.revoked_at IS NULL
+               AND capability_grant.capability = 'attachment.download'
+               AND ((capability_grant.scope = 'project' AND capability_grant.project_id = requested_project)
+                    OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+         )
+         AND EXISTS (
+             SELECT 1
+             FROM attachment.uploads AS upload
+             JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = upload.artifact_id
+             JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+             WHERE upload.artifact_id = requested_resource
+               AND upload.project_id = requested_project
+               AND upload.state = 'ready'
+               AND manifest.size_bytes = upload.size_bytes
+               AND manifest.sha256::text = upload.sha256::text
+               AND (upload.principal_id = requested_principal OR EXISTS (
+                   SELECT 1 FROM attachment.recipient_grants AS recipient
+                   WHERE recipient.artifact_id = upload.artifact_id
+                     AND recipient.recipient_principal_id = requested_principal
+               ) OR EXISTS (
+                   SELECT 1
+                   FROM attachment.message_artifacts AS artifact
+                   JOIN relay.mail_deliveries AS delivery ON delivery.message_id = artifact.message_id
+                   JOIN relay.mail_role_bindings AS role_binding
+                     ON delivery.recipient_endpoint = chr(30) || 'role:' || role_binding.role
+                   JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint = role_binding.session_endpoint
+                   JOIN attachment.endpoint_principals AS recipient_endpoint ON recipient_endpoint.endpoint = endpoint.endpoint
+                   WHERE artifact.artifact_id = upload.artifact_id
+                     AND recipient_endpoint.principal_id = requested_principal
+                     AND recipient_endpoint.machine_id = role_binding.machine_id
+                     AND recipient_endpoint.ownership_generation = role_binding.ownership_generation
+                     AND endpoint.machine_id = role_binding.machine_id
+                     AND endpoint.ownership_generation = role_binding.ownership_generation
+                     AND endpoint.lease_until > statement_timestamp()
+                     AND role_binding.lease_until > statement_timestamp()
+               ))
+         ))
+        OR
+        (requested_kind = 'memory' AND requested_revision >= 1
+         AND EXISTS (
+             SELECT 1
+             FROM auth.capability_grants AS capability_grant
+             WHERE capability_grant.principal_id = requested_principal
+               AND capability_grant.revoked_at IS NULL
+               AND capability_grant.capability = 'memory.read'
+               AND ((capability_grant.scope = 'project' AND capability_grant.project_id = requested_project)
+                    OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+         )
+         AND EXISTS (
+             SELECT 1
+             FROM brain.memory_items AS item
+             JOIN brain.scopes AS scope ON scope.id = item.scope_id AND scope.project_id = requested_project
+             JOIN brain.memory_revisions AS revision
+               ON revision.item_id = item.id AND revision.revision = requested_revision
+             WHERE item.id = requested_resource
+               AND NOT EXISTS (
+                   SELECT 1 FROM brain.memory_quarantines AS quarantine
+                   WHERE quarantine.item_id = item.id AND quarantine.released_at IS NULL
+               )
+         ))
+      )
+)
+$function$;
+
+CREATE OR REPLACE FUNCTION brain.lock_evidence_source(
+    requested_principal uuid,
+    requested_kind text,
+    requested_project uuid,
+    requested_resource uuid,
+    requested_revision bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+VOLATILE
+SET search_path = pg_catalog
+AS $function$
+DECLARE
+    source_owner uuid;
+BEGIN
+    IF requested_kind = 'message' AND requested_revision IS NULL THEN
+        PERFORM 1
+        FROM relay.mail_messages AS message
+        JOIN attachment.conversation_projects AS binding
+          ON binding.conversation_id = message.conversation_id AND binding.project_id = requested_project
+        WHERE message.id = requested_resource;
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+        PERFORM 1
+        FROM attachment.endpoint_principals AS endpoint
+        WHERE endpoint.principal_id = requested_principal
+          AND (endpoint.endpoint = (SELECT message.from_endpoint FROM relay.mail_messages AS message WHERE message.id = requested_resource)
+               OR endpoint.endpoint IN (SELECT delivery.recipient_endpoint FROM relay.mail_deliveries AS delivery WHERE delivery.message_id = requested_resource))
+        FOR SHARE OF endpoint;
+        IF NOT FOUND THEN
+            PERFORM 1
+            FROM relay.mail_deliveries AS delivery
+            JOIN relay.mail_role_bindings AS role_binding
+              ON delivery.recipient_endpoint = chr(30) || 'role:' || role_binding.role
+            JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint = role_binding.session_endpoint
+            JOIN attachment.endpoint_principals AS recipient_endpoint ON recipient_endpoint.endpoint = endpoint.endpoint
+            WHERE delivery.message_id = requested_resource
+              AND recipient_endpoint.principal_id = requested_principal
+              AND recipient_endpoint.machine_id = role_binding.machine_id
+              AND recipient_endpoint.ownership_generation = role_binding.ownership_generation
+              AND endpoint.machine_id = role_binding.machine_id
+              AND endpoint.ownership_generation = role_binding.ownership_generation
+              AND endpoint.lease_until > statement_timestamp()
+              AND role_binding.lease_until > statement_timestamp()
+            FOR SHARE OF delivery, role_binding, endpoint, recipient_endpoint;
+            IF NOT FOUND THEN
+                RETURN false;
+            END IF;
+        END IF;
+    ELSIF requested_kind = 'attachment' AND requested_revision IS NULL THEN
+        SELECT upload.principal_id INTO source_owner
+        FROM attachment.uploads AS upload
+        JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = upload.artifact_id
+        JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+        WHERE upload.artifact_id = requested_resource AND upload.project_id = requested_project
+          AND upload.state = 'ready' AND manifest.size_bytes = upload.size_bytes
+          AND manifest.sha256::text = upload.sha256::text
+        FOR SHARE OF upload, ready, manifest;
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+        IF source_owner <> requested_principal THEN
+            PERFORM 1 FROM attachment.recipient_grants AS recipient
+            WHERE recipient.artifact_id = requested_resource AND recipient.recipient_principal_id = requested_principal
+            FOR SHARE OF recipient;
+            IF NOT FOUND THEN
+                PERFORM 1
+                FROM attachment.message_artifacts AS artifact
+                JOIN relay.mail_deliveries AS delivery ON delivery.message_id = artifact.message_id
+                JOIN relay.mail_role_bindings AS role_binding
+                  ON delivery.recipient_endpoint = chr(30) || 'role:' || role_binding.role
+                JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint = role_binding.session_endpoint
+                JOIN attachment.endpoint_principals AS recipient_endpoint ON recipient_endpoint.endpoint = endpoint.endpoint
+                WHERE artifact.artifact_id = requested_resource
+                  AND recipient_endpoint.principal_id = requested_principal
+                  AND recipient_endpoint.machine_id = role_binding.machine_id
+                  AND recipient_endpoint.ownership_generation = role_binding.ownership_generation
+                  AND endpoint.machine_id = role_binding.machine_id
+                  AND endpoint.ownership_generation = role_binding.ownership_generation
+                  AND endpoint.lease_until > statement_timestamp()
+                  AND role_binding.lease_until > statement_timestamp()
+                FOR SHARE OF artifact, delivery, role_binding, endpoint, recipient_endpoint;
+                IF NOT FOUND THEN
+                    RETURN false;
+                END IF;
+            END IF;
+        END IF;
+    ELSIF requested_kind = 'memory' AND requested_revision >= 1 THEN
+        PERFORM 1
+        FROM brain.memory_items AS item
+        JOIN brain.scopes AS scope ON scope.id = item.scope_id AND scope.project_id = requested_project
+        JOIN brain.memory_revisions AS revision ON revision.item_id = item.id AND revision.revision = requested_revision
+        WHERE item.id = requested_resource
+        FOR SHARE OF item, scope, revision;
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+    ELSE
+        RETURN false;
+    END IF;
+    RETURN brain.authorize_evidence_source(requested_principal, requested_kind, requested_project, requested_resource, requested_revision);
+END
+$function$;

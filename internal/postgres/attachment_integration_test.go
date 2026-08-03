@@ -180,6 +180,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		CreatorEndpoint: "agent/attachment/uploader", Now: now,
 		Members: []relay.Member{
 			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive},
 			{Role: "role/attachment-recipient", RoleMachineID: "attachment-recipient-machine", Capabilities: relay.CapReceive},
 		},
 	})
