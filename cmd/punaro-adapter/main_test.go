@@ -133,6 +133,8 @@ func TestDirectCommandsLoadInstallerProfileBeforeTheirTransportBoundary(t *testi
 			_, _ = w.Write([]byte(`{"id":"conversation-1"}`))
 		case "/v1/conversations/conversation-1/messages":
 			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"ignored","created_at":"2026-08-03T00:00:00Z"}`))
+		case "/v1/conversations/conversation-1/invocations":
+			_, _ = w.Write([]byte(`{"id":"invocation-1","status":"pending"}`))
 		default:
 			t.Fatalf("unexpected transport boundary %s %s", r.Method, r.URL.Path)
 		}
@@ -158,6 +160,9 @@ func TestDirectCommandsLoadInstallerProfileBeforeTheirTransportBoundary(t *testi
 	}
 	if err := runAttachmentNotify([]string{"--conversation", "conversation-1", "--from", "agent/a", "--offer-file", offerFile, "--idempotency-key", "offer-1"}); err != nil {
 		t.Fatalf("attachment-notify did not reach its transport boundary: %v", err)
+	}
+	if err := runInvoke([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b", "--idempotency-key", "invoke-1"}); err != nil {
+		t.Fatalf("invoke did not reach its transport boundary: %v", err)
 	}
 }
 
