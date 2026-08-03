@@ -456,9 +456,8 @@ func loadAdapterProfile() (map[string]string, error) {
 	path := strings.TrimSpace(os.Getenv(adapterProfileFileEnv))
 	explicitPath := path != ""
 	if !explicitPath {
-		var err error
-		path, err = installedAdapterProfilePath()
-		if err != nil {
+		path = installedAdapterProfilePath()
+		if path == "" {
 			// Preserve environment-only deployments when the optional default
 			// profile root is unavailable. An explicitly selected profile still
 			// fails closed below.

@@ -3,16 +3,15 @@
 package main
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-func installedAdapterProfilePath() (string, error) {
+func installedAdapterProfilePath() string {
 	root := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
 	if root == "" {
-		return "", errors.New("LOCALAPPDATA is unavailable")
+		return ""
 	}
-	return filepath.Join(root, "Punaro", "config", "adapter.env"), nil
+	return filepath.Join(root, "Punaro", "config", "adapter.env")
 }

@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 )
 
-func installedAdapterProfilePath() (string, error) {
+func installedAdapterProfilePath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return ""
 	}
-	return filepath.Join(home, ".config", "punaro", "adapter.env"), nil
+	return filepath.Join(home, ".config", "punaro", "adapter.env")
 }

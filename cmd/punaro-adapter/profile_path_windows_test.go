@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -104,8 +103,12 @@ func setupWindowsProfile(t *testing.T) string {
 func protectWindowsFixture(t *testing.T, path string, directory bool) {
 	t.Helper()
 	// Keep the fixture ACL identical to Protect-PunaroPath in install-client.ps1.
-	script := `$ErrorActionPreference = 'Stop'; $path = $args[0]; $directory = [bool]::Parse($args[1]); $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl = Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid); if ($directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit } else { $inheritance = [System.Security.AccessControl.InheritanceFlags]::None }; $rule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl`
-	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path, strconv.FormatBool(directory))
+	inheritance := `[System.Security.AccessControl.InheritanceFlags]::None`
+	if directory {
+		inheritance = `[System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit`
+	}
+	script := `$ErrorActionPreference = 'Stop'; $path = $args[0]; $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl = Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid); $inheritance = ` + inheritance + `; $rule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl`
+	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("protect test fixture: %v (%s)", err, output)
 	}
