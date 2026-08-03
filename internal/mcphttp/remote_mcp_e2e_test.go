@@ -3,10 +3,12 @@
 package mcphttp
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -114,14 +116,14 @@ func TestRemoteMCPE2EChallengeRequiresExactResourceMetadata(t *testing.T) {
 
 func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.T) {
 	want := json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)
-	valid := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)}
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)}
 	if !validRemoteMCPE2EJSONRPCSuccess(valid, want) {
 		t.Fatal("valid correlated MCP tool result rejected")
 	}
 	for _, response := range []remoteMCPE2EResponse{
-		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"wrong","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)},
-		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{}}`)},
-		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"other"}]}}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"wrong","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{}}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"other"}]}}`)},
 	} {
 		if validRemoteMCPE2EJSONRPCSuccess(response, want) {
 			t.Fatal("uncorrelated or invalid MCP tool result accepted")
@@ -170,13 +172,33 @@ func TestRemoteMCPE2EJSONRPCFailureRejectsServerErrors(t *testing.T) {
 }
 
 func TestRemoteMCPE2EInitializeRequiresNegotiatedProtocol(t *testing.T) {
-	valid := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
 	if !validRemoteMCPE2EInitializeSuccess(valid, "2024-11-05") {
 		t.Fatal("valid initialize response rejected")
 	}
-	wrongVersion := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"other","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
+	wrongVersion := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"other","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
 	if validRemoteMCPE2EInitializeSuccess(wrongVersion, "2024-11-05") {
 		t.Fatal("wrong initialize protocol accepted")
+	}
+}
+
+func TestRemoteMCPE2EInitializedNotificationRequiresAccepted(t *testing.T) {
+	if !validRemoteMCPE2EInitializedNotification(remoteMCPE2EResponse{Status: http.StatusAccepted}) {
+		t.Fatal("accepted initialized notification rejected")
+	}
+	if validRemoteMCPE2EInitializedNotification(remoteMCPE2EResponse{Status: http.StatusOK}) {
+		t.Fatal("non-accepted initialized notification accepted")
+	}
+}
+
+func TestRemoteMCPE2EJSONRPCResponseRequiresSupportedMediaType(t *testing.T) {
+	response := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)}
+	if !validRemoteMCPE2EJSONRPCSuccess(response, json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)) {
+		t.Fatal("JSON MCP response rejected")
+	}
+	response.Header.Set("Content-Type", "text/plain")
+	if validRemoteMCPE2EJSONRPCSuccess(response, json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)) {
+		t.Fatal("unsupported MCP response media type accepted")
 	}
 }
 
@@ -232,7 +254,16 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 		}
 		response.Header().Set("Content-Type", "application/json")
 		if bytes.Contains(body, []byte(`"method":"initialize"`)) {
+			if token == config.Tokens.Valid {
+				response.Header().Set("Mcp-Session-Id", "fixture-valid-session")
+			} else {
+				response.Header().Set("Mcp-Session-Id", "fixture-insufficient-scope-session")
+			}
 			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`))
+			return
+		}
+		if token == config.Tokens.Valid && request.Header.Get("Mcp-Session-Id") != "fixture-valid-session" || token == config.Tokens.InsufficientScope && request.Header.Get("Mcp-Session-Id") != "fixture-insufficient-scope-session" {
+			response.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		if bytes.Contains(body, []byte(`"method":"notifications/initialized"`)) {
@@ -495,18 +526,18 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		t.Fatal("missing required scope did not return an insufficient-scope challenge")
 	}
 
+	validSessionID := remoteMCPE2EInitializeSession(t, client, config, config.Tokens.Valid)
 	for _, malformedRequest := range [][]byte{
 		[]byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`),
 		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call"}`),
 		[]byte(`{"jsonrpc":"2.0","id":{},"method":"tools/list"}`),
 		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","extra":true}`),
 	} {
-		malformed := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, malformedRequest)
+		malformed := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, malformedRequest)
 		remoteMCPE2ERedacted(t, malformed, config.sensitiveValues())
 		remoteMCPE2ERequireJSONRPCFailure(t, malformed)
 	}
 
-	validSessionID := remoteMCPE2EInitializeSession(t, client, config, config.Tokens.Valid)
 	authorized := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
 	remoteMCPE2ERequireJSONRPCSuccess(t, authorized, config.AuthorizedTool.ExpectedResult)
 
@@ -646,7 +677,8 @@ func remoteMCPE2EInitializeSession(t *testing.T, client *http.Client, config rem
 }
 
 func validRemoteMCPE2EInitializeSuccess(response remoteMCPE2EResponse, expectedProtocolVersion string) bool {
-	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) {
+	payload, supported := remoteMCPE2EJSONRPCPayload(response)
+	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
 		return false
 	}
 	var envelope struct {
@@ -662,18 +694,23 @@ func validRemoteMCPE2EInitializeSuccess(response remoteMCPE2EResponse, expectedP
 		} `json:"result"`
 		Error json.RawMessage `json:"error"`
 	}
-	return json.Unmarshal(response.Body, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Error) == 0 && jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e-initialize"`)) && envelope.Result.ProtocolVersion == expectedProtocolVersion && validJSONObject(envelope.Result.Capabilities, maxJSONRPCDepth) && envelope.Result.ServerInfo.Name != "" && envelope.Result.ServerInfo.Version != ""
+	return json.Unmarshal(payload, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Error) == 0 && jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e-initialize"`)) && envelope.Result.ProtocolVersion == expectedProtocolVersion && validJSONObject(envelope.Result.Capabilities, maxJSONRPCDepth) && envelope.Result.ServerInfo.Name != "" && envelope.Result.ServerInfo.Version != ""
 }
 
 func remoteMCPE2ERequireInitializedNotification(t *testing.T, response remoteMCPE2EResponse) {
 	t.Helper()
-	if response.Status < 200 || response.Status > 299 || len(response.Body) != 0 {
+	if !validRemoteMCPE2EInitializedNotification(response) {
 		t.Fatal("MCP initialized notification did not complete")
 	}
 }
 
+func validRemoteMCPE2EInitializedNotification(response remoteMCPE2EResponse) bool {
+	return response.Status == http.StatusAccepted && len(response.Body) == 0
+}
+
 func validRemoteMCPE2EJSONRPCSuccess(response remoteMCPE2EResponse, expectedResult json.RawMessage) bool {
-	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) || !validRemoteMCPE2EToolResult(expectedResult) {
+	payload, supported := remoteMCPE2EJSONRPCPayload(response)
+	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) || !validRemoteMCPE2EToolResult(expectedResult) {
 		return false
 	}
 	var envelope struct {
@@ -682,7 +719,7 @@ func validRemoteMCPE2EJSONRPCSuccess(response remoteMCPE2EResponse, expectedResu
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(response.Body, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Error) != 0 || !jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e"`)) || !jsonRawMessageEquals(envelope.Result, expectedResult) {
+	if json.Unmarshal(payload, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Error) != 0 || !jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e"`)) || !jsonRawMessageEquals(envelope.Result, expectedResult) {
 		return false
 	}
 	return validRemoteMCPE2EToolResult(envelope.Result)
@@ -779,7 +816,8 @@ func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
 	if response.Status >= 400 && response.Status < 500 {
 		return true
 	}
-	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) {
+	payload, supported := remoteMCPE2EJSONRPCPayload(response)
+	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
 		return false
 	}
 	var envelope struct {
@@ -787,7 +825,50 @@ func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
 	}
-	return json.Unmarshal(response.Body, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Result) == 0 && len(envelope.Error) != 0
+	return json.Unmarshal(payload, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Result) == 0 && len(envelope.Error) != 0
+}
+
+func remoteMCPE2EJSONRPCPayload(response remoteMCPE2EResponse) ([]byte, bool) {
+	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, false
+	}
+	switch mediaType {
+	case "application/json":
+		return response.Body, true
+	case "text/event-stream":
+		return remoteMCPE2ESSEPayload(response.Body)
+	default:
+		return nil, false
+	}
+}
+
+func remoteMCPE2ESSEPayload(body []byte) ([]byte, bool) {
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner.Buffer(make([]byte, 1024), maxRemoteMCPE2EResponse)
+	var eventData [][]byte
+	var lines []string
+	dispatch := func() {
+		if len(lines) > 0 {
+			eventData = append(eventData, []byte(strings.Join(lines, "\n")))
+			lines = nil
+		}
+	}
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" {
+			dispatch()
+			continue
+		}
+		if value, found := strings.CutPrefix(line, "data:"); found {
+			lines = append(lines, strings.TrimPrefix(value, " "))
+		}
+	}
+	dispatch()
+	if scanner.Err() != nil || len(eventData) != 1 {
+		return nil, false
+	}
+	return eventData[0], true
 }
 
 func remoteMCPE2ERedacted(t *testing.T, response remoteMCPE2EResponse, sensitive []string) {
