@@ -17,6 +17,7 @@ import (
 var mailCutoverTables = []string{
 	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_request_nonces",
+	"mail_conversation_controls", "mail_conversation_control_idempotency",
 }
 
 var emptyMailCutoverDigest = func() string {
@@ -353,6 +354,10 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 		return manifest.Counts.MessageIdempotency, manifest.TableSHA256.MessageIdempotency
 	case "mail_conversation_idempotency":
 		return manifest.Counts.ConversationIdempotency, manifest.TableSHA256.ConversationIdempotency
+	case "mail_conversation_controls":
+		return manifest.Counts.ControlEvents, manifest.TableSHA256.ControlEvents
+	case "mail_conversation_control_idempotency":
+		return manifest.Counts.ControlIdempotency, manifest.TableSHA256.ControlIdempotency
 	case "mail_request_nonces":
 		return manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces
 	default:
@@ -397,6 +402,12 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_conversation_idempotency(machine_id,key,request_hash,conversation_id,created_at)
 	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'conversation_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_idempotency' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at)
+	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,payload->>'actor_endpoint',payload->>'operation',payload->>'member_endpoint',(payload->>'member_capabilities')::smallint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_controls' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at)
+	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'control_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_control_idempotency' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_request_nonces(machine_id,nonce,expires_at)
 	 SELECT payload->>'machine_id',payload->>'nonce',TIMESTAMPTZ 'epoch'+(payload->>'expires_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_request_nonces' ORDER BY row_key COLLATE "C"`,

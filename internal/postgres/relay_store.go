@@ -260,16 +260,11 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230610))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.ControlEvent{}, false, errors.New("control retry lock is unavailable")
 	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control conversation lock is unavailable")
+	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
 		return relay.ControlEvent{}, false, err
-	}
-	var actorCapabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
-	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&relay.CapAdmin == 0 {
-		return relay.ControlEvent{}, false, relay.ErrForbidden
-	}
-	if err != nil {
-		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
 	}
 	requestHash := relay.ControlRequestHash(input)
 	var existingID, existingHash string
@@ -289,6 +284,14 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.ControlEvent{}, false, errors.New("control retry state is unavailable")
+	}
+	var actorCapabilities relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
+	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&relay.CapAdmin == 0 {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
 	}
 	if input.Operation == relay.ControlUpsertMember {
 		// New members must be actively advertised. Ownership need not match the
@@ -319,8 +322,13 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
 		}
-	} else if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.Member.Endpoint); err != nil {
-		return relay.ControlEvent{}, false, relayDatabaseError(err, "remove conversation member")
+	} else {
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_deliveries WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.Member.Endpoint); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "remove conversation member")
+		}
 	}
 	event := relay.ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: input.Now.UTC().Truncate(time.Microsecond)}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt); err != nil {

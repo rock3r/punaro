@@ -490,14 +490,6 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if err := endpointOwnedBy(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
 		return ControlEvent{}, false, err
 	}
-	var actorCapabilities Capability
-	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
-	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&CapAdmin == 0 {
-		return ControlEvent{}, false, ErrForbidden
-	}
-	if err != nil {
-		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
-	}
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT control_id,request_hash FROM conversation_control_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -515,6 +507,14 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return ControlEvent{}, false, fmt.Errorf("read control idempotency key: %w", err)
+	}
+	var actorCapabilities Capability
+	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
+	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&CapAdmin == 0 {
+		return ControlEvent{}, false, ErrForbidden
+	}
+	if err != nil {
+		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
 	}
 	if input.Operation == ControlUpsertMember {
 		if err := endpointActive(tx, input.Member.Endpoint, input.Now); err != nil {
@@ -554,6 +554,9 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			if remaining == 0 {
 				return ControlEvent{}, false, ErrConflict
 			}
+		}
+		if _, err := tx.ExecContext(context.Background(), "DELETE FROM deliveries WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Member.Endpoint, input.ConversationID); err != nil {
+			return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
 		}
 		if _, err := tx.ExecContext(context.Background(), "DELETE FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("remove conversation member: %w", err)

@@ -119,6 +119,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
 	{"conversation_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
+	{"conversation_controls", "id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at", "id"},
+	{"conversation_control_idempotency", "machine_id,key,request_hash,control_id,created_at", "machine_id,key"},
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 

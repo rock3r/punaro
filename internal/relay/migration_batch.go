@@ -128,7 +128,9 @@ var migrationBatchSpecs = []migrationBatchSpec{
 	{target: "mail_recipient_cursors", source: migrationTableSpecs[8], keyColumns: []string{"recipient_endpoint", "conversation_id"}},
 	{target: "mail_message_idempotency", source: migrationTableSpecs[9], keyColumns: []string{"machine_id", "key"}},
 	{target: "mail_conversation_idempotency", source: migrationTableSpecs[10], keyColumns: []string{"machine_id", "key"}},
-	{target: "mail_request_nonces", source: migrationTableSpecs[11], keyColumns: []string{"machine_id", "nonce"}},
+	{target: "mail_conversation_controls", source: migrationTableSpecs[11], keyColumns: []string{"id"}},
+	{target: "mail_conversation_control_idempotency", source: migrationTableSpecs[12], keyColumns: []string{"machine_id", "key"}},
+	{target: "mail_request_nonces", source: migrationTableSpecs[13], keyColumns: []string{"machine_id", "nonce"}},
 }
 
 // ReadMigrationSourceBatch reads one bounded page from the exact prepared
