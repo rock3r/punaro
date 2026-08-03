@@ -44,7 +44,7 @@ func TestCommandInvokerRejectsSymlinkAndWritableAncestors(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
-	if err := os.Chmod(directory, 0o700); err != nil {
+	if err := os.Chmod(directory, 0o700); err != nil { // #nosec G302 -- test fixture directory must be owner-traversable.
 		t.Fatal(err)
 	}
 	directory, err = filepath.Abs(directory)
