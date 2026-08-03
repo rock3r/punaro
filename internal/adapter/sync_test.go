@@ -77,12 +77,20 @@ func TestSyncOnceDoesNotAcknowledgeWhenMailboxInjectionFails(t *testing.T) {
 }
 
 type fakeMailbox struct {
-	attached []string
-	sent     []InboundMessage
-	sendErr  error
+	attached      []string
+	attachedCalls int
+	onAttached    func(int) []string
+	sent          []InboundMessage
+	sendErr       error
 }
 
-func (m *fakeMailbox) Attached(context.Context) ([]string, error) { return m.attached, nil }
+func (m *fakeMailbox) Attached(context.Context) ([]string, error) {
+	m.attachedCalls++
+	if m.onAttached != nil {
+		return m.onAttached(m.attachedCalls), nil
+	}
+	return m.attached, nil
+}
 func (m *fakeMailbox) Send(_ context.Context, _ string, message InboundMessage) error {
 	if m.sendErr != nil {
 		return m.sendErr

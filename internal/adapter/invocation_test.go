@@ -89,6 +89,29 @@ func TestSyncerReportsFailedRuntimeHandoffForBoundedRelayRetry(t *testing.T) {
 	}
 }
 
+func TestSyncerDoesNotInvokeRoleThatAttachedDuringCycle(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{onAttached: func(call int) []string {
+		if call == 1 {
+			return nil
+		}
+		return []string{"agent/recipient"}
+	}}
+	relayClient := &fakeInvocationRelay{fakeRelay: fakeRelay{deliveries: map[string][]relay.Delivery{}}, invocations: []relay.Invocation{{ID: "invoke-1", ConversationID: "conversation-1", TargetEndpoint: "agent/recipient", TargetMachineID: "machine-a", Fence: "stable-fence", LeaseToken: "lease-1", LeaseGeneration: 1}}}
+	runtime := &fakeInvoker{}
+	syncer := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Invoker: runtime}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.calls != 0 || len(relayClient.reports) != 1 || relayClient.reports[0].accepted {
+		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
+	}
+}
+
 type fakeInvoker struct {
 	calls  int
 	fences []string

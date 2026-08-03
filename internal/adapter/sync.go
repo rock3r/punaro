@@ -125,6 +125,24 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 		}
 		accepted := state == invocationAccepted
 		if !accepted {
+			attached, err := s.Mailbox.Attached(ctx)
+			if err != nil {
+				return fmt.Errorf("recheck attached mailbox sessions: %w", err)
+			}
+			attached, err = uniqueEndpoints(attached)
+			if err != nil {
+				return err
+			}
+			if containsEndpoint(attached, invocation.TargetEndpoint) {
+				// The relay can only observe the attachment advertised at the
+				// beginning of this cycle. If it appeared meanwhile, release the
+				// handoff without crossing the process-start boundary; the next
+				// cycle advertises the live role and terminalizes the stale lease.
+				if err := relayClient.ReportInvocation(ctx, invocation, false); err != nil {
+					return fmt.Errorf("release locally attached invocation %q: %w", invocation.ID, err)
+				}
+				continue
+			}
 			if err := s.Invoker.Invoke(ctx, invocation); err != nil {
 				if reportErr := relayClient.ReportInvocation(ctx, invocation, false); reportErr != nil {
 					return fmt.Errorf("runtime invocation %q failed and retry report failed: %w", invocation.ID, reportErr)
@@ -141,6 +159,15 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 		}
 	}
 	return nil
+}
+
+func containsEndpoint(endpoints []string, endpoint string) bool {
+	for _, candidate := range endpoints {
+		if candidate == endpoint {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, delivery relay.Delivery, now time.Time) error {

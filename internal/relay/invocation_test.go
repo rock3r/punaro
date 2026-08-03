@@ -78,11 +78,17 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	if err := store.ReportInvocation("recipient-machine", second[0].ID, second[0].LeaseToken, second[0].LeaseGeneration, true, retryAt); err != nil {
 		t.Fatal(err)
 	}
+	afterAccept := request
+	afterAccept.IdempotencyKey = "invoke-after-accept"
+	afterAccept.Now = retryAt
+	if coalesced, duplicate, err := store.RequestInvocation(afterAccept); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Fence != invocation.Fence || coalesced.Status != InvocationSucceeded {
+		t.Fatalf("accepted coalescing invocation=%#v duplicate=%t err=%v", coalesced, duplicate, err)
+	}
 	if final, err := store.LeaseInvocations("recipient-machine", "adapter-a", retryAt.Add(time.Hour), time.Second, 10); err != nil || len(final) != 0 {
 		t.Fatalf("final=%#v err=%v", final, err)
 	}
 	audit, err := store.InvocationAudit(invocation.ID)
-	if err != nil || len(audit) != 6 || audit[0].Action != "requested" || audit[1].Action != "coalesced" || audit[2].Action != "leased" || audit[3].Action != "retry" || audit[4].Action != "leased" || audit[5].Action != "accepted" {
+	if err != nil || len(audit) != 7 || audit[0].Action != "requested" || audit[1].Action != "coalesced" || audit[2].Action != "leased" || audit[3].Action != "retry" || audit[4].Action != "leased" || audit[5].Action != "accepted" || audit[6].Action != "coalesced" {
 		t.Fatalf("audit=%#v err=%v", audit, err)
 	}
 }
