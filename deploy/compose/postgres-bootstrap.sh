@@ -34,13 +34,17 @@ BEGIN;
 DO $$
 BEGIN
   IF EXISTS (
-    SELECT 1 FROM pg_database database, aclexplode(coalesce(database.datacl, acldefault('d', database.datdba))) privilege
-    WHERE database.datname = current_database() AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE'
+    SELECT 1
+    FROM pg_database database
+    CROSS JOIN LATERAL aclexplode(coalesce(database.datacl, acldefault('d', database.datdba))) privilege
+    WHERE database.datname = current_database()
+      AND (database.datdba <> (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+           OR (privilege.privilege_type = 'CREATE' AND privilege.grantee <> database.datdba))
   ) OR EXISTS (
     SELECT 1 FROM pg_namespace schema, aclexplode(coalesce(schema.nspacl, acldefault('n', schema.nspowner))) privilege
     WHERE schema.nspname !~ '^pg_' AND schema.nspname <> 'information_schema' AND privilege.grantee = 0 AND privilege.privilege_type = 'CREATE'
   ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while PUBLIC retains CREATE; revoke it and rerun bootstrap';
+    RAISE EXCEPTION 'refusing to rotate punaro_app while the database has an unexpected owner or non-owner CREATE grant; repair it and rerun bootstrap';
   END IF;
 END $$;
 DO $$
@@ -118,6 +122,7 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
       AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
       AND privilege.grantee = 0
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while an owner relation outside Punaro schemas grants PUBLIC access; revoke it and rerun bootstrap';
@@ -168,6 +173,24 @@ BEGIN
       AND procedure.proowner NOT IN ((SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner'), (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while a Punaro routine has an unexpected owner; repair ownership and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_trigger trigger
+    JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid
+    WHERE NOT trigger.tgisinternal
+      AND procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while an application-owned trigger function remains; remove the trigger and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_event_trigger trigger
+    JOIN pg_proc procedure ON procedure.oid = trigger.evtfoid
+    WHERE trigger.evtowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+       OR procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while an application-owned event trigger remains; remove the trigger and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_namespace namespace

@@ -203,6 +203,27 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	echo 'production bootstrap retained PUBLIC execution on an owner security-definer function' >&2
 	exit 1
 fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'CREATE SCHEMA bootstrap_legacy; CREATE VIEW bootstrap_legacy.owner_public_view AS SELECT * FROM relay.projects; ALTER SCHEMA bootstrap_legacy OWNER TO punaro_owner; ALTER VIEW bootstrap_legacy.owner_public_view OWNER TO punaro_owner; GRANT USAGE ON SCHEMA bootstrap_legacy TO PUBLIC; GRANT SELECT ON bootstrap_legacy.owner_public_view TO PUBLIC'
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted PUBLIC access to an owner relation outside Punaro schemas' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE ALL PRIVILEGES ON bootstrap_legacy.owner_public_view FROM PUBLIC; REVOKE ALL PRIVILEGES ON SCHEMA bootstrap_legacy FROM PUBLIC'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE FUNCTION relay.bootstrap_app_trigger() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS \$\$ BEGIN RETURN NEW; END \$\$; ALTER FUNCTION relay.bootstrap_app_trigger() OWNER TO punaro_app; CREATE TRIGGER bootstrap_app_trigger BEFORE INSERT ON relay.projects FOR EACH ROW EXECUTE FUNCTION relay.bootstrap_app_trigger()"
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted an application-owned trigger function' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'DROP TRIGGER bootstrap_app_trigger ON relay.projects; DROP FUNCTION relay.bootstrap_app_trigger()'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command "CREATE ROLE punaro_database_creator LOGIN PASSWORD 'database-creator-password'; GRANT CREATE ON DATABASE punaro TO punaro_database_creator"
+if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap >/dev/null 2>&1; then
+	echo 'production bootstrap accepted a non-owner database CREATE grant' >&2
+	exit 1
+fi
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'REVOKE CREATE ON DATABASE punaro FROM punaro_database_creator; DROP ROLE punaro_database_creator'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TEMPORARY ON DATABASE punaro TO punaro_app'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 if docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'CREATE TEMPORARY TABLE forbidden_temp ()' >/dev/null 2>&1; then
