@@ -115,6 +115,20 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.validateSender(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/controls"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/controls")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.applyControl(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/controls/audit"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/controls/audit")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.controlAudit(w, body, machineID, conversationID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
@@ -157,6 +171,76 @@ func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string,
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) applyControl(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(ControlBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "control plane is unavailable")
+		return
+	}
+	var request struct {
+		ActorEndpoint string           `json:"actor_endpoint"`
+		Operation     ControlOperation `json:"operation"`
+		Member        struct {
+			Endpoint     string   `json:"endpoint"`
+			Capabilities []string `json:"capabilities"`
+		} `json:"member"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid control request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.ActorEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	capabilities := Capability(0)
+	var err error
+	if request.Operation == ControlUpsertMember {
+		capabilities, err = parseCapabilities(request.Member.Capabilities)
+	} else if request.Operation != ControlRemoveMember || len(request.Member.Capabilities) != 0 {
+		err = fmt.Errorf("invalid control operation")
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid control request")
+		return
+	}
+	event, duplicate, err := store.ApplyControl(ControlInput{ConversationID: conversationID, ActorMachineID: machineID, ActorEndpoint: request.ActorEndpoint, Operation: request.Operation, Member: Member{Endpoint: request.Member.Endpoint, Capabilities: capabilities}, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, event)
+}
+
+func (h *handler) controlAudit(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
+	store, ok := h.store.(ControlBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "control plane is unavailable")
+		return
+	}
+	var request struct {
+		ActorEndpoint string `json:"actor_endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil || !h.auth.AllowsEndpoint(machineID, request.ActorEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	events, err := store.ControlAudit(conversationID, machineID, request.ActorEndpoint, now)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
 func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {

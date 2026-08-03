@@ -16,6 +16,7 @@ import (
 
 var _ relay.Backend = (*Database)(nil)
 var _ relay.RoleBindingBackend = (*Database)(nil)
+var _ relay.ControlBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
 
@@ -241,6 +242,194 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 	return tx.Commit()
 }
 
+// ApplyControl mutates membership through the same explicit, server-authorized
+// control plane as SQLite. Controls never enter mail_messages or deliveries.
+func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if _, err := uuid.Parse(input.ConversationID); err != nil {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control transaction cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230610))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control retry lock is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control conversation lock is unavailable")
+	}
+	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
+		return relay.ControlEvent{}, false, err
+	}
+	if err := postgresLockSessionRoleBindings(tx, input.ActorMachineID, input.ActorEndpoint, input.Now); err != nil {
+		return relay.ControlEvent{}, false, err
+	}
+	actorCapabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
+	}
+	if actorCapabilities&relay.CapAdmin == 0 {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	requestHash := relay.ControlRequestHash(input)
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), `SELECT control_id::text,request_hash FROM relay.mail_conversation_control_idempotency WHERE machine_id=$1 AND key=$2`, input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
+		event, err := postgresControlEventByID(tx, existingID)
+		if err != nil {
+			return relay.ControlEvent{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.ControlEvent{}, false, errors.New("control retry cannot commit")
+		}
+		return event, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, errors.New("control retry state is unavailable")
+	}
+	var previous relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.Member.Endpoint).Scan(&previous)
+	if input.Operation == relay.ControlRemoveMember && errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, errors.New("control target state is unavailable")
+	}
+	if input.Operation == relay.ControlUpsertMember && errors.Is(err, sql.ErrNoRows) {
+		// New members must be actively advertised. Existing members may be
+		// detached so an admin can still revoke their capabilities.
+		var until time.Time
+		if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, input.Member.Endpoint).Scan(&until); err != nil || !until.After(input.Now) {
+			return relay.ControlEvent{}, false, relay.ErrForbidden
+		}
+		var members int
+		if err := tx.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid) + (SELECT count(*) FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid)`, input.ConversationID).Scan(&members); err != nil {
+			return relay.ControlEvent{}, false, errors.New("conversation member count is unavailable")
+		}
+		if members >= 256 {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
+	}
+	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
+		var remaining int
+		if err := tx.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0 AND endpoint<>$3) + (SELECT count(*) FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0)`, input.ConversationID, relay.CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
+			return relay.ControlEvent{}, false, errors.New("remaining admin state is unavailable")
+		}
+		if remaining == 0 {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
+	}
+	if input.Operation == relay.ControlUpsertMember && err == nil && previous&relay.CapReceive != 0 && input.Member.Capabilities&relay.CapReceive == 0 {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+			return relay.ControlEvent{}, false, err
+		}
+	}
+	if input.Operation == relay.ControlUpsertMember {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
+		}
+		if input.Member.Capabilities&relay.CapReceive != 0 {
+			if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return relay.ControlEvent{}, false, err
+			}
+		}
+	} else {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+			return relay.ControlEvent{}, false, err
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.Member.Endpoint); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "remove conversation member")
+		}
+	}
+	createdAt := input.Now.UTC().Truncate(time.Microsecond)
+	var latestCreatedAt sql.NullTime
+	if err := tx.QueryRowContext(context.Background(), `SELECT MAX(created_at) FROM relay.mail_conversation_controls WHERE conversation_id=$1::uuid`, input.ConversationID).Scan(&latestCreatedAt); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control audit order is unavailable")
+	}
+	if latestCreatedAt.Valid && !createdAt.After(latestCreatedAt.Time) {
+		createdAt = latestCreatedAt.Time.Add(time.Microsecond)
+	}
+	event := relay.ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: createdAt}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "record control audit")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, input.ActorMachineID, input.IdempotencyKey, requestHash, event.ID, input.Now.UTC()); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "record control idempotency")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "commit control")
+	}
+	return event, false, nil
+}
+
+// ControlAudit returns at most 100 newest content-free control records to a
+// live admin endpoint on the requesting machine.
+func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]relay.ControlEvent, error) {
+	if _, err := uuid.Parse(conversationID); err != nil {
+		return nil, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, errors.New("control audit cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if err := postgresEndpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
+	if err != nil {
+		return nil, errors.New("control audit authorization is unavailable")
+	}
+	if capabilities&relay.CapAdmin == 0 {
+		return nil, relay.ErrForbidden
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE conversation_id=$1::uuid ORDER BY created_at DESC,id DESC LIMIT 100`, conversationID)
+	if err != nil {
+		return nil, relayDatabaseError(err, "read control audit")
+	}
+	defer func() { _ = rows.Close() }()
+	var events []relay.ControlEvent
+	for rows.Next() {
+		var event relay.ControlEvent
+		if err := rows.Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
+			return nil, errors.New("control audit row is malformed")
+		}
+		event.CreatedAt = event.CreatedAt.UTC()
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("control audit is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("control audit cannot commit")
+	}
+	return events, nil
+}
+
+func postgresControlEventByID(tx *sql.Tx, id string) (relay.ControlEvent, error) {
+	var event relay.ControlEvent
+	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE id=$1::uuid`, id).Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
+		return relay.ControlEvent{}, errors.New("control retry event is unavailable")
+	}
+	event.CreatedAt = event.CreatedAt.UTC()
+	return event, nil
+}
+
 // CreateConversationIdempotent creates one PostgreSQL relay conversation per retry key.
 func (d *Database) CreateConversationIdempotent(input relay.CreateConversationInput) (relay.Conversation, error) {
 	if !relay.ValidMachineID(input.MachineID) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.CreatorEndpoint) || len(input.Members) == 0 || len(input.Members) > 256 {
@@ -253,7 +442,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	roles := make(map[string]string, len(input.Members))
 	creatorAdmin := false
 	for _, member := range input.Members {
-		if member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0 {
+		if member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0 {
 			return relay.Conversation{}, errors.New("invalid conversation member")
 		}
 		switch {
@@ -269,6 +458,9 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 				creatorAdmin = true
 			}
 		case member.Endpoint == "" && relay.ValidRole(member.Role) && relay.ValidMachineID(member.RoleMachineID):
+			if member.Capabilities&relay.CapInvoke != 0 {
+				return relay.Conversation{}, errors.New("invalid conversation member")
+			}
 			if _, duplicate := roles[member.Role]; duplicate {
 				return relay.Conversation{}, errors.New("duplicate conversation member")
 			}
@@ -449,6 +641,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230609))`, input.SenderMachineID, input.IdempotencyKey); err != nil {
 		return relay.Message{}, false, errors.New("message retry lock is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
+		return relay.Message{}, false, errors.New("message conversation lock is unavailable")
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
@@ -1042,7 +1237,7 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 	if err != nil {
 		return 0, errors.New("session authorization is unavailable")
 	}
-	if capabilities < 0 || capabilities > int64(relay.CapSend|relay.CapReceive|relay.CapAdmin) {
+	if capabilities < 0 || capabilities > int64(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) {
 		return 0, errors.New("session authorization is malformed")
 	}
 	return relay.Capability(capabilities), nil
@@ -1335,7 +1530,7 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) OR ((char_length(consumer_id) >= 1) AND (char_length(consumer_id) <= 128) AND (octet_length(consumer_id) <= 512) AND (consumer_id !~ ''[[:cntrl:]]''::text)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
-       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))')
+	   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)=CASE WHEN $1 >= 43 THEN '((capabilities >= 1) AND (capabilities <= 15))' ELSE '((capabilities >= 1) AND (capabilities <= 7))' END)
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(role) >= 1) AND (char_length(role) <= 512) AND (octet_length(role) <= 2048) AND (role !~ ''[[:cntrl:]]''::text))'))
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'))
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))'))
@@ -1413,13 +1608,14 @@ WITH objects AS (
 ), expected_table_acl(table_oid,privilege_type) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'SELECT'),(endpoints_oid,'INSERT'),(conversations_oid,'SELECT'),(conversations_oid,'INSERT'),
-        (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
+        (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(memberships_oid,'DELETE'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
 		(roles_oid,'SELECT'),(roles_oid,'INSERT'),(role_memberships_oid,'SELECT'),(role_memberships_oid,'INSERT'),(role_bindings_oid,'SELECT'),(role_bindings_oid,'INSERT'),
         (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
         (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.privilege_type='DELETE'))
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
@@ -1434,13 +1630,14 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'machine_id','UPDATE'),(endpoints_oid,'lease_until','UPDATE'),(endpoints_oid,'ownership_generation','UPDATE'),
         (endpoints_oid,'consumer_id','UPDATE'),(endpoints_oid,'consumer_generation','UPDATE'),(endpoints_oid,'consumer_lease_until','UPDATE'),
-        (conversations_oid,'next_sequence','UPDATE'),
+        (conversations_oid,'next_sequence','UPDATE'),(memberships_oid,'capabilities','UPDATE'),
 		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
         (cursors_oid,'sequence','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.column_name='capabilities'))
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
@@ -1525,7 +1722,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',nonces_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',endpoints_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversations_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
-   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND CASE WHEN $1 >= 41 THEN NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,TRUNCATE,REFERENCES,TRIGGER') ELSE NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') END
    AND NOT has_table_privilege('punaro_app',messages_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',deliveries_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')

@@ -484,6 +484,8 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testBackupRestoreIntegration(ctx, t, app, ownerDB, ownerFile, appFile)
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
 	testMailCutoverSubstrate(ctx, t, app, ownerDB)
+	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
+	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -989,7 +991,8 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 			Endpoints: emptyMailCutoverDigest, Conversations: emptyMailCutoverDigest, Memberships: emptyMailCutoverDigest,
 			Roles: emptyMailCutoverDigest, RoleMemberships: emptyMailCutoverDigest, RoleBindings: emptyMailCutoverDigest,
 			Messages: emptyMailCutoverDigest, Deliveries: emptyMailCutoverDigest, RecipientCursors: emptyMailCutoverDigest,
-			MessageIdempotency: emptyMailCutoverDigest, ConversationIdempotency: emptyMailCutoverDigest, RequestNonces: emptyMailCutoverDigest,
+			MessageIdempotency: emptyMailCutoverDigest, ConversationIdempotency: emptyMailCutoverDigest,
+			ControlEvents: emptyMailCutoverDigest, ControlIdempotency: emptyMailCutoverDigest, RequestNonces: emptyMailCutoverDigest,
 		},
 	}
 	canonicalManifest, _ := json.Marshal(manifest)
@@ -1400,9 +1403,89 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
+	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 	testDurableRoleRebindFencesPostgresDelivery(t, app)
+}
+
+func testPostgresMembershipControls(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 3, 15, 30, 0, 0, time.UTC)
+	const (
+		adminMachine   = "postgres-control-admin"
+		memberMachine  = "postgres-control-member"
+		adminEndpoint  = "agent/postgres-control/admin"
+		memberEndpoint = "agent/postgres-control/member"
+	)
+	if err := app.AdvertiseEndpoints(adminMachine, []string{adminEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(memberMachine, []string{memberEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: adminMachine, IdempotencyKey: "postgres-control-conversation", CreatorEndpoint: adminEndpoint, Now: now,
+		Members: []relay.Member{
+			{Endpoint: adminEndpoint, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: memberEndpoint, Capabilities: relay.CapReceive | relay.CapAdmin},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := relay.ControlInput{
+		ConversationID: conversation.ID, ActorMachineID: adminMachine, ActorEndpoint: adminEndpoint,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: memberEndpoint, Capabilities: relay.CapSend | relay.CapAdmin},
+		IdempotencyKey: "postgres-control-upsert", Now: now.Add(time.Second),
+	}
+	event, duplicate, err := app.ApplyControl(input)
+	if err != nil || duplicate || event.Operation != relay.ControlUpsertMember || event.Member.Capabilities != relay.CapSend|relay.CapAdmin {
+		t.Fatalf("first control event=%#v duplicate=%t err=%v", event, duplicate, err)
+	}
+	replayed, duplicate, err := app.ApplyControl(input)
+	if err != nil || !duplicate || replayed != event {
+		t.Fatalf("replayed control event=%#v duplicate=%t err=%v, want original %#v", replayed, duplicate, err, event)
+	}
+	audit, err := app.ControlAudit(conversation.ID, adminMachine, adminEndpoint, now.Add(2*time.Second))
+	if err != nil || len(audit) != 1 || audit[0] != event {
+		t.Fatalf("control audit=%#v err=%v, want %#v", audit, err, event)
+	}
+	if _, _, err := app.ApplyControl(relay.ControlInput{
+		ConversationID: conversation.ID, ActorMachineID: memberMachine, ActorEndpoint: memberEndpoint,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: adminEndpoint, Capabilities: relay.CapSend | relay.CapReceive},
+		IdempotencyKey: "postgres-control-revoke-admin", Now: now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("revoke admin control: %v", err)
+	}
+	if _, _, err := app.ApplyControl(input); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("revoked admin replay err=%v, want forbidden", err)
+	}
+}
+
+func testRelayMembershipControlSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_request_hash_check; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_request_hash_check CHECK (request_hash IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive membership-control request-hash constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_request_hash_check; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_request_hash_check CHECK (request_hash ~ '^[0-9a-f]{64}$')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT replacement_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("renamed membership-control foreign key state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT replacement_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("membership-control constraint restoration did not recover readiness: %v", err)
+	}
 }
 
 func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
@@ -1443,7 +1526,6 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.ID != message.ID {
 		t.Fatalf("lease through initial role binding page=%#v err=%v", pageA, err)
 	}
-
 	lockTx, lockCancel, err := app.beginRelayTransaction(nil)
 	if err != nil {
 		t.Fatal(err)

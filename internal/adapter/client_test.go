@@ -148,6 +148,79 @@ func TestHTTPRelayClientLeasesOneInvocationPerSync(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientSendsTypedMembershipControl(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/controls" || r.Header.Get("Idempotency-Key") != "control-1" {
+			t.Fatalf("unexpected control request %s %s key=%q", r.Method, r.URL.Path, r.Header.Get("Idempotency-Key"))
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if request.MachineID != "machine-a" || !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("membership control request was not signed")
+		}
+		var payload struct {
+			ActorEndpoint string                 `json:"actor_endpoint"`
+			Operation     relay.ControlOperation `json:"operation"`
+			Member        struct {
+				Endpoint     string   `json:"endpoint"`
+				Capabilities []string `json:"capabilities"`
+			} `json:"member"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.ActorEndpoint != "agent/a" || payload.Operation != relay.ControlUpsertMember || payload.Member.Endpoint != "agent/b" || len(payload.Member.Capabilities) != 2 || payload.Member.Capabilities[0] != "send" || payload.Member.Capabilities[1] != "receive" {
+			t.Fatalf("control payload=%#v err=%v", payload, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"control-1","conversation_id":"conversation-1","actor_endpoint":"agent/a","operation":"upsert_member","member":{"endpoint":"agent/b","capabilities":3},"created_at":"2026-08-03T13:25:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := client.ControlMembership(context.Background(), "conversation-1", "agent/a", relay.ControlUpsertMember, relay.Member{Endpoint: "agent/b", Capabilities: relay.CapSend | relay.CapReceive}, "control-1")
+	if err != nil || event.ID != "control-1" || event.Member.Endpoint != "agent/b" || event.Member.Capabilities != relay.CapSend|relay.CapReceive {
+		t.Fatalf("control event=%#v err=%v", event, err)
+	}
+}
+
+func TestHTTPRelayClientReadsSignedControlAudit(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/controls/audit" {
+			t.Fatalf("unexpected audit request %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if request.MachineID != "machine-a" || !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("control audit request was not signed")
+		}
+		var payload struct {
+			ActorEndpoint string `json:"actor_endpoint"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.ActorEndpoint != "agent/a" {
+			t.Fatalf("audit payload=%#v err=%v", payload, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"events":[{"id":"control-1","conversation_id":"conversation-1","actor_endpoint":"agent/a","operation":"upsert_member","member":{"endpoint":"agent/b","capabilities":2},"created_at":"2026-08-03T13:25:00Z"}]}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := client.ControlAudit(context.Background(), "conversation-1", "agent/a")
+	if err != nil || len(events) != 1 || events[0].ID != "control-1" || events[0].Member.Capabilities != relay.CapReceive {
+		t.Fatalf("audit events=%#v err=%v", events, err)
+	}
+}
+
 func TestHTTPRelayClientClassifiesOnlyPreAppendRejectionsAsTerminalOfferFailures(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

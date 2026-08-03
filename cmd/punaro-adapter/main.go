@@ -68,15 +68,103 @@ func main() {
 		err = runBindRole(os.Args[2:])
 	case os.Args[1] == "invoke":
 		err = runInvoke(os.Args[2:])
+	case os.Args[1] == "member" && len(os.Args) > 2 && os.Args[2] == "set":
+		err = runMemberSet(os.Args[3:])
+	case os.Args[1] == "member" && len(os.Args) > 2 && os.Args[2] == "remove":
+		err = runMemberRemove(os.Args[3:])
 	case os.Args[1] == "attachment-notify":
 		err = runAttachmentNotify(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, attachment-notify)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
 		os.Exit(1)
 	}
+}
+
+type memberControlRequest struct {
+	conversationID, actor, idempotencyKey string
+	member                                relay.Member
+	operation                             relay.ControlOperation
+}
+
+func parseMemberSetArgs(args []string) (memberControlRequest, error) {
+	return parseMemberControlArgs(args, relay.ControlUpsertMember)
+}
+func parseMemberRemoveArgs(args []string) (memberControlRequest, error) {
+	return parseMemberControlArgs(args, relay.ControlRemoveMember)
+}
+func parseMemberControlArgs(args []string, operation relay.ControlOperation) (memberControlRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter member", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request memberControlRequest
+	var rawMember string
+	request.operation = operation
+	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
+	flags.StringVar(&request.actor, "actor", "", "attached admin endpoint")
+	flags.StringVar(&rawMember, "member", "", "member endpoint, or endpoint:send,receive,admin for set")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.conversationID == "" || request.actor == "" || rawMember == "" || request.idempotencyKey == "" {
+		return memberControlRequest{}, fmt.Errorf("--conversation, --actor, --member, and --idempotency-key are required")
+	}
+	if operation == relay.ControlRemoveMember {
+		request.member.Endpoint = rawMember
+		return request, nil
+	}
+	separator := strings.LastIndex(rawMember, ":")
+	if separator <= 0 || separator == len(rawMember)-1 {
+		return memberControlRequest{}, fmt.Errorf("member set requires endpoint:send,receive,admin")
+	}
+	endpoint, permissions := rawMember[:separator], rawMember[separator+1:]
+	request.member.Endpoint = endpoint
+	for _, item := range strings.Split(permissions, ",") {
+		switch item {
+		case "send":
+			request.member.Capabilities |= relay.CapSend
+		case "receive":
+			request.member.Capabilities |= relay.CapReceive
+		case "admin":
+			request.member.Capabilities |= relay.CapAdmin
+		default:
+			return memberControlRequest{}, fmt.Errorf("invalid member capability")
+		}
+	}
+	if request.member.Capabilities == 0 {
+		return memberControlRequest{}, fmt.Errorf("invalid member capability")
+	}
+	return request, nil
+}
+
+func runMemberSet(args []string) error {
+	request, err := parseMemberSetArgs(args)
+	if err != nil {
+		return err
+	}
+	return runMemberControl(request)
+}
+func runMemberRemove(args []string) error {
+	request, err := parseMemberRemoveArgs(args)
+	if err != nil {
+		return err
+	}
+	return runMemberControl(request)
+}
+func runMemberControl(request memberControlRequest) error {
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClient(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken)
+	if err != nil {
+		return err
+	}
+	event, err := client.ControlMembership(context.Background(), request.conversationID, request.actor, request.operation, request.member, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"operation\":%q,\"member\":%q}\n", event.ID, event.Operation, event.Member.Endpoint)
+	return err
 }
 
 type createRequest struct {

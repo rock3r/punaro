@@ -38,6 +38,13 @@ func TestExecutorCrossesBoundariesInOrderAndPublishesLast(t *testing.T) {
 	if len(events) < len(want) || !reflect.DeepEqual(events[:len(want)], want) {
 		t.Fatalf("events=%v want prefix=%v", events, want)
 	}
+	for _, table := range []string{"mail_conversation_controls", "mail_conversation_control_idempotency"} {
+		for _, operation := range []string{"checkpoint:", "read:", "stage:"} {
+			if indexOf(events, operation+table) < 0 {
+				t.Fatalf("control table %s was not %s: events=%v", table, operation[:len(operation)-1], events)
+			}
+		}
+	}
 	readinessIndex, retireIndex, activateIndex, publishIndex := indexOf(events, "activation-readiness"), indexOf(events, "retire"), indexOf(events, "activate"), indexOf(events, "publish")
 	if readinessIndex < 0 || retireIndex <= readinessIndex || activateIndex <= retireIndex || publishIndex <= activateIndex || events[len(events)-1] != "publish" {
 		t.Fatalf("irreversible ordering=%v", events)

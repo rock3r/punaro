@@ -65,10 +65,45 @@ const (
 
 // Member is an explicitly authorized conversation endpoint.
 type Member struct {
-	Endpoint      string
-	Role          string
-	RoleMachineID string
-	Capabilities  Capability
+	Endpoint      string     `json:"endpoint"`
+	Role          string     `json:"role,omitempty"`
+	RoleMachineID string     `json:"role_machine_id,omitempty"`
+	Capabilities  Capability `json:"capabilities"`
+}
+
+// ControlOperation names an explicit, server-authorized membership mutation.
+// It is intentionally not representable as message content.
+type ControlOperation string
+
+const (
+	// ControlUpsertMember adds a member or replaces its capability set.
+	ControlUpsertMember ControlOperation = "upsert_member"
+	// ControlRemoveMember removes one member while preserving another admin.
+	ControlRemoveMember ControlOperation = "remove_member"
+)
+
+// ControlInput is one signed-machine retry domain for a membership mutation.
+// ActorEndpoint is only an asserted local endpoint; ownership and admin
+// capability are rechecked durably by the relay before every mutation.
+type ControlInput struct {
+	ConversationID string
+	ActorMachineID string
+	ActorEndpoint  string
+	Operation      ControlOperation
+	Member         Member
+	IdempotencyKey string
+	Now            time.Time
+}
+
+// ControlEvent is an immutable, content-free audit record for a control-plane
+// transition. It deliberately has no message body or credential material.
+type ControlEvent struct {
+	ID             string           `json:"id"`
+	ConversationID string           `json:"conversation_id"`
+	ActorEndpoint  string           `json:"actor_endpoint"`
+	Operation      ControlOperation `json:"operation"`
+	Member         Member           `json:"member"`
+	CreatedAt      time.Time        `json:"created_at"`
 }
 
 // Conversation is an immutable identifier returned when a room is created.
@@ -206,6 +241,30 @@ func Open(database string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &Store{db: db}
+	var migrationControlExists bool
+	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
+		_ = db.Close()
+		return nil, errors.New("relay migration source state is unavailable")
+	}
+	if migrationControlExists {
+		var migrationPhase MigrationSourcePhase
+		if err := db.QueryRowContext(context.Background(), `SELECT phase FROM relay_migration_control WHERE singleton=1`).Scan(&migrationPhase); err != nil {
+			_ = db.Close()
+			return nil, errors.New("relay migration source state is unavailable")
+		}
+		switch migrationPhase {
+		case MigrationSourcePrepared:
+			_ = db.Close()
+			return nil, ErrMigrationSourcePrepared
+		case MigrationSourceRetired:
+			_ = db.Close()
+			return nil, ErrMigrationSourceRetired
+		case MigrationSourceActive:
+		default:
+			_ = db.Close()
+			return nil, errors.New("relay migration source control is invalid")
+		}
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -344,6 +403,23 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, key)
 		)`,
+		`CREATE TABLE IF NOT EXISTS conversation_controls (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			actor_endpoint TEXT NOT NULL,
+			operation TEXT NOT NULL CHECK (operation IN ('upsert_member','remove_member')),
+			member_endpoint TEXT NOT NULL,
+			member_capabilities INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS conversation_control_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			control_id TEXT NOT NULL REFERENCES conversation_controls(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS request_nonces (
 			machine_id TEXT NOT NULL,
 			nonce TEXT NOT NULL,
@@ -382,7 +458,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "request_nonces"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -414,6 +490,216 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ApplyControl performs one explicit membership mutation after rechecking that
+// the caller owns a currently attached admin endpoint. A stable retry key
+// returns the original audit event; key reuse for another mutation conflicts.
+func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.ActorMachineID) || !ValidEndpoint(input.ActorEndpoint) || !ValidRequestToken(input.IdempotencyKey) || !validControlOperation(input.Operation) || !ValidEndpoint(input.Member.Endpoint) {
+		return ControlEvent{}, false, ErrForbidden
+	}
+	if input.Operation == ControlUpsertMember && !validCapabilities(input.Member.Capabilities) {
+		return ControlEvent{}, false, ErrForbidden
+	}
+	if input.Operation == ControlRemoveMember && input.Member.Capabilities != 0 {
+		return ControlEvent{}, false, ErrForbidden
+	}
+	requestHash := controlHash(input)
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return ControlEvent{}, false, err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
+		return ControlEvent{}, false, err
+	}
+	actorCapabilities, err := sessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
+	}
+	if actorCapabilities&CapAdmin == 0 {
+		return ControlEvent{}, false, ErrForbidden
+	}
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), "SELECT control_id,request_hash FROM conversation_control_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return ControlEvent{}, false, ErrConflict
+		}
+		event, err := controlEventByID(tx, existingID)
+		if err != nil {
+			return ControlEvent{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return ControlEvent{}, false, err
+		}
+		return event, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return ControlEvent{}, false, fmt.Errorf("read control idempotency key: %w", err)
+	}
+	if input.Operation == ControlUpsertMember {
+		var previous Capability
+		err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint).Scan(&previous)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return ControlEvent{}, false, fmt.Errorf("read existing control member: %w", err)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := endpointActive(tx, input.Member.Endpoint, input.Now); err != nil {
+				return ControlEvent{}, false, err
+			}
+			var members int
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=?)", input.ConversationID, input.ConversationID).Scan(&members); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("count conversation members: %w", err)
+			}
+			if members >= 256 {
+				return ControlEvent{}, false, ErrConflict
+			}
+		}
+		if err == nil && previous&CapAdmin != 0 && input.Member.Capabilities&CapAdmin == 0 {
+			var remaining int
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=? AND (capabilities & ?) != 0)", input.ConversationID, CapAdmin, input.Member.Endpoint, input.ConversationID, CapAdmin).Scan(&remaining); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("count remaining admins: %w", err)
+			}
+			if remaining == 0 {
+				return ControlEvent{}, false, ErrConflict
+			}
+		}
+		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
+			if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+			}
+			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, err
+			}
+			if err := failRevokedInvocations(tx, input.ConversationID, input.Member.Endpoint, input.Now); err != nil {
+				return ControlEvent{}, false, err
+			}
+		}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES(?,?,?) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
+			return ControlEvent{}, false, fmt.Errorf("upsert conversation member: %w", err)
+		}
+		if input.Member.Capabilities&CapReceive != 0 {
+			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, err
+			}
+		}
+	} else {
+		var targetCapabilities Capability
+		err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint).Scan(&targetCapabilities)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ControlEvent{}, false, ErrForbidden
+		}
+		if err != nil {
+			return ControlEvent{}, false, fmt.Errorf("read control member: %w", err)
+		}
+		if targetCapabilities&CapAdmin != 0 {
+			var remaining int
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=? AND (capabilities & ?) != 0)", input.ConversationID, CapAdmin, input.Member.Endpoint, input.ConversationID, CapAdmin).Scan(&remaining); err != nil {
+				return ControlEvent{}, false, fmt.Errorf("count remaining admins: %w", err)
+			}
+			if remaining == 0 {
+				return ControlEvent{}, false, ErrConflict
+			}
+		}
+		if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
+			return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+		}
+		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+			return ControlEvent{}, false, err
+		}
+		if err := failRevokedInvocations(tx, input.ConversationID, input.Member.Endpoint, input.Now); err != nil {
+			return ControlEvent{}, false, err
+		}
+		if _, err := tx.ExecContext(context.Background(), "DELETE FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint); err != nil {
+			return ControlEvent{}, false, fmt.Errorf("remove conversation member: %w", err)
+		}
+	}
+	createdAt := input.Now.UTC().Truncate(time.Millisecond)
+	var latestCreatedAt sql.NullInt64
+	if err := tx.QueryRowContext(context.Background(), "SELECT MAX(created_at) FROM conversation_controls WHERE conversation_id=?", input.ConversationID).Scan(&latestCreatedAt); err != nil {
+		return ControlEvent{}, false, fmt.Errorf("read latest control audit event: %w", err)
+	}
+	if latestCreatedAt.Valid && createdAt.UnixMilli() <= latestCreatedAt.Int64 {
+		createdAt = time.UnixMilli(latestCreatedAt.Int64 + 1).UTC()
+	}
+	event := ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: createdAt}
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES(?,?,?,?,?,?,?)", event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt.UnixMilli()); err != nil {
+		return ControlEvent{}, false, fmt.Errorf("record control audit event: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at) VALUES(?,?,?,?,?)", input.ActorMachineID, input.IdempotencyKey, requestHash, event.ID, input.Now.UnixMilli()); err != nil {
+		return ControlEvent{}, false, fmt.Errorf("record control idempotency key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ControlEvent{}, false, err
+	}
+	return event, false, nil
+}
+
+// ControlAudit returns bounded, newest-first content-free control history only
+// to a current admin endpoint on the requesting machine.
+func (s *Store) ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]ControlEvent, error) {
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	capabilities, err := sessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
+	if err != nil {
+		return nil, fmt.Errorf("authorize control audit: %w", err)
+	}
+	if capabilities&CapAdmin == 0 {
+		return nil, ErrForbidden
+	}
+	rows, err := tx.QueryContext(context.Background(), "SELECT id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM conversation_controls WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 100", conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("read control audit: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var events []ControlEvent
+	for rows.Next() {
+		var event ControlEvent
+		var millis int64
+		if err := rows.Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &millis); err != nil {
+			return nil, fmt.Errorf("read control audit event: %w", err)
+		}
+		event.CreatedAt = time.UnixMilli(millis).UTC()
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read control audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func validControlOperation(operation ControlOperation) bool {
+	return operation == ControlUpsertMember || operation == ControlRemoveMember
+}
+func validCapabilities(capabilities Capability) bool {
+	return capabilities != 0 && capabilities&^(CapSend|CapReceive|CapAdmin|CapInvoke) == 0
+}
+func controlHash(input ControlInput) string {
+	return stableHash(input.ConversationID, input.ActorEndpoint, string(input.Operation), input.Member.Endpoint, fmt.Sprintf("%d", input.Member.Capabilities))
+}
+
+// ControlRequestHash binds a control retry key to the exact typed mutation.
+func ControlRequestHash(input ControlInput) string { return controlHash(input) }
+
+func controlEventByID(tx *sql.Tx, id string) (ControlEvent, error) {
+	var event ControlEvent
+	var millis int64
+	if err := tx.QueryRowContext(context.Background(), "SELECT id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM conversation_controls WHERE id=?", id).Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &millis); err != nil {
+		return ControlEvent{}, fmt.Errorf("read control audit event: %w", err)
+	}
+	event.CreatedAt = time.UnixMilli(millis).UTC()
+	return event, nil
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {

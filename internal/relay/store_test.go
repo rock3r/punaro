@@ -106,6 +106,230 @@ func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	}
 }
 
+func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b", "machine-c": "agent/c"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive | CapAdmin},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/c", Capabilities: CapReceive}, IdempotencyKey: "control-1", Now: now}
+	first, duplicate, err := store.ApplyControl(input)
+	if err != nil || duplicate {
+		t.Fatalf("first control=%#v duplicate=%v err=%v", first, duplicate, err)
+	}
+	again, duplicate, err := store.ApplyControl(input)
+	if err != nil || !duplicate || again.ID != first.ID {
+		t.Fatalf("retry control=%#v duplicate=%v err=%v", again, duplicate, err)
+	}
+	second, duplicate, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/c"}, IdempotencyKey: "control-order", Now: now})
+	if err != nil || duplicate || !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("same-timestamp control=%#v duplicate=%v first=%#v err=%v", second, duplicate, first, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-c", ActorEndpoint: "agent/c", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/b"}, IdempotencyKey: "control-2", Now: now}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin control err=%v, want forbidden", err)
+	}
+	events, err := store.ControlAudit(conversation.ID, "machine-a", "agent/a", now)
+	if err != nil || len(events) != 2 || events[0].ID != second.ID || events[1].ID != first.ID {
+		t.Fatalf("audit=%#v err=%v", events, err)
+	}
+	var messages int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages").Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("control entered message plane: messages=%d err=%v", messages, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive}, IdempotencyKey: "revoke-admin-a", Now: now}); err != nil {
+		t.Fatalf("revoke admin control: %v", err)
+	}
+	if _, _, err := store.ApplyControl(input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked admin replay err=%v, want forbidden", err)
+	}
+}
+
+func TestStoreControlRevokesDetachedExistingMember(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapSend | CapReceive}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapSend}, IdempotencyKey: "revoke-detached", Now: now.Add(2 * time.Minute)}); err != nil {
+		t.Fatalf("revoke detached member: %v", err)
+	}
+}
+
+func TestStoreControlCanRetainInvokeCapability(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 30, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive | CapInvoke}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapSend | CapInvoke}, IdempotencyKey: "retain-invoke", Now: now})
+	if err != nil || event.Member.Capabilities != CapSend|CapInvoke {
+		t.Fatalf("invoke control=%#v err=%v", event, err)
+	}
+}
+
+func TestStoreControlRejectsNewMemberBeyondConversationLimit(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 35, 0, 0, time.UTC)
+	members := make([]Member, 0, 256)
+	endpoints := make([]string, 0, 2)
+	members = append(members, Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin})
+	endpoints = append(endpoints, "agent/a")
+	for index := 1; index < 256; index++ {
+		members = append(members, Member{Role: fmt.Sprintf("role/member-%03d", index), RoleMachineID: fmt.Sprintf("machine-member-%03d", index), Capabilities: CapReceive})
+	}
+	endpoints = append(endpoints, "agent/overflow")
+	if err := store.AdvertiseEndpoints("machine-a", endpoints, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", members, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/overflow", Capabilities: CapReceive}, IdempotencyKey: "member-limit", Now: now}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overflow upsert error=%v, want conflict", err)
+	}
+}
+
+func TestStoreControlAcceptsBoundRoleAdministrator(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 40, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b", "agent/c"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/admin", RoleMachineID: "machine-b", Capabilities: CapAdmin},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", "role/admin", "agent/b", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/c", Capabilities: CapReceive}, IdempotencyKey: "role-admin-control", Now: now})
+	if err != nil {
+		t.Fatalf("bound role admin control: %v", err)
+	}
+	audit, err := store.ControlAudit(conversation.ID, "machine-b", "agent/b", now)
+	if err != nil || len(audit) != 1 || audit[0].ID != event.ID {
+		t.Fatalf("bound role admin audit=%#v err=%v", audit, err)
+	}
+}
+
+func TestStoreControlGrantReceiveStartsAtCurrentConversationCursor(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 45, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "before membership", IdempotencyKey: "before-membership", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "grant-receive", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-b", "agent/b", conversation.ID, now); err != nil || cursor != message.Sequence {
+		t.Fatalf("cursor=%d err=%v, want current sequence %d", cursor, err, message.Sequence)
+	}
+}
+
+func TestStoreControlRetirementAdvancesRecipientCursor(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 13, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "retired delivery", IdempotencyKey: "retired-delivery", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapSend}, IdempotencyKey: "revoke-receive", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "restore-receive", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-b", "agent/b", conversation.ID, now); err != nil || cursor != message.Sequence {
+		t.Fatalf("cursor=%d err=%v, want retired sequence %d", cursor, err, message.Sequence)
+	}
+}
+
 func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")

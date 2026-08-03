@@ -107,6 +107,77 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	}
 }
 
+func TestMembershipRevocationFailsQueuedInvocation(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 17, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	members := []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/b", Capabilities: CapReceive}}
+	controlled, err := store.CreateConversation("agent/a", members, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated, err := store.CreateConversation("agent/a", members, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: controlled.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "controlled work", IdempotencyKey: "controlled-work", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: unrelated.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "unrelated work", IdempotencyKey: "unrelated-work", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	invocation, duplicate, err := store.RequestInvocation(InvokeInput{ConversationID: controlled.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", TargetEndpoint: "agent/b", IdempotencyKey: "queued-before-revocation", Now: now.Add(2 * time.Second)})
+	if err != nil || duplicate || invocation.Status != InvocationPending {
+		t.Fatalf("invocation=%#v duplicate=%t err=%v", invocation, duplicate, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: controlled.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapSend}, IdempotencyKey: "revoke-controlled-receive", Now: now.Add(3 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if leased, err := store.LeaseInvocations("machine-b", "adapter-b", now.Add(4*time.Second), time.Minute, 10); err != nil || len(leased) != 0 {
+		t.Fatalf("revoked invocation leased=%#v err=%v", leased, err)
+	}
+	var status InvocationStatus
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status FROM invocations WHERE id=?`, invocation.ID).Scan(&status); err != nil || status != InvocationFailed {
+		t.Fatalf("invocation status=%q err=%v", status, err)
+	}
+	audit, err := store.InvocationAudit(invocation.ID)
+	if err != nil || len(audit) != 2 || audit[0].Action != "requested" || audit[1].Action != "failed" {
+		t.Fatalf("invocation audit=%#v err=%v", audit, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: controlled.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "restore-controlled-receive", Now: now.Add(5 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: controlled.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "work before removal", IdempotencyKey: "work-before-removal", Now: now.Add(5 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	removed, duplicate, err := store.RequestInvocation(InvokeInput{ConversationID: controlled.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", TargetEndpoint: "agent/b", IdempotencyKey: "queued-before-removal", Now: now.Add(6 * time.Second)})
+	if err != nil || duplicate || removed.Status != InvocationPending {
+		t.Fatalf("removal invocation=%#v duplicate=%t err=%v", removed, duplicate, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: controlled.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/b"}, IdempotencyKey: "remove-controlled-member", Now: now.Add(7 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if leased, err := store.LeaseInvocations("machine-b", "adapter-b", now.Add(8*time.Second), time.Minute, 10); err != nil || len(leased) != 0 {
+		t.Fatalf("removed invocation leased=%#v err=%v", leased, err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status FROM invocations WHERE id=?`, removed.ID).Scan(&status); err != nil || status != InvocationFailed {
+		t.Fatalf("removed invocation status=%q err=%v", status, err)
+	}
+}
+
 func TestEmptyInvocationLeaseDoesNotMaterializeControlState(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

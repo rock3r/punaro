@@ -81,6 +81,14 @@ type InvocationBackend interface {
 	RejectInvocation(machineID, invocationID, token string, generation int64, now time.Time) error
 }
 
+// ControlBackend is deliberately separate from message delivery: only
+// backends that implement this explicit membership-control surface may mutate
+// a running conversation.
+type ControlBackend interface {
+	ApplyControl(ControlInput) (ControlEvent, bool, error)
+	ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]ControlEvent, error)
+}
+
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
 // the stable authenticated principal used by trusted attachment snapshots.
 // Legacy backends remain mail-only and need not implement it.

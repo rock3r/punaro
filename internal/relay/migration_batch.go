@@ -128,7 +128,9 @@ var migrationBatchSpecs = []migrationBatchSpec{
 	{target: "mail_recipient_cursors", source: migrationTableSpecs[8], keyColumns: []string{"recipient_endpoint", "conversation_id"}},
 	{target: "mail_message_idempotency", source: migrationTableSpecs[9], keyColumns: []string{"machine_id", "key"}},
 	{target: "mail_conversation_idempotency", source: migrationTableSpecs[10], keyColumns: []string{"machine_id", "key"}},
-	{target: "mail_request_nonces", source: migrationTableSpecs[11], keyColumns: []string{"machine_id", "nonce"}},
+	{target: "mail_conversation_controls", source: migrationTableSpecs[11], keyColumns: []string{"id"}},
+	{target: "mail_conversation_control_idempotency", source: migrationTableSpecs[12], keyColumns: []string{"machine_id", "key"}},
+	{target: "mail_request_nonces", source: migrationTableSpecs[13], keyColumns: []string{"machine_id", "nonce"}},
 }
 
 // ReadMigrationSourceBatch reads one bounded page from the exact prepared
@@ -165,7 +167,8 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	if manifest.Phase != MigrationSourcePrepared {
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
-	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) {
 		return MigrationSourceBatch{Done: true}, nil
 	}
 	var keyValues []any

@@ -201,6 +201,59 @@ func TestHTTPSenderValidationAuthorizesWithoutCreatingMessageState(t *testing.T)
 	}
 }
 
+func TestHTTPControlsRequireAdminAndKeepAuditOutOfMessageBodies(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	body := `{"actor_endpoint":"agent/a/session","operation":"upsert_member","member":{"endpoint":"agent/b/session","capabilities":["send","receive"]}}`
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls", body, "control-first", "control-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("control=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls", body, "control-retry", "control-1")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("control retry=%d %s", retry.Code, retry.Body.String())
+	}
+	denied := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls", `{"actor_endpoint":"agent/b/session","operation":"remove_member","member":{"endpoint":"agent/a/session"}}`, "control-denied", "control-2")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("non-admin control=%d %s", denied.Code, denied.Body.String())
+	}
+	audit := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/controls/audit", `{"actor_endpoint":"agent/a/session"}`, "audit", "")
+	var response struct {
+		Events []ControlEvent `json:"events"`
+	}
+	if audit.Code != http.StatusOK || json.NewDecoder(audit.Body).Decode(&response) != nil || len(response.Events) != 1 || response.Events[0].Operation != ControlUpsertMember {
+		t.Fatalf("audit=%d %s %#v", audit.Code, audit.Body.String(), response)
+	}
+	var messages int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages").Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("control entered message plane: %d %v", messages, err)
+	}
+}
+
 func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

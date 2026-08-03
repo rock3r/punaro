@@ -222,7 +222,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
-func TestMigrationSourceRejectsInvokeCapabilityBeforePreparation(t *testing.T) {
+func TestMigrationSourceAcceptsInvokeCapabilityBeforePreparation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
@@ -238,11 +238,104 @@ func TestMigrationSourceRejectsInvokeCapabilityBeforePreparation(t *testing.T) {
 	if _, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a", Now: now, Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectMigrationSource(ctx, path); err == nil {
-		t.Fatal("invoke-capability source was accepted for incompatible PostgreSQL cutover")
+	manifest, err := InspectMigrationSource(ctx, path)
+	if err != nil || manifest.Phase != MigrationSourceActive {
+		t.Fatalf("invoke-capability manifest=%#v err=%v", manifest, err)
 	}
 	if got := migrationSourcePhase(t, store); got != MigrationSourceActive {
-		t.Fatalf("rejected source inspection changed phase to %q", got)
+		t.Fatalf("source inspection changed phase to %q", got)
+	}
+}
+
+func TestMigrationSourceRejectsControlAuditWithoutRetryRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 10, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "orphaned-control", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM conversation_control_idempotency WHERE control_id=?", event.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("migration source accepted a control audit event without its retry record")
+	}
+}
+
+func TestMigrationSourceRejectsOperationInconsistentControlAudit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 15, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/b", Capabilities: CapReceive}, IdempotencyKey: "inconsistent-control", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE conversation_controls SET member_capabilities=0 WHERE id=?", event.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("migration source accepted an upsert control audit event without capabilities")
+	}
+}
+
+func TestMigrationSourceRejectsControlAuditWithMissingEndpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 20, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/b"}, IdempotencyKey: "missing-control-target", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM endpoints WHERE endpoint='agent/b'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("migration source accepted a control audit event with a missing endpoint")
 	}
 }
 
@@ -401,6 +494,180 @@ func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 	count, digest := hasher.Evidence()
 	if count != prepared.Counts.Messages || digest != prepared.TableSHA256.Messages {
 		t.Fatalf("large message evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
+	}
+}
+
+func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	now := time.Date(2026, time.August, 3, 10, 0, 0, 0, time.UTC)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/legacy/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := InspectMigrationSource(ctx, path)
+	if err != nil || legacy.Phase != MigrationSourceActive || legacy.Fingerprint == "" {
+		t.Fatalf("legacy active manifest=%#v err=%v", legacy, err)
+	}
+	preparedLegacy, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), legacy.Fingerprint, now.Add(time.Minute))
+	if err != nil || preparedLegacy.Phase != MigrationSourcePrepared || preparedLegacy.Version != 1 {
+		t.Fatalf("legacy preparation=%#v err=%v", preparedLegacy, err)
+	}
+	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("prepared legacy control batch=%#v err=%v", controls, err)
+	}
+	legacy, err = AbortPreparedMigrationSource(ctx, path, preparedLegacy.EpochID, preparedLegacy.TargetIdentity, preparedLegacy.Fingerprint)
+	if err != nil || legacy.Phase != MigrationSourceActive || legacy.Version != 1 {
+		t.Fatalf("legacy preparation abort=%#v err=%v", legacy, err)
+	}
+
+	prepareLegacy := func(epoch string) {
+		db, err := openMigrationSourceDatabase(path, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		if _, err := db.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition=? WHERE singleton=1`, epoch, strings.Repeat("b", 64), legacy.Fingerprint, epoch, strings.Repeat("b", 64), legacy.Fingerprint, legacy.Fingerprint, now.UnixMilli(), "prepared"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	epoch := uuid.NewString()
+	prepareLegacy(epoch)
+	prepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy prepared manifest=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening legacy prepared source err=%v", err)
+	}
+	preparedAfterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || preparedAfterOpen.Fingerprint != legacy.Fingerprint || preparedAfterOpen.Phase != MigrationSourcePrepared {
+		t.Fatalf("legacy prepared source changed after Open: manifest=%#v err=%v", preparedAfterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_endpoints", "", 1)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("legacy endpoint batch=%#v err=%v", batch, err)
+	}
+	controls, err = ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("legacy control batch=%#v err=%v", controls, err)
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, epoch, strings.Repeat("b", 64), legacy.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive || aborted.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy abort=%#v err=%v", aborted, err)
+	}
+
+	epoch = uuid.NewString()
+	prepareLegacy(epoch)
+	retired, err := RetirePreparedMigrationSource(ctx, path, epoch, strings.Repeat("b", 64), legacy.Fingerprint)
+	if err != nil || retired.Phase != MigrationSourceRetired || retired.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy retirement=%#v err=%v", retired, err)
+	}
+}
+
+func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	now := time.Date(2026, time.August, 3, 10, 0, 0, 0, time.UTC)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Role: "role/fenced", RoleMachineID: "machine-a", Capabilities: CapReceive}}, now); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/fenced", "agent/a", now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil || active.Version != 2 || active.Phase != MigrationSourceActive {
+		t.Fatalf("role-only active manifest=%#v err=%v", active, err)
+	}
+	epoch, target := uuid.NewString(), strings.Repeat("a", 64)
+	preparedV2, err := PrepareMigrationSource(ctx, path, epoch, target, active.Fingerprint, now.Add(time.Minute))
+	if err != nil || preparedV2.Version != 2 || preparedV2.Phase != MigrationSourcePrepared {
+		t.Fatalf("role-only v2 preparation=%#v err=%v", preparedV2, err)
+	}
+	preparedV2AfterRestart, err := InspectMigrationSource(ctx, path)
+	if err != nil || preparedV2AfterRestart.Version != 2 || preparedV2AfterRestart.Phase != MigrationSourcePrepared || preparedV2AfterRestart.Fingerprint != preparedV2.Fingerprint {
+		t.Fatalf("role-only v2 restart manifest=%#v err=%v", preparedV2AfterRestart, err)
+	}
+	active, err = AbortPreparedMigrationSource(ctx, path, epoch, target, preparedV2.Fingerprint)
+	if err != nil || active.Version != 2 || active.Phase != MigrationSourceActive {
+		t.Fatalf("role-only v2 abort=%#v err=%v", active, err)
+	}
+	epoch = uuid.NewString()
+	db, err = openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition=? WHERE singleton=1`, epoch, target, active.Fingerprint, epoch, target, active.Fingerprint, active.Fingerprint, now.UnixMilli(), "prepared")
+	closeErr := db.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("record parent prepared source err=%v close=%v", err, closeErr)
+	}
+	prepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || prepared.Version != 3 || prepared.Phase != MigrationSourcePrepared || prepared.Fingerprint != active.Fingerprint {
+		t.Fatalf("parent v3 prepared manifest=%#v err=%v", prepared, err)
+	}
+	body, err := json.Marshal(prepared)
+	if err != nil || strings.Contains(string(body), `"control_events"`) || strings.Contains(string(body), `"control_idempotency"`) {
+		t.Fatalf("parent v3 manifest changed body=%s err=%v", body, err)
+	}
+	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("parent v3 control batch=%#v err=%v", controls, err)
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, epoch, target, active.Fingerprint)
+	if err != nil || aborted.Version != 2 || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("parent v3 abort=%#v err=%v", aborted, err)
 	}
 }
 
