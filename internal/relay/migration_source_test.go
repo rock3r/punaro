@@ -570,6 +570,18 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Role: "role/fenced", RoleMachineID: "machine-a", Capabilities: CapReceive}}, now); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/fenced", "agent/a", now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -589,6 +601,15 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 		t.Fatalf("role-only active manifest=%#v err=%v", active, err)
 	}
 	epoch, target := uuid.NewString(), strings.Repeat("a", 64)
+	preparedV2, err := PrepareMigrationSource(ctx, path, epoch, target, active.Fingerprint, now.Add(time.Minute))
+	if err != nil || preparedV2.Version != 2 || preparedV2.Phase != MigrationSourcePrepared {
+		t.Fatalf("role-only v2 preparation=%#v err=%v", preparedV2, err)
+	}
+	active, err = AbortPreparedMigrationSource(ctx, path, epoch, target, preparedV2.Fingerprint)
+	if err != nil || active.Version != 2 || active.Phase != MigrationSourceActive {
+		t.Fatalf("role-only v2 abort=%#v err=%v", active, err)
+	}
+	epoch = uuid.NewString()
 	db, err = openMigrationSourceDatabase(path, false)
 	if err != nil {
 		t.Fatal(err)

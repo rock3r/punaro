@@ -72,6 +72,16 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	if err := legacy.Validate(); err != nil {
 		t.Fatalf("legacy request rejected: %v", err)
 	}
+	parentV3 := valid
+	parentV3Manifest := manifest
+	parentV3Manifest.TableSHA256.ControlEvents = ""
+	parentV3Manifest.TableSHA256.ControlIdempotency = ""
+	parentV3.Manifest, _ = json.Marshal(parentV3Manifest)
+	parentV3Digest := sha256.Sum256(parentV3.Manifest)
+	parentV3.ManifestSHA256 = hex.EncodeToString(parentV3Digest[:])
+	if err := parentV3.Validate(); err != nil {
+		t.Fatalf("parent v3 request rejected: %v", err)
+	}
 	invalid := []MailCutoverRequest{
 		{},
 		func() MailCutoverRequest { changed := valid; changed.EpochID = "bad"; return changed }(),

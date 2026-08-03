@@ -236,7 +236,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			consumer_id=NULL,consumer_generation=consumer_generation+CASE WHEN consumer_id IS NULL THEN 0 ELSE 1 END,consumer_lease_until=NULL`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration endpoint fencing failed")
 		}
-		if current.Version >= 3 {
+		if current.Version >= 2 {
 			if _, err := conn.ExecContext(ctx, `UPDATE role_bindings SET lease_until=?, ownership_generation=(
 				SELECT ownership_generation FROM endpoints WHERE endpoint=role_bindings.session_endpoint
 			)`, now.UTC().UnixMilli()); err != nil {

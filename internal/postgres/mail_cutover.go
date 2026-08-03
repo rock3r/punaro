@@ -70,13 +70,14 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 	if (manifest.Version < 1 || manifest.Version > 3) || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
 		return nil, errors.New("mail cutover manifest binding does not match")
 	}
+	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
 	for _, count := range counts {
 		if count < 0 {
 			return nil, errors.New("mail cutover manifest count is invalid")
 		}
 	}
 	for index, hash := range hashes {
-		if ((manifest.Version == 1 && index >= 3 && index <= 5) || (manifest.Version <= 2 && index >= 11 && index <= 12)) && hash == "" {
+		if ((manifest.Version == 1 && index >= 3 && index <= 5) || ((manifest.Version <= 2 || parentRoleOnlyV3) && index >= 11 && index <= 12)) && hash == "" {
 			continue
 		}
 		if !mailCutoverDigestPattern.MatchString(hash) {
