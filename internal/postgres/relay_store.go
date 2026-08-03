@@ -259,6 +259,12 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 	if _, err := postgresEndpointOwnershipLocked(tx, adminEndpoint, machineID, now); err != nil {
 		return err
 	}
+	var nextSequence int64
+	if err := tx.QueryRowContext(context.Background(), `SELECT next_sequence FROM relay.mail_conversations WHERE id=$1::uuid FOR UPDATE`, conversationID).Scan(&nextSequence); errors.Is(err, sql.ErrNoRows) {
+		return relay.ErrForbidden
+	} else if err != nil {
+		return errors.New("conversation membership transition is unavailable")
+	}
 	var capabilities relay.Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, conversationID, adminEndpoint).Scan(&capabilities)
 	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapAdmin == 0 {

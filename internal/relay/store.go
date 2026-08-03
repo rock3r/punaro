@@ -207,6 +207,26 @@ func Open(database string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &Store{db: db}
+	var migrationControlExists bool
+	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("inspect relay migration control: %w", err)
+	}
+	if migrationControlExists {
+		var migrationPhase MigrationSourcePhase
+		if err := db.QueryRowContext(context.Background(), `SELECT phase FROM relay_migration_control WHERE singleton=1`).Scan(&migrationPhase); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("inspect relay migration phase: %w", err)
+		}
+		if migrationPhase == MigrationSourcePrepared {
+			_ = db.Close()
+			return nil, ErrMigrationSourcePrepared
+		}
+		if migrationPhase == MigrationSourceRetired {
+			_ = db.Close()
+			return nil, ErrMigrationSourceRetired
+		}
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -642,6 +662,15 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 	if err := endpointOwnedBy(tx, adminEndpoint, machineID, now); err != nil {
 		return err
 	}
+	// Serialize every membership transition for this conversation so concurrent
+	// administrators cannot each observe another admin and remove the last one.
+	result, err := tx.ExecContext(context.Background(), "UPDATE conversations SET created_at=created_at WHERE id=?", conversationID)
+	if err != nil {
+		return fmt.Errorf("lock conversation membership transition: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return ErrForbidden
+	}
 	var adminCapabilities Capability
 	if err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, adminEndpoint).Scan(&adminCapabilities); errors.Is(err, sql.ErrNoRows) || adminCapabilities&CapAdmin == 0 {
 		return ErrForbidden
@@ -698,7 +727,7 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 			return fmt.Errorf("rebind pending deliveries: %w", err)
 		}
 	}
-	result, err := tx.ExecContext(context.Background(), "UPDATE memberships SET endpoint=?, capabilities=?, role=? WHERE conversation_id=? AND endpoint=?", member.Endpoint, member.Capabilities, member.Role, conversationID, previousEndpoint)
+	result, err = tx.ExecContext(context.Background(), "UPDATE memberships SET endpoint=?, capabilities=?, role=? WHERE conversation_id=? AND endpoint=?", member.Endpoint, member.Capabilities, member.Role, conversationID, previousEndpoint)
 	if err != nil {
 		return fmt.Errorf("update conversation member: %w", err)
 	}

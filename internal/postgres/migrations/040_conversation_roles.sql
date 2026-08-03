@@ -43,14 +43,17 @@ STABLE
 SET search_path = pg_catalog
 AS $function$
     SELECT COALESCE(bool_and(
-        previous_binding.principal_id IS NOT NULL
+        evidence.recipient_principal_id IS NOT NULL
         AND replacement_binding.principal_id IS NOT NULL
-        AND previous_binding.principal_id = replacement_binding.principal_id
+        AND replacement_binding.principal_id = evidence.recipient_principal_id
     ), true)
     FROM relay.mail_deliveries AS delivery
     JOIN relay.mail_messages AS message ON message.id = delivery.message_id
     JOIN attachment.message_artifacts AS artifact ON artifact.message_id = message.id
-    LEFT JOIN attachment.endpoint_principals AS previous_binding ON previous_binding.endpoint = previous_endpoint
+    LEFT JOIN attachment.recipient_grant_endpoints AS evidence
+      ON evidence.message_id = delivery.message_id
+     AND evidence.recipient_endpoint = delivery.recipient_endpoint
+     AND evidence.artifact_id = artifact.artifact_id
     LEFT JOIN attachment.endpoint_principals AS replacement_binding ON replacement_binding.endpoint = replacement_endpoint
     WHERE delivery.recipient_endpoint = previous_endpoint
       AND delivery.acked_at IS NULL

@@ -86,6 +86,16 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if prepared.Phase != MigrationSourcePrepared || prepared.EpochID != epochID || prepared.TargetIdentity != targetID || prepared.Fingerprint == first.Fingerprint {
 		t.Fatalf("prepared manifest=%#v active=%#v", prepared, first)
 	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("open prepared source err=%v", err)
+	}
+	stillPrepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || stillPrepared != prepared {
+		t.Fatalf("opening prepared source mutated manifest=%#v want=%#v err=%v", stillPrepared, prepared, err)
+	}
 	preparedRetry, err := PrepareMigrationSource(ctx, path, epochID, targetID, first.Fingerprint, now.Add(time.Minute))
 	if err != nil || preparedRetry != prepared {
 		t.Fatalf("exact prepare retry=%#v err=%v, want %#v", preparedRetry, err, prepared)
