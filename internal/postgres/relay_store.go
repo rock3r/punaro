@@ -561,6 +561,10 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if err != nil {
 		return relay.DeliveryLeasePage{}, err
 	}
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, errors.New("durable role bindings are unavailable")
+	}
 	encodedRecipientIDs, err := json.Marshal(recipientIDs)
 	if err != nil {
 		return relay.DeliveryLeasePage{}, errors.New("delivery recipients are invalid")
@@ -650,7 +654,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	for id := range conversationIDs {
 		cursorIDs = append(cursorIDs, id)
 	}
-	cursors, err := postgresRecipientCursorsForLease(tx, encodedRecipientIDs, cursorIDs)
+	cursors, err := postgresRecipientCursorsForLease(tx, encodedRecipientIDs, cursorIDs, rolesAvailable)
 	if err != nil {
 		return relay.DeliveryLeasePage{}, err
 	}
@@ -660,12 +664,12 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	return relay.DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
 }
 
-func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, conversationIDs []string) (map[string]int64, error) {
+func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, conversationIDs []string, rolesAvailable bool) (map[string]int64, error) {
 	encodedConversationIDs, err := json.Marshal(conversationIDs)
 	if err != nil {
 		return nil, errors.New("recipient conversations are invalid")
 	}
-	rows, err := tx.QueryContext(context.Background(), `WITH recipients AS (
+	query := `WITH recipients AS (
 		SELECT value AS recipient FROM jsonb_array_elements_text($1::jsonb)
 	), conversations AS (
 		SELECT value::uuid AS id FROM jsonb_array_elements_text($2::jsonb)
@@ -674,18 +678,22 @@ func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, co
 		FROM relay.mail_memberships AS membership
 		JOIN conversations ON conversations.id=membership.conversation_id
 		JOIN recipients ON recipients.recipient=membership.endpoint
-		WHERE membership.capabilities&$3<>0
-		UNION ALL
+		WHERE membership.capabilities&$3<>0`
+	if rolesAvailable {
+		query += ` UNION ALL
 		SELECT membership.conversation_id,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
 		JOIN conversations ON conversations.id=membership.conversation_id
 		JOIN recipients ON recipients.recipient=chr(30)||'role:'||membership.role
-		WHERE membership.capabilities&$3<>0
+		WHERE membership.capabilities&$3<>0`
+	}
+	query += `
 	)
 	SELECT authorized.conversation_id::text,MIN(COALESCE(cursor.sequence,0))
 	FROM authorized LEFT JOIN relay.mail_recipient_cursors AS cursor
 	ON cursor.conversation_id=authorized.conversation_id AND cursor.recipient_endpoint=authorized.recipient
-	GROUP BY authorized.conversation_id`, string(encodedRecipientIDs), string(encodedConversationIDs), relay.CapReceive)
+	GROUP BY authorized.conversation_id`
+	rows, err := tx.QueryContext(context.Background(), query, string(encodedRecipientIDs), string(encodedConversationIDs), relay.CapReceive)
 	if err != nil {
 		return nil, errors.New("recipient cursor authorization is unavailable")
 	}
