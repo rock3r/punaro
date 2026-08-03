@@ -34,8 +34,8 @@ func TestWindowsLoadConfigRejectsSharedProfileACL(t *testing.T) {
 		t.Fatalf("share test fixture: %v (%s)", err, output)
 	}
 
-	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "adapter profile file must be a private regular file") {
-		t.Fatalf("shared profile error=%v, want private-file rejection", err)
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "adapter profile is unsafe") {
+		t.Fatalf("shared profile error=%v, want sanitized profile rejection", err)
 	}
 }
 
