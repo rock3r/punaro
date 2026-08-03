@@ -517,13 +517,15 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
 	}
 	if input.Operation == ControlUpsertMember {
-		if err := endpointActive(tx, input.Member.Endpoint, input.Now); err != nil {
-			return ControlEvent{}, false, err
-		}
 		var previous Capability
 		err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint).Scan(&previous)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return ControlEvent{}, false, fmt.Errorf("read existing control member: %w", err)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := endpointActive(tx, input.Member.Endpoint, input.Now); err != nil {
+				return ControlEvent{}, false, err
+			}
 		}
 		if err == nil && previous&CapAdmin != 0 && input.Member.Capabilities&CapAdmin == 0 {
 			var remaining int

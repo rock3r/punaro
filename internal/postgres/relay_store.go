@@ -293,14 +293,6 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if err != nil {
 		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
 	}
-	if input.Operation == relay.ControlUpsertMember {
-		// New members must be actively advertised. Ownership need not match the
-		// actor, while remove deliberately permits pruning a detached endpoint.
-		var until time.Time
-		if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, input.Member.Endpoint).Scan(&until); err != nil || !until.After(input.Now) {
-			return relay.ControlEvent{}, false, relay.ErrForbidden
-		}
-	}
 	var previous relay.Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.Member.Endpoint).Scan(&previous)
 	if input.Operation == relay.ControlRemoveMember && errors.Is(err, sql.ErrNoRows) {
@@ -308,6 +300,14 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return relay.ControlEvent{}, false, errors.New("control target state is unavailable")
+	}
+	if input.Operation == relay.ControlUpsertMember && errors.Is(err, sql.ErrNoRows) {
+		// New members must be actively advertised. Existing members may be
+		// detached so an admin can still revoke their capabilities.
+		var until time.Time
+		if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, input.Member.Endpoint).Scan(&until); err != nil || !until.After(input.Now) {
+			return relay.ControlEvent{}, false, relay.ErrForbidden
+		}
 	}
 	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
 		var remaining int
