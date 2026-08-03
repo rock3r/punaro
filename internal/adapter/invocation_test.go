@@ -37,7 +37,7 @@ func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T)
 		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
 	}
 	var retained int
-	if err := journal.db.QueryRow(`SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
 		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
 	}
 }
