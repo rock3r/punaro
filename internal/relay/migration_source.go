@@ -159,7 +159,8 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 		return errors.New("relay migration enrollment snapshot cannot start")
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := inspectMigrationSource(ctx, tx); err != nil {
+	manifest, err := inspectMigrationSource(ctx, tx)
+	if err != nil {
 		return err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT endpoint, machine_id FROM endpoints ORDER BY endpoint COLLATE BINARY`)
@@ -175,6 +176,12 @@ func CheckMigrationSourceEnrollmentCoverage(ctx context.Context, path, enrollmen
 	}
 	if err := rows.Close(); err != nil || rows.Err() != nil {
 		return errors.New("relay migration endpoints are unavailable")
+	}
+	if manifest.Version == 1 {
+		if err := tx.Commit(); err != nil {
+			return errors.New("relay migration enrollment snapshot cannot commit")
+		}
+		return nil
 	}
 	roleRows, err := tx.QueryContext(ctx, `SELECT DISTINCT machine_id FROM roles ORDER BY machine_id COLLATE BINARY`)
 	if err != nil {
@@ -217,10 +224,12 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			consumer_id=NULL,consumer_generation=consumer_generation+CASE WHEN consumer_id IS NULL THEN 0 ELSE 1 END,consumer_lease_until=NULL`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration endpoint fencing failed")
 		}
-		if _, err := conn.ExecContext(ctx, `UPDATE role_bindings SET lease_until=?, ownership_generation=(
-			SELECT ownership_generation FROM endpoints WHERE endpoint=role_bindings.session_endpoint
-		)`, now.UTC().UnixMilli()); err != nil {
-			return MigrationSourceManifest{}, errors.New("relay migration role binding fencing failed")
+		if current.Version >= 3 {
+			if _, err := conn.ExecContext(ctx, `UPDATE role_bindings SET lease_until=?, ownership_generation=(
+				SELECT ownership_generation FROM endpoints WHERE endpoint=role_bindings.session_endpoint
+			)`, now.UTC().UnixMilli()); err != nil {
+				return MigrationSourceManifest{}, errors.New("relay migration role binding fencing failed")
+			}
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE deliveries SET lease_machine_id=NULL,lease_token=NULL,
 			lease_generation=lease_generation+CASE WHEN lease_token IS NULL THEN 0 ELSE 1 END,
