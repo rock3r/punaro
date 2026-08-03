@@ -1470,7 +1470,6 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.ID != message.ID {
 		t.Fatalf("lease through initial role binding page=%#v err=%v", pageA, err)
 	}
-
 	lockTx, lockCancel, err := app.beginRelayTransaction(nil)
 	if err != nil {
 		t.Fatal(err)

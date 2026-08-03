@@ -404,6 +404,91 @@ func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 	}
 }
 
+func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	now := time.Date(2026, time.August, 3, 10, 0, 0, 0, time.UTC)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/legacy/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := InspectMigrationSource(ctx, path)
+	if err != nil || legacy.Phase != MigrationSourceActive || legacy.Fingerprint == "" {
+		t.Fatalf("legacy active manifest=%#v err=%v", legacy, err)
+	}
+	if _, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), legacy.Fingerprint, now.Add(time.Minute)); err == nil {
+		t.Fatal("legacy active source was prepared without the control-plane schema")
+	}
+
+	prepareLegacy := func(epoch string) {
+		db, err := openMigrationSourceDatabase(path, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = db.Close() }()
+		if _, err := db.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition=? WHERE singleton=1`, epoch, strings.Repeat("b", 64), legacy.Fingerprint, epoch, strings.Repeat("b", 64), legacy.Fingerprint, legacy.Fingerprint, now.UnixMilli(), "prepared"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	epoch := uuid.NewString()
+	prepareLegacy(epoch)
+	prepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy prepared manifest=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening legacy prepared source err=%v", err)
+	}
+	preparedAfterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || preparedAfterOpen.Fingerprint != legacy.Fingerprint || preparedAfterOpen.Phase != MigrationSourcePrepared {
+		t.Fatalf("legacy prepared source changed after Open: manifest=%#v err=%v", preparedAfterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_endpoints", "", 1)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("legacy endpoint batch=%#v err=%v", batch, err)
+	}
+	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("legacy control batch=%#v err=%v", controls, err)
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, epoch, strings.Repeat("b", 64), legacy.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive || aborted.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy abort=%#v err=%v", aborted, err)
+	}
+
+	epoch = uuid.NewString()
+	prepareLegacy(epoch)
+	retired, err := RetirePreparedMigrationSource(ctx, path, epoch, strings.Repeat("b", 64), legacy.Fingerprint)
+	if err != nil || retired.Phase != MigrationSourceRetired || retired.Fingerprint != legacy.Fingerprint {
+		t.Fatalf("legacy retirement=%#v err=%v", retired, err)
+	}
+}
+
 func TestMigrationSourceRefusesMissingOrPermissiveGuard(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

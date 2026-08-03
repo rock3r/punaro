@@ -241,6 +241,30 @@ func Open(database string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	store := &Store{db: db}
+	var migrationControlExists bool
+	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
+		_ = db.Close()
+		return nil, errors.New("relay migration source state is unavailable")
+	}
+	if migrationControlExists {
+		var migrationPhase MigrationSourcePhase
+		if err := db.QueryRowContext(context.Background(), `SELECT phase FROM relay_migration_control WHERE singleton=1`).Scan(&migrationPhase); err != nil {
+			_ = db.Close()
+			return nil, errors.New("relay migration source state is unavailable")
+		}
+		switch migrationPhase {
+		case MigrationSourcePrepared:
+			_ = db.Close()
+			return nil, ErrMigrationSourcePrepared
+		case MigrationSourceRetired:
+			_ = db.Close()
+			return nil, ErrMigrationSourceRetired
+		case MigrationSourceActive:
+		default:
+			_ = db.Close()
+			return nil, errors.New("relay migration source control is invalid")
+		}
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -540,6 +564,9 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
 				return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
 			}
+			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+				return ControlEvent{}, false, err
+			}
 		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO memberships(conversation_id,endpoint,capabilities) VALUES(?,?,?) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("upsert conversation member: %w", err)
@@ -564,6 +591,9 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 		}
 		if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+		}
+		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
+			return ControlEvent{}, false, err
 		}
 		if _, err := tx.ExecContext(context.Background(), "DELETE FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("remove conversation member: %w", err)
