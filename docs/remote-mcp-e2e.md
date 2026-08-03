@@ -99,8 +99,8 @@ the endpoint, tokens, request bodies, response bodies, and topology on failure.
 Its own TLS-backed fixture validates the complete harness flow locally; the
 release command remains the authoritative deployed-candidate check.
 `candidate_commit` must match `git rev-parse HEAD` in the checkout that runs
-the command, and that checkout must have no changes (including untracked
-files), so release evidence cannot be attributed to another build or a
+the command, and that checkout must have no changes (including untracked or
+ignored files), so release evidence cannot be attributed to another build or a
 modified test harness.
 Record its CI job URL, exact command result, candidate commit, deployment image
 digest, approvers, residual risk, and rollback reference in the final

@@ -146,6 +146,9 @@ func TestRemoteMCPE2ECleanCheckoutRejectsTrackedChanges(t *testing.T) {
 	if validRemoteMCPE2ECleanCheckoutStatus("?? internal/mcphttp/override_test.go\n") {
 		t.Fatal("untracked checkout change accepted")
 	}
+	if validRemoteMCPE2ECleanCheckoutStatus("!! internal/mcphttp/override_test.go\n") {
+		t.Fatal("ignored test input accepted")
+	}
 }
 
 func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.T) {
@@ -275,12 +278,25 @@ func TestRemoteMCPE2EJSONRPCResponseRequiresSupportedMediaType(t *testing.T) {
 }
 
 func TestRemoteMCPE2EToolListRequiresConfiguredTool(t *testing.T) {
-	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search"}]}}`)}
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object"}}]}}`)}
 	if !validRemoteMCPE2EToolList(valid, "punaro_memory_search") {
 		t.Fatal("configured tool listing rejected")
 	}
 	if validRemoteMCPE2EToolList(valid, "punaro_memory_propose") {
 		t.Fatal("listing without configured tool accepted")
+	}
+	missingSchema := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search"}]}}`)}
+	if validRemoteMCPE2EToolList(missingSchema, "punaro_memory_search") {
+		t.Fatal("configured tool without input schema accepted")
+	}
+}
+
+func TestRemoteMCPE2ENoScopeFailureDoesNotExposeJSONRPCResult(t *testing.T) {
+	if !validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"error":"insufficient_scope"}`)}) {
+		t.Fatal("OAuth insufficient-scope error response rejected")
+	}
+	if validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"tools":[]}}`)}) {
+		t.Fatal("no-scope response exposing a JSON-RPC result accepted")
 	}
 }
 
@@ -383,7 +399,7 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 			return
 		}
 		if bytes.Contains(body, []byte(`"method":"tools/list"`)) {
-			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search"}]}}`))
+			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-tools-list","result":{"tools":[{"name":"punaro_memory_search","inputSchema":{"type":"object"}}]}}`))
 			return
 		}
 		if bytes.Contains(body, []byte(`"name":"punaro_memory_propose"`)) {
@@ -453,7 +469,7 @@ func checkedOutRemoteMCPE2ECommit() (string, error) {
 	if err != nil {
 		return "", errors.New("candidate commit unavailable")
 	}
-	status, err := exec.Command("git", "status", "--porcelain").Output() // #nosec G204 -- fixed local Git command rejects checkout changes from release evidence.
+	status, err := exec.Command("git", "status", "--porcelain", "--ignored").Output() // #nosec G204 -- fixed local Git command rejects tracked, untracked, and ignored checkout changes from release evidence.
 	if err != nil || !validRemoteMCPE2ECleanCheckoutStatus(string(status)) {
 		return "", errors.New("candidate checkout is not clean")
 	}
@@ -638,6 +654,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	noScope := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.NoScope, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 	remoteMCPE2ERequireStatus(t, noScope, http.StatusForbidden)
 	remoteMCPE2ERedacted(t, noScope, config.sensitiveValues())
+	if !validRemoteMCPE2EOAuthFailureBody(noScope) {
+		t.Fatal("missing required scope response exposed a JSON-RPC result")
+	}
 	if !validRemoteMCPE2EOAuthErrorChallenge(noScope, "insufficient_scope") {
 		t.Fatal("missing required scope did not return an insufficient-scope challenge")
 	}
@@ -882,7 +901,8 @@ func validRemoteMCPE2EToolList(response remoteMCPE2EResponse, expectedTool strin
 		ID      string `json:"id"`
 		Result  struct {
 			Tools []struct {
-				Name string `json:"name"`
+				Name        string          `json:"name"`
+				InputSchema json.RawMessage `json:"inputSchema"`
 			} `json:"tools"`
 		} `json:"result"`
 		Error json.RawMessage `json:"error"`
@@ -891,11 +911,21 @@ func validRemoteMCPE2EToolList(response remoteMCPE2EResponse, expectedTool strin
 		return false
 	}
 	for _, tool := range envelope.Result.Tools {
-		if tool.Name == expectedTool {
+		if tool.Name == expectedTool && validRemoteMCPE2EToolInputSchema(tool.InputSchema) {
 			return true
 		}
 	}
 	return false
+}
+
+func validRemoteMCPE2EToolInputSchema(raw json.RawMessage) bool {
+	if !validJSONObject(raw, maxJSONRPCDepth) {
+		return false
+	}
+	var schema struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(raw, &schema) == nil && schema.Type == "object"
 }
 
 func jsonRawMessageEquals(left, right json.RawMessage) bool {
