@@ -168,6 +168,13 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return errors.New("durable role bindings are unavailable")
+	}
+	if !rolesAvailable {
+		return relay.ErrForbidden
+	}
 	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
 	if err != nil {
 		return err
@@ -302,6 +309,15 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		orderedRoles = append(orderedRoles, role)
 	}
 	sort.Strings(orderedRoles)
+	if len(orderedRoles) != 0 {
+		rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+		if err != nil {
+			return relay.Conversation{}, errors.New("durable role bindings are unavailable")
+		}
+		if !rolesAvailable {
+			return relay.Conversation{}, relay.ErrForbidden
+		}
+	}
 	for _, role := range orderedRoles {
 		owner := roles[role]
 		if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, role); err != nil {
@@ -414,8 +430,14 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
-	if err := postgresLockSessionRoleBindings(tx, input.SenderMachineID, input.FromEndpoint, input.Now); err != nil {
-		return relay.Message{}, false, err
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return relay.Message{}, false, errors.New("durable role bindings are unavailable")
+	}
+	if rolesAvailable {
+		if err := postgresLockSessionRoleBindings(tx, input.SenderMachineID, input.FromEndpoint, input.Now); err != nil {
+			return relay.Message{}, false, err
+		}
 	}
 	capabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.SenderMachineID, input.FromEndpoint, input.Now)
 	if err != nil {
@@ -466,7 +488,8 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
+	if rolesAvailable {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
 		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0
@@ -478,7 +501,8 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 			  AND endpoint.machine_id=$4 AND endpoint.lease_until>$6
 			  AND endpoint.ownership_generation=binding.ownership_generation
 		)`, message.ID, message.ConversationID, relay.CapReceive, input.SenderMachineID, input.FromEndpoint, input.Now.UTC()); err != nil {
-		return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+		}
 	}
 	if len(input.ArtifactIDs) != 0 {
 		encodedArtifacts, err := json.Marshal(input.ArtifactIDs)
@@ -762,18 +786,27 @@ func (d *Database) RecipientMachines(messageID string, now time.Time) ([]string,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	rows, err := d.relayPool().QueryContext(ctx, `SELECT DISTINCT machine_id FROM (
+	rolesAvailable, err := postgresRoleBindingsAvailable(d.relayPool())
+	if err != nil {
+		return nil, errors.New("durable role bindings are unavailable")
+	}
+	query := `SELECT DISTINCT machine_id FROM (
 		SELECT endpoint.machine_id FROM relay.mail_deliveries AS delivery
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint
 		WHERE delivery.message_id=$1::uuid AND endpoint.lease_until>$2
-		UNION
+	`
+	if rolesAvailable {
+		query += `UNION
 		SELECT binding.machine_id FROM relay.mail_deliveries AS delivery
 		JOIN relay.mail_role_bindings AS binding ON delivery.recipient_endpoint=chr(30)||'role:'||binding.role
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
 		WHERE delivery.message_id=$1::uuid AND binding.lease_until>$2
 		  AND endpoint.lease_until>$2 AND endpoint.machine_id=binding.machine_id
 		  AND endpoint.ownership_generation=binding.ownership_generation
-	) AS recipients ORDER BY machine_id`, messageID, now.UTC())
+	`
+	}
+	query += `) AS recipients ORDER BY machine_id`
+	rows, err := d.relayPool().QueryContext(ctx, query, messageID, now.UTC())
 	if err != nil {
 		return nil, errors.New("message recipients are unavailable")
 	}
@@ -796,19 +829,28 @@ func (d *Database) RecipientMachines(messageID string, now time.Time) ([]string,
 func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]relay.Conversation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	rows, err := d.relayPool().QueryContext(ctx, `SELECT DISTINCT id FROM (
+	rolesAvailable, err := postgresRoleBindingsAvailable(d.relayPool())
+	if err != nil {
+		return nil, errors.New("durable role bindings are unavailable")
+	}
+	query := `SELECT DISTINCT id FROM (
 		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
 		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2
-		UNION
+	`
+	if rolesAvailable {
+		query += `UNION
 		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_role_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
 		WHERE binding.machine_id=$1 AND binding.lease_until>$2 AND endpoint.machine_id=$1
 		  AND endpoint.lease_until>$2 AND endpoint.ownership_generation=binding.ownership_generation
-	) AS visible ORDER BY id`, machineID, now.UTC())
+	`
+	}
+	query += `) AS visible ORDER BY id`
+	rows, err := d.relayPool().QueryContext(ctx, query, machineID, now.UTC())
 	if err != nil {
 		return nil, errors.New("machine conversations are unavailable")
 	}
@@ -916,8 +958,15 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
 		return 0, err
 	}
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return 0, errors.New("session authorization is unavailable")
+	}
 	var capabilities int64
-	err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(bit_or(capabilities::int),0) FROM (
+	if !rolesAvailable {
+		err = tx.QueryRowContext(context.Background(), `SELECT COALESCE(capabilities::int,0) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
+	} else {
+		err = tx.QueryRowContext(context.Background(), `SELECT COALESCE(bit_or(capabilities::int),0) FROM (
 		SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2
 		UNION ALL
 		SELECT membership.capabilities FROM relay.mail_role_memberships AS membership
@@ -927,6 +976,7 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 		  AND binding.lease_until>$4 AND live.machine_id=$3 AND live.lease_until>$4
 		  AND live.ownership_generation=binding.ownership_generation
 	) AS grants`, conversationID, endpoint, machineID, now.UTC()).Scan(&capabilities)
+	}
 	if err != nil {
 		return 0, errors.New("session authorization is unavailable")
 	}
@@ -941,6 +991,13 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 // ownership records, so operations that lease, acknowledge, or append through
 // them must hold a shared lock until commit.
 func postgresLockSessionRoleBindings(tx *sql.Tx, machineID, endpoint string, now time.Time) error {
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	if !rolesAvailable {
+		return nil
+	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT binding.role FROM relay.mail_role_bindings AS binding
 		WHERE binding.machine_id=$1 AND binding.session_endpoint=$2 AND binding.lease_until>$3
 		FOR SHARE OF binding`, machineID, endpoint, now.UTC())
@@ -961,6 +1018,13 @@ func postgresLockSessionRoleBindings(tx *sql.Tx, machineID, endpoint string, now
 }
 
 func postgresSessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generation int64, now time.Time) ([]string, error) {
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return nil, errors.New("session recipients are unavailable")
+	}
+	if !rolesAvailable {
+		return []string{endpoint}, nil
+	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT recipient FROM (
 		SELECT $2::text AS recipient,0 AS ordinal
 		UNION ALL
@@ -986,6 +1050,14 @@ func postgresSessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generat
 		return nil, errors.New("session recipients are unavailable")
 	}
 	return identities, nil
+}
+
+func postgresRoleBindingsAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_bindings') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
 }
 
 func postgresAdvanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversationID string, now time.Time) error {

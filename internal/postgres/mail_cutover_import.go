@@ -327,6 +327,9 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
+	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+		return 0, emptyMailCutoverDigest
+	}
 	switch table {
 	case "mail_endpoints":
 		return manifest.Counts.Endpoints, manifest.TableSHA256.Endpoints

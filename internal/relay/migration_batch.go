@@ -165,6 +165,9 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	if manifest.Phase != MigrationSourcePrepared {
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
+	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+		return MigrationSourceBatch{Done: true}, nil
+	}
 	var keyValues []any
 	where := ""
 	if afterKey != "" {

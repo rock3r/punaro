@@ -67,7 +67,7 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 	}
 	counts := []int64{manifest.Counts.Endpoints, manifest.Counts.Conversations, manifest.Counts.Memberships, manifest.Counts.Roles, manifest.Counts.RoleMemberships, manifest.Counts.RoleBindings, manifest.Counts.Messages, manifest.Counts.Deliveries, manifest.Counts.RecipientCursors, manifest.Counts.MessageIdempotency, manifest.Counts.ConversationIdempotency, manifest.Counts.RequestNonces}
 	hashes := []string{manifest.TableSHA256.Endpoints, manifest.TableSHA256.Conversations, manifest.TableSHA256.Memberships, manifest.TableSHA256.Roles, manifest.TableSHA256.RoleMemberships, manifest.TableSHA256.RoleBindings, manifest.TableSHA256.Messages, manifest.TableSHA256.Deliveries, manifest.TableSHA256.RecipientCursors, manifest.TableSHA256.MessageIdempotency, manifest.TableSHA256.ConversationIdempotency, manifest.TableSHA256.RequestNonces}
-	if manifest.Version != 3 || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
+	if (manifest.Version != 1 && manifest.Version != 3) || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
 		return nil, errors.New("mail cutover manifest binding does not match")
 	}
 	for _, count := range counts {
@@ -75,13 +75,23 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 			return nil, errors.New("mail cutover manifest count is invalid")
 		}
 	}
-	for _, hash := range hashes {
+	for index, hash := range hashes {
+		if manifest.Version == 1 && index >= 3 && index <= 5 && hash == "" {
+			continue
+		}
 		if !mailCutoverDigestPattern.MatchString(hash) {
 			return nil, errors.New("mail cutover manifest hash is invalid")
 		}
 	}
-	canonical, err := json.Marshal(manifest)
-	if err != nil || len(canonical) > 8192 {
+	canonical := request.Manifest
+	if manifest.Version != 1 {
+		var err error
+		canonical, err = json.Marshal(manifest)
+		if err != nil {
+			return nil, errors.New("mail cutover manifest is too large")
+		}
+	}
+	if len(canonical) > 8192 {
 		return nil, errors.New("mail cutover manifest is too large")
 	}
 	digest := sha256.Sum256(canonical)
