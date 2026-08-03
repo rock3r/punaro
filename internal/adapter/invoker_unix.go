@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -26,7 +27,7 @@ func openPinnedInvocationExecutable(path string) (*os.File, error) {
 	}
 	for current := canonicalPath; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 {
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o022 != 0 || !trustedInvocationPathOwner(info) {
 			return nil, fmt.Errorf("invocation runtime command must have protected non-symlink path components")
 		}
 		if current == string(filepath.Separator) {
@@ -34,7 +35,7 @@ func openPinnedInvocationExecutable(path string) (*os.File, error) {
 		}
 	}
 	info, err := os.Lstat(canonicalPath)
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil || !info.Mode().IsRegular() || !trustedInvocationPathOwner(info) {
 		return nil, fmt.Errorf("invocation runtime command must be a protected regular executable")
 	}
 	if info.Mode().Perm()&0o111 == 0 {
@@ -51,6 +52,11 @@ func openPinnedInvocationExecutable(path string) (*os.File, error) {
 		return nil, fmt.Errorf("invocation runtime command changed during validation")
 	}
 	return executable, nil
+}
+
+func trustedInvocationPathOwner(info os.FileInfo) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && (stat.Uid == uint32(os.Geteuid()) || stat.Uid == 0)
 }
 
 func runPinnedInvocationExecutable(ctx context.Context, executable *os.File, invocation relay.Invocation) error {

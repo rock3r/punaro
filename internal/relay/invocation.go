@@ -106,7 +106,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		if err := tx.Commit(); err != nil {
 			return Invocation{}, false, err
 		}
-		return invocation, true, nil
+		return invocationForCaller(invocation, input), true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Invocation{}, false, fmt.Errorf("read invocation idempotency: %w", err)
@@ -172,7 +172,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		if err := tx.Commit(); err != nil {
 			return Invocation{}, false, err
 		}
-		return invocation, true, nil
+		return invocationForCaller(invocation, input), true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Invocation{}, false, fmt.Errorf("find pending invocation: %w", err)
@@ -191,6 +191,16 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		return Invocation{}, false, err
 	}
 	return invocation, false, nil
+}
+
+func invocationForCaller(invocation Invocation, input InvokeInput) Invocation {
+	if invocation.ConversationID == input.ConversationID {
+		return invocation
+	}
+	// A shared endpoint-level start fence is deliberately opaque to callers in
+	// other conversations. They learn only that their request converged on a
+	// pending start, not the original conversation, machine, ID, or fence.
+	return Invocation{ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, Status: invocation.Status}
 }
 
 // LeaseInvocations gives an enrolled adapter bounded content-free start work.

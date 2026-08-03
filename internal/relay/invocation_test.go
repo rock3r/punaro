@@ -321,7 +321,7 @@ func TestInvokeCoalescesPendingWorkAcrossConversationsForOneTarget(t *testing.T)
 	}
 	invocationA := request(conversationA, "invoke-a", false)
 	invocationB := request(conversationB, "invoke-b", true)
-	if invocationA.ID != invocationB.ID || invocationA.Fence != invocationB.Fence {
-		t.Fatalf("cross-conversation invocation was not coalesced: A=%#v B=%#v", invocationA, invocationB)
+	if invocationA.ID == "" || invocationA.Fence == "" || invocationB.ID != "" || invocationB.Fence != "" || invocationB.ConversationID != conversationB.ID || invocationB.TargetEndpoint != "agent/recipient" || invocationB.Status != InvocationPending {
+		t.Fatalf("cross-conversation invocation response leaked or did not coalesce: A=%#v B=%#v", invocationA, invocationB)
 	}
 }
