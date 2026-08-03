@@ -2333,8 +2333,11 @@ OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND resu
 		{"mail message", `DELETE FROM relay.mail_messages WHERE id=$1`, messageID},
 		{"mail recipient cursor", `DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, conversationID},
 		{"mail membership", `DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, conversationID},
+		{"mail role membership", `DELETE FROM relay.mail_role_memberships WHERE conversation_id=$1`, conversationID},
+		{"mail role binding", `DELETE FROM relay.mail_role_bindings WHERE role=$1`, role},
 		{"mail conversation idempotency", `DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, conversationID},
 		{"mail conversation", `DELETE FROM relay.mail_conversations WHERE id=$1`, conversationID},
+		{"mail role", `DELETE FROM relay.mail_roles WHERE role=$1`, role},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, cleanup.query, cleanup.argument); err != nil {
 			t.Fatalf("clean up evidence %s: %v", cleanup.name, err)
