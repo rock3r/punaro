@@ -409,6 +409,7 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 		if err := rows.Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
 			return nil, errors.New("control audit row is malformed")
 		}
+		event.CreatedAt = event.CreatedAt.UTC()
 		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
@@ -425,6 +426,7 @@ func postgresControlEventByID(tx *sql.Tx, id string) (relay.ControlEvent, error)
 	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE id=$1::uuid`, id).Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
 		return relay.ControlEvent{}, errors.New("control retry event is unavailable")
 	}
+	event.CreatedAt = event.CreatedAt.UTC()
 	return event, nil
 }
 
