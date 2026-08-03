@@ -97,17 +97,17 @@ BEGIN
     FROM pg_default_acl default_acl
     CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
     WHERE privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
-       OR (privilege.grantee = 0 AND default_acl.defaclobjtype IN ('r', 'S'))
+       OR (privilege.grantee = 0 AND default_acl.defaclobjtype IN ('r', 'S', 'f'))
   ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table or sequence default privileges remain; revoke them and rerun bootstrap';
+    RAISE EXCEPTION 'refusing to rotate punaro_app while default privileges grant it access or PUBLIC table, sequence, or function default privileges remain; revoke them and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_default_acl default_acl
     CROSS JOIN LATERAL aclexplode(coalesce(default_acl.defaclacl, acldefault(CASE default_acl.defaclobjtype WHEN 'S' THEN 'S'::"char" WHEN 'f' THEN 'f'::"char" ELSE 'r'::"char" END, default_acl.defaclrole))) privilege
-    WHERE default_acl.defaclobjtype IN ('r', 'S')
+    WHERE default_acl.defaclobjtype IN ('r', 'S', 'f')
       AND privilege.grantee NOT IN (0, default_acl.defaclrole, (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app'))
   ) THEN
-    RAISE EXCEPTION 'refusing to rotate punaro_app while table or sequence default privileges grant a third-party role access; revoke them and rerun bootstrap';
+    RAISE EXCEPTION 'refusing to rotate punaro_app while table, sequence, or function default privileges grant a third-party role access; revoke them and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
