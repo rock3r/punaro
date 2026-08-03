@@ -776,6 +776,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
         OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM conversation_idempotency GROUP BY conversation_id HAVING count(*)<>1)
 		OR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15 OR (operation='upsert_member' AND member_capabilities=0) OR (operation='remove_member' AND member_capabilities<>0))
+		OR EXISTS (SELECT 1 FROM conversation_controls AS control
+			LEFT JOIN endpoints AS actor ON actor.endpoint=control.actor_endpoint
+			LEFT JOIN endpoints AS member ON member.endpoint=control.member_endpoint
+			WHERE actor.endpoint IS NULL OR member.endpoint IS NULL)
 		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)
 		OR EXISTS (SELECT 1 FROM uuid_values WHERE typeof(value)<>'text' OR length(value)<>36 OR substr(value,9,1)<>'-' OR substr(value,14,1)<>'-' OR substr(value,19,1)<>'-' OR substr(value,24,1)<>'-' OR lower(replace(value,'-','')) GLOB '*[^0-9a-f]*')
@@ -805,6 +809,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		for _, clause := range []string{
 			"\n\t\tUNION ALL SELECT id FROM conversation_controls UNION ALL SELECT conversation_id FROM conversation_controls\n\t\tUNION ALL SELECT control_id FROM conversation_control_idempotency",
 			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15 OR (operation='upsert_member' AND member_capabilities=0) OR (operation='remove_member' AND member_capabilities<>0))",
+			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls AS control\n\t\t\tLEFT JOIN endpoints AS actor ON actor.endpoint=control.actor_endpoint\n\t\t\tLEFT JOIN endpoints AS member ON member.endpoint=control.member_endpoint\n\t\t\tWHERE actor.endpoint IS NULL OR member.endpoint IS NULL)",
 			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')",
 			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)",
 			"\n\t\tOR EXISTS (SELECT 1 FROM conversation_controls WHERE typeof(actor_endpoint)<>'text' OR typeof(operation)<>'text' OR typeof(member_endpoint)<>'text' OR typeof(member_capabilities)<>'integer' OR typeof(created_at)<>'integer')",

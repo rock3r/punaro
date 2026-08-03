@@ -309,6 +309,36 @@ func TestMigrationSourceRejectsOperationInconsistentControlAudit(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRejectsControlAuditWithMissingEndpoint(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 3, 12, 20, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive}}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/b"}, IdempotencyKey: "missing-control-target", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM endpoints WHERE endpoint='agent/b'"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("migration source accepted a control audit event with a missing endpoint")
+	}
+}
+
 func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
