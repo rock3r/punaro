@@ -24,6 +24,7 @@ operator, and never attach it to CI logs or the release record. Its shape is:
   "endpoint": "https://candidate.example.invalid/mcp",
   "resource": "https://candidate.example.invalid/mcp",
   "authorization_server": "https://issuer.example.invalid",
+  "protocol_version": "2024-11-05",
   "tokens": {
     "valid": "private-token-for-the-authorized-read-only-tool",
     "invalid": "private-malformed-or-unrecognized-token",
@@ -56,7 +57,8 @@ operator, and never attach it to CI logs or the release record. Its shape is:
 `candidate_commit` must be the deployed 40-character lowercase Git commit.
 `endpoint` and `resource` must be the same canonical HTTPS MCP resource;
 `authorization_server` is the canonical HTTPS issuer. The tool arguments must
-be JSON objects with no duplicate keys. Every token and the redaction probe
+be JSON objects with no duplicate keys. `protocol_version` is the MCP protocol
+version the disposable client must negotiate with the candidate. Every token and the redaction probe
 must be a distinct, at-least-16-character OAuth bearer value made only of
 letters, digits, `-._~+/=`. Values above are placeholders, not usable
 credentials. `authorized_tool.expected_result` must be the exact non-error MCP
@@ -82,6 +84,8 @@ The test proves all of the following against the candidate:
   and an `invalid_token` challenge; a revoked token fails the configured `401`
   token-revocation or `403` disabled-subject boundary;
 - missing required scope and tool-specific insufficient scope fail closed;
+- the MCP `initialize` / `notifications/initialized` lifecycle negotiates the
+  configured protocol before any tool invocation;
 - duplicate-member JSON-RPC input fails without executing a request;
 - a valid scoped bearer reaches its configured tool; and
 - failure headers and bodies do not echo any supplied token or the redaction

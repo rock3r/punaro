@@ -30,6 +30,7 @@ type remoteMCPE2EConfig struct {
 	Endpoint            string `json:"endpoint"`
 	Resource            string `json:"resource"`
 	AuthorizationServer string `json:"authorization_server"`
+	ProtocolVersion     string `json:"protocol_version"`
 	Tokens              struct {
 		Valid         string `json:"valid"`
 		Invalid       string `json:"invalid"`
@@ -73,6 +74,7 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 		"endpoint":"https://mcp.example.test/mcp",
 		"resource":"https://mcp.example.test/mcp",
 		"authorization_server":"https://auth.example.test",
+		"protocol_version":"2024-11-05",
 		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":{"token":"ffffffffffffffff","expected_status":403},"no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
 		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
@@ -140,6 +142,43 @@ func TestRemoteMCPE2ERevocationRequiresConfiguredClosedRejection(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPE2EConfigReadIsBounded(t *testing.T) {
+	if _, err := readRemoteMCPE2EConfig(strings.NewReader(strings.Repeat("x", maxRemoteMCPE2EConfig+1))); err == nil {
+		t.Fatal("oversized E2E config accepted")
+	}
+}
+
+func TestRemoteMCPE2EOAuthErrorChallengeIsStructured(t *testing.T) {
+	valid := remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Www-Authenticate": []string{`Bearer error="invalid_token"`}}}
+	if !validRemoteMCPE2EOAuthErrorChallenge(valid, "invalid_token") {
+		t.Fatal("valid Bearer error challenge rejected")
+	}
+	invalid := remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Www-Authenticate": []string{`Basic error="invalid_token"`}}}
+	if validRemoteMCPE2EOAuthErrorChallenge(invalid, "invalid_token") {
+		t.Fatal("non-Bearer error challenge accepted")
+	}
+}
+
+func TestRemoteMCPE2EJSONRPCFailureRejectsServerErrors(t *testing.T) {
+	if validRemoteMCPE2EJSONRPCFailure(remoteMCPE2EResponse{Status: http.StatusInternalServerError}) {
+		t.Fatal("server error accepted as malformed-request rejection")
+	}
+	if !validRemoteMCPE2EJSONRPCFailure(remoteMCPE2EResponse{Status: http.StatusBadRequest}) {
+		t.Fatal("client error rejected as malformed-request rejection")
+	}
+}
+
+func TestRemoteMCPE2EInitializeRequiresNegotiatedProtocol(t *testing.T) {
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
+	if !validRemoteMCPE2EInitializeSuccess(valid, "2024-11-05") {
+		t.Fatal("valid initialize response rejected")
+	}
+	wrongVersion := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"other","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
+	if validRemoteMCPE2EInitializeSuccess(wrongVersion, "2024-11-05") {
+		t.Fatal("wrong initialize protocol accepted")
+	}
+}
+
 func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 	var config remoteMCPE2EConfig
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -179,6 +218,14 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 			return
 		}
 		response.Header().Set("Content-Type", "application/json")
+		if bytes.Contains(body, []byte(`"method":"initialize"`)) {
+			_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`))
+			return
+		}
+		if bytes.Contains(body, []byte(`"method":"notifications/initialized"`)) {
+			response.WriteHeader(http.StatusAccepted)
+			return
+		}
 		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`))
 	}))
 	defer server.Close()
@@ -193,6 +240,7 @@ func remoteMCPE2EFixtureConfig(t *testing.T, endpoint string) remoteMCPE2EConfig
 		"endpoint":"` + endpoint + `",
 		"resource":"` + endpoint + `",
 		"authorization_server":"https://auth.example.test",
+		"protocol_version":"2024-11-05",
 		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":{"token":"ffffffffffffffff","expected_status":401},"no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
 		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
@@ -210,18 +258,28 @@ func loadRemoteMCPE2EConfig(t *testing.T) remoteMCPE2EConfig {
 	if configPath == "" {
 		t.Skip("set PUNARO_REMOTE_MCP_E2E_CONFIG to run the remote MCP release-candidate E2E test")
 	}
-	contents, err := os.ReadFile(configPath) // #nosec G304 -- operator-selected private E2E configuration.
+	file, err := os.Open(configPath) // #nosec G304 -- operator-selected private E2E configuration.
 	if err != nil {
 		t.Fatal("remote MCP E2E configuration is unavailable")
 	}
-	if len(contents) > maxRemoteMCPE2EConfig {
-		t.Fatal("remote MCP E2E configuration is too large")
+	defer file.Close()
+	contents, err := readRemoteMCPE2EConfig(file)
+	if err != nil {
+		t.Fatal("remote MCP E2E configuration is invalid")
 	}
 	config, err := parseRemoteMCPE2EConfig(contents)
 	if err != nil {
 		t.Fatal("remote MCP E2E configuration is invalid")
 	}
 	return config
+}
+
+func readRemoteMCPE2EConfig(reader io.Reader) ([]byte, error) {
+	contents, err := io.ReadAll(io.LimitReader(reader, maxRemoteMCPE2EConfig+1))
+	if err != nil || len(contents) > maxRemoteMCPE2EConfig {
+		return nil, errors.New("invalid remote MCP E2E configuration")
+	}
+	return contents, nil
 }
 
 func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
@@ -234,7 +292,7 @@ func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
 	if err := decoder.Decode(&config); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return remoteMCPE2EConfig{}, errors.New("invalid remote MCP E2E configuration")
 	}
-	if !validCommit(config.CandidateCommit) || !validRemoteMCPE2EURL(config.Endpoint, true) || config.Endpoint != config.Resource || !validRemoteMCPE2EURL(config.Resource, true) || !validRemoteMCPE2EURL(config.AuthorizationServer, false) || !validRemoteMCPE2EBearer(config.RedactionProbe) {
+	if !validCommit(config.CandidateCommit) || !validRemoteMCPE2EURL(config.Endpoint, true) || config.Endpoint != config.Resource || !validRemoteMCPE2EURL(config.Resource, true) || !validRemoteMCPE2EURL(config.AuthorizationServer, false) || !validRemoteMCPE2EProtocolVersion(config.ProtocolVersion) || !validRemoteMCPE2EBearer(config.RedactionProbe) {
 		return remoteMCPE2EConfig{}, errors.New("invalid remote MCP E2E configuration")
 	}
 	seen := map[string]struct{}{config.RedactionProbe: {}}
@@ -251,6 +309,18 @@ func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
 		return remoteMCPE2EConfig{}, errors.New("invalid remote MCP E2E configuration")
 	}
 	return config, nil
+}
+
+func validRemoteMCPE2EProtocolVersion(value string) bool {
+	if len(value) == 0 || len(value) > 32 || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if !(character >= '0' && character <= '9' || character == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func validCommit(raw string) bool {
@@ -365,7 +435,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		response := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, token, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 		remoteMCPE2ERequireStatus(t, response, http.StatusUnauthorized)
 		remoteMCPE2ERedacted(t, response, config.sensitiveValues())
-		if !strings.Contains(response.Header.Get("WWW-Authenticate"), `error="invalid_token"`) {
+		if !validRemoteMCPE2EOAuthErrorChallenge(response, "invalid_token") {
 			t.Fatal("invalid bearer token did not return the OAuth invalid-token challenge")
 		}
 	}
@@ -378,7 +448,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	noScope := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.NoScope, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 	remoteMCPE2ERequireStatus(t, noScope, http.StatusForbidden)
 	remoteMCPE2ERedacted(t, noScope, config.sensitiveValues())
-	if !strings.Contains(noScope.Header.Get("WWW-Authenticate"), `error="insufficient_scope"`) {
+	if !validRemoteMCPE2EOAuthErrorChallenge(noScope, "insufficient_scope") {
 		t.Fatal("missing required scope did not return an insufficient-scope challenge")
 	}
 
@@ -393,10 +463,16 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		remoteMCPE2ERequireJSONRPCFailure(t, malformed)
 	}
 
-	authorized := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
+	initialized := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, remoteMCPE2ERequestWithID(t, "remote-mcp-e2e-initialize", "initialize", map[string]any{"protocolVersion": config.ProtocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "punaro-remote-mcp-e2e", "version": "1"}}))
+	remoteMCPE2ERequireInitializeSuccess(t, initialized, config.ProtocolVersion)
+	sessionID := initialized.Header.Get("Mcp-Session-Id")
+	notification := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, sessionID, remoteMCPE2ENotification(t, "notifications/initialized", map[string]any{}))
+	remoteMCPE2ERequireInitializedNotification(t, notification)
+
+	authorized := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, sessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
 	remoteMCPE2ERequireJSONRPCSuccess(t, authorized, config.AuthorizedTool.ExpectedResult)
 
-	forbidden := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.InsufficientScope, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.ForbiddenTool.Name, "arguments": config.ForbiddenTool.Arguments}))
+	forbidden := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.InsufficientScope, sessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.ForbiddenTool.Name, "arguments": config.ForbiddenTool.Arguments}))
 	remoteMCPE2ERequireStatus(t, forbidden, config.ForbiddenTool.ExpectedStatus)
 	remoteMCPE2ERedacted(t, forbidden, config.sensitiveValues())
 	remoteMCPE2ERequireJSONRPCFailure(t, forbidden)
@@ -417,15 +493,32 @@ func remoteMCPE2EMetadataURL(t *testing.T, resource string) string {
 }
 
 func remoteMCPE2ERequest(t *testing.T, method string, params any) []byte {
+	return remoteMCPE2ERequestWithID(t, "remote-mcp-e2e", method, params)
+}
+
+func remoteMCPE2ERequestWithID(t *testing.T, id, method string, params any) []byte {
 	t.Helper()
-	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": "remote-mcp-e2e", "method": method, "params": params})
+	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	if err != nil {
 		t.Fatal("remote MCP E2E request could not be encoded")
 	}
 	return raw
 }
 
+func remoteMCPE2ENotification(t *testing.T, method string, params any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err != nil {
+		t.Fatal("remote MCP E2E notification could not be encoded")
+	}
+	return raw
+}
+
 func remoteMCPE2EDo(t *testing.T, client *http.Client, method, endpoint, token string, body []byte) remoteMCPE2EResponse {
+	return remoteMCPE2EDoWithSession(t, client, method, endpoint, token, "", body)
+}
+
+func remoteMCPE2EDoWithSession(t *testing.T, client *http.Client, method, endpoint, token, sessionID string, body []byte) remoteMCPE2EResponse {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), method, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -437,6 +530,9 @@ func remoteMCPE2EDo(t *testing.T, client *http.Client, method, endpoint, token s
 	}
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	if sessionID != "" {
+		request.Header.Set("Mcp-Session-Id", sessionID)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -470,12 +566,50 @@ func validRemoteMCPE2ERevocationResponse(response remoteMCPE2EResponse, expected
 	}
 	switch expectedStatus {
 	case http.StatusUnauthorized:
-		errorCode, found := remoteMCPE2EChallengeParameter(response.Header.Get("WWW-Authenticate"), "error")
-		return found && errorCode == "invalid_token"
+		return validRemoteMCPE2EOAuthErrorChallenge(response, "invalid_token")
 	case http.StatusForbidden:
 		return response.Header.Get("WWW-Authenticate") == ""
 	default:
 		return false
+	}
+}
+
+func validRemoteMCPE2EOAuthErrorChallenge(response remoteMCPE2EResponse, expectedError string) bool {
+	errorCode, found := remoteMCPE2EChallengeParameter(response.Header.Get("WWW-Authenticate"), "error")
+	return found && errorCode == expectedError
+}
+
+func remoteMCPE2ERequireInitializeSuccess(t *testing.T, response remoteMCPE2EResponse, expectedProtocolVersion string) {
+	t.Helper()
+	if !validRemoteMCPE2EInitializeSuccess(response, expectedProtocolVersion) {
+		t.Fatal("MCP initialize did not negotiate the configured protocol")
+	}
+}
+
+func validRemoteMCPE2EInitializeSuccess(response remoteMCPE2EResponse, expectedProtocolVersion string) bool {
+	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) {
+		return false
+	}
+	var envelope struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Result  struct {
+			ProtocolVersion string          `json:"protocolVersion"`
+			Capabilities    json.RawMessage `json:"capabilities"`
+			ServerInfo      struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+		Error json.RawMessage `json:"error"`
+	}
+	return json.Unmarshal(response.Body, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Error) == 0 && jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e-initialize"`)) && envelope.Result.ProtocolVersion == expectedProtocolVersion && validJSONObject(envelope.Result.Capabilities, maxJSONRPCDepth) && envelope.Result.ServerInfo.Name != "" && envelope.Result.ServerInfo.Version != ""
+}
+
+func remoteMCPE2ERequireInitializedNotification(t *testing.T, response remoteMCPE2EResponse) {
+	t.Helper()
+	if response.Status < 200 || response.Status > 299 || len(response.Body) != 0 {
+		t.Fatal("MCP initialized notification did not complete")
 	}
 }
 
@@ -577,17 +711,24 @@ func validRemoteMCPE2EChallengeName(value string) bool {
 
 func remoteMCPE2ERequireJSONRPCFailure(t *testing.T, response remoteMCPE2EResponse) {
 	t.Helper()
-	if response.Status >= 400 {
-		return
+	if !validRemoteMCPE2EJSONRPCFailure(response) {
+		t.Fatal("MCP request did not fail closed")
+	}
+}
+
+func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
+	if response.Status >= 400 && response.Status < 500 {
+		return true
+	}
+	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) {
+		return false
 	}
 	var envelope struct {
 		JSONRPC string          `json:"jsonrpc"`
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(response.Body, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Result) != 0 || len(envelope.Error) == 0 {
-		t.Fatal("MCP request did not fail closed")
-	}
+	return json.Unmarshal(response.Body, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Result) == 0 && len(envelope.Error) != 0
 }
 
 func remoteMCPE2ERedacted(t *testing.T, response remoteMCPE2EResponse, sensitive []string) {
