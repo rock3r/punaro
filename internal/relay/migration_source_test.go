@@ -222,7 +222,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
-func TestMigrationSourceRejectsInvokeCapabilityBeforePreparation(t *testing.T) {
+func TestMigrationSourceAcceptsInvokeCapabilityBeforePreparation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
@@ -238,11 +238,12 @@ func TestMigrationSourceRejectsInvokeCapabilityBeforePreparation(t *testing.T) {
 	if _, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a", Now: now, Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := InspectMigrationSource(ctx, path); err == nil {
-		t.Fatal("invoke-capability source was accepted for incompatible PostgreSQL cutover")
+	manifest, err := InspectMigrationSource(ctx, path)
+	if err != nil || manifest.Phase != MigrationSourceActive {
+		t.Fatalf("invoke-capability manifest=%#v err=%v", manifest, err)
 	}
 	if got := migrationSourcePhase(t, store); got != MigrationSourceActive {
-		t.Fatalf("rejected source inspection changed phase to %q", got)
+		t.Fatalf("source inspection changed phase to %q", got)
 	}
 }
 
