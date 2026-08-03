@@ -41,6 +41,27 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	} else if err != nil {
 		return Invocation{}, false, fmt.Errorf("authorize invocation target: %w", err)
 	}
+	requestHash := stableHash(input.ConversationID, input.FromEndpoint, input.TargetEndpoint)
+	invocationSchemaExists, err := s.invocationSchemaExists()
+	if err != nil {
+		return Invocation{}, false, err
+	}
+	if invocationSchemaExists {
+		var existingHash string
+		err := s.db.QueryRowContext(context.Background(), `SELECT request_hash FROM invocation_idempotency WHERE machine_id=? AND key=?`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingHash)
+		if err == nil {
+			if existingHash != requestHash {
+				return Invocation{}, false, ErrConflict
+			}
+			if err := s.ensureInvocationSchema(); err != nil {
+				return Invocation{}, false, err
+			}
+			return s.requestInvocationWithSchema(input, requestHash)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Invocation{}, false, fmt.Errorf("read invocation idempotency: %w", err)
+		}
+	}
 	var pending bool
 	if err := s.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
 		return Invocation{}, false, fmt.Errorf("inspect pending invocation work: %w", err)
@@ -51,12 +72,17 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	if err := s.ensureInvocationSchema(); err != nil {
 		return Invocation{}, false, err
 	}
-	requestHash := stableHash(input.ConversationID, input.FromEndpoint, input.TargetEndpoint)
+	return s.requestInvocationWithSchema(input, requestHash)
+}
+
+func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash string) (Invocation, bool, error) {
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return Invocation{}, false, err
 	}
 	defer rollback(tx)
+	var sourceCapabilities, targetCapabilities Capability
+	var pending bool
 	if err := endpointOwnedBy(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return Invocation{}, false, err
 	}
