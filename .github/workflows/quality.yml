@@ -83,6 +83,7 @@ jobs:
       - run: go test ./internal/adapter -run '^TestWindows'
       - run: go test ./internal/trustedattachmentclient -run '^TestWindows'
       - run: go test ./cmd/punaro-attachment -run '^TestWindows'
+      - run: go test ./cmd/punaro-adapter -run '^TestWindows'
       - run: go vet ./...
       - run: go build ./...
       - shell: pwsh

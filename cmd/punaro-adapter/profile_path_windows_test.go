@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestLoadConfigUsesWindowsInstalledProfile(t *testing.T) {
+func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 	clearAdapterEnvironment(t)
 	localAppData := t.TempDir()
 	t.Setenv("LOCALAPPDATA", localAppData)
