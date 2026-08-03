@@ -25,6 +25,32 @@ func TestStoreRejectsNonPortableRequestAndMessageText(t *testing.T) {
 	}
 }
 
+func TestRoleHashesPreserveLegacyEmptyRoleLayout(t *testing.T) {
+	members := []Member{
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+	}
+	legacyConversation := stableHash("agent/a", "agent/a", "7", "agent/b", "2")
+	if got := createConversationHash("agent/a", members); got != legacyConversation {
+		t.Fatalf("empty-role conversation hash=%s want legacy=%s", got, legacyConversation)
+	}
+	withRoles := append([]Member(nil), members...)
+	withRoles[0].Role = "reviewer"
+	if got := createConversationHash("agent/a", withRoles); got == legacyConversation {
+		t.Fatal("role-bearing conversation reused the legacy hash")
+	}
+
+	input := AppendInput{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "body", PrincipalID: "principal-1", ArtifactIDs: []string{"artifact-1"}}
+	legacyAppend := stableHash("conversation-1", "agent/a", "body", "principal-1", "artifact-1")
+	if got := appendHash(input); got != legacyAppend {
+		t.Fatalf("empty-role append hash=%s want legacy=%s", got, legacyAppend)
+	}
+	input.TargetRole = "reviewer"
+	if got := appendHash(input); got == legacyAppend {
+		t.Fatal("role-addressed append reused the legacy hash")
+	}
+}
+
 func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")

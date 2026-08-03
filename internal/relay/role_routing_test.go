@@ -128,6 +128,9 @@ func TestMembershipRoleChangesRequireAdminAndSurviveRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.UpdateMembership(conversation.ID, "machine-admin", "agent/admin", "agent/admin", Member{Endpoint: "agent/admin", Capabilities: CapSend | CapReceive, Role: "coordinator"}, now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("removing the last administrator err=%v", err)
+	}
 	if _, duplicate, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-admin", FromEndpoint: "agent/admin", Body: "queued for reviewer", TargetRole: "reviewer", IdempotencyKey: "before-rebind", Now: now}); err != nil || duplicate {
 		t.Fatalf("queue before rebind duplicate=%t err=%v", duplicate, err)
 	}

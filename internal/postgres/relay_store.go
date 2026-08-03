@@ -271,7 +271,23 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, member.Endpoint).Scan(&memberLease); err != nil || !memberLease.After(now) {
 		return relay.ErrForbidden
 	}
+	if member.Capabilities&relay.CapAdmin == 0 {
+		var otherAdministrators int
+		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint<>$2 AND (capabilities & $3) <> 0`, conversationID, previousEndpoint, relay.CapAdmin).Scan(&otherAdministrators); err != nil {
+			return errors.New("remaining conversation administrators are unavailable")
+		}
+		if otherAdministrators == 0 {
+			return relay.ErrForbidden
+		}
+	}
 	if member.Endpoint != previousEndpoint {
+		var attachmentSafe bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT attachment.recipient_rebind_allowed($1,$2,$3::uuid)`, previousEndpoint, member.Endpoint, conversationID).Scan(&attachmentSafe); err != nil {
+			return relayDatabaseError(err, "authorize attachment recipient rebind")
+		}
+		if !attachmentSafe {
+			return relay.ErrForbidden
+		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_recipient_cursors(recipient_endpoint,conversation_id,sequence)
 			SELECT $1,conversation_id,sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$2 AND conversation_id=$3::uuid
 			ON CONFLICT(recipient_endpoint,conversation_id) DO UPDATE SET sequence=GREATEST(relay.mail_recipient_cursors.sequence,excluded.sequence)`, member.Endpoint, previousEndpoint, conversationID); err != nil {

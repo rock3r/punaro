@@ -651,6 +651,15 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 	if err := endpointActive(tx, member.Endpoint, now); err != nil {
 		return err
 	}
+	if member.Capabilities&CapAdmin == 0 {
+		var otherAdministrators int
+		if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND endpoint<>? AND (capabilities & ?) <> 0", conversationID, previousEndpoint, CapAdmin).Scan(&otherAdministrators); err != nil {
+			return fmt.Errorf("count remaining conversation administrators: %w", err)
+		}
+		if otherAdministrators == 0 {
+			return ErrForbidden
+		}
+	}
 	if member.Endpoint != previousEndpoint {
 		// Keep the role's unacknowledged stream durable across session rebinding.
 		// Advancing the cursor with the greater of either endpoint's history avoids
@@ -1184,17 +1193,32 @@ func createConversationHash(creatorEndpoint string, members []Member) string {
 		}
 		return normalized[left].Endpoint < normalized[right].Endpoint
 	})
-	parts := make([]string, 1, 1+len(normalized)*2)
-	parts[0] = creatorEndpoint
+	hasRole := false
 	for _, member := range normalized {
-		parts = append(parts, member.Endpoint, fmt.Sprintf("%d", member.Capabilities), member.Role)
+		if member.Role != "" {
+			hasRole = true
+		}
+	}
+	parts := make([]string, 1, 1+len(normalized)*3)
+	parts[0] = creatorEndpoint
+	// Keep the pre-role wire hash for ordinary conversations so a lost response
+	// can be retried across an upgrade without turning into a conflict.
+	for _, member := range normalized {
+		parts = append(parts, member.Endpoint, fmt.Sprintf("%d", member.Capabilities))
+		if hasRole {
+			parts = append(parts, member.Role)
+		}
 	}
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
 }
 
 func appendHash(input AppendInput) string {
-	parts := []string{input.ConversationID, input.FromEndpoint, input.TargetRole, input.Body}
+	parts := []string{input.ConversationID, input.FromEndpoint}
+	if input.TargetRole != "" {
+		parts = append(parts, input.TargetRole)
+	}
+	parts = append(parts, input.Body)
 	if len(input.ArtifactIDs) != 0 {
 		parts = append(parts, input.PrincipalID)
 		parts = append(parts, input.ArtifactIDs...)
