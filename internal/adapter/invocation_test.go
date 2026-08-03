@@ -107,7 +107,7 @@ func TestSyncerDoesNotInvokeRoleThatAttachedDuringCycle(t *testing.T) {
 	if err := syncer.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.calls != 0 || len(relayClient.reports) != 1 || relayClient.reports[0].accepted {
+	if runtime.calls != 0 || len(relayClient.reports) != 1 || !relayClient.reports[0].accepted {
 		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
 	}
 }

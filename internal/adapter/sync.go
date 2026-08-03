@@ -138,8 +138,8 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 				// beginning of this cycle. If it appeared meanwhile, release the
 				// handoff without crossing the process-start boundary; the next
 				// cycle advertises the live role and terminalizes the stale lease.
-				if err := relayClient.ReportInvocation(ctx, invocation, false); err != nil {
-					return fmt.Errorf("release locally attached invocation %q: %w", invocation.ID, err)
+				if err := relayClient.ReportInvocation(ctx, invocation, true); err != nil {
+					return fmt.Errorf("record locally attached invocation %q: %w", invocation.ID, err)
 				}
 				continue
 			}

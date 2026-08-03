@@ -440,11 +440,27 @@ func (s *Store) AdvertiseEndpoints(machineID string, endpoints []string, now tim
 		}
 		seen[endpoint] = struct{}{}
 	}
+	invocationSchemaExists, err := s.invocationSchemaExists()
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
+	if invocationSchemaExists {
+		for endpoint := range seen {
+			var liveStartLease bool
+			err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM invocations WHERE target_endpoint=? AND target_machine_id<>? AND status=? AND lease_machine_id IS NOT NULL AND lease_until>?)`, endpoint, machineID, InvocationPending, now.UnixMilli()).Scan(&liveStartLease)
+			if err != nil {
+				return fmt.Errorf("inspect live invocation lease: %w", err)
+			}
+			if liveStartLease {
+				return ErrConflict
+			}
+		}
+	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM endpoints WHERE machine_id = ? AND lease_until > ?`, machineID, now.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("find attached endpoints: %w", err)
