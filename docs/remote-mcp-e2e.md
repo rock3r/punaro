@@ -1,0 +1,85 @@
+# Remote MCP release-candidate E2E evidence
+
+The remote MCP release candidate is qualified with a black-box test against a
+disposable deployed endpoint. The test does not provision an endpoint, mint
+tokens, or infer deployment topology. An operator supplies a private test
+configuration after deploying the exact candidate commit.
+
+Run the test from the candidate checkout:
+
+```sh
+PUNARO_REMOTE_MCP_E2E_CONFIG=/private/punaro/remote-mcp-e2e.json make remote-mcp-e2e
+```
+
+The target fails when the configuration variable is unset. The tagged Go test
+skips without it only so ordinary developer test runs cannot accidentally touch
+a remote deployment.
+
+Keep the configuration outside the repository, readable only by the release
+operator, and never attach it to CI logs or the release record. Its shape is:
+
+```json
+{
+  "candidate_commit": "0123456789abcdef0123456789abcdef01234567",
+  "endpoint": "https://candidate.example.invalid/mcp",
+  "resource": "https://candidate.example.invalid/mcp",
+  "authorization_server": "https://issuer.example.invalid",
+  "tokens": {
+    "valid": "private-token-for-the-authorized-read-only-tool",
+    "invalid": "private-malformed-or-unrecognized-token",
+    "wrong_issuer": "private-token-from-a-different-issuer",
+    "wrong_audience": "private-token-for-a-different-resource",
+    "expired": "private-expired-token",
+    "revoked": "private-token-or-subject-revoked-before-the-test",
+    "no_scope": "private-valid-token-with-no-required-scope",
+    "insufficient_scope": "private-valid-token-that-cannot-invoke-the-forbidden-tool"
+  },
+  "authorized_tool": {
+    "name": "candidate_read_only_tool",
+    "arguments": {"query": "release-candidate-e2e"}
+  },
+  "forbidden_tool": {
+    "name": "candidate_out_of_scope_tool",
+    "arguments": {},
+    "expected_status": 403
+  },
+  "redaction_probe": "remote-mcp-e2e-redaction-probe"
+}
+```
+
+`candidate_commit` must be the deployed 40-character lowercase Git commit.
+`endpoint` and `resource` must be the same canonical HTTPS MCP resource;
+`authorization_server` is the canonical HTTPS issuer. The tool arguments must
+be JSON objects with no duplicate keys. Every token and the redaction probe
+must be a distinct, at-least-16-character OAuth bearer value made only of
+letters, digits, `-._~+/=`. Values above are placeholders, not usable
+credentials.
+
+Prepare a token suite that proves each distinct failure boundary. `valid` must
+invoke only the configured read-only `authorized_tool`. `no_scope` must be a
+valid token without any required MCP default scope. `insufficient_scope` must
+be valid but lack the operation-specific scope for `forbidden_tool`.
+`wrong_issuer`, `wrong_audience`, `expired`, and `revoked` must each fail for
+that stated reason at the candidate boundary, not merely be arbitrary malformed
+strings. Use disposable principals, resources, and data; no test request should
+name a production project or contain user content.
+
+The test proves all of the following against the candidate:
+
+- OAuth protected-resource discovery and the unauthenticated challenge;
+- malformed, wrong-issuer, wrong-audience, expired, and revoked bearers fail
+  with `401` and an `invalid_token` challenge;
+- missing required scope and tool-specific insufficient scope fail closed;
+- duplicate-member JSON-RPC input fails without executing a request;
+- a valid scoped bearer reaches its configured tool; and
+- failure headers and bodies do not echo any supplied token or the redaction
+  probe.
+
+The test logs only the candidate commit on success and intentionally withholds
+the endpoint, tokens, request bodies, response bodies, and topology on failure.
+Its own TLS-backed fixture validates the complete harness flow locally; the
+release command remains the authoritative deployed-candidate check.
+Record its CI job URL, exact command result, candidate commit, deployment image
+digest, approvers, residual risk, and rollback reference in the final
+release-evidence record under `docs/release-evidence/` only after the release
+process has the required protected-branch and environment approvals.
