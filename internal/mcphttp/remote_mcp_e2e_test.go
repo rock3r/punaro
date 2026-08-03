@@ -643,6 +643,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	unauthorized := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, "", remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 	remoteMCPE2ERequireStatus(t, unauthorized, http.StatusUnauthorized)
 	remoteMCPE2ERedacted(t, unauthorized, config.sensitiveValues())
+	if !validRemoteMCPE2EOAuthFailureBody(unauthorized) {
+		t.Fatal("unauthenticated request exposed a successful MCP result")
+	}
 	challenge := unauthorized.Header.Get("WWW-Authenticate")
 	metadataURL, metadataOK := remoteMCPE2EChallengeParameter(challenge, "resource_metadata")
 	scope, scopeOK := remoteMCPE2EChallengeParameter(challenge, "scope")
