@@ -12,6 +12,7 @@ WITH objects AS (
     SELECT to_regclass('relay.mail_conversation_controls') AS controls_oid,
            to_regclass('relay.mail_conversation_control_idempotency') AS retries_oid,
            to_regclass('relay.mail_conversations') AS conversations_oid,
+	   to_regclass('relay.mail_memberships') AS memberships_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS guard_oid
 ), relations AS (
     SELECT count(*)=2 AND bool_and(pg_get_userbyid(class.relowner)='punaro_owner' AND class.relkind='r'
@@ -47,10 +48,15 @@ WITH objects AS (
     SELECT has_table_privilege('punaro_app',controls_oid,'SELECT,INSERT')
        AND has_table_privilege('punaro_app',retries_oid,'SELECT,INSERT')
        AND NOT has_table_privilege('punaro_app',controls_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-       AND NOT has_table_privilege('punaro_app',retries_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS exact
+       AND NOT has_table_privilege('punaro_app',retries_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+	   AND has_table_privilege('punaro_app',memberships_oid,'DELETE')
+	   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE')
+	   AND has_column_privilege('punaro_app',memberships_oid,'capabilities','UPDATE')
+	   AND NOT has_column_privilege('punaro_app',memberships_oid,'conversation_id','UPDATE')
+	   AND NOT has_column_privilege('punaro_app',memberships_oid,'endpoint','UPDATE') AS exact
     FROM objects
 )
-SELECT controls_oid IS NOT NULL AND retries_oid IS NOT NULL AND conversations_oid IS NOT NULL AND guard_oid IS NOT NULL
+SELECT controls_oid IS NOT NULL AND retries_oid IS NOT NULL AND conversations_oid IS NOT NULL AND memberships_oid IS NOT NULL AND guard_oid IS NOT NULL
    AND relations.exact AND columns.exact AND constraints.exact AND guards.exact AND acl.exact
 FROM objects,relations,columns,constraints,guards,acl`).Scan(&available)
 	return available, err
