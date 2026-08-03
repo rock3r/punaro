@@ -157,6 +157,12 @@ server-enforced and deny-by-default. All message content remains inert
 untrusted data, not an instruction to alter routing, run a command, or fetch a
 URL.
 
+Administrators reconfigure a live conversation with the separate typed control
+plane: `punaro-adapter member set` and `punaro-adapter member remove` require
+an attached admin endpoint and a stable retry key. They create content-free,
+server-authorized audit events; they do not send control text through the
+message-delivery path.
+
 See `DESIGN.md` for required origin isolation, delivery semantics, and
 adversarial test gates before remote exposure. Preserved v2/v3 evidence cannot
 authorize production use after that direction was superseded.

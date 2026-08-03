@@ -106,6 +106,52 @@ func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	}
 }
 
+func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b", "machine-c": "agent/c"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/c", Capabilities: CapReceive}, IdempotencyKey: "control-1", Now: now}
+	first, duplicate, err := store.ApplyControl(input)
+	if err != nil || duplicate {
+		t.Fatalf("first control=%#v duplicate=%v err=%v", first, duplicate, err)
+	}
+	again, duplicate, err := store.ApplyControl(input)
+	if err != nil || !duplicate || again.ID != first.ID {
+		t.Fatalf("retry control=%#v duplicate=%v err=%v", again, duplicate, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/c"}, IdempotencyKey: "control-2", Now: now}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin control err=%v, want forbidden", err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/a"}, IdempotencyKey: "control-3", Now: now}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("last-admin removal err=%v, want conflict", err)
+	}
+	events, err := store.ControlAudit(conversation.ID, "machine-a", "agent/a", now)
+	if err != nil || len(events) != 1 || events[0].Member.Endpoint != "agent/c" || events[0].Member.Capabilities != CapReceive {
+		t.Fatalf("audit=%#v err=%v", events, err)
+	}
+	var messages int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages").Scan(&messages); err != nil || messages != 0 {
+		t.Fatalf("control entered message plane: messages=%d err=%v", messages, err)
+	}
+}
+
 func TestStoreRejectsStaleLeaseAfterRedeliveryAndSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")

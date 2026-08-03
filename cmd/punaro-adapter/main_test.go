@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/rock3r/punaro/internal/relay"
 	"github.com/zeebo/blake3"
 )
 
@@ -76,6 +77,16 @@ func TestParseInvokeArgsRequiresExplicitContentFreeTargetAndRetryKey(t *testing.
 	request, err := parseInvokeArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b", "--idempotency-key", "invoke-1"})
 	if err != nil || request.conversationID != "conversation-1" || request.fromEndpoint != "agent/a" || request.targetEndpoint != "agent/b" || request.idempotencyKey != "invoke-1" {
 		t.Fatalf("invoke request did not parse: %#v err=%v", request, err)
+	}
+}
+
+func TestParseMemberControlArgsRequiresExplicitActorAndRetryKey(t *testing.T) {
+	request, err := parseMemberSetArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--member", "agent/b:receive", "--idempotency-key", "control-1"})
+	if err != nil || request.actor != "agent/a" || request.member.Endpoint != "agent/b" || request.member.Capabilities != relay.CapReceive {
+		t.Fatalf("member set=%#v err=%v", request, err)
+	}
+	if _, err := parseMemberRemoveArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--member", "agent/b"}); err == nil {
+		t.Fatal("member remove without stable retry key accepted")
 	}
 }
 

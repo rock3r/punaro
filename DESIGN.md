@@ -341,7 +341,8 @@ authorization.
 
 ## Delivery model
 
-Conversation creation and messages use separate idempotency records, each
+Conversation creation, membership controls, and messages use separate
+idempotency records, each
 scoped to the signed machine and bound to the normalized request. Retrying a
 create returns the original conversation; changing the request under the same
 key is a conflict. Messages are immutable rows. A relay-assigned UUID is the
@@ -407,6 +408,30 @@ and lease token. A lease that expires without an acknowledgement becomes
 available again. The recipient must tolerate duplicate delivery by durably
 recording the Punaro message UUID before local injection, or by using it as the
 local mailbox idempotency key.
+
+### Membership control plane
+
+Running-fleet membership changes are explicit control operations, never message
+bodies. `POST /v1/conversations/{id}/controls` accepts only the typed
+`upsert_member` and `remove_member` operations, an attached `actor_endpoint`,
+and a target member. The relay derives authority from the signed machine plus
+the current endpoint lease, then requires that actor's durable `admin`
+capability. It does not trust a client-supplied machine, sender, or endpoint
+name as authority. A control retry uses a dedicated idempotency key and returns
+the original content-free audit event; reuse with another mutation conflicts.
+
+Every accepted operation appends a durable audit row containing only opaque
+conversation/event IDs, actor and target endpoint labels, capability bits,
+operation, and timestamp—never a message body, credential, routing secret, or
+arbitrary instruction. Current admins may read the bounded history through
+`POST /v1/conversations/{id}/controls/audit`. The relay refuses any mutation
+that would remove the final admin, preserving a recoverable control path.
+
+The actionable local interface is `punaro-adapter member set --conversation
+... --actor ... --member endpoint:send,receive,admin --idempotency-key ...`
+or `punaro-adapter member remove --conversation ... --actor ... --member
+endpoint --idempotency-key ...`. These paths call the typed control endpoint;
+they never interpret local or delivered text as a command.
 
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired

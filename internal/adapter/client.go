@@ -245,6 +245,31 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 	return conversation, err
 }
 
+// ControlMembership sends a typed membership control record. It never routes
+// through Send, so local agents can keep all delivery bodies inert.
+func (c *HTTPRelayClient) ControlMembership(ctx context.Context, conversationID, actor string, operation relay.ControlOperation, member relay.Member, idempotencyKey string) (relay.ControlEvent, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(member.Endpoint) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.ControlEvent{}, fmt.Errorf("conversation, actor, member, and idempotency key are required")
+	}
+	request := map[string]any{"actor_endpoint": actor, "operation": operation, "member": map[string]any{"endpoint": member.Endpoint}}
+	if operation == relay.ControlUpsertMember {
+		request["member"].(map[string]any)["capabilities"] = capabilityNames(member.Capabilities)
+	}
+	var event relay.ControlEvent
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/controls", request, idempotencyKey, &event)
+	return event, err
+}
+
+// ControlAudit reads the bounded, content-free control history as a current
+// admin endpoint; it is separate from message deliveries and their bodies.
+func (c *HTTPRelayClient) ControlAudit(ctx context.Context, conversationID, actor string) ([]relay.ControlEvent, error) {
+	var response struct {
+		Events []relay.ControlEvent `json:"events"`
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/controls/audit", map[string]any{"actor_endpoint": actor}, &response)
+	return response.Events, err
+}
+
 func capabilityNames(capabilities relay.Capability) []string {
 	result := make([]string, 0, 3)
 	if capabilities&relay.CapSend != 0 {

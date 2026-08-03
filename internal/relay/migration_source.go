@@ -46,6 +46,8 @@ type MigrationSourceCounts struct {
 	RecipientCursors        int64 `json:"recipient_cursors"`
 	MessageIdempotency      int64 `json:"message_idempotency"`
 	ConversationIdempotency int64 `json:"conversation_idempotency"`
+	ControlEvents           int64 `json:"control_events"`
+	ControlIdempotency      int64 `json:"control_idempotency"`
 	RequestNonces           int64 `json:"request_nonces"`
 }
 
@@ -62,6 +64,8 @@ type MigrationSourceHashes struct {
 	RecipientCursors        string `json:"recipient_cursors"`
 	MessageIdempotency      string `json:"message_idempotency"`
 	ConversationIdempotency string `json:"conversation_idempotency"`
+	ControlEvents           string `json:"control_events"`
+	ControlIdempotency      string `json:"control_idempotency"`
 	RequestNonces           string `json:"request_nonces"`
 }
 
@@ -101,6 +105,8 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
 	{"conversation_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
+	{"conversation_controls", "id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at", "id"},
+	{"conversation_control_idempotency", "machine_id,key,request_hash,control_id,created_at", "machine_id,key"},
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
@@ -116,7 +122,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
+const migrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
 const legacyMigrationSourceSchema = "punaro-relay-sqlite-v1:endpoints;conversations;memberships;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 
 // InspectMigrationSource reads an existing source without creating, migrating,
@@ -500,24 +506,26 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
 	expectedColumns := map[string][]string{
-		"endpoints":                {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
-		"conversations":            {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-"},
-		"memberships":              {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"roles":                    {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
-		"role_memberships":         {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"role_bindings":            {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
-		"messages":                 {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"deliveries":               {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
-		"recipient_cursors":        {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
-		"idempotency":              {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"request_nonces":           {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
-		"relay_migration_control":  {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+		"endpoints":                        {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
+		"conversations":                    {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-"},
+		"memberships":                      {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"roles":                            {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
+		"role_memberships":                 {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
+		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
+		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
+		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_controls":            {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "operation:TEXT:1:0:-", "member_endpoint:TEXT:1:0:-", "member_capabilities:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_control_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"request_nonces":                   {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
+		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -546,14 +554,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		}
 	}
 	expectedForeignKeys := map[string][]string{
-		"memberships":              {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"role_memberships":         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
-		"role_bindings":            {"roles:role:role:NO ACTION:CASCADE:NONE"},
-		"messages":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"deliveries":               {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"recipient_cursors":        {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"idempotency":              {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_idempotency": {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"memberships":                      {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"role_memberships":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
+		"role_bindings":                    {"roles:role:role:NO ACTION:CASCADE:NONE"},
+		"messages":                         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"deliveries":                       {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"recipient_cursors":                {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"idempotency":                      {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_idempotency":         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_controls":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_control_idempotency": {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
 	}
 	for table := range expectedColumns {
 		foreignKeys, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -589,6 +599,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		"recipient_cursors:1:pk:0:recipient_endpoint,conversation_id",
 		"idempotency:1:pk:0:machine_id,key",
 		"conversation_idempotency:1:pk:0:machine_id,key",
+		"conversation_controls:1:pk:0:id",
+		"conversation_control_idempotency:1:pk:0:machine_id,key",
 		"request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 	}
 	var actualIndexes []string
@@ -645,7 +657,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 	if err != nil {
 		return errors.New("relay migration source guards are unavailable")
 	}
-	seenTriggers := make(map[string]struct{}, 27)
+	seenTriggers := make(map[string]struct{}, 33)
 	for triggerRows.Next() {
 		var name, table, statement string
 		if err := triggerRows.Scan(&name, &table, &statement); err != nil {
@@ -674,7 +686,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != 36 {
+	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != 42 {
 		return errors.New("relay migration source guard inventory is incomplete")
 	}
 	var integrity string
@@ -697,11 +709,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		UNION ALL SELECT conversation_id FROM recipient_cursors
 		UNION ALL SELECT message_id FROM idempotency
 		UNION ALL SELECT conversation_id FROM conversation_idempotency
+		UNION ALL SELECT id FROM conversation_controls UNION ALL SELECT conversation_id FROM conversation_controls
+		UNION ALL SELECT control_id FROM conversation_control_idempotency
 	)
 	SELECT
         EXISTS (SELECT 1 FROM endpoints WHERE ownership_generation<1 OR consumer_generation<0 OR (consumer_id IS NULL)<>(consumer_lease_until IS NULL))
         OR EXISTS (SELECT 1 FROM conversations WHERE next_sequence<0)
-        OR EXISTS (SELECT 1 FROM memberships WHERE capabilities<1 OR capabilities>7)
+		OR EXISTS (SELECT 1 FROM memberships WHERE capabilities<1 OR capabilities>15)
 		OR EXISTS (SELECT 1 FROM role_memberships WHERE capabilities<1 OR capabilities>7)
         OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)
         OR EXISTS (SELECT 1 FROM messages WHERE sequence<1 OR length(CAST(body AS blob))>32768)
@@ -715,6 +729,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		OR EXISTS (SELECT 1 FROM idempotency GROUP BY message_id HAVING count(*)<>1)
         OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM conversation_idempotency GROUP BY conversation_id HAVING count(*)<>1)
+		OR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15)
+		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
+		OR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)
 		OR EXISTS (SELECT 1 FROM uuid_values WHERE typeof(value)<>'text' OR length(value)<>36 OR substr(value,9,1)<>'-' OR substr(value,14,1)<>'-' OR substr(value,19,1)<>'-' OR substr(value,24,1)<>'-' OR lower(replace(value,'-','')) GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM endpoints WHERE typeof(endpoint)<>'text' OR typeof(machine_id)<>'text' OR typeof(lease_until)<>'integer' OR typeof(ownership_generation)<>'integer' OR (consumer_id IS NOT NULL AND typeof(consumer_id)<>'text') OR typeof(consumer_generation)<>'integer' OR (consumer_lease_until IS NOT NULL AND typeof(consumer_lease_until)<>'integer'))
 		OR EXISTS (SELECT 1 FROM conversations WHERE typeof(next_sequence)<>'integer' OR typeof(created_at)<>'integer')
@@ -734,6 +751,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		OR EXISTS (SELECT 1 FROM recipient_cursors WHERE typeof(recipient_endpoint)<>'text' OR typeof(sequence)<>'integer')
 		OR EXISTS (SELECT 1 FROM idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM conversation_controls WHERE typeof(actor_endpoint)<>'text' OR typeof(operation)<>'text' OR typeof(member_endpoint)<>'text' OR typeof(member_capabilities)<>'integer' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM request_nonces WHERE typeof(machine_id)<>'text' OR typeof(nonce)<>'text' OR typeof(expires_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM relay_migration_control WHERE typeof(source_id)<>'text' OR typeof(phase)<>'text' OR (epoch_id IS NOT NULL AND typeof(epoch_id)<>'text') OR (target_identity IS NOT NULL AND typeof(target_identity)<>'text') OR (fingerprint IS NOT NULL AND typeof(fingerprint)<>'text') OR (last_epoch_id IS NOT NULL AND typeof(last_epoch_id)<>'text') OR (last_target_identity IS NOT NULL AND typeof(last_target_identity)<>'text') OR (last_expected_fingerprint IS NOT NULL AND typeof(last_expected_fingerprint)<>'text') OR (last_result_fingerprint IS NOT NULL AND typeof(last_result_fingerprint)<>'text') OR (last_cutoff IS NOT NULL AND typeof(last_cutoff)<>'integer') OR (last_transition IS NOT NULL AND typeof(last_transition)<>'text') OR typeof(changed_at)<>'integer')`).Scan(&invalidLogicalState); err != nil || invalidLogicalState {
 		return errors.New("relay migration source logical constraints are invalid")
@@ -748,20 +767,20 @@ func validateMigrationSourceValue(table, column string, value any) error {
 	}
 	var valid bool
 	switch table + "." + column {
-	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "role_bindings.session_endpoint":
+	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "role_bindings.session_endpoint", "conversation_controls.actor_endpoint", "conversation_controls.member_endpoint":
 		valid = ValidEndpoint(text)
 	case "roles.role", "role_memberships.role", "role_bindings.role":
 		valid = ValidRole(text)
-	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "request_nonces.machine_id":
+	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "request_nonces.machine_id":
 		valid = ValidMachineID(text)
 	case "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
 		_, roleRecipient := parseRoleRecipient(text)
 		valid = roleRecipient || ValidEndpoint(text)
-	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "request_nonces.nonce":
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "request_nonces.nonce":
 		valid = ValidRequestToken(text)
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil
@@ -824,6 +843,10 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.MessageIdempotency, manifest.TableSHA256.MessageIdempotency = count, digest
 	case "conversation_idempotency":
 		manifest.Counts.ConversationIdempotency, manifest.TableSHA256.ConversationIdempotency = count, digest
+	case "conversation_controls":
+		manifest.Counts.ControlEvents, manifest.TableSHA256.ControlEvents = count, digest
+	case "conversation_control_idempotency":
+		manifest.Counts.ControlIdempotency, manifest.TableSHA256.ControlIdempotency = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}

@@ -16,6 +16,7 @@ import (
 
 var _ relay.Backend = (*Database)(nil)
 var _ relay.RoleBindingBackend = (*Database)(nil)
+var _ relay.ControlBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
 
@@ -239,6 +240,152 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 		return err
 	}
 	return tx.Commit()
+}
+
+// ApplyControl mutates membership through the same explicit, server-authorized
+// control plane as SQLite. Controls never enter mail_messages or deliveries.
+func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if _, err := uuid.Parse(input.ConversationID); err != nil {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control transaction cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230610))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control retry lock is unavailable")
+	}
+	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
+		return relay.ControlEvent{}, false, err
+	}
+	var actorCapabilities relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
+	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&relay.CapAdmin == 0 {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
+	}
+	requestHash := relay.ControlRequestHash(input)
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), `SELECT control_id::text,request_hash FROM relay.mail_conversation_control_idempotency WHERE machine_id=$1 AND key=$2`, input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
+		event, err := postgresControlEventByID(tx, existingID)
+		if err != nil {
+			return relay.ControlEvent{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.ControlEvent{}, false, errors.New("control retry cannot commit")
+		}
+		return event, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, errors.New("control retry state is unavailable")
+	}
+	if input.Operation == relay.ControlUpsertMember {
+		// New members must be actively advertised. Ownership need not match the
+		// actor, while remove deliberately permits pruning a detached endpoint.
+		var until time.Time
+		if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, input.Member.Endpoint).Scan(&until); err != nil || !until.After(input.Now) {
+			return relay.ControlEvent{}, false, relay.ErrForbidden
+		}
+	}
+	var previous relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.Member.Endpoint).Scan(&previous)
+	if input.Operation == relay.ControlRemoveMember && errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return relay.ControlEvent{}, false, errors.New("control target state is unavailable")
+	}
+	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
+		var remaining int
+		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0 AND endpoint<>$3`, input.ConversationID, relay.CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
+			return relay.ControlEvent{}, false, errors.New("remaining admin state is unavailable")
+		}
+		if remaining == 0 {
+			return relay.ControlEvent{}, false, relay.ErrConflict
+		}
+	}
+	if input.Operation == relay.ControlUpsertMember {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
+			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
+		}
+	} else if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.Member.Endpoint); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "remove conversation member")
+	}
+	event := relay.ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: input.Now.UTC().Truncate(time.Microsecond)}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "record control audit")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_control_idempotency(machine_id,key,request_hash,control_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, input.ActorMachineID, input.IdempotencyKey, requestHash, event.ID, input.Now.UTC()); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "record control idempotency")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.ControlEvent{}, false, relayDatabaseError(err, "commit control")
+	}
+	return event, false, nil
+}
+
+// ControlAudit returns at most 100 newest content-free control records to a
+// live admin endpoint on the requesting machine.
+func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]relay.ControlEvent, error) {
+	if _, err := uuid.Parse(conversationID); err != nil {
+		return nil, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, errors.New("control audit cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if err := postgresEndpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	var capabilities relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, actorEndpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapAdmin == 0 {
+		return nil, relay.ErrForbidden
+	}
+	if err != nil {
+		return nil, errors.New("control audit authorization is unavailable")
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE conversation_id=$1::uuid ORDER BY created_at DESC,id DESC LIMIT 100`, conversationID)
+	if err != nil {
+		return nil, relayDatabaseError(err, "read control audit")
+	}
+	defer func() { _ = rows.Close() }()
+	var events []relay.ControlEvent
+	for rows.Next() {
+		var event relay.ControlEvent
+		if err := rows.Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
+			return nil, errors.New("control audit row is malformed")
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("control audit is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("control audit cannot commit")
+	}
+	return events, nil
+}
+
+func postgresControlEventByID(tx *sql.Tx, id string) (relay.ControlEvent, error) {
+	var event relay.ControlEvent
+	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE id=$1::uuid`, id).Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
+		return relay.ControlEvent{}, errors.New("control retry event is unavailable")
+	}
+	return event, nil
 }
 
 // CreateConversationIdempotent creates one PostgreSQL relay conversation per retry key.
