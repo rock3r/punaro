@@ -706,7 +706,7 @@ func (d *Database) RecipientCursor(machineID, endpoint, conversationID string, n
 	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
 		return 0, err
 	}
-	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
+	generation, err := postgresEndpointOwnership(tx, endpoint, machineID, now)
 	if err != nil {
 		return 0, err
 	}
@@ -821,6 +821,18 @@ func postgresEndpointOwnershipLocked(tx *sql.Tx, endpoint, machineID string, now
 	var until time.Time
 	var generation int64
 	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until,ownership_generation FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, endpoint).Scan(&owner, &until, &generation); errors.Is(err, sql.ErrNoRows) || owner != machineID || !until.After(now) {
+		return 0, relay.ErrForbidden
+	} else if err != nil {
+		return 0, errors.New("endpoint ownership is unavailable")
+	}
+	return generation, nil
+}
+
+func postgresEndpointOwnership(tx *sql.Tx, endpoint, machineID string, now time.Time) (int64, error) {
+	var owner string
+	var until time.Time
+	var generation int64
+	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until,ownership_generation FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint).Scan(&owner, &until, &generation); errors.Is(err, sql.ErrNoRows) || owner != machineID || !until.After(now) {
 		return 0, relay.ErrForbidden
 	} else if err != nil {
 		return 0, errors.New("endpoint ownership is unavailable")

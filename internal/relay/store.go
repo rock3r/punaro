@@ -757,10 +757,8 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if err := roleRows.Close(); err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
 	}
-	if capabilities&CapReceive != 0 {
-		if err := advanceRecipientCursor(tx, input.FromEndpoint, input.ConversationID); err != nil {
-			return Message{}, false, err
-		}
+	if err := advanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
+		return Message{}, false, err
 	}
 	if _, err := tx.ExecContext(context.Background(), "INSERT INTO idempotency(machine_id, key, request_hash, message_id, created_at) VALUES (?, ?, ?, ?, ?)", input.SenderMachineID, input.IdempotencyKey, requestHash, message.ID, input.Now.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("record idempotency key: %w", err)
@@ -1163,6 +1161,36 @@ func sessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generation int6
 		return nil, err
 	}
 	return identities, nil
+}
+
+func advanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversationID string, now time.Time) error {
+	generation, err := endpointOwnership(tx, endpoint, machineID, now)
+	if err != nil {
+		return err
+	}
+	identities, err := sessionRecipientIDs(tx, machineID, endpoint, generation, now)
+	if err != nil {
+		return err
+	}
+	for _, identity := range identities {
+		var capabilities Capability
+		var capabilityErr error
+		if role, isRole := parseRoleRecipient(identity); isRole {
+			capabilityErr = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM role_memberships WHERE conversation_id = ? AND role = ?", conversationID, role).Scan(&capabilities)
+		} else {
+			capabilityErr = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", conversationID, identity).Scan(&capabilities)
+		}
+		if errors.Is(capabilityErr, sql.ErrNoRows) || capabilities&CapReceive == 0 {
+			continue
+		}
+		if capabilityErr != nil {
+			return fmt.Errorf("authorize sender cursor: %w", capabilityErr)
+		}
+		if err := advanceRecipientCursor(tx, identity, conversationID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func roleBoundToSession(tx *sql.Tx, role, machineID, endpoint string, now time.Time) bool {

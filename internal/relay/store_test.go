@@ -301,8 +301,17 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.Body != "review this" {
 		t.Fatalf("role delivery after session replacement page=%#v err=%v", page, err)
 	}
+	if err := store.AckDelivery("machine-reviewer", "agent/reviewer/second-session", page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.AuthorizeSender(conversation.ID, "machine-reviewer", "agent/reviewer/second-session", now.Add(2*time.Second)); err != nil {
 		t.Fatalf("rebound role sender authorization: %v", err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-reviewer", FromEndpoint: "agent/reviewer/second-session", Body: "role response", IdempotencyKey: "role-reconnect-response", Now: now.Add(3 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := store.RecipientCursor("machine-reviewer", "agent/reviewer/second-session", conversation.ID, now.Add(3*time.Second)); err != nil || cursor != 2 {
+		t.Fatalf("durable role sender cursor=%d err=%v, want two", cursor, err)
 	}
 }
 
