@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -74,7 +75,7 @@ func parseCreateArgs(args []string) (createRequest, error) {
 	var roleMembers memberFlags
 	flags.StringVar(&request.creator, "creator", "", "attached creator endpoint")
 	flags.Var(&members, "member", "endpoint:send,receive,admin (repeatable)")
-	flags.Var(&roleMembers, "role-member", "role@machine:send,receive,admin (repeatable)")
+	flags.Var(&roleMembers, "role-member", `JSON {"role":"...","machine_id":"...","capabilities":["send","receive","admin"]} (repeatable)`)
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || request.creator == "" || request.idempotencyKey == "" || len(members)+len(roleMembers) == 0 {
 		return createRequest{}, fmt.Errorf("--creator, at least one --member, and --idempotency-key are required")
@@ -88,13 +89,19 @@ func parseCreateArgs(args []string) (createRequest, error) {
 		request.members = append(request.members, relay.Member{Endpoint: endpoint, Capabilities: capability})
 	}
 	for _, raw := range roleMembers {
-		role, remainder, found := strings.Cut(raw, "@")
-		machineID, permissions, hasPermissions := strings.Cut(remainder, ":")
-		capability, err := parseMemberCapabilities(permissions, found && hasPermissions)
-		if err != nil || !relay.ValidRole(role) || !relay.ValidMachineID(machineID) {
+		var member struct {
+			Role         string   `json:"role"`
+			MachineID    string   `json:"machine_id"`
+			Capabilities []string `json:"capabilities"`
+		}
+		if err := json.Unmarshal([]byte(raw), &member); err != nil || !relay.ValidRole(member.Role) || !relay.ValidMachineID(member.MachineID) {
 			return createRequest{}, fmt.Errorf("invalid --role-member")
 		}
-		request.members = append(request.members, relay.Member{Role: role, RoleMachineID: machineID, Capabilities: capability})
+		capability, err := parseCapabilityNames(member.Capabilities)
+		if err != nil {
+			return createRequest{}, fmt.Errorf("invalid --role-member")
+		}
+		request.members = append(request.members, relay.Member{Role: member.Role, RoleMachineID: member.MachineID, Capabilities: capability})
 	}
 	return request, nil
 }
@@ -103,8 +110,12 @@ func parseMemberCapabilities(permissions string, present bool) (relay.Capability
 	if !present || permissions == "" {
 		return 0, fmt.Errorf("missing member capability")
 	}
+	return parseCapabilityNames(strings.Split(permissions, ","))
+}
+
+func parseCapabilityNames(items []string) (relay.Capability, error) {
 	var capability relay.Capability
-	for _, item := range strings.Split(permissions, ",") {
+	for _, item := range items {
 		switch item {
 		case "send":
 			capability |= relay.CapSend

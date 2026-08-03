@@ -178,7 +178,7 @@ instead. The role is a durable identity, not a mailbox address:
 punaro-adapter create \
   --creator agent/workstation-review/operator-session \
   --member agent/workstation-review/operator-session:send,receive,admin \
-  --role-member role/plan-reviewer@workstation-review:send,receive \
+  --role-member '{"role":"role/plan-reviewer","machine_id":"workstation-review","capabilities":["send","receive"]}' \
   --idempotency-key create-review-room-1
 ```
 
