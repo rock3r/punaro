@@ -209,6 +209,9 @@ func TestRemoteMCPE2EOAuthFailureDoesNotExposeJSONRPCResult(t *testing.T) {
 	if validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"tools":[]}}`)}) {
 		t.Fatal("OAuth failure response exposing a JSON-RPC result accepted")
 	}
+	if validRemoteMCPE2EOAuthFailureBody(remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: []byte("data: {\"jsonrpc\":\"2.0\",\"id\":\"remote-mcp-e2e\",\"result\":{\"tools\":[]}}\n")}) {
+		t.Fatal("unterminated SSE OAuth failure response accepted")
+	}
 }
 
 func TestRemoteMCPE2EJSONRPCFailureRejectsServerErrors(t *testing.T) {
@@ -1020,9 +1023,12 @@ func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
 }
 
 func validRemoteMCPE2EOAuthFailureBody(response remoteMCPE2EResponse) bool {
+	if len(response.Body) == 0 {
+		return true
+	}
 	payload, supported := remoteMCPE2EJSONRPCPayload(response)
 	if !supported || len(payload) == 0 {
-		return true
+		return false
 	}
 	if !validJSONRPCValue(payload, maxJSONRPCDepth) {
 		return false
