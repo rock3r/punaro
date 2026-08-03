@@ -21,11 +21,35 @@ var _ InvocationBackend = (*Store)(nil)
 // RequestInvocation authorizes a distinct invoke capability and queues one
 // content-free handoff only when the target has pending work and is offline.
 func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
-	if err := s.ensureInvocationSchema(); err != nil {
-		return Invocation{}, false, err
-	}
 	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidEndpoint(input.TargetEndpoint) || !ValidRequestToken(input.IdempotencyKey) {
 		return Invocation{}, false, fmt.Errorf("invalid invocation request")
+	}
+	// Do the inexpensive authority and pending-work checks before creating the
+	// optional control-plane tables. An unauthorized request must remain a
+	// read-only rejection, including for cutover-compatible stores.
+	if err := s.AssertEndpointOwnership(input.SenderMachineID, input.FromEndpoint, input.Now); err != nil {
+		return Invocation{}, false, err
+	}
+	var sourceCapabilities, targetCapabilities Capability
+	if err := s.db.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.FromEndpoint).Scan(&sourceCapabilities); errors.Is(err, sql.ErrNoRows) || sourceCapabilities&CapInvoke == 0 {
+		return Invocation{}, false, ErrForbidden
+	} else if err != nil {
+		return Invocation{}, false, fmt.Errorf("authorize invocation sender: %w", err)
+	}
+	if err := s.db.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.TargetEndpoint).Scan(&targetCapabilities); errors.Is(err, sql.ErrNoRows) || targetCapabilities&CapReceive == 0 {
+		return Invocation{}, false, ErrForbidden
+	} else if err != nil {
+		return Invocation{}, false, fmt.Errorf("authorize invocation target: %w", err)
+	}
+	var pending bool
+	if err := s.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
+		return Invocation{}, false, fmt.Errorf("inspect pending invocation work: %w", err)
+	}
+	if !pending {
+		return Invocation{}, false, ErrConflict
+	}
+	if err := s.ensureInvocationSchema(); err != nil {
+		return Invocation{}, false, err
 	}
 	requestHash := stableHash(input.ConversationID, input.FromEndpoint, input.TargetEndpoint)
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -36,7 +60,6 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	if err := endpointOwnedBy(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return Invocation{}, false, err
 	}
-	var sourceCapabilities Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.FromEndpoint).Scan(&sourceCapabilities)
 	if errors.Is(err, sql.ErrNoRows) || sourceCapabilities&CapInvoke == 0 {
 		return Invocation{}, false, ErrForbidden
@@ -62,7 +85,6 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Invocation{}, false, fmt.Errorf("read invocation idempotency: %w", err)
 	}
-	var targetCapabilities Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.TargetEndpoint).Scan(&targetCapabilities)
 	if errors.Is(err, sql.ErrNoRows) || targetCapabilities&CapReceive == 0 {
 		return Invocation{}, false, ErrForbidden
@@ -80,7 +102,6 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	if err != nil {
 		return Invocation{}, false, fmt.Errorf("resolve invocation target: %w", err)
 	}
-	var pending bool
 	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
 		return Invocation{}, false, fmt.Errorf("inspect pending invocation work: %w", err)
 	}
@@ -110,7 +131,7 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	// offline role. They must converge on one durable fence, rather than start
 	// separate runtime processes merely because their idempotency domains differ.
 	var pendingID string
-	err = tx.QueryRowContext(context.Background(), `SELECT id FROM invocations WHERE conversation_id=? AND target_endpoint=? AND target_machine_id=? AND target_ownership_generation=? AND (status=? OR (status=? AND not_before>?)) ORDER BY created_at,id LIMIT 1`, input.ConversationID, input.TargetEndpoint, targetMachine, targetOwnershipGeneration, InvocationPending, InvocationSucceeded, input.Now.UnixMilli()).Scan(&pendingID)
+	err = tx.QueryRowContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND target_machine_id=? AND target_ownership_generation=? AND (status=? OR (status=? AND not_before>?)) ORDER BY created_at,id LIMIT 1`, input.TargetEndpoint, targetMachine, targetOwnershipGeneration, InvocationPending, InvocationSucceeded, input.Now.UnixMilli()).Scan(&pendingID)
 	if err == nil {
 		invocation, err := invocationByID(tx, pendingID)
 		if err != nil {
@@ -199,7 +220,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	}
 	staleRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		WHERE invocation.target_machine_id=? AND invocation.status=? AND (invocation.lease_machine_id IS NULL OR invocation.lease_until<=?)
-		AND NOT EXISTS (SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=invocation.target_endpoint AND delivery.acked_at IS NULL AND message.conversation_id=invocation.conversation_id)`, machineID, InvocationPending, now.UnixMilli())
+		AND NOT EXISTS (SELECT 1 FROM deliveries WHERE recipient_endpoint=invocation.target_endpoint AND acked_at IS NULL)`, machineID, InvocationPending, now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find stale invocations: %w", err)
 	}

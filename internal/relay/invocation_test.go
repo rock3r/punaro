@@ -280,7 +280,7 @@ func TestInvokeDoesNotLeaseAcrossTargetOwnershipChange(t *testing.T) {
 	}
 }
 
-func TestInvokeCoalescesOnlyWithinPendingWorkConversation(t *testing.T) {
+func TestInvokeCoalescesPendingWorkAcrossConversationsForOneTarget(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
@@ -309,16 +309,16 @@ func TestInvokeCoalescesOnlyWithinPendingWorkConversation(t *testing.T) {
 	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	request := func(conversation Conversation, key string) Invocation {
+	request := func(conversation Conversation, key string, wantDuplicate bool) Invocation {
 		invocation, duplicate, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: key, Now: now.Add(2 * time.Second)})
-		if err != nil || duplicate {
+		if err != nil || duplicate != wantDuplicate {
 			t.Fatalf("invocation=%#v duplicate=%t err=%v", invocation, duplicate, err)
 		}
 		return invocation
 	}
-	invocationA := request(conversationA, "invoke-a")
-	invocationB := request(conversationB, "invoke-b")
-	if invocationA.ID == invocationB.ID || invocationA.Fence == invocationB.Fence {
-		t.Fatalf("cross-conversation invocation was coalesced: A=%#v B=%#v", invocationA, invocationB)
+	invocationA := request(conversationA, "invoke-a", false)
+	invocationB := request(conversationB, "invoke-b", true)
+	if invocationA.ID != invocationB.ID || invocationA.Fence != invocationB.Fence {
+		t.Fatalf("cross-conversation invocation was not coalesced: A=%#v B=%#v", invocationA, invocationB)
 	}
 }
