@@ -48,8 +48,9 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	installedServicePath := filepath.Join(receiverHome, "Library", "LaunchAgents", "org.punaro.adapter.plist")
 	launchDomain := "gui/" + strconvItoa(os.Getuid())
 
-	relayAddress, healthAddress := e2eDistinctLoopbackAddresses(t)
-	proxy := e2eStartRelayProxy(t, relayAddress)
+	proxyListener := e2eListenLoopback(t)
+	relayAddress, healthAddress := e2eDistinctLoopbackAddresses(t, proxyListener.Addr().String())
+	proxy := e2eStartRelayProxy(t, relayAddress, proxyListener)
 	relayURL := "https://" + proxy.listener.Addr().String()
 
 	senderProfile := filepath.Join(senderHome, ".config", "punaro", "adapter.env")
@@ -64,7 +65,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eRewriteRelayURL(t, senderProfile, "http://"+proxy.listener.Addr().String())
 	e2eRewriteRelayURL(t, receiverProfile, "http://"+proxy.listener.Addr().String())
 	receiverAdapter := filepath.Join(receiverHome, ".local", "bin", "punaro-adapter")
-	servicePath, serviceLabel := e2eIsolatedLaunchAgent(t, installedServicePath, receiverProfile, receiverAdapter, fixture)
+	servicePath, serviceLabel := e2eIsolatedLaunchAgent(t, installedServicePath, receiverHome, receiverProfile, receiverAdapter, fixture)
 	serviceTarget := launchDomain + "/" + serviceLabel
 	t.Cleanup(func() { _ = e2eLaunchctl("bootout", launchDomain, servicePath) })
 
@@ -170,20 +171,38 @@ func e2eFreeLoopbackAddress(t *testing.T) string {
 	return address
 }
 
-func e2eDistinctLoopbackAddresses(t *testing.T) (string, string) {
+func e2eListenLoopback(t *testing.T) net.Listener {
 	t.Helper()
-	relayAddress := e2eFreeLoopbackAddress(t)
-	for attempts := 0; attempts < 10; attempts++ {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal("reserve disposable loopback address")
+	}
+	return listener
+}
+
+func e2eDistinctLoopbackAddresses(t *testing.T, occupied ...string) (string, string) {
+	t.Helper()
+	reserved := make(map[string]struct{}, len(occupied)+2)
+	for _, address := range occupied {
+		reserved[address] = struct{}{}
+	}
+	for attempts := 0; attempts < 20; attempts++ {
+		relayAddress := e2eFreeLoopbackAddress(t)
+		if _, exists := reserved[relayAddress]; exists {
+			continue
+		}
+		reserved[relayAddress] = struct{}{}
 		healthAddress := e2eFreeLoopbackAddress(t)
-		if healthAddress != relayAddress {
+		if _, exists := reserved[healthAddress]; !exists {
 			return relayAddress, healthAddress
 		}
+		delete(reserved, relayAddress)
 	}
 	t.Fatal("allocate distinct disposable relay and health addresses")
 	return "", ""
 }
 
-func e2eStartRelayProxy(t *testing.T, relayAddress string) *e2eRelayProxy {
+func e2eStartRelayProxy(t *testing.T, relayAddress string, listener net.Listener) *e2eRelayProxy {
 	t.Helper()
 	target, err := url.Parse("http://" + relayAddress)
 	if err != nil {
@@ -208,10 +227,6 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string) *e2eRelayProxy {
 		}
 		proxy.ServeHTTP(response, request)
 	})}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal("start disposable relay proxy")
-	}
 	state.listener = listener
 	go func() { _ = state.server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -268,7 +283,7 @@ func e2eRewriteRelayURL(t *testing.T, profile, relayURL string) {
 	}
 }
 
-func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, profile, binary, fixture string) (string, string) {
+func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, home, profile, binary, fixture string) (string, string) {
 	t.Helper()
 	raw, err := os.ReadFile(installedServicePath)
 	if err != nil {
@@ -278,9 +293,9 @@ func e2eIsolatedLaunchAgent(t *testing.T, installedServicePath, profile, binary,
 	labelPattern := regexp.MustCompile(`<key>Label</key>\s*<string>org\.punaro\.adapter</string>`)
 	rewritten := labelPattern.ReplaceAll(raw, []byte("<key>Label</key>\n  <string>"+label+"</string>"))
 	rewritten = []byte(strings.Replace(string(rewritten), `set -a; . "$HOME/.config/punaro/adapter.env"; set +a; `, "", 1))
-	rewritten = []byte(strings.Replace(string(rewritten), `exec "$HOME/.local/bin/punaro-adapter"`, `exec "`+binary+`"`, 1))
-	rewritten = []byte(strings.Replace(string(rewritten), "\n</dict>\n</plist>", "\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>"+adapterProfileFileEnv+"</key>\n    <string>"+profile+"</string>\n  </dict>\n</dict>\n</plist>", 1))
-	if string(rewritten) == string(raw) || strings.Contains(string(rewritten), `"$HOME/.config/punaro/adapter.env"`) || strings.Contains(string(rewritten), `"$HOME/.local/bin/punaro-adapter"`) || !strings.Contains(string(rewritten), adapterProfileFileEnv) {
+	isolationCommand := `exec /usr/bin/env -i HOME="` + home + `" PATH="/usr/bin:/bin:/usr/sbin:/sbin" ` + adapterProfileFileEnv + `="` + profile + `" "` + binary + `"`
+	rewritten = []byte(strings.Replace(string(rewritten), `exec "$HOME/.local/bin/punaro-adapter"`, isolationCommand, 1))
+	if string(rewritten) == string(raw) || strings.Contains(string(rewritten), `"$HOME/.config/punaro/adapter.env"`) || strings.Contains(string(rewritten), `"$HOME/.local/bin/punaro-adapter"`) || !strings.Contains(string(rewritten), `exec /usr/bin/env -i`) || !strings.Contains(string(rewritten), adapterProfileFileEnv) {
 		t.Fatal("isolate installed receiver service definition")
 	}
 	path := filepath.Join(fixture, "receiver-launch-agent.plist")
