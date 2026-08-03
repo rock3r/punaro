@@ -159,12 +159,38 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, err
 	}
 	defer rollback(tx)
+	staleRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
+		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.lease_machine_id IS NULL
+		AND NOT EXISTS (SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=invocation.target_endpoint AND delivery.acked_at IS NULL AND message.conversation_id=invocation.conversation_id)`, machineID, InvocationPending)
+	if err != nil {
+		return nil, fmt.Errorf("find stale invocations: %w", err)
+	}
+	var staleIDs []string
+	for staleRows.Next() {
+		var invocationID string
+		if err := staleRows.Scan(&invocationID); err != nil {
+			_ = staleRows.Close()
+			return nil, fmt.Errorf("read stale invocation: %w", err)
+		}
+		staleIDs = append(staleIDs, invocationID)
+	}
+	if err := staleRows.Close(); err != nil || staleRows.Err() != nil {
+		return nil, fmt.Errorf("find stale invocations: %w", err)
+	}
+	for _, invocationID := range staleIDs {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=? WHERE id=?`, InvocationFailed, invocationID); err != nil {
+			return nil, fmt.Errorf("fail stale invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocationID, "failed", now); err != nil {
+			return nil, err
+		}
+	}
 	// A role may have attached after its caller observed it offline. Terminally
 	// consume that old request before leasing anything: attachment is the
 	// authoritative proof that starting another copy is no longer allowed.
 	onlineRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
-		WHERE invocation.target_machine_id=? AND invocation.status=? AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli())
+		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.lease_machine_id IS NULL AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find online invocation targets: %w", err)
 	}
