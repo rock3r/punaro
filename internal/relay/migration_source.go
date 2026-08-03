@@ -292,7 +292,7 @@ type migrationQueryer interface {
 }
 
 func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationSourceManifest, error) {
-	manifest := MigrationSourceManifest{Version: 1}
+	manifest := MigrationSourceManifest{Version: 2}
 	var storedFingerprint sql.NullString
 	var controlRows int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM relay_migration_control`).Scan(&controlRows); err != nil || controlRows != 1 {

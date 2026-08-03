@@ -22,7 +22,8 @@ WITH objects AS (
            to_regprocedure('attachment.bind_conversation_project(uuid,uuid,bigint,uuid,text,uuid)') AS conversation_bind_oid,
            to_regprocedure('attachment.bind_message_artifacts(uuid,uuid,bigint,uuid,jsonb)') AS message_bind_oid,
            to_regprocedure('attachment.project_has_recipient_records(uuid,uuid)') AS project_records_oid,
-           to_regprocedure('attachment.authorize_download(uuid,uuid,bigint,uuid)') AS download_oid
+           to_regprocedure('attachment.authorize_download(uuid,uuid,bigint,uuid)') AS download_oid,
+           to_regprocedure('attachment.recipient_rebind_allowed(text,text,uuid)') AS rebind_oid
 ), expected_columns(relation_name, column_name, type_name, type_modifier, required) AS (
     VALUES
       ('attachment.endpoint_principals','endpoint','text',-1,true),
@@ -67,8 +68,9 @@ WITH objects AS (
       (project_records_oid,'4fe60fc8c8ddcb2d9f2abe97cf8c195c','v'::"char",true,'boolean',false),
       (download_oid,'11c4af626ef77090e6957b96f6f11b72','s'::"char",true,'record',true)
     ) AS expected(oid,body_hash,volatility,application_execute,result_type,returns_set)
+    UNION ALL SELECT rebind_oid,'b6546919e05918d373ac2dd9f46b0c16','s'::"char",true,'boolean',false FROM objects WHERE $1 >= 40
 ), routine_safety AS (
-    SELECT count(*) = 6
+    SELECT count(*) = CASE WHEN $1 >= 40 THEN 7 ELSE 6 END
        AND bool_and(pg_get_userbyid(proc.proowner) = 'punaro_owner')
        AND bool_and(language.lanname IN ('sql','plpgsql'))
        AND bool_and(proc.prokind = 'f' AND proc.prosecdef AND proc.provolatile = expected.volatility)
@@ -79,10 +81,10 @@ WITH objects AS (
     JOIN pg_proc AS proc ON proc.oid = expected.oid
     JOIN pg_language AS language ON language.oid = proc.prolang
 ), routine_acl AS (
-    SELECT count(*) = 11
+    SELECT count(*) = CASE WHEN $1 >= 40 THEN 13 ELSE 11 END
        AND bool_and(acl.privilege_type = 'EXECUTE' AND NOT acl.is_grantable)
        AND bool_and(grantee.rolname IN ('punaro_owner','punaro_app'))
-       AND count(*) FILTER (WHERE grantee.rolname = 'punaro_app') = 5 AS exact
+       AND count(*) FILTER (WHERE grantee.rolname = 'punaro_app') = CASE WHEN $1 >= 40 THEN 6 ELSE 5 END AS exact
     FROM expected_routines AS expected
     JOIN pg_proc AS proc ON proc.oid = expected.oid
     CROSS JOIN LATERAL aclexplode(COALESCE(proc.proacl,acldefault('f',proc.proowner))) AS acl
@@ -188,6 +190,7 @@ SELECT endpoint_oid IS NOT NULL AND conversation_oid IS NOT NULL AND message_oid
    AND endpoint_index_oid IS NOT NULL AND conversation_index_oid IS NOT NULL AND grant_index_oid IS NOT NULL
    AND authority_oid IS NOT NULL AND endpoint_bind_oid IS NOT NULL AND conversation_bind_oid IS NOT NULL
    AND message_bind_oid IS NOT NULL AND project_records_oid IS NOT NULL AND download_oid IS NOT NULL
+   AND ($1 < 40 OR rebind_oid IS NOT NULL)
    AND pg_get_function_result(download_oid) = 'TABLE(artifact_id uuid, project_id uuid, storage_path text, size_bytes bigint, sha256 text, display_name text, media_type text, ready_at timestamp with time zone)'
    AND table_safety.exact AND table_acl.exact AND routine_safety.exact AND routine_acl.exact
    AND constraint_safety.exact AND check_safety.exact AND index_safety.exact
@@ -207,6 +210,7 @@ SELECT endpoint_oid IS NOT NULL AND conversation_oid IS NOT NULL AND message_oid
    AND has_function_privilege('punaro_app',message_bind_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',project_records_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',download_oid,'EXECUTE')
+   AND ($1 < 40 OR has_function_privilege('punaro_app',rebind_oid,'EXECUTE'))
 FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, check_safety, index_safety`, version).Scan(&available)
 	return available, err
 }

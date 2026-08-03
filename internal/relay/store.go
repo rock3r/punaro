@@ -659,6 +659,17 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 		return err
 	}
 	defer rollback(tx)
+	if adminEndpoint == previousEndpoint && member.Endpoint != previousEndpoint {
+		var endpoint string
+		var capabilities Capability
+		var role string
+		err := tx.QueryRowContext(context.Background(), "SELECT endpoint, capabilities, role FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, member.Endpoint).Scan(&endpoint, &capabilities, &role)
+		if err == nil && endpoint == member.Endpoint && capabilities == member.Capabilities && role == member.Role {
+			if err := endpointOwnedBy(tx, member.Endpoint, machineID, now); err == nil {
+				return tx.Commit()
+			}
+		}
+	}
 	if err := endpointOwnedBy(tx, adminEndpoint, machineID, now); err != nil {
 		return err
 	}
@@ -711,6 +722,15 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 		}
 	}
 	if member.Endpoint != previousEndpoint {
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM deliveries
+			WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (
+				SELECT old_delivery.message_id FROM deliveries AS old_delivery
+				JOIN messages AS message ON message.id=old_delivery.message_id
+				JOIN deliveries AS replacement ON replacement.message_id=old_delivery.message_id AND replacement.recipient_endpoint=?
+				WHERE old_delivery.recipient_endpoint=? AND old_delivery.acked_at IS NULL AND message.conversation_id=?
+			)`, previousEndpoint, member.Endpoint, previousEndpoint, conversationID); err != nil {
+			return fmt.Errorf("reconcile rebound deliveries: %w", err)
+		}
 		// Keep the role's unacknowledged stream durable across session rebinding.
 		// Advancing the cursor with the greater of either endpoint's history avoids
 		// reopening an acknowledged gap while moving pending delivery ownership.

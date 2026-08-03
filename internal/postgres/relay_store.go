@@ -256,8 +256,22 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	if adminEndpoint == previousEndpoint && member.Endpoint != previousEndpoint {
+		var endpoint string
+		var capabilities relay.Capability
+		var role string
+		err := tx.QueryRowContext(context.Background(), `SELECT endpoint,capabilities,role FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, member.Endpoint).Scan(&endpoint, &capabilities, &role)
+		if err == nil && endpoint == member.Endpoint && capabilities == member.Capabilities && role == member.Role {
+			if _, err := postgresEndpointOwnershipLocked(tx, member.Endpoint, machineID, now); err == nil {
+				return tx.Commit()
+			}
+		}
+	}
 	if _, err := postgresEndpointOwnershipLocked(tx, adminEndpoint, machineID, now); err != nil {
 		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230610))`, conversationID); err != nil {
+		return errors.New("conversation membership lock is unavailable")
 	}
 	var nextSequence int64
 	if err := tx.QueryRowContext(context.Background(), `SELECT next_sequence FROM relay.mail_conversations WHERE id=$1::uuid FOR UPDATE`, conversationID).Scan(&nextSequence); errors.Is(err, sql.ErrNoRows) {
@@ -274,7 +288,7 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 		return errors.New("membership administrator is unavailable")
 	}
 	var memberLease time.Time
-	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`, member.Endpoint).Scan(&memberLease); err != nil || !memberLease.After(now) {
+	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1`, member.Endpoint).Scan(&memberLease); err != nil || !memberLease.After(now) {
 		return relay.ErrForbidden
 	}
 	if member.Endpoint != previousEndpoint {
@@ -314,6 +328,13 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 		}
 		if !attachmentSafe {
 			return relay.ErrForbidden
+		}
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_deliveries AS old_delivery
+			USING relay.mail_messages AS message, relay.mail_deliveries AS replacement
+			WHERE old_delivery.message_id=message.id AND replacement.message_id=old_delivery.message_id
+			  AND old_delivery.recipient_endpoint=$1 AND old_delivery.acked_at IS NULL
+			  AND replacement.recipient_endpoint=$2 AND message.conversation_id=$3::uuid`, previousEndpoint, member.Endpoint, conversationID); err != nil {
+			return relayDatabaseError(err, "reconcile rebound deliveries")
 		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_recipient_cursors(recipient_endpoint,conversation_id,sequence)
 			SELECT $1,conversation_id,sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$2 AND conversation_id=$3::uuid
@@ -420,6 +441,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230610))`, input.ConversationID); err != nil {
+		return relay.Message{}, false, errors.New("conversation send lock is unavailable")
 	}
 	var capabilities relay.Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.FromEndpoint).Scan(&capabilities)
@@ -684,12 +708,22 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	if err != nil {
 		return err
 	}
+	var conversationID string
+	if err := tx.QueryRowContext(context.Background(), `SELECT message.conversation_id::text
+		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+		WHERE delivery.id=$1::uuid`, deliveryID).Scan(&conversationID); errors.Is(err, sql.ErrNoRows) {
+		return relay.ErrForbidden
+	} else if err != nil {
+		return errors.New("delivery acknowledgement conversation is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230610))`, conversationID); err != nil {
+		return errors.New("delivery acknowledgement lock is unavailable")
+	}
 	var recipient string
 	var leaseMachine, leaseToken sql.NullString
 	var leaseGeneration int64
 	var leaseOwnership, leaseConsumer sql.NullInt64
 	var leaseUntil, acknowledged sql.NullTime
-	var conversationID string
 	err = tx.QueryRowContext(context.Background(), `SELECT delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,
 		delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,delivery.acked_at,message.conversation_id::text
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
