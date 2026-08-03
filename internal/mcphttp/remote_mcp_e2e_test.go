@@ -367,7 +367,10 @@ func loadRemoteMCPE2EConfig(t *testing.T) remoteMCPE2EConfig {
 		t.Fatal("remote MCP E2E configuration is invalid")
 	}
 	checkedOutCommit, err := checkedOutRemoteMCPE2ECommit()
-	if err != nil || validateRemoteMCPE2ECandidateCommit(config.CandidateCommit, checkedOutCommit) != nil {
+	if err != nil {
+		t.Fatalf("remote MCP E2E candidate checkout cannot be verified: %v", err)
+	}
+	if validateRemoteMCPE2ECandidateCommit(config.CandidateCommit, checkedOutCommit) != nil {
 		t.Fatal("remote MCP E2E candidate commit does not match the checkout")
 	}
 	return config
