@@ -437,7 +437,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	roles := make(map[string]string, len(input.Members))
 	creatorAdmin := false
 	for _, member := range input.Members {
-		if member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0 {
+		if member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0 {
 			return relay.Conversation{}, errors.New("invalid conversation member")
 		}
 		switch {
@@ -453,6 +453,9 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 				creatorAdmin = true
 			}
 		case member.Endpoint == "" && relay.ValidRole(member.Role) && relay.ValidMachineID(member.RoleMachineID):
+			if member.Capabilities&relay.CapInvoke != 0 {
+				return relay.Conversation{}, errors.New("invalid conversation member")
+			}
 			if _, duplicate := roles[member.Role]; duplicate {
 				return relay.Conversation{}, errors.New("duplicate conversation member")
 			}
