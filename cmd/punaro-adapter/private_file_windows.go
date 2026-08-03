@@ -72,16 +72,17 @@ func privateWindowsACL(path string) bool {
 	}
 	// Protect-PunaroPath emits one FullControl ACE for the current SID, with no
 	// inherited or shared grants. DACL() also rejects absent/null DACLs.
-	if dacl, _, err := sd.DACL(); err != nil || dacl == nil || dacl.AceCount != 1 {
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil || dacl.AceCount != 1 {
 		return false
-	} else {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if windows.GetAce(dacl, 0, &ace) != nil || ace == nil ||
-			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
-			ace.Mask != windows.ACCESS_MASK(0x1f01ff) {
-			return false
-		}
-		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		return aceSID.Equals(user.User.Sid)
 	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if windows.GetAce(dacl, 0, &ace) != nil || ace == nil ||
+		ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
+		ace.Mask != windows.ACCESS_MASK(0x1f01ff) {
+		return false
+	}
+	// #nosec G103 -- SidStart is the documented flexible-array start of this ACE's SID.
+	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	return aceSID.Equals(user.User.Sid)
 }

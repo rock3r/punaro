@@ -44,5 +44,6 @@ func isPrivateRegularFile(info os.FileInfo, fd int) bool {
 
 func isOwnedByEffectiveUser(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
+	// #nosec G115 -- os.Geteuid returns the platform uid_t, represented as a non-negative int.
 	return ok && stat.Uid == uint32(os.Geteuid())
 }

@@ -11,11 +11,20 @@ import (
 )
 
 func TestPrivateFileRequiresEffectiveOwner(t *testing.T) {
-	uid := uint32(os.Geteuid())
-	if isOwnedByEffectiveUser(privateFileInfo{sys: &syscall.Stat_t{Uid: uid + 1}}) {
+	info, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("temporary directory did not provide Unix file metadata")
+	}
+	other := *stat
+	other.Uid ^= 1
+	if isOwnedByEffectiveUser(privateFileInfo{sys: &other}) {
 		t.Fatal("private file owned by another user was accepted")
 	}
-	if !isOwnedByEffectiveUser(privateFileInfo{sys: &syscall.Stat_t{Uid: uid}}) {
+	if !isOwnedByEffectiveUser(info) {
 		t.Fatal("private file owned by the effective user was rejected")
 	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -13,7 +14,8 @@ func TestLoadConfigRejectsProfileWithMacOSACL(t *testing.T) {
 	clearAdapterEnvironment(t)
 	profile := writeInstallerProfile(t, "https://profile.example")
 	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
-	command := exec.Command("chmod", "+a", "everyone allow read", profile)
+	// #nosec G204 -- this Darwin-only test invokes the fixed system chmod path.
+	command := exec.CommandContext(context.Background(), "chmod", "+a", "everyone allow read", profile)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("add ACL test fixture: %v (%s)", err, output)
 	}
