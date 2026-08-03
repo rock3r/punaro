@@ -48,7 +48,8 @@ WITH objects AS (
            CASE WHEN constraint_.contype='f' THEN constraint_.confdeltype END,
            CASE WHEN constraint_.contype='c' THEN pg_get_expr(constraint_.conbin,constraint_.conrelid) END
     FROM objects JOIN pg_constraint AS constraint_ ON constraint_.conrelid=ANY(ARRAY[controls_oid,retries_oid])
-    WHERE constraint_.convalidated AND NOT constraint_.condeferrable AND NOT constraint_.condeferred
+    WHERE constraint_.contype IN ('p','u','f','c')
+      AND constraint_.convalidated AND NOT constraint_.condeferrable AND NOT constraint_.condeferred
 ), constraints AS (
     SELECT NOT EXISTS (SELECT * FROM expected_constraints EXCEPT SELECT * FROM actual_constraints)
        AND NOT EXISTS (SELECT * FROM actual_constraints EXCEPT SELECT * FROM expected_constraints) AS exact
