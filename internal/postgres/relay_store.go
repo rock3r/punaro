@@ -391,9 +391,6 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 	if err := postgresEndpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
 		return nil, err
 	}
-	if err := postgresLockSessionRoleBindings(tx, machineID, actorEndpoint, now); err != nil {
-		return nil, err
-	}
 	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
 	if err != nil {
 		return nil, errors.New("control audit authorization is unavailable")
