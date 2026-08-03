@@ -440,15 +440,18 @@ func (s *Store) AdvertiseEndpoints(machineID string, endpoints []string, now tim
 		}
 		seen[endpoint] = struct{}{}
 	}
-	invocationSchemaExists, err := s.invocationSchemaExists()
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 	defer rollback(tx)
+	// Read optional invocation state under the same SQLite transaction that
+	// changes endpoint ownership. A pre-transaction snapshot could miss a
+	// concurrently committed start lease and permit its owner to be replaced.
+	invocationSchemaExists, err := invocationSchemaExistsTx(tx)
+	if err != nil {
+		return err
+	}
 	if invocationSchemaExists {
 		for endpoint := range seen {
 			var handoffReserved bool

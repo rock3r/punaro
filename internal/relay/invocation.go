@@ -555,3 +555,11 @@ func (s *Store) invocationSchemaExists() (bool, error) {
 	}
 	return exists, nil
 }
+
+func invocationSchemaExistsTx(tx *sql.Tx) (bool, error) {
+	var exists bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocations')`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("inspect invocation state: %w", err)
+	}
+	return exists, nil
+}
