@@ -208,6 +208,44 @@ func TestInvokeRejectsUnauthorizedAndDoesNotQueueAlreadyRunningTarget(t *testing
 	}
 }
 
+func TestInvokePrunesTerminalIdempotencyAndAuditAfterRetention(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a", "agent/b"}, now, 2*invocationTerminalRetention); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a", Now: now, Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/b", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	request := InvokeInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", TargetEndpoint: "agent/b", IdempotencyKey: "invoke", Now: now}
+	first, duplicate, err := store.RequestInvocation(request)
+	if err != nil || duplicate || first.Status != InvocationAlreadyRunning {
+		t.Fatalf("first=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	request.Now = now.Add(invocationTerminalRetention - time.Millisecond)
+	if repeated, duplicate, err := store.RequestInvocation(request); err != nil || !duplicate || repeated.ID != first.ID {
+		t.Fatalf("retained retry=%#v duplicate=%t err=%v", repeated, duplicate, err)
+	}
+	request.Now = now.Add(invocationTerminalRetention + time.Millisecond)
+	second, duplicate, err := store.RequestInvocation(request)
+	if err != nil || duplicate || second.ID == first.ID || second.Status != InvocationAlreadyRunning {
+		t.Fatalf("pruned retry=%#v duplicate=%t err=%v", second, duplicate, err)
+	}
+	var invocations, idempotency, audit int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM invocations), (SELECT count(*) FROM invocation_idempotency), (SELECT count(*) FROM invocation_audit)`).Scan(&invocations, &idempotency, &audit); err != nil || invocations != 1 || idempotency != 1 || audit != 1 {
+		t.Fatalf("invocations=%d idempotency=%d audit=%d err=%v", invocations, idempotency, audit, err)
+	}
+}
+
 func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

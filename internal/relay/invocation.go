@@ -14,6 +14,10 @@ import (
 const (
 	maxInvocationAttempts = 3
 	maxInvocationBackoff  = time.Minute
+	// Invocation records include their idempotency and body-free audit trail.
+	// Retain terminal records long enough for a client retry, then reclaim them
+	// with the same transaction that accepts later invoke traffic.
+	invocationTerminalRetention = 24 * time.Hour
 )
 
 var _ InvocationBackend = (*Store)(nil)
@@ -47,20 +51,10 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 		return Invocation{}, false, err
 	}
 	if invocationSchemaExists {
-		var existingHash string
-		err := s.db.QueryRowContext(context.Background(), `SELECT request_hash FROM invocation_idempotency WHERE machine_id=? AND key=?`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingHash)
-		if err == nil {
-			if existingHash != requestHash {
-				return Invocation{}, false, ErrConflict
-			}
-			if err := s.ensureInvocationSchema(); err != nil {
-				return Invocation{}, false, err
-			}
-			return s.requestInvocationWithSchema(input, requestHash)
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return Invocation{}, false, fmt.Errorf("read invocation idempotency: %w", err)
-		}
+		// The transaction rechecks authority, prunes expired terminal records,
+		// then resolves idempotency. This lets an expired key be reclaimed before
+		// it can reject a later valid request as a stale hash conflict.
+		return s.requestInvocationWithSchema(input, requestHash)
 	}
 	var pending bool
 	if err := s.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
@@ -92,6 +86,9 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 	}
 	if err != nil {
 		return Invocation{}, false, fmt.Errorf("authorize invocation sender: %w", err)
+	}
+	if err := pruneExpiredTerminalInvocations(tx, input.Now); err != nil {
+		return Invocation{}, false, err
 	}
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT invocation_id,request_hash FROM invocation_idempotency WHERE machine_id=? AND key=?`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -191,6 +188,13 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		return Invocation{}, false, err
 	}
 	return invocation, false, nil
+}
+
+func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE status IN (?,?,?) AND created_at<?`, InvocationAlreadyRunning, InvocationSucceeded, InvocationFailed, now.Add(-invocationTerminalRetention).UnixMilli()); err != nil {
+		return fmt.Errorf("prune terminal invocations: %w", err)
+	}
+	return nil
 }
 
 func invocationForCaller(invocation Invocation, input InvokeInput) Invocation {
@@ -523,6 +527,7 @@ func (s *Store) ensureInvocationSchema() error {
 			PRIMARY KEY(invocation_id, ordinal)
 		)`,
 		`CREATE INDEX IF NOT EXISTS invocations_machine_pending ON invocations(target_machine_id, status, not_before, lease_until)`,
+		`CREATE INDEX IF NOT EXISTS invocations_terminal_retention ON invocations(status, created_at)`,
 	} {
 		if _, err := s.db.ExecContext(context.Background(), statement); err != nil {
 			return fmt.Errorf("initialize invocation state: %w", err)
