@@ -25,6 +25,7 @@ import (
 )
 
 const maxMessageBodyBytes = 32 << 10
+const MaxActiveRolesPerSession = 128
 
 var (
 	// ErrForbidden intentionally does not disclose whether a referenced object
@@ -506,6 +507,14 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 	}
 	if bindingUntil <= now.UnixMilli() {
 		return ErrForbidden
+	}
+	var activeRoles int
+	if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM role_bindings
+		WHERE machine_id=? AND session_endpoint=? AND lease_until>? AND role<>?`, machineID, sessionEndpoint, now.UnixMilli(), role).Scan(&activeRoles); err != nil {
+		return fmt.Errorf("count active durable roles: %w", err)
+	}
+	if activeRoles >= MaxActiveRolesPerSession {
+		return ErrConflict
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_bindings(role, session_endpoint, machine_id, ownership_generation, lease_until)
 		VALUES (?, ?, ?, ?, ?)

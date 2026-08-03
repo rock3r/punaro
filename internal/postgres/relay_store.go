@@ -193,6 +193,14 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	if endpointUntil.Before(until) {
 		until = endpointUntil
 	}
+	var activeRoles int
+	if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_role_bindings
+		WHERE machine_id=$1 AND session_endpoint=$2 AND lease_until>$3 AND role<>$4`, machineID, endpoint, now.UTC(), role).Scan(&activeRoles); err != nil {
+		return errors.New("durable role binding count is unavailable")
+	}
+	if activeRoles >= relay.MaxActiveRolesPerSession {
+		return relay.ErrConflict
+	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
 		VALUES($1,$2,$3,$4,$5)
 		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint,machine_id=excluded.machine_id,ownership_generation=excluded.ownership_generation,lease_until=excluded.lease_until`, role, endpoint, machineID, generation, until); err != nil {
