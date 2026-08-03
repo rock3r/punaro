@@ -201,10 +201,23 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	if activeRoles >= relay.MaxActiveRolesPerSession {
 		return relay.ErrConflict
 	}
+	var previousSession string
+	err = tx.QueryRowContext(context.Background(), `SELECT session_endpoint FROM relay.mail_role_bindings WHERE role=$1 FOR UPDATE`, role).Scan(&previousSession)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return errors.New("durable role binding is unavailable")
+	}
+	rebinding := err == nil && previousSession != endpoint
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
 		VALUES($1,$2,$3,$4,$5)
 		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint,machine_id=excluded.machine_id,ownership_generation=excluded.ownership_generation,lease_until=excluded.lease_until`, role, endpoint, machineID, generation, until); err != nil {
 		return relayDatabaseError(err, "bind durable role")
+	}
+	if rebinding {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries
+			SET lease_machine_id=NULL,lease_token=NULL,ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL
+			WHERE recipient_endpoint=chr(30)||'role:'||$1 AND acked_at IS NULL`, role); err != nil {
+			return relayDatabaseError(err, "invalidate rebound role leases")
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit durable role binding")

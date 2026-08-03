@@ -519,11 +519,24 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 	if activeRoles >= MaxActiveRolesPerSession {
 		return ErrConflict
 	}
+	var previousSession string
+	err = tx.QueryRowContext(context.Background(), "SELECT session_endpoint FROM role_bindings WHERE role=?", role).Scan(&previousSession)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read durable role binding: %w", err)
+	}
+	rebinding := err == nil && previousSession != sessionEndpoint
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_bindings(role, session_endpoint, machine_id, ownership_generation, lease_until)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint, machine_id=excluded.machine_id,
 		ownership_generation=excluded.ownership_generation, lease_until=excluded.lease_until`, role, sessionEndpoint, machineID, generation, bindingUntil); err != nil {
 		return fmt.Errorf("bind durable role: %w", err)
+	}
+	if rebinding {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE deliveries
+			SET lease_machine_id=NULL,lease_token=NULL,ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL
+			WHERE recipient_endpoint=? AND acked_at IS NULL`, roleRecipient(role)); err != nil {
+			return fmt.Errorf("invalidate rebound role leases: %w", err)
+		}
 	}
 	return tx.Commit()
 }
