@@ -1,4 +1,4 @@
-.PHONY: test test-race test-postgres memory-onboarding-e2e vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
+.PHONY: test test-race test-postgres memory-onboarding-e2e test-real-relay-e2e vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
 PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
@@ -21,6 +21,10 @@ test:
 
 test-race:
 	go test -race -count=1 ./...
+
+test-real-relay-e2e:
+	@test "$(shell uname -s)" = Darwin || { printf '%s\n' 'test-real-relay-e2e requires a disposable macOS GUI login for the supported LaunchAgent lifecycle' >&2; exit 2; }
+	PUNARO_REAL_RELAY_E2E=1 go test -tags=e2e -count=1 -timeout=2m ./cmd/punaro-adapter -run '^TestE2ERealTwoClientRelayLifecycle$$'
 
 test-postgres:
 	./scripts/test-postgres-integration.sh
