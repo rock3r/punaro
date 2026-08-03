@@ -1075,7 +1075,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = attachmentObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 11 {
-		recipientObjectsPresent, err := attachmentRecipientControlsAvailable(ctx, q)
+		recipientObjectsPresent, err := attachmentRecipientControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL attachment-recipient schema cannot be inspected")
 		}

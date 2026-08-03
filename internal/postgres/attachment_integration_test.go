@@ -180,11 +180,14 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		CreatorEndpoint: "agent/attachment/uploader", Now: now,
 		Members: []relay.Member{
 			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive},
+			{Role: "role/attachment-recipient", RoleMachineID: "attachment-recipient-machine", Capabilities: relay.CapReceive},
 		},
 	})
 	if err != nil {
 		t.Fatalf("project conversation: %v", err)
+	}
+	if err := app.BindRoleToSession("attachment-recipient-machine", "role/attachment-recipient", "agent/attachment/recipient", now, time.Hour); err != nil {
+		t.Fatalf("bind attachment recipient role: %v", err)
 	}
 	message, duplicateMessage, err := app.AppendMessage(relay.AppendInput{
 		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",

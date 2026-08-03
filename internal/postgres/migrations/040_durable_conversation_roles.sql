@@ -56,3 +56,159 @@ ALTER TABLE relay.mail_cutover_staging DROP CONSTRAINT mail_cutover_staging_tabl
 ALTER TABLE relay.mail_cutover_staging ADD CONSTRAINT mail_cutover_staging_table_name_check CHECK (table_name IN ('mail_endpoints','mail_conversations','mail_memberships','mail_roles','mail_role_memberships','mail_role_bindings','mail_messages','mail_deliveries','mail_recipient_cursors','mail_message_idempotency','mail_conversation_idempotency','mail_request_nonces'));
 ALTER TABLE relay.mail_cutover_checkpoints DROP CONSTRAINT mail_cutover_checkpoints_table_name_check;
 ALTER TABLE relay.mail_cutover_checkpoints ADD CONSTRAINT mail_cutover_checkpoints_table_name_check CHECK (table_name IN ('mail_endpoints','mail_conversations','mail_memberships','mail_roles','mail_role_memberships','mail_role_bindings','mail_messages','mail_deliveries','mail_recipient_cursors','mail_message_idempotency','mail_conversation_idempotency','mail_request_nonces'));
+
+-- Endpoint grants remain immutable snapshots. A role delivery instead derives
+-- attachment access from its currently fenced session binding, allowing an
+-- unbound role to receive an artifact-bearing message and bind later.
+CREATE OR REPLACE FUNCTION attachment.bind_message_artifacts(
+    requested_principal uuid, requested_lookup uuid, requested_generation bigint,
+    requested_message uuid, requested_artifacts jsonb
+)
+RETURNS integer LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $function$
+DECLARE
+    artifact_count integer; distinct_count integer; matching_count integer;
+    delivery_count integer; bound_delivery_count integer; message_project uuid;
+    sender_endpoint text; grant_id uuid;
+BEGIN
+    PERFORM jobs.assert_application_mutation();
+    IF jsonb_typeof(requested_artifacts) <> 'array'
+       OR jsonb_array_length(requested_artifacts) < 1
+       OR jsonb_array_length(requested_artifacts) > 16
+       OR EXISTS (SELECT 1 FROM jsonb_array_elements(requested_artifacts) AS item(value)
+                  WHERE jsonb_typeof(item.value) <> 'string'
+                     OR (item.value #>> '{}') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$') THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    SELECT count(*), count(DISTINCT value) INTO artifact_count, distinct_count
+    FROM jsonb_array_elements_text(requested_artifacts) AS artifact(value);
+    IF artifact_count <> distinct_count THEN
+        RAISE EXCEPTION USING ERRCODE = '22023', MESSAGE = 'message attachment binding is invalid';
+    END IF;
+    SELECT project.project_id, message.from_endpoint INTO message_project, sender_endpoint
+    FROM relay.mail_messages AS message
+    JOIN attachment.conversation_projects AS project ON project.conversation_id = message.conversation_id
+    WHERE message.id = requested_message FOR SHARE OF message, project;
+    IF message_project IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    PERFORM 1 FROM relay.projects WHERE id = message_project AND merged_into IS NULL FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    PERFORM 1 FROM auth.principals AS principal
+    JOIN auth.device_credentials AS credential ON credential.principal_id = principal.id
+    WHERE principal.id = requested_principal AND principal.disabled_at IS NULL
+      AND credential.lookup_id = requested_lookup AND credential.generation = requested_generation
+      AND credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+    FOR SHARE OF principal, credential;
+    IF NOT FOUND OR NOT EXISTS (SELECT 1 FROM attachment.endpoint_principals WHERE endpoint = sender_endpoint AND principal_id = requested_principal) THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    SELECT capability_grant.id INTO grant_id FROM auth.capability_grants AS capability_grant
+    WHERE capability_grant.principal_id = requested_principal AND capability_grant.revoked_at IS NULL
+      AND capability_grant.capability = 'conversation.send'
+      AND ((capability_grant.scope = 'project' AND capability_grant.project_id = message_project)
+           OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL))
+    ORDER BY capability_grant.id LIMIT 1 FOR SHARE OF capability_grant;
+    IF grant_id IS NULL THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    SELECT count(*) INTO matching_count FROM attachment.message_artifacts AS linked
+    JOIN jsonb_array_elements_text(requested_artifacts) WITH ORDINALITY AS artifact(value, ordinality)
+      ON linked.ordinal = artifact.ordinality - 1 AND linked.artifact_id = artifact.value::uuid
+    WHERE linked.message_id = requested_message AND linked.sender_principal_id = requested_principal;
+    IF matching_count > 0 THEN
+        IF matching_count <> artifact_count OR EXISTS (SELECT 1 FROM attachment.message_artifacts WHERE message_id = requested_message OFFSET artifact_count) THEN
+            RAISE EXCEPTION USING ERRCODE = '23505', MESSAGE = 'message attachment binding conflicts with prior request';
+        END IF;
+        RETURN matching_count;
+    END IF;
+    PERFORM 1 FROM attachment.uploads AS upload
+    WHERE upload.artifact_id IN (SELECT value::uuid FROM jsonb_array_elements_text(requested_artifacts) AS artifact(value))
+    ORDER BY upload.artifact_id FOR UPDATE;
+    SELECT count(*) INTO matching_count FROM attachment.uploads AS upload
+    JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = upload.artifact_id
+    JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+    WHERE upload.artifact_id IN (SELECT value::uuid FROM jsonb_array_elements_text(requested_artifacts) AS artifact(value))
+      AND upload.project_id = message_project AND upload.principal_id = requested_principal AND upload.state = 'ready'
+      AND manifest.size_bytes = upload.size_bytes AND manifest.sha256::text = upload.sha256::text;
+    IF matching_count <> artifact_count THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment binding is not authorized';
+    END IF;
+    SELECT count(*) INTO delivery_count FROM relay.mail_deliveries
+    WHERE message_id = requested_message AND recipient_endpoint !~ ('^' || chr(30) || 'role:');
+    PERFORM 1 FROM attachment.endpoint_principals AS binding
+    JOIN relay.mail_deliveries AS delivery ON delivery.recipient_endpoint = binding.endpoint
+    WHERE delivery.message_id = requested_message AND delivery.recipient_endpoint !~ ('^' || chr(30) || 'role:')
+    ORDER BY binding.endpoint FOR SHARE OF binding;
+    SELECT count(*) INTO bound_delivery_count FROM relay.mail_deliveries AS delivery
+    JOIN attachment.endpoint_principals AS binding ON binding.endpoint = delivery.recipient_endpoint
+    WHERE delivery.message_id = requested_message AND delivery.recipient_endpoint !~ ('^' || chr(30) || 'role:');
+    IF bound_delivery_count <> delivery_count THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'message attachment recipient is not authorized';
+    END IF;
+    INSERT INTO attachment.message_artifacts (message_id, ordinal, artifact_id, sender_principal_id)
+    SELECT requested_message, (artifact.ordinality - 1)::smallint, artifact.value::uuid, requested_principal
+    FROM jsonb_array_elements_text(requested_artifacts) WITH ORDINALITY AS artifact(value, ordinality) ORDER BY artifact.ordinality;
+    INSERT INTO attachment.recipient_grants (artifact_id, recipient_principal_id, message_id)
+    SELECT artifact.value::uuid, binding.principal_id, requested_message
+    FROM jsonb_array_elements_text(requested_artifacts) AS artifact(value)
+    CROSS JOIN relay.mail_deliveries AS delivery
+    JOIN attachment.endpoint_principals AS binding ON binding.endpoint = delivery.recipient_endpoint
+    WHERE delivery.message_id = requested_message AND delivery.recipient_endpoint !~ ('^' || chr(30) || 'role:')
+    GROUP BY artifact.value, binding.principal_id;
+    INSERT INTO attachment.recipient_grant_endpoints (artifact_id, recipient_principal_id, recipient_endpoint, recipient_machine_id, ownership_generation, message_id)
+    SELECT artifact.value::uuid, binding.principal_id, delivery.recipient_endpoint, binding.machine_id, binding.ownership_generation, requested_message
+    FROM jsonb_array_elements_text(requested_artifacts) AS artifact(value)
+    CROSS JOIN relay.mail_deliveries AS delivery
+    JOIN attachment.endpoint_principals AS binding ON binding.endpoint = delivery.recipient_endpoint
+    WHERE delivery.message_id = requested_message AND delivery.recipient_endpoint !~ ('^' || chr(30) || 'role:');
+    RETURN artifact_count;
+END
+$function$;
+
+CREATE OR REPLACE FUNCTION attachment.authorize_download(
+    requested_principal uuid, requested_lookup uuid, requested_generation bigint, requested_artifact uuid
+)
+RETURNS TABLE (artifact_id uuid, project_id uuid, storage_path text, size_bytes bigint, sha256 text,
+               display_name text, media_type text, ready_at timestamptz)
+LANGUAGE plpgsql SECURITY DEFINER STABLE SET search_path = pg_catalog
+AS $function$
+BEGIN
+    IF NOT attachment.device_authority_current(requested_principal, requested_lookup, requested_generation) THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment download is not authorized';
+    END IF;
+    RETURN QUERY
+    SELECT upload.artifact_id, upload.project_id, ready.storage_path, upload.size_bytes, upload.sha256::text,
+           upload.display_name, upload.media_type, upload.ready_at
+    FROM attachment.uploads AS upload
+    JOIN attachment.ready_artifacts AS ready ON ready.artifact_id = upload.artifact_id
+    JOIN attachment.ready_blob_manifest AS manifest ON manifest.storage_path = ready.storage_path
+    WHERE upload.artifact_id = requested_artifact AND upload.state = 'ready'
+      AND manifest.size_bytes = upload.size_bytes AND manifest.sha256::text = upload.sha256::text
+      AND (EXISTS (SELECT 1 FROM attachment.recipient_grants AS recipient
+                  WHERE recipient.artifact_id = upload.artifact_id AND recipient.recipient_principal_id = requested_principal)
+           OR EXISTS (
+               SELECT 1 FROM attachment.message_artifacts AS artifact
+               JOIN relay.mail_deliveries AS delivery ON delivery.message_id = artifact.message_id
+               JOIN relay.mail_role_bindings AS binding ON delivery.recipient_endpoint = chr(30) || 'role:' || binding.role
+               JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint = binding.session_endpoint
+               JOIN attachment.endpoint_principals AS principal ON principal.endpoint = endpoint.endpoint
+               WHERE artifact.artifact_id = upload.artifact_id
+                 AND principal.principal_id = requested_principal
+                 AND principal.credential_lookup_id = requested_lookup AND principal.credential_generation = requested_generation
+                 AND principal.machine_id = binding.machine_id AND principal.ownership_generation = binding.ownership_generation
+                 AND endpoint.machine_id = binding.machine_id AND endpoint.ownership_generation = binding.ownership_generation
+                 AND endpoint.lease_until > statement_timestamp() AND binding.lease_until > statement_timestamp()
+           ))
+      AND EXISTS (SELECT 1 FROM auth.capability_grants AS capability_grant
+                  WHERE capability_grant.principal_id = requested_principal AND capability_grant.revoked_at IS NULL
+                    AND capability_grant.capability = 'attachment.download'
+                    AND ((capability_grant.scope = 'project' AND capability_grant.project_id = upload.project_id)
+                         OR (capability_grant.scope = 'all_projects' AND capability_grant.project_id IS NULL)));
+    IF NOT FOUND THEN
+        RAISE EXCEPTION USING ERRCODE = '42501', MESSAGE = 'attachment download is not authorized';
+    END IF;
+END
+$function$;

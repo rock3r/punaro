@@ -204,7 +204,9 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 			consumer_id=NULL,consumer_generation=consumer_generation+CASE WHEN consumer_id IS NULL THEN 0 ELSE 1 END,consumer_lease_until=NULL`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration endpoint fencing failed")
 		}
-		if _, err := conn.ExecContext(ctx, `UPDATE role_bindings SET lease_until=?`, now.UTC().UnixMilli()); err != nil {
+		if _, err := conn.ExecContext(ctx, `UPDATE role_bindings SET lease_until=?, ownership_generation=(
+			SELECT ownership_generation FROM endpoints WHERE endpoint=role_bindings.session_endpoint
+		)`, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration role binding fencing failed")
 		}
 		if _, err := conn.ExecContext(ctx, `UPDATE deliveries SET lease_machine_id=NULL,lease_token=NULL,
@@ -650,7 +652,14 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		OR EXISTS (SELECT 1 FROM memberships WHERE typeof(endpoint)<>'text' OR typeof(capabilities)<>'integer')
 		OR EXISTS (SELECT 1 FROM roles WHERE typeof(role)<>'text' OR typeof(machine_id)<>'text')
 		OR EXISTS (SELECT 1 FROM role_memberships WHERE typeof(role)<>'text' OR typeof(capabilities)<>'integer')
-		OR EXISTS (SELECT 1 FROM role_bindings AS binding JOIN roles AS role ON role.role=binding.role WHERE typeof(binding.session_endpoint)<>'text' OR typeof(binding.machine_id)<>'text' OR typeof(binding.ownership_generation)<>'integer' OR typeof(binding.lease_until)<>'integer' OR role.machine_id<>binding.machine_id)
+		OR EXISTS (SELECT 1 FROM role_bindings AS binding
+			LEFT JOIN roles AS role ON role.role=binding.role
+			LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+			WHERE role.role IS NULL OR endpoint.endpoint IS NULL
+				OR typeof(binding.session_endpoint)<>'text' OR typeof(binding.machine_id)<>'text'
+				OR typeof(binding.ownership_generation)<>'integer' OR binding.ownership_generation<1
+				OR typeof(binding.lease_until)<>'integer' OR role.machine_id<>binding.machine_id
+				OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)
 		OR EXISTS (SELECT 1 FROM messages WHERE typeof(sequence)<>'integer' OR typeof(from_endpoint)<>'text' OR typeof(body)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM deliveries WHERE typeof(recipient_endpoint)<>'text' OR (lease_machine_id IS NOT NULL AND typeof(lease_machine_id)<>'text') OR typeof(lease_generation)<>'integer' OR (lease_token IS NOT NULL AND (typeof(lease_token)<>'text' OR length(lease_token)<>64 OR lease_token GLOB '*[^0-9a-f]*')) OR (ownership_generation IS NOT NULL AND typeof(ownership_generation)<>'integer') OR (consumer_generation IS NOT NULL AND typeof(consumer_generation)<>'integer') OR (lease_until IS NOT NULL AND typeof(lease_until)<>'integer') OR (acked_at IS NOT NULL AND typeof(acked_at)<>'integer'))
 		OR EXISTS (SELECT 1 FROM recipient_cursors WHERE typeof(recipient_endpoint)<>'text' OR typeof(sequence)<>'integer')

@@ -289,6 +289,42 @@ func TestMigrationSourceRefusesOutOfRangeRoleCapabilities(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRefusesInvalidRoleBindingFence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/source/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "source-invalid-role-binding", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{
+			{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", "role/source-reviewer", "agent/source/b", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE role_bindings SET session_endpoint='agent/source/missing', ownership_generation=0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("source with an invalid durable role binding fence was accepted")
+	}
+}
+
 func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
