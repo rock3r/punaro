@@ -105,6 +105,30 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 		}
 		return invocation, false, nil
 	}
+	// Different authorized callers can legitimately race to wake the same
+	// offline role. They must converge on one durable fence, rather than start
+	// separate runtime processes merely because their idempotency domains differ.
+	var pendingID string
+	err = tx.QueryRowContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? ORDER BY created_at,id LIMIT 1`, input.TargetEndpoint, InvocationPending).Scan(&pendingID)
+	if err == nil {
+		invocation, err := invocationByID(tx, pendingID)
+		if err != nil {
+			return Invocation{}, false, err
+		}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
+			return Invocation{}, false, fmt.Errorf("record coalesced invocation idempotency: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocation.ID, "coalesced", input.Now); err != nil {
+			return Invocation{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Invocation{}, false, err
+		}
+		return invocation, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Invocation{}, false, fmt.Errorf("find pending invocation: %w", err)
+	}
 	invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationPending}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 		return Invocation{}, false, fmt.Errorf("queue invocation: %w", err)
@@ -167,7 +191,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 			return nil, err
 		}
 	}
-	rows, err := tx.QueryContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,lease_generation FROM invocations
+	rows, err := tx.QueryContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,lease_generation,attempts,lease_until FROM invocations
 		WHERE target_machine_id=? AND status=? AND not_before<=? AND (lease_until IS NULL OR lease_until<=? OR (lease_machine_id=? AND lease_consumer_id=?))
 		ORDER BY created_at,id LIMIT ?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli(), machineID, consumerID, limit)
 	if err != nil {
@@ -177,8 +201,25 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	var invocations []Invocation
 	for rows.Next() {
 		var invocation Invocation
-		if err := rows.Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.LeaseGeneration); err != nil {
+		var attempts int
+		var priorLeaseUntil sql.NullInt64
+		if err := rows.Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.LeaseGeneration, &attempts, &priorLeaseUntil); err != nil {
 			return nil, fmt.Errorf("read invocation: %w", err)
+		}
+		if !priorLeaseUntil.Valid || priorLeaseUntil.Int64 <= now.UnixMilli() {
+			// A fresh lease, and a lease recovered after an adapter crash, each
+			// consume one bounded runtime-start attempt. Releasing a still-live
+			// lease to the same adapter does not.
+			if attempts >= maxInvocationAttempts {
+				if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, invocation.ID); err != nil {
+					return nil, fmt.Errorf("fail exhausted invocation: %w", err)
+				}
+				if err := recordInvocationAudit(tx, invocation.ID, "failed", now); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			attempts++
 		}
 		token, err := randomToken()
 		if err != nil {
@@ -188,7 +229,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		invocation.LeaseGeneration++
 		invocation.LeaseToken = token
 		invocation.LeaseUntil = now.Add(ttl).UTC()
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET attempts=?,lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, attempts, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
 			return nil, fmt.Errorf("lease invocation: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocation.ID, "leased", now); err != nil {
@@ -239,7 +280,6 @@ func (s *Store) ReportInvocation(machineID, invocationID, token string, generati
 			return err
 		}
 	} else {
-		attempts++
 		status := InvocationPending
 		action := "retry"
 		if attempts >= maxInvocationAttempts {
@@ -349,7 +389,7 @@ func (s *Store) ensureInvocationSchema() error {
 		`CREATE TABLE IF NOT EXISTS invocation_audit (
 			invocation_id TEXT NOT NULL REFERENCES invocations(id) ON DELETE CASCADE,
 			ordinal INTEGER NOT NULL,
-			action TEXT NOT NULL CHECK(action IN ('requested', 'already_running', 'leased', 'retry', 'accepted', 'failed')),
+			action TEXT NOT NULL CHECK(action IN ('requested', 'coalesced', 'already_running', 'leased', 'retry', 'accepted', 'failed')),
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY(invocation_id, ordinal)
 		)`,

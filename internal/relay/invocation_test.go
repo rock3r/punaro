@@ -43,6 +43,12 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	if err != nil || duplicate || invocation.Status != InvocationPending || invocation.TargetMachineID != "recipient-machine" || invocation.Fence == "" {
 		t.Fatalf("invocation=%#v duplicate=%t err=%v", invocation, duplicate, err)
 	}
+	coalescedRequest := request
+	coalescedRequest.IdempotencyKey = "invoke-another-caller"
+	coalesced, duplicate, err := store.RequestInvocation(coalescedRequest)
+	if err != nil || !duplicate || coalesced != invocation {
+		t.Fatalf("coalesced=%#v duplicate=%t err=%v", coalesced, duplicate, err)
+	}
 	repeated, duplicate, err := store.RequestInvocation(request)
 	if err != nil || !duplicate || repeated != invocation {
 		t.Fatalf("repeated=%#v duplicate=%t err=%v", repeated, duplicate, err)
@@ -75,7 +81,50 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 		t.Fatalf("final=%#v err=%v", final, err)
 	}
 	audit, err := store.InvocationAudit(invocation.ID)
-	if err != nil || len(audit) != 5 || audit[0].Action != "requested" || audit[1].Action != "leased" || audit[2].Action != "retry" || audit[3].Action != "leased" || audit[4].Action != "accepted" {
+	if err != nil || len(audit) != 6 || audit[0].Action != "requested" || audit[1].Action != "coalesced" || audit[2].Action != "leased" || audit[3].Action != "retry" || audit[4].Action != "leased" || audit[5].Action != "accepted" {
+		t.Fatalf("audit=%#v err=%v", audit, err)
+	}
+}
+
+func TestInvokeCrashLeasesAreBounded(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	invocation, _, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < maxInvocationAttempts; attempt++ {
+		leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(time.Duration(2+attempt*2)*time.Second), time.Second, 10)
+		if err != nil || len(leased) != 1 || leased[0].Fence != invocation.Fence {
+			t.Fatalf("attempt=%d leased=%#v err=%v", attempt, leased, err)
+		}
+	}
+	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(8*time.Second), time.Second, 10); err != nil || len(leased) != 0 {
+		t.Fatalf("exhausted leased=%#v err=%v", leased, err)
+	}
+	audit, err := store.InvocationAudit(invocation.ID)
+	if err != nil || len(audit) != 5 || audit[4].Action != "failed" {
 		t.Fatalf("audit=%#v err=%v", audit, err)
 	}
 }

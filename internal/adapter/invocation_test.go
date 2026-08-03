@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -34,6 +35,30 @@ func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T)
 	}
 	if runtime.calls != 1 || len(relayClient.reports) != 2 || !relayClient.reports[1].accepted {
 		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
+	}
+}
+
+func TestCommandInvokerRejectsSymlinkAndWritableAncestors(t *testing.T) {
+	directory := t.TempDir()
+	command := filepath.Join(directory, "runtime")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { // #nosec G306 -- test executable must be executable by its owner.
+		t.Fatal(err)
+	}
+	if _, err := NewCommandInvoker(command); err != nil {
+		t.Fatalf("protected command rejected: %v", err)
+	}
+	symlink := filepath.Join(directory, "runtime-link")
+	if err := os.Symlink(command, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewCommandInvoker(symlink); err == nil {
+		t.Fatal("symlinked command accepted")
+	}
+	if err := os.Chmod(directory, 0o777); err != nil { // #nosec G302 -- test constructs an intentionally unsafe ancestor.
+		t.Fatal(err)
+	}
+	if _, err := NewCommandInvoker(command); err == nil {
+		t.Fatal("command with writable ancestor accepted")
 	}
 }
 
