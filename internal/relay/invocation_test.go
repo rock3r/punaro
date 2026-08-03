@@ -84,6 +84,14 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	if coalesced, duplicate, err := store.RequestInvocation(afterAccept); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Fence != invocation.Fence || coalesced.Status != InvocationSucceeded {
 		t.Fatalf("accepted coalescing invocation=%#v duplicate=%t err=%v", coalesced, duplicate, err)
 	}
+	// A successful local start is still fenced until the role can reattach, so
+	// another machine cannot overtake it in the handoff gap.
+	if err := store.AdvertiseEndpoints("replacement-machine", []string{"agent/recipient"}, retryAt.Add(time.Second), time.Hour); !errors.Is(err, ErrConflict) {
+		t.Fatalf("replacement attached during accepted handoff: %v", err)
+	}
+	if err := store.AdvertiseEndpoints("replacement-machine", []string{"agent/recipient"}, retryAt.Add(maxInvocationBackoff+time.Second), time.Hour); err != nil {
+		t.Fatalf("replacement did not attach after bounded handoff: %v", err)
+	}
 	if final, err := store.LeaseInvocations("recipient-machine", "adapter-a", retryAt.Add(time.Hour), time.Second, 10); err != nil || len(final) != 0 {
 		t.Fatalf("final=%#v err=%v", final, err)
 	}
