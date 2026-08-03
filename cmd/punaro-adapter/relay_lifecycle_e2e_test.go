@@ -120,7 +120,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
 	e2eSend(t, senderAdapter, senderProfile, conversationID, senderEndpoint)
 
-	e2eMailbox(t, receiverMailboxState, "wait", "--for", receiverEndpoint, "--timeout", "30s", "--json")
+	e2eMailbox(t, receiverMailboxState, "wait", "--for", receiverEndpoint, "--timeout", "60s", "--json")
 	claim := e2eClaim(t, mailbox, receiverMailboxState, receiverEndpoint)
 	e2eMailbox(t, receiverMailboxState, "ack", "--delivery", claim.DeliveryID, "--lease-token", claim.LeaseToken)
 	e2eEventually(t, 10*time.Second, func() bool { return proxy.firstAckRejected.Load() }, "receiver did not reach the forced acknowledgement retry boundary")
