@@ -259,6 +259,36 @@ func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceRefusesOutOfRangeRoleCapabilities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "source-invalid-role-capability", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{
+			{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE role_memberships SET capabilities = 8"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("source with out-of-range durable role capabilities was accepted")
+	}
+}
+
 func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

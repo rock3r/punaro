@@ -631,6 +631,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
         EXISTS (SELECT 1 FROM endpoints WHERE ownership_generation<1 OR consumer_generation<0 OR (consumer_id IS NULL)<>(consumer_lease_until IS NULL))
         OR EXISTS (SELECT 1 FROM conversations WHERE next_sequence<0)
         OR EXISTS (SELECT 1 FROM memberships WHERE capabilities<1 OR capabilities>7)
+		OR EXISTS (SELECT 1 FROM role_memberships WHERE capabilities<1 OR capabilities>7)
         OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)
         OR EXISTS (SELECT 1 FROM messages WHERE sequence<1 OR length(CAST(body AS blob))>32768)
         OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
