@@ -129,6 +129,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		t.Fatal("stop installed receiver service before retry restart")
 	}
 	proxy.retryAcknowledged.Store(false)
+	proxy.allowRetryAcknowledgement.Store(true)
 	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
 		t.Fatal("restart installed receiver service for retry")
 	}
@@ -146,10 +147,11 @@ type e2eClaimResult struct {
 }
 
 type e2eRelayProxy struct {
-	listener          net.Listener
-	server            *http.Server
-	firstAckRejected  atomic.Bool
-	retryAcknowledged atomic.Bool
+	listener                  net.Listener
+	server                    *http.Server
+	firstAckRejected          atomic.Bool
+	retryAcknowledged         atomic.Bool
+	allowRetryAcknowledgement atomic.Bool
 }
 
 func e2eRepositoryRoot(t *testing.T) string {
@@ -223,6 +225,11 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string, listener net.Listener
 	state.server = &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/deliveries/") && strings.HasSuffix(request.URL.Path, "/ack") {
 			if state.firstAckRejected.CompareAndSwap(false, true) {
+				response.Header().Set("Cache-Control", "no-store")
+				response.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if !state.allowRetryAcknowledgement.Load() {
 				response.Header().Set("Cache-Control", "no-store")
 				response.WriteHeader(http.StatusServiceUnavailable)
 				return
