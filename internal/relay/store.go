@@ -370,6 +370,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			)
 		)`,
 		"CREATE INDEX IF NOT EXISTS deliveries_recipient_pending ON deliveries(recipient_endpoint, acked_at, lease_until)",
+		"CREATE INDEX IF NOT EXISTS role_bindings_session ON role_bindings(machine_id, session_endpoint, ownership_generation, lease_until)",
 		"CREATE INDEX IF NOT EXISTS request_nonces_expiry ON request_nonces(expires_at)",
 	} {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -655,6 +656,9 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 				creatorAdmin = true
 			}
 		case member.Endpoint == "" && ValidRole(member.Role) && ValidMachineID(member.RoleMachineID):
+			if member.Capabilities&CapInvoke != 0 {
+				return Conversation{}, fmt.Errorf("invalid conversation member")
+			}
 			if _, duplicate := seenRoles[member.Role]; duplicate {
 				return Conversation{}, fmt.Errorf("duplicate conversation member")
 			}

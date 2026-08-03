@@ -188,6 +188,9 @@ currently attached mailbox address. To keep a conversation member stable while
 an agent process reconnects, create a role member owned by its enrolled machine
 instead. The role is a durable identity, not a mailbox address:
 
+Role members may use `send`, `receive`, and `admin`; `invoke` is reserved for
+an exact endpoint member because invoking needs a concrete process target.
+
 ```sh
 punaro-adapter create \
   --creator agent/workstation-review/operator-session \

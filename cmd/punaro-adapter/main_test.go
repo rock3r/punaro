@@ -51,6 +51,9 @@ func TestParseCreateArgsAcceptsDurableRoleMemberAndBinding(t *testing.T) {
 	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", "role/plan-reviewer@machine-b:receive", "--idempotency-key", "create-role-legacy"}); err == nil {
 		t.Fatal("ambiguous legacy role-member was accepted")
 	}
+	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", `{"role":"role/plan-reviewer","machine_id":"machine-b","capabilities":["receive","invoke"]}`, "--idempotency-key", "create-role-invoke"}); err == nil {
+		t.Fatal("role member with invoke capability was accepted")
+	}
 	binding, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer", "--session", "agent/b/new-session"})
 	if err != nil || binding.role != "role/plan-reviewer" || binding.session != "agent/b/new-session" {
 		t.Fatalf("role binding=%#v err=%v", binding, err)

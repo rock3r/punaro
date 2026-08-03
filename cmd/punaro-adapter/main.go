@@ -104,6 +104,9 @@ func parseCreateArgs(args []string) (createRequest, error) {
 		if err != nil {
 			return createRequest{}, fmt.Errorf("invalid --role-member")
 		}
+		if capability&relay.CapInvoke != 0 {
+			return createRequest{}, fmt.Errorf("invalid --role-member")
+		}
 		request.members = append(request.members, relay.Member{Role: member.Role, RoleMachineID: member.MachineID, Capabilities: capability})
 	}
 	return request, nil

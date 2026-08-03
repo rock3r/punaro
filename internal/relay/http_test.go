@@ -458,6 +458,9 @@ func TestHTTPRoleBindingRequiresOwningMachineAndLiveSession(t *testing.T) {
 	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Minute})
 	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
 	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"role":"role/plan-reviewer","role_machine_id":"machine-b","capabilities":["receive","invoke"]}]}`, "create-role-invoke", "create-role-invoke-1"); response.Code != http.StatusBadRequest {
+		t.Fatalf("role invoke capability status=%d body=%s", response.Code, response.Body.String())
+	}
 	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"role":"role/plan-reviewer","role_machine_id":"machine-b","capabilities":["receive"]}]}`, "create-role", "create-role-1")
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create role conversation status=%d body=%s", create.Code, create.Body.String())

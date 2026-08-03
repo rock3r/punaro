@@ -583,7 +583,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		"memberships:1:pk:0:conversation_id,endpoint",
 		"roles:1:pk:0:role",
 		"role_memberships:1:pk:0:conversation_id,role",
-		"role_bindings:1:pk:0:role",
+		"role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until",
 		"messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence",
 		"deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until",
 		"recipient_cursors:1:pk:0:recipient_endpoint,conversation_id",

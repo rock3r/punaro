@@ -333,6 +333,10 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 			writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
 			return
 		}
+		if member.Role != "" && capabilities&CapInvoke != 0 {
+			writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
+			return
+		}
 		if member.RoleMachineID != "" {
 			if _, found := h.auth.machines[member.RoleMachineID]; !found {
 				writeError(w, http.StatusForbidden, "authorization denied")

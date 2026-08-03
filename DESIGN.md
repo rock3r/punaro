@@ -300,9 +300,11 @@ existing endpoint member, while legacy endpoint membership retains its current
 behavior unchanged.
 
 Each conversation has an explicit membership table with `send`, `receive`,
-and `admin` capabilities. The Telegram gateway is a distinct principal; only
-the configured Telegram user ID may control it. Neither a friendly endpoint
-name nor a client-provided `from` field is proof of identity.
+and `admin` capabilities. Roles may use only those three capabilities;
+`invoke` is endpoint-only because a role has no stable process target. The
+Telegram gateway is a distinct principal; only the configured Telegram user ID
+may control it. Neither a friendly endpoint name nor a client-provided `from`
+field is proof of identity.
 
 Provision each machine with a distinct Cloudflare Access service token and a
 distinct Punaro machine credential. Service-token revocation stops ingress at

@@ -316,6 +316,21 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesRoleBindingSessionIndex(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var count int
+	if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='role_bindings_session'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("role binding session index is missing")
+	}
+}
+
 func TestStoreBoundsActiveRolesPerSession(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
