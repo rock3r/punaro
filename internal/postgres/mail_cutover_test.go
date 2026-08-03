@@ -49,7 +49,7 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 			Endpoints: strings.Repeat("c", 64), Conversations: strings.Repeat("c", 64), Memberships: strings.Repeat("c", 64),
 			Roles: strings.Repeat("c", 64), RoleMemberships: strings.Repeat("c", 64), RoleBindings: strings.Repeat("c", 64),
 			Messages: strings.Repeat("c", 64), Deliveries: strings.Repeat("c", 64), RecipientCursors: strings.Repeat("c", 64),
-			MessageIdempotency: strings.Repeat("c", 64), ConversationIdempotency: strings.Repeat("c", 64), RequestNonces: strings.Repeat("c", 64),
+			MessageIdempotency: strings.Repeat("c", 64), ConversationIdempotency: strings.Repeat("c", 64), ControlEvents: strings.Repeat("c", 64), ControlIdempotency: strings.Repeat("c", 64), RequestNonces: strings.Repeat("c", 64),
 		},
 	}
 	valid.Manifest, _ = json.Marshal(manifest)
@@ -68,6 +68,30 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		func() MailCutoverRequest {
 			changed := valid
 			changed.Manifest = json.RawMessage(`{"padding":"` + strings.Repeat("x", 9000) + `"}`)
+			return changed
+		}(),
+		func() MailCutoverRequest {
+			changed := valid
+			var altered relay.MigrationSourceManifest
+			if err := json.Unmarshal(changed.Manifest, &altered); err != nil {
+				t.Fatal(err)
+			}
+			altered.Counts.ControlEvents = -1
+			changed.Manifest, _ = json.Marshal(altered)
+			digest := sha256.Sum256(changed.Manifest)
+			changed.ManifestSHA256 = hex.EncodeToString(digest[:])
+			return changed
+		}(),
+		func() MailCutoverRequest {
+			changed := valid
+			var altered relay.MigrationSourceManifest
+			if err := json.Unmarshal(changed.Manifest, &altered); err != nil {
+				t.Fatal(err)
+			}
+			altered.TableSHA256.ControlIdempotency = "bad"
+			changed.Manifest, _ = json.Marshal(altered)
+			digest := sha256.Sum256(changed.Manifest)
+			changed.ManifestSHA256 = hex.EncodeToString(digest[:])
 			return changed
 		}(),
 		func() MailCutoverRequest { changed := valid; changed.ManifestSHA256 = "bad"; return changed }(),
