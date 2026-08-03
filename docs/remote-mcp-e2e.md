@@ -36,7 +36,10 @@ operator, and never attach it to CI logs or the release record. Its shape is:
   },
   "authorized_tool": {
     "name": "candidate_read_only_tool",
-    "arguments": {"query": "release-candidate-e2e"}
+    "arguments": {"query": "release-candidate-e2e"},
+    "expected_result": {
+      "content": [{"type": "text", "text": "release-candidate-e2e"}]
+    }
   },
   "forbidden_tool": {
     "name": "candidate_out_of_scope_tool",
@@ -53,7 +56,9 @@ operator, and never attach it to CI logs or the release record. Its shape is:
 be JSON objects with no duplicate keys. Every token and the redaction probe
 must be a distinct, at-least-16-character OAuth bearer value made only of
 letters, digits, `-._~+/=`. Values above are placeholders, not usable
-credentials.
+credentials. `authorized_tool.expected_result` must be the exact non-error MCP
+tool result for the disposable probe. It must contain at least one non-empty
+text content item; the harness validates it and the request ID exactly.
 
 Prepare a token suite that proves each distinct failure boundary. `valid` must
 invoke only the configured read-only `authorized_tool`. `no_scope` must be a

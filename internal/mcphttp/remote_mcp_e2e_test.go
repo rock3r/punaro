@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -40,8 +41,9 @@ type remoteMCPE2EConfig struct {
 		InsufficientScope string `json:"insufficient_scope"`
 	} `json:"tokens"`
 	AuthorizedTool struct {
-		Name      string          `json:"name"`
-		Arguments json.RawMessage `json:"arguments"`
+		Name           string          `json:"name"`
+		Arguments      json.RawMessage `json:"arguments"`
+		ExpectedResult json.RawMessage `json:"expected_result"`
 	} `json:"authorized_tool"`
 	ForbiddenTool struct {
 		Name           string          `json:"name"`
@@ -69,7 +71,7 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 		"resource":"https://mcp.example.test/mcp",
 		"authorization_server":"https://auth.example.test",
 		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":"ffffffffffffffff","no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
-		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"}},
+		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
 		"redaction_probe":"not-a-secret-redaction-probe"
 	}`)
@@ -83,10 +85,39 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 		bytes.Replace(valid, []byte(`"valid":"aaaaaaaaaaaaaaaa"`), []byte(`"valid":"bad\nvalue"`), 1),
 		bytes.Replace(valid, []byte(`"redaction_probe":"not-a-secret-redaction-probe"`), []byte(`"redaction_probe":"bad\"value"`), 1),
 		bytes.Replace(valid, []byte(`{"query":"e2e"}`), []byte(`{"query":"e2e","query":"other"}`), 1),
+		bytes.Replace(valid, []byte(`"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}`), []byte(`"expected_result":{}`), 1),
 		append(append([]byte(nil), valid[:len(valid)-1]...), []byte(`,"candidate_commit":"0123456789abcdef0123456789abcdef01234567"}`)...),
 	} {
 		if _, err := parseRemoteMCPE2EConfig(replacement); err == nil {
 			t.Fatal("unsafe E2E config accepted")
+		}
+	}
+}
+
+func TestRemoteMCPE2EChallengeRequiresExactResourceMetadata(t *testing.T) {
+	const want = "https://mcp.example.test/.well-known/oauth-protected-resource/mcp"
+	challenge := `Bearer realm="punaro-mcp", resource_metadata="` + want + `", scope="memory.search memory.read memory.propose"`
+	if got, ok := remoteMCPE2EChallengeParameter(challenge, "resource_metadata"); !ok || got != want {
+		t.Fatalf("resource_metadata=%q ok=%t", got, ok)
+	}
+	if _, ok := remoteMCPE2EChallengeParameter(`Bearer resource_metadata="https://other.example.test"`, "scope"); ok {
+		t.Fatal("missing challenge parameter accepted")
+	}
+}
+
+func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.T) {
+	want := json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)}
+	if !validRemoteMCPE2EJSONRPCSuccess(valid, want) {
+		t.Fatal("valid correlated MCP tool result rejected")
+	}
+	for _, response := range []remoteMCPE2EResponse{
+		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"wrong","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)},
+		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{}}`)},
+		{Status: http.StatusOK, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"other"}]}}`)},
+	} {
+		if validRemoteMCPE2EJSONRPCSuccess(response, want) {
+			t.Fatal("uncorrelated or invalid MCP tool result accepted")
 		}
 	}
 }
@@ -106,7 +137,7 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 		}
 		token := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
 		if token == "" {
-			response.Header().Set("WWW-Authenticate", `Bearer realm="punaro-mcp", resource_metadata="https://metadata.example.test", scope="memory.search memory.read memory.propose"`)
+			response.Header().Set("WWW-Authenticate", `Bearer realm="punaro-mcp", resource_metadata="https://`+request.Host+`/.well-known/oauth-protected-resource/mcp", scope="memory.search memory.read memory.propose"`)
 			response.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -130,7 +161,7 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 			return
 		}
 		response.Header().Set("Content-Type", "application/json")
-		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{}}`))
+		_, _ = response.Write([]byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`))
 	}))
 	defer server.Close()
 	config = remoteMCPE2EFixtureConfig(t, server.URL+"/mcp")
@@ -145,7 +176,7 @@ func remoteMCPE2EFixtureConfig(t *testing.T, endpoint string) remoteMCPE2EConfig
 		"resource":"` + endpoint + `",
 		"authorization_server":"https://auth.example.test",
 		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":"ffffffffffffffff","no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
-		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"}},
+		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
 		"redaction_probe":"not-a-secret-redaction-probe"
 	}`))
@@ -198,7 +229,7 @@ func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
 		}
 		seen[token] = struct{}{}
 	}
-	if !validRemoteMCPE2ETool(config.AuthorizedTool.Name, config.AuthorizedTool.Arguments) || !validRemoteMCPE2ETool(config.ForbiddenTool.Name, config.ForbiddenTool.Arguments) || config.ForbiddenTool.ExpectedStatus < 400 || config.ForbiddenTool.ExpectedStatus > 499 {
+	if !validRemoteMCPE2ETool(config.AuthorizedTool.Name, config.AuthorizedTool.Arguments) || !validRemoteMCPE2EToolResult(config.AuthorizedTool.ExpectedResult) || !validRemoteMCPE2ETool(config.ForbiddenTool.Name, config.ForbiddenTool.Arguments) || config.ForbiddenTool.ExpectedStatus < 400 || config.ForbiddenTool.ExpectedStatus > 499 {
 		return remoteMCPE2EConfig{}, errors.New("invalid remote MCP E2E configuration")
 	}
 	return config, nil
@@ -232,6 +263,28 @@ func validRemoteMCPE2ETool(name string, arguments json.RawMessage) bool {
 		return false
 	}
 	return true
+}
+
+func validRemoteMCPE2EToolResult(raw json.RawMessage) bool {
+	if !validJSONObject(raw, maxJSONRPCDepth) {
+		return false
+	}
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError"`
+	}
+	if json.Unmarshal(raw, &result) != nil || result.IsError || len(result.Content) == 0 {
+		return false
+	}
+	for _, content := range result.Content {
+		if content.Type == "text" && content.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validRemoteMCPE2EBearer(value string) bool {
@@ -284,7 +337,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	remoteMCPE2ERequireStatus(t, unauthorized, http.StatusUnauthorized)
 	remoteMCPE2ERedacted(t, unauthorized, config.sensitiveValues())
 	challenge := unauthorized.Header.Get("WWW-Authenticate")
-	if !strings.Contains(challenge, "Bearer") || !strings.Contains(challenge, "resource_metadata=") || !strings.Contains(challenge, `scope="memory.search memory.read memory.propose"`) {
+	metadataURL, metadataOK := remoteMCPE2EChallengeParameter(challenge, "resource_metadata")
+	scope, scopeOK := remoteMCPE2EChallengeParameter(challenge, "scope")
+	if !metadataOK || metadataURL != remoteMCPE2EMetadataURL(t, config.Resource) || !scopeOK || scope != defaultScopeChallenge {
 		t.Fatal("unauthorized request did not return the OAuth discovery challenge")
 	}
 
@@ -316,7 +371,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	}
 
 	authorized := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
-	remoteMCPE2ERequireJSONRPCSuccess(t, authorized)
+	remoteMCPE2ERequireJSONRPCSuccess(t, authorized, config.AuthorizedTool.ExpectedResult)
 
 	forbidden := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.InsufficientScope, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.ForbiddenTool.Name, "arguments": config.ForbiddenTool.Arguments}))
 	remoteMCPE2ERequireStatus(t, forbidden, config.ForbiddenTool.ExpectedStatus)
@@ -379,19 +434,107 @@ func remoteMCPE2ERequireStatus(t *testing.T, response remoteMCPE2EResponse, expe
 	}
 }
 
-func remoteMCPE2ERequireJSONRPCSuccess(t *testing.T, response remoteMCPE2EResponse) {
+func remoteMCPE2ERequireJSONRPCSuccess(t *testing.T, response remoteMCPE2EResponse, expectedResult json.RawMessage) {
 	t.Helper()
-	if response.Status < 200 || response.Status > 299 {
-		t.Fatalf("authorized MCP request status=%d", response.Status)
+	if !validRemoteMCPE2EJSONRPCSuccess(response, expectedResult) {
+		t.Fatal("authorized MCP request did not return a JSON-RPC result")
+	}
+}
+
+func validRemoteMCPE2EJSONRPCSuccess(response remoteMCPE2EResponse, expectedResult json.RawMessage) bool {
+	if response.Status < 200 || response.Status > 299 || !validJSONRPCValue(response.Body, maxJSONRPCDepth) || !validRemoteMCPE2EToolResult(expectedResult) {
+		return false
 	}
 	var envelope struct {
 		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
 	}
-	if json.Unmarshal(response.Body, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Result) == 0 || len(envelope.Error) != 0 {
-		t.Fatal("authorized MCP request did not return a JSON-RPC result")
+	if json.Unmarshal(response.Body, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Error) != 0 || !jsonRawMessageEquals(envelope.ID, json.RawMessage(`"remote-mcp-e2e"`)) || !jsonRawMessageEquals(envelope.Result, expectedResult) {
+		return false
 	}
+	return validRemoteMCPE2EToolResult(envelope.Result)
+}
+
+func jsonRawMessageEquals(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	leftDecoder := json.NewDecoder(bytes.NewReader(left))
+	leftDecoder.UseNumber()
+	rightDecoder := json.NewDecoder(bytes.NewReader(right))
+	rightDecoder.UseNumber()
+	return leftDecoder.Decode(&leftValue) == nil && leftDecoder.Decode(&struct{}{}) == io.EOF && rightDecoder.Decode(&rightValue) == nil && rightDecoder.Decode(&struct{}{}) == io.EOF && reflect.DeepEqual(leftValue, rightValue)
+}
+
+func remoteMCPE2EChallengeParameter(challenge, wanted string) (string, bool) {
+	scheme, remaining, found := strings.Cut(strings.TrimSpace(challenge), " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	parameters := make(map[string]string)
+	for {
+		remaining = strings.TrimLeft(remaining, " ")
+		if remaining == "" {
+			break
+		}
+		nameEnd := strings.IndexByte(remaining, '=')
+		if nameEnd <= 0 {
+			return "", false
+		}
+		name := remaining[:nameEnd]
+		remaining = remaining[nameEnd+1:]
+		if !validRemoteMCPE2EChallengeName(name) || !strings.HasPrefix(remaining, `"`) {
+			return "", false
+		}
+		remaining = remaining[1:]
+		var value strings.Builder
+		closed := false
+		for len(remaining) > 0 {
+			character := remaining[0]
+			remaining = remaining[1:]
+			if character == '"' {
+				closed = true
+				break
+			}
+			if character == '\\' {
+				if len(remaining) == 0 || remaining[0] != '"' && remaining[0] != '\\' {
+					return "", false
+				}
+				character = remaining[0]
+				remaining = remaining[1:]
+			}
+			value.WriteByte(character)
+		}
+		if !closed {
+			return "", false
+		}
+		if _, duplicate := parameters[name]; duplicate {
+			return "", false
+		}
+		parameters[name] = value.String()
+		remaining = strings.TrimLeft(remaining, " ")
+		if remaining == "" {
+			break
+		}
+		if !strings.HasPrefix(remaining, ",") {
+			return "", false
+		}
+		remaining = remaining[1:]
+	}
+	value, found := parameters[wanted]
+	return value, found
+}
+
+func validRemoteMCPE2EChallengeName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range []byte(value) {
+		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_' || character == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func remoteMCPE2ERequireJSONRPCFailure(t *testing.T, response remoteMCPE2EResponse) {
