@@ -178,9 +178,15 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string) *e2eRelayProxy {
 	if err != nil {
 		t.Fatal("configure disposable relay proxy")
 	}
+	state := &e2eRelayProxy{}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.ErrorLog = log.New(io.Discard, "", 0)
-	state := &e2eRelayProxy{}
+	proxy.ModifyResponse = func(upstream *http.Response) error {
+		if upstream.Request.Method == http.MethodPost && strings.HasPrefix(upstream.Request.URL.Path, "/v1/deliveries/") && strings.HasSuffix(upstream.Request.URL.Path, "/ack") && upstream.StatusCode >= http.StatusOK && upstream.StatusCode < http.StatusMultipleChoices {
+			state.retryAcknowledged.Store(true)
+		}
+		return nil
+	}
 	state.server = &http.Server{Handler: http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodPost && strings.HasPrefix(request.URL.Path, "/v1/deliveries/") && strings.HasSuffix(request.URL.Path, "/ack") {
 			if state.firstAckRejected.CompareAndSwap(false, true) {
@@ -188,7 +194,6 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string) *e2eRelayProxy {
 				response.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
-			state.retryAcknowledged.Store(true)
 		}
 		proxy.ServeHTTP(response, request)
 	})}
