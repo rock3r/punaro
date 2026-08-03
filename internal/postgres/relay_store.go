@@ -646,18 +646,66 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	for _, delivery := range deliveries {
 		conversationIDs[delivery.Message.ConversationID] = struct{}{}
 	}
-	cursors := make(map[string]int64, len(conversationIDs))
+	cursorIDs := make([]string, 0, len(conversationIDs))
 	for id := range conversationIDs {
-		cursor, err := postgresRecipientCursorForLease(tx, recipientIDs, id)
-		if err != nil {
-			return relay.DeliveryLeasePage{}, err
-		}
-		cursors[id] = cursor
+		cursorIDs = append(cursorIDs, id)
+	}
+	cursors, err := postgresRecipientCursorsForLease(tx, encodedRecipientIDs, cursorIDs)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "commit delivery lease")
 	}
 	return relay.DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
+}
+
+func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, conversationIDs []string) (map[string]int64, error) {
+	encodedConversationIDs, err := json.Marshal(conversationIDs)
+	if err != nil {
+		return nil, errors.New("recipient conversations are invalid")
+	}
+	rows, err := tx.QueryContext(context.Background(), `WITH recipients AS (
+		SELECT value AS recipient FROM jsonb_array_elements_text($1::jsonb)
+	), conversations AS (
+		SELECT value::uuid AS id FROM jsonb_array_elements_text($2::jsonb)
+	), authorized AS (
+		SELECT membership.conversation_id,membership.endpoint AS recipient
+		FROM relay.mail_memberships AS membership
+		JOIN conversations ON conversations.id=membership.conversation_id
+		JOIN recipients ON recipients.recipient=membership.endpoint
+		WHERE membership.capabilities&$3<>0
+		UNION ALL
+		SELECT membership.conversation_id,chr(30)||'role:'||membership.role
+		FROM relay.mail_role_memberships AS membership
+		JOIN conversations ON conversations.id=membership.conversation_id
+		JOIN recipients ON recipients.recipient=chr(30)||'role:'||membership.role
+		WHERE membership.capabilities&$3<>0
+	)
+	SELECT authorized.conversation_id::text,MIN(COALESCE(cursor.sequence,0))
+	FROM authorized LEFT JOIN relay.mail_recipient_cursors AS cursor
+	ON cursor.conversation_id=authorized.conversation_id AND cursor.recipient_endpoint=authorized.recipient
+	GROUP BY authorized.conversation_id`, string(encodedRecipientIDs), string(encodedConversationIDs), relay.CapReceive)
+	if err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
+	}
+	defer rows.Close()
+	cursors := make(map[string]int64, len(conversationIDs))
+	for rows.Next() {
+		var conversationID string
+		var cursor int64
+		if err := rows.Scan(&conversationID, &cursor); err != nil {
+			return nil, errors.New("recipient cursor is malformed")
+		}
+		cursors[conversationID] = cursor
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
+	}
+	if len(cursors) != len(conversationIDs) {
+		return nil, relay.ErrForbidden
+	}
+	return cursors, nil
 }
 
 func postgresRecipientCursorForLease(tx *sql.Tx, recipientIDs []string, conversationID string) (int64, error) {
@@ -760,17 +808,17 @@ func (d *Database) RecipientCursor(machineID, endpoint, conversationID string, n
 	if _, err := uuid.Parse(conversationID); err != nil {
 		return 0, relay.ErrForbidden
 	}
-	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	tx, cancel, err := d.beginRelayTransaction(nil)
 	if err != nil {
 		return 0, errors.New("recipient cursor cannot be inspected")
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
-	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
+	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
+	if err != nil {
 		return 0, err
 	}
-	generation, err := postgresEndpointOwnership(tx, endpoint, machineID, now)
-	if err != nil {
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
 		return 0, err
 	}
 	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, generation, now)
