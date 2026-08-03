@@ -388,6 +388,13 @@ func TestInvokeDoesNotExpireAbandonedHandoffWithLiveLease(t *testing.T) {
 	if coalesced, duplicate, err := store.RequestInvocation(request); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Status != InvocationPending {
 		t.Fatalf("coalesced=%#v duplicate=%t err=%v", coalesced, duplicate, err)
 	}
+	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", leasedAt.Add(invocationPendingRetention+time.Second), time.Minute, 1); err != nil || len(leased) != 0 {
+		t.Fatalf("abandoned leased invocation=%#v err=%v", leased, err)
+	}
+	var status InvocationStatus
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status FROM invocations WHERE id=?`, invocation.ID).Scan(&status); err != nil || status != InvocationFailed {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
 }
 
 func TestInvokeRepairsPartialOptionalSchema(t *testing.T) {

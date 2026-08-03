@@ -238,6 +238,41 @@ func expireAbandonedInvocations(tx *sql.Tx, targetEndpoint string, now time.Time
 	return nil
 }
 
+// expireAbandonedLeasedInvocations closes the crash-recovery window before an
+// adapter can obtain another lease. A never-leased request remains eligible for
+// its first start even if it is old; only a prior runtime handoff needs this
+// fence-preserving terminal transition.
+func expireAbandonedLeasedInvocations(tx *sql.Tx, machineID string, now time.Time) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_machine_id=? AND status=? AND lease_generation>0 AND last_activity_at<? AND (lease_until IS NULL OR lease_until<=?)`, machineID, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("find abandoned leased invocations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read abandoned leased invocation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("find abandoned leased invocations: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("find abandoned leased invocations: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), id); err != nil {
+			return fmt.Errorf("expire abandoned leased invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, id, "failed", now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func invocationForCaller(invocation Invocation, input InvokeInput) Invocation {
 	if invocation.ConversationID == input.ConversationID {
 		return invocation
@@ -269,6 +304,9 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, err
 	}
 	defer rollback(tx)
+	if err := expireAbandonedLeasedInvocations(tx, machineID, now); err != nil {
+		return nil, err
+	}
 	// An invocation carries the endpoint ownership generation observed at
 	// authorization. A later detach or reassignment must not grant its old
 	// machine a process-start lease, even if the endpoint is offline again.
