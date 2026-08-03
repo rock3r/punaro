@@ -39,7 +39,18 @@ func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T)
 }
 
 func TestCommandInvokerRejectsSymlinkAndWritableAncestors(t *testing.T) {
-	directory := t.TempDir()
+	directory, err := os.MkdirTemp(".", ".invoke-runtime-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, err = filepath.Abs(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
 	command := filepath.Join(directory, "runtime")
 	if err := os.WriteFile(command, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil { // #nosec G306 -- test executable must be executable by its owner.
 		t.Fatal(err)
