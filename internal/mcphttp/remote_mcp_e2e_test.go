@@ -31,12 +31,15 @@ type remoteMCPE2EConfig struct {
 	Resource            string `json:"resource"`
 	AuthorizationServer string `json:"authorization_server"`
 	Tokens              struct {
-		Valid             string `json:"valid"`
-		Invalid           string `json:"invalid"`
-		WrongIssuer       string `json:"wrong_issuer"`
-		WrongAudience     string `json:"wrong_audience"`
-		Expired           string `json:"expired"`
-		Revoked           string `json:"revoked"`
+		Valid         string `json:"valid"`
+		Invalid       string `json:"invalid"`
+		WrongIssuer   string `json:"wrong_issuer"`
+		WrongAudience string `json:"wrong_audience"`
+		Expired       string `json:"expired"`
+		Revoked       struct {
+			Token          string `json:"token"`
+			ExpectedStatus int    `json:"expected_status"`
+		} `json:"revoked"`
 		NoScope           string `json:"no_scope"`
 		InsufficientScope string `json:"insufficient_scope"`
 	} `json:"tokens"`
@@ -70,7 +73,7 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 		"endpoint":"https://mcp.example.test/mcp",
 		"resource":"https://mcp.example.test/mcp",
 		"authorization_server":"https://auth.example.test",
-		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":"ffffffffffffffff","no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
+		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":{"token":"ffffffffffffffff","expected_status":403},"no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
 		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
 		"redaction_probe":"not-a-secret-redaction-probe"
@@ -81,6 +84,7 @@ func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 	for _, replacement := range [][]byte{
 		bytes.Replace(valid, []byte(`"https://mcp.example.test/mcp"`), []byte(`"http://mcp.example.test/mcp"`), 1),
 		bytes.Replace(valid, []byte(`"expected_status":403`), []byte(`"expected_status":200`), 1),
+		bytes.Replace(valid, []byte(`"token":"ffffffffffffffff","expected_status":403`), []byte(`"token":"ffffffffffffffff","expected_status":418`), 1),
 		bytes.Replace(valid, []byte(`"valid":"aaaaaaaaaaaaaaaa"`), []byte(`"valid":""`), 1),
 		bytes.Replace(valid, []byte(`"valid":"aaaaaaaaaaaaaaaa"`), []byte(`"valid":"bad\nvalue"`), 1),
 		bytes.Replace(valid, []byte(`"redaction_probe":"not-a-secret-redaction-probe"`), []byte(`"redaction_probe":"bad\"value"`), 1),
@@ -119,6 +123,20 @@ func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.
 		if validRemoteMCPE2EJSONRPCSuccess(response, want) {
 			t.Fatal("uncorrelated or invalid MCP tool result accepted")
 		}
+	}
+}
+
+func TestRemoteMCPE2ERevocationRequiresConfiguredClosedRejection(t *testing.T) {
+	invalidToken := remoteMCPE2EResponse{Status: http.StatusUnauthorized, Header: http.Header{"Www-Authenticate": []string{`Bearer error="invalid_token"`}}}
+	inactiveSubject := remoteMCPE2EResponse{Status: http.StatusForbidden}
+	if !validRemoteMCPE2ERevocationResponse(invalidToken, http.StatusUnauthorized) {
+		t.Fatal("token revocation rejection rejected")
+	}
+	if !validRemoteMCPE2ERevocationResponse(inactiveSubject, http.StatusForbidden) {
+		t.Fatal("inactive subject revocation rejection rejected")
+	}
+	if validRemoteMCPE2ERevocationResponse(invalidToken, http.StatusForbidden) || validRemoteMCPE2ERevocationResponse(inactiveSubject, http.StatusUnauthorized) {
+		t.Fatal("revocation accepted the wrong rejection boundary")
 	}
 }
 
@@ -175,7 +193,7 @@ func remoteMCPE2EFixtureConfig(t *testing.T, endpoint string) remoteMCPE2EConfig
 		"endpoint":"` + endpoint + `",
 		"resource":"` + endpoint + `",
 		"authorization_server":"https://auth.example.test",
-		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":"ffffffffffffffff","no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
+		"tokens":{"valid":"aaaaaaaaaaaaaaaa","invalid":"bbbbbbbbbbbbbbbb","wrong_issuer":"cccccccccccccccc","wrong_audience":"dddddddddddddddd","expired":"eeeeeeeeeeeeeeee","revoked":{"token":"ffffffffffffffff","expected_status":401},"no_scope":"gggggggggggggggg","insufficient_scope":"hhhhhhhhhhhhhhhh"},
 		"authorized_tool":{"name":"punaro_memory_search","arguments":{"query":"e2e"},"expected_result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}},
 		"forbidden_tool":{"name":"punaro_memory_propose","arguments":{},"expected_status":403},
 		"redaction_probe":"not-a-secret-redaction-probe"
@@ -229,7 +247,7 @@ func parseRemoteMCPE2EConfig(raw []byte) (remoteMCPE2EConfig, error) {
 		}
 		seen[token] = struct{}{}
 	}
-	if !validRemoteMCPE2ETool(config.AuthorizedTool.Name, config.AuthorizedTool.Arguments) || !validRemoteMCPE2EToolResult(config.AuthorizedTool.ExpectedResult) || !validRemoteMCPE2ETool(config.ForbiddenTool.Name, config.ForbiddenTool.Arguments) || config.ForbiddenTool.ExpectedStatus < 400 || config.ForbiddenTool.ExpectedStatus > 499 {
+	if !validRemoteMCPE2ETool(config.AuthorizedTool.Name, config.AuthorizedTool.Arguments) || !validRemoteMCPE2EToolResult(config.AuthorizedTool.ExpectedResult) || !validRemoteMCPE2ETool(config.ForbiddenTool.Name, config.ForbiddenTool.Arguments) || config.ForbiddenTool.ExpectedStatus < 400 || config.ForbiddenTool.ExpectedStatus > 499 || config.Tokens.Revoked.ExpectedStatus != http.StatusUnauthorized && config.Tokens.Revoked.ExpectedStatus != http.StatusForbidden {
 		return remoteMCPE2EConfig{}, errors.New("invalid remote MCP E2E configuration")
 	}
 	return config, nil
@@ -300,7 +318,7 @@ func validRemoteMCPE2EBearer(value string) bool {
 }
 
 func (config remoteMCPE2EConfig) tokens() []string {
-	return []string{config.Tokens.Valid, config.Tokens.Invalid, config.Tokens.WrongIssuer, config.Tokens.WrongAudience, config.Tokens.Expired, config.Tokens.Revoked, config.Tokens.NoScope, config.Tokens.InsufficientScope}
+	return []string{config.Tokens.Valid, config.Tokens.Invalid, config.Tokens.WrongIssuer, config.Tokens.WrongAudience, config.Tokens.Expired, config.Tokens.Revoked.Token, config.Tokens.NoScope, config.Tokens.InsufficientScope}
 }
 
 func (config remoteMCPE2EConfig) sensitiveValues() []string {
@@ -343,13 +361,18 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		t.Fatal("unauthorized request did not return the OAuth discovery challenge")
 	}
 
-	for _, token := range []string{config.Tokens.Invalid, config.Tokens.WrongIssuer, config.Tokens.WrongAudience, config.Tokens.Expired, config.Tokens.Revoked} {
+	for _, token := range []string{config.Tokens.Invalid, config.Tokens.WrongIssuer, config.Tokens.WrongAudience, config.Tokens.Expired} {
 		response := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, token, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 		remoteMCPE2ERequireStatus(t, response, http.StatusUnauthorized)
 		remoteMCPE2ERedacted(t, response, config.sensitiveValues())
 		if !strings.Contains(response.Header.Get("WWW-Authenticate"), `error="invalid_token"`) {
 			t.Fatal("invalid bearer token did not return the OAuth invalid-token challenge")
 		}
+	}
+	revoked := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Revoked.Token, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
+	remoteMCPE2ERedacted(t, revoked, config.sensitiveValues())
+	if !validRemoteMCPE2ERevocationResponse(revoked, config.Tokens.Revoked.ExpectedStatus) {
+		t.Fatal("revoked bearer did not return the configured closed rejection")
 	}
 
 	noScope := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.NoScope, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
@@ -438,6 +461,21 @@ func remoteMCPE2ERequireJSONRPCSuccess(t *testing.T, response remoteMCPE2ERespon
 	t.Helper()
 	if !validRemoteMCPE2EJSONRPCSuccess(response, expectedResult) {
 		t.Fatal("authorized MCP request did not return a JSON-RPC result")
+	}
+}
+
+func validRemoteMCPE2ERevocationResponse(response remoteMCPE2EResponse, expectedStatus int) bool {
+	if response.Status != expectedStatus {
+		return false
+	}
+	switch expectedStatus {
+	case http.StatusUnauthorized:
+		errorCode, found := remoteMCPE2EChallengeParameter(response.Header.Get("WWW-Authenticate"), "error")
+		return found && errorCode == "invalid_token"
+	case http.StatusForbidden:
+		return response.Header.Get("WWW-Authenticate") == ""
+	default:
+		return false
 	}
 }
 

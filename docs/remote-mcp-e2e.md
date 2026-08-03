@@ -30,7 +30,10 @@ operator, and never attach it to CI logs or the release record. Its shape is:
     "wrong_issuer": "private-token-from-a-different-issuer",
     "wrong_audience": "private-token-for-a-different-resource",
     "expired": "private-expired-token",
-    "revoked": "private-token-or-subject-revoked-before-the-test",
+    "revoked": {
+      "token": "private-token-or-subject-revoked-before-the-test",
+      "expected_status": 403
+    },
     "no_scope": "private-valid-token-with-no-required-scope",
     "insufficient_scope": "private-valid-token-that-cannot-invoke-the-forbidden-tool"
   },
@@ -66,14 +69,18 @@ valid token without any required MCP default scope. `insufficient_scope` must
 be valid but lack the operation-specific scope for `forbidden_tool`.
 `wrong_issuer`, `wrong_audience`, `expired`, and `revoked` must each fail for
 that stated reason at the candidate boundary, not merely be arbitrary malformed
-strings. Use disposable principals, resources, and data; no test request should
-name a production project or contain user content.
+strings. Set `revoked.expected_status` to `401` for a revoked token (which must
+return `invalid_token`) or `403` for a token whose bound subject was disabled
+or unbound (which must have no authentication challenge). Use disposable
+principals, resources, and data; no test request should name a production
+project or contain user content.
 
 The test proves all of the following against the candidate:
 
 - OAuth protected-resource discovery and the unauthenticated challenge;
-- malformed, wrong-issuer, wrong-audience, expired, and revoked bearers fail
-  with `401` and an `invalid_token` challenge;
+- malformed, wrong-issuer, wrong-audience, and expired bearers fail with `401`
+  and an `invalid_token` challenge; a revoked token fails the configured `401`
+  token-revocation or `403` disabled-subject boundary;
 - missing required scope and tool-specific insufficient scope fail closed;
 - duplicate-member JSON-RPC input fails without executing a request;
 - a valid scoped bearer reaches its configured tool; and
