@@ -149,6 +149,13 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 // LeaseInvocations gives an enrolled adapter bounded content-free start work.
 // The stable fence survives a lost response and every later lease generation.
 func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, ttl time.Duration, limit int) ([]Invocation, error) {
+	exists, err := s.invocationSchemaExists()
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, nil
+	}
 	if err := s.ensureInvocationSchema(); err != nil {
 		return nil, err
 	}
@@ -166,7 +173,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	staleOwnerRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
 		WHERE invocation.target_machine_id=? AND invocation.status=? AND (invocation.lease_machine_id IS NULL OR invocation.lease_until<=?)
-		AND (endpoint.endpoint IS NULL OR endpoint.machine_id<>invocation.target_machine_id OR endpoint.ownership_generation<>invocation.target_ownership_generation)`, machineID, InvocationPending, now.UnixMilli())
+		AND (endpoint.endpoint IS NULL OR endpoint.machine_id<>invocation.target_machine_id OR (endpoint.ownership_generation<>invocation.target_ownership_generation AND endpoint.lease_until<=?))`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find invocation ownership changes: %w", err)
 	}
@@ -222,7 +229,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	onlineRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
 		WHERE invocation.target_machine_id=? AND invocation.status=? AND (invocation.lease_machine_id IS NULL OR invocation.lease_until<=?)
-		AND endpoint.machine_id=invocation.target_machine_id AND endpoint.ownership_generation=invocation.target_ownership_generation AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli())
+		AND endpoint.machine_id=invocation.target_machine_id AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find online invocation targets: %w", err)
 	}
@@ -464,4 +471,12 @@ func (s *Store) ensureInvocationSchema() error {
 		return err
 	}
 	return nil
+}
+
+func (s *Store) invocationSchemaExists() (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocations')`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("inspect invocation state: %w", err)
+	}
+	return exists, nil
 }

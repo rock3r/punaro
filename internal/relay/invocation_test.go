@@ -93,6 +93,22 @@ func TestInvokeQueuesOnlyOfflineAuthorizedRecipientAndFencesRetries(t *testing.T
 	}
 }
 
+func TestEmptyInvocationLeaseDoesNotMaterializeControlState(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if leased, err := store.LeaseInvocations("machine-a", "adapter-a", time.Now().UTC(), time.Minute, 1); err != nil || len(leased) != 0 {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	var exists bool
+	if err := store.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocations')`).Scan(&exists); err != nil || exists {
+		t.Fatalf("invocation state exists=%t err=%v", exists, err)
+	}
+}
+
 func TestInvokeCrashLeasesAreBounded(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
@@ -181,7 +197,7 @@ func TestInvokeRejectsUnauthorizedAndDoesNotQueueAlreadyRunningTarget(t *testing
 	}
 }
 
-func TestInvokeFailsWhenTargetAttachmentChangesAfterRequest(t *testing.T) {
+func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
@@ -216,7 +232,7 @@ func TestInvokeFailsWhenTargetAttachmentChangesAfterRequest(t *testing.T) {
 		t.Fatalf("leased=%#v err=%v", leased, err)
 	}
 	audit, err := store.InvocationAudit(invocation.ID)
-	if err != nil || len(audit) != 2 || audit[1].Action != "failed" {
+	if err != nil || len(audit) != 2 || audit[1].Action != "already_running" {
 		t.Fatalf("audit=%#v err=%v", audit, err)
 	}
 }
