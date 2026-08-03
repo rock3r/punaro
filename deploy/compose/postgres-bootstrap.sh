@@ -117,6 +117,15 @@ BEGIN
     SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
+      AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND privilege.grantee = 0
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while an owner relation outside Punaro schemas grants PUBLIC access; revoke it and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+    CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
+    WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
       AND namespace.nspname IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
       AND privilege.grantee = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
       AND (privilege.is_grantable OR (relation.relkind = 'S' AND privilege.privilege_type NOT IN ('USAGE', 'SELECT')) OR (relation.relkind <> 'S' AND privilege.privilege_type NOT IN ('SELECT', 'INSERT', 'UPDATE', 'DELETE')))
