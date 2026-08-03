@@ -157,6 +157,14 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 		if err := relayClient.ReportInvocation(ctx, invocation, accepted); err != nil {
 			return fmt.Errorf("report runtime invocation %q: %w", invocation.ID, err)
 		}
+		if accepted {
+			// A successful server outcome is the terminal acknowledgement for this
+			// handoff. The runtime owns the durable fence; retaining this adapter
+			// recovery row longer would grow local state without improving recovery.
+			if err := s.Journal.removeInvocation(invocation.ID, invocation.Fence); err != nil {
+				return fmt.Errorf("remove accepted invocation %q: %w", invocation.ID, err)
+			}
+		}
 	}
 	return nil
 }
@@ -348,6 +356,21 @@ func (j *Journal) markInvocationAccepted(invocationID, fence string, now time.Ti
 	}
 	if changed != 1 {
 		return errors.New("adapter invocation journal is missing")
+	}
+	return nil
+}
+
+func (j *Journal) removeInvocation(invocationID, fence string) error {
+	result, err := j.db.ExecContext(context.Background(), `DELETE FROM inbound_invocations WHERE invocation_id=? AND fence=?`, invocationID, fence)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("adapter journal invocation is missing")
 	}
 	return nil
 }

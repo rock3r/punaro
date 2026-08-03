@@ -36,6 +36,10 @@ func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T)
 	if runtime.calls != 1 || len(relayClient.reports) != 2 || !relayClient.reports[1].accepted {
 		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
 	}
+	var retained int
+	if err := journal.db.QueryRow(`SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
+		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
+	}
 }
 
 func TestCommandInvokerRejectsSymlinkAndWritableAncestors(t *testing.T) {
