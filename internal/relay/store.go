@@ -685,7 +685,7 @@ func validControlOperation(operation ControlOperation) bool {
 	return operation == ControlUpsertMember || operation == ControlRemoveMember
 }
 func validCapabilities(capabilities Capability) bool {
-	return capabilities != 0 && capabilities&^(CapSend|CapReceive|CapAdmin) == 0
+	return capabilities != 0 && capabilities&^(CapSend|CapReceive|CapAdmin|CapInvoke) == 0
 }
 func controlHash(input ControlInput) string {
 	return stableHash(input.ConversationID, input.ActorEndpoint, string(input.Operation), input.Member.Endpoint, fmt.Sprintf("%d", input.Member.Capabilities))
