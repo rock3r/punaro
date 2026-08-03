@@ -299,6 +299,86 @@ func TestInvokeRetentionPreservesAnAcceptedAttachmentFence(t *testing.T) {
 	}
 }
 
+func TestInvokeExpiresAbandonedPendingHandoffBeforeCreatingFreshFence(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, 2*invocationPendingRetention); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	request := InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)}
+	abandoned, duplicate, err := store.RequestInvocation(request)
+	if err != nil || duplicate || abandoned.Status != InvocationPending {
+		t.Fatalf("abandoned=%#v duplicate=%t err=%v", abandoned, duplicate, err)
+	}
+	request.IdempotencyKey = "invoke-fresh"
+	request.Now = now.Add(invocationPendingRetention + 3*time.Second)
+	fresh, duplicate, err := store.RequestInvocation(request)
+	if err != nil || duplicate || fresh.ID == abandoned.ID || fresh.Status != InvocationPending {
+		t.Fatalf("fresh=%#v duplicate=%t err=%v", fresh, duplicate, err)
+	}
+	audit, err := store.InvocationAudit(abandoned.ID)
+	if err != nil || len(audit) != 2 || audit[1].Action != "failed" {
+		t.Fatalf("audit=%#v err=%v", audit, err)
+	}
+}
+
+func TestInvokeRepairsPartialOptionalSchema(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a", "agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a", Now: now, Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/b", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ensureInvocationSchema(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `DROP TABLE invocation_idempotency`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `DROP TABLE invocation_audit`); err != nil {
+		t.Fatal(err)
+	}
+	invocation, duplicate, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", TargetEndpoint: "agent/b", IdempotencyKey: "invoke", Now: now})
+	if err != nil || duplicate || invocation.Status != InvocationAlreadyRunning {
+		t.Fatalf("invocation=%#v duplicate=%t err=%v", invocation, duplicate, err)
+	}
+	for _, table := range []string{"invocation_idempotency", "invocation_audit"} {
+		var exists bool
+		if err := store.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)`, table).Scan(&exists); err != nil || !exists {
+			t.Fatalf("table=%s exists=%t err=%v", table, exists, err)
+		}
+	}
+}
+
 func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

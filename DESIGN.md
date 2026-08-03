@@ -372,7 +372,9 @@ Terminal invocation records, their idempotency bindings, and their body-free
 audit trail are retained for 24 hours from their terminal transition to serve
 bounded client retries, then pruned atomically by later invoke traffic. Pending
 handoffs and the short accepted-attachment fence are never pruned by this
-retention path.
+retention path. A pending handoff that has neither been polled nor completed
+for 24 hours is terminally failed before a later invoke can create a fresh
+fence, bounding its coalesced idempotency and audit metadata.
 
 The lease response is the source of truth. It contains bounded durable
 deliveries plus a map of conversation IDs to the recipient's highest contiguous

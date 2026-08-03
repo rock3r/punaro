@@ -18,6 +18,9 @@ const (
 	// Retain terminal records long enough for a client retry, then reclaim them
 	// with the same transaction that accepts later invoke traffic.
 	invocationTerminalRetention = 24 * time.Hour
+	// A pending handoff without a poll or outcome must not retain unbounded
+	// coalesced idempotency and audit metadata forever.
+	invocationPendingRetention = 24 * time.Hour
 )
 
 var _ InvocationBackend = (*Store)(nil)
@@ -54,6 +57,9 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 		// The transaction rechecks authority, prunes expired terminal records,
 		// then resolves idempotency. This lets an expired key be reclaimed before
 		// it can reject a later valid request as a stale hash conflict.
+		if err := s.ensureInvocationSchema(); err != nil {
+			return Invocation{}, false, err
+		}
 		return s.requestInvocationWithSchema(input, requestHash)
 	}
 	var pending bool
@@ -125,6 +131,9 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 	if err != nil {
 		return Invocation{}, false, fmt.Errorf("resolve invocation target: %w", err)
 	}
+	if err := expireAbandonedInvocations(tx, input.TargetEndpoint, input.Now); err != nil {
+		return Invocation{}, false, err
+	}
 	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
 		return Invocation{}, false, fmt.Errorf("inspect pending invocation work: %w", err)
 	}
@@ -194,6 +203,37 @@ func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
 	cutoff := now.Add(-invocationTerminalRetention).UnixMilli()
 	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE terminal_at IS NOT NULL AND terminal_at<?`, cutoff); err != nil {
 		return fmt.Errorf("prune terminal invocations: %w", err)
+	}
+	return nil
+}
+
+func expireAbandonedInvocations(tx *sql.Tx, targetEndpoint string, now time.Time) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? AND created_at<?`, targetEndpoint, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli())
+	if err != nil {
+		return fmt.Errorf("find abandoned invocations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read abandoned invocation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("find abandoned invocations: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("find abandoned invocations: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), id); err != nil {
+			return fmt.Errorf("expire abandoned invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, id, "failed", now); err != nil {
+			return err
+		}
 	}
 	return nil
 }
