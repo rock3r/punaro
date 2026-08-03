@@ -1,0 +1,87 @@
+package adapter
+
+import (
+	"context"
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/rock3r/punaro/internal/relay"
+)
+
+func TestSyncerFencesRuntimeInvokeAcrossLostOutcomeAcknowledgement(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	invocation := relay.Invocation{ID: "invoke-1", ConversationID: "conversation-1", TargetEndpoint: "agent/offline", TargetMachineID: "machine-a", Fence: "stable-fence", LeaseToken: "lease-1", LeaseGeneration: 1}
+	relayClient := &fakeInvocationRelay{fakeRelay: fakeRelay{deliveries: map[string][]relay.Delivery{}}, invocations: []relay.Invocation{invocation}, reportErr: errors.New("lost response")}
+	runtime := &fakeInvoker{}
+	syncer := Syncer{Mailbox: &fakeMailbox{}, Relay: relayClient, Journal: journal, Invoker: runtime}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("lost outcome acknowledgement reported success")
+	}
+	if runtime.calls != 1 || runtime.fences[0] != "stable-fence" {
+		t.Fatalf("runtime calls=%d fences=%#v", runtime.calls, runtime.fences)
+	}
+	relayClient.reportErr = nil
+	invocation.LeaseToken, invocation.LeaseGeneration = "lease-2", 2
+	relayClient.invocations = []relay.Invocation{invocation}
+	if err := syncer.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.calls != 1 || len(relayClient.reports) != 2 || !relayClient.reports[1].accepted {
+		t.Fatalf("runtime calls=%d reports=%#v", runtime.calls, relayClient.reports)
+	}
+}
+
+func TestSyncerReportsFailedRuntimeHandoffForBoundedRelayRetry(t *testing.T) {
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	relayClient := &fakeInvocationRelay{fakeRelay: fakeRelay{deliveries: map[string][]relay.Delivery{}}, invocations: []relay.Invocation{{ID: "invoke-1", ConversationID: "conversation-1", TargetEndpoint: "agent/offline", TargetMachineID: "machine-a", Fence: "stable-fence", LeaseToken: "lease-1", LeaseGeneration: 1}}}
+	syncer := Syncer{Mailbox: &fakeMailbox{}, Relay: relayClient, Journal: journal, Invoker: &fakeInvoker{err: errors.New("runtime unavailable")}, Now: func() time.Time { return time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC) }}
+	if err := syncer.SyncOnce(context.Background()); err == nil {
+		t.Fatal("failed runtime handoff reported success")
+	}
+	if len(relayClient.reports) != 1 || relayClient.reports[0].accepted {
+		t.Fatalf("reports=%#v", relayClient.reports)
+	}
+}
+
+type fakeInvoker struct {
+	calls  int
+	fences []string
+	err    error
+}
+
+func (i *fakeInvoker) Invoke(_ context.Context, invocation relay.Invocation) error {
+	i.calls++
+	i.fences = append(i.fences, invocation.Fence)
+	return i.err
+}
+
+type invocationReport struct {
+	id       string
+	accepted bool
+}
+
+type fakeInvocationRelay struct {
+	fakeRelay
+	invocations []relay.Invocation
+	reports     []invocationReport
+	reportErr   error
+}
+
+func (r *fakeInvocationRelay) LeaseInvocations(context.Context) ([]relay.Invocation, error) {
+	return r.invocations, nil
+}
+
+func (r *fakeInvocationRelay) ReportInvocation(_ context.Context, invocation relay.Invocation, accepted bool) error {
+	r.reports = append(r.reports, invocationReport{id: invocation.ID, accepted: accepted})
+	return r.reportErr
+}

@@ -1,0 +1,331 @@
+package relay
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const (
+	maxInvocationAttempts = 3
+	maxInvocationBackoff  = time.Minute
+)
+
+var _ InvocationBackend = (*Store)(nil)
+
+// RequestInvocation authorizes a distinct invoke capability and queues one
+// content-free handoff only when the target has pending work and is offline.
+func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
+	if err := s.ensureInvocationSchema(); err != nil {
+		return Invocation{}, false, err
+	}
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidEndpoint(input.TargetEndpoint) || !ValidRequestToken(input.IdempotencyKey) {
+		return Invocation{}, false, fmt.Errorf("invalid invocation request")
+	}
+	requestHash := stableHash(input.ConversationID, input.FromEndpoint, input.TargetEndpoint)
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Invocation{}, false, err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
+		return Invocation{}, false, err
+	}
+	var sourceCapabilities Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.FromEndpoint).Scan(&sourceCapabilities)
+	if errors.Is(err, sql.ErrNoRows) || sourceCapabilities&CapInvoke == 0 {
+		return Invocation{}, false, ErrForbidden
+	}
+	if err != nil {
+		return Invocation{}, false, fmt.Errorf("authorize invocation sender: %w", err)
+	}
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), `SELECT invocation_id,request_hash FROM invocation_idempotency WHERE machine_id=? AND key=?`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return Invocation{}, false, ErrConflict
+		}
+		invocation, err := invocationByID(tx, existingID)
+		if err != nil {
+			return Invocation{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Invocation{}, false, err
+		}
+		return invocation, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Invocation{}, false, fmt.Errorf("read invocation idempotency: %w", err)
+	}
+	var targetCapabilities Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?`, input.ConversationID, input.TargetEndpoint).Scan(&targetCapabilities)
+	if errors.Is(err, sql.ErrNoRows) || targetCapabilities&CapReceive == 0 {
+		return Invocation{}, false, ErrForbidden
+	}
+	if err != nil {
+		return Invocation{}, false, fmt.Errorf("authorize invocation target: %w", err)
+	}
+	var targetMachine string
+	var targetLeaseUntil int64
+	err = tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until FROM endpoints WHERE endpoint=?`, input.TargetEndpoint).Scan(&targetMachine, &targetLeaseUntil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Invocation{}, false, ErrForbidden
+	}
+	if err != nil {
+		return Invocation{}, false, fmt.Errorf("resolve invocation target: %w", err)
+	}
+	var pending bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=? AND delivery.acked_at IS NULL AND message.conversation_id=?)`, input.TargetEndpoint, input.ConversationID).Scan(&pending); err != nil {
+		return Invocation{}, false, fmt.Errorf("inspect pending invocation work: %w", err)
+	}
+	if !pending {
+		return Invocation{}, false, ErrConflict
+	}
+	if targetLeaseUntil > input.Now.UnixMilli() {
+		// Persist this no-op result in the caller's idempotency domain. Otherwise
+		// retrying the same key after the endpoint detached could unexpectedly
+		// become a new start request.
+		invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationAlreadyRunning}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+			return Invocation{}, false, fmt.Errorf("record already-running invocation: %w", err)
+		}
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
+			return Invocation{}, false, fmt.Errorf("record invocation idempotency: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocation.ID, "already_running", input.Now); err != nil {
+			return Invocation{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Invocation{}, false, err
+		}
+		return invocation, false, nil
+	}
+	invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationPending}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+		return Invocation{}, false, fmt.Errorf("queue invocation: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
+		return Invocation{}, false, fmt.Errorf("record invocation idempotency: %w", err)
+	}
+	if err := recordInvocationAudit(tx, invocation.ID, "requested", input.Now); err != nil {
+		return Invocation{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Invocation{}, false, err
+	}
+	return invocation, false, nil
+}
+
+// LeaseInvocations gives an enrolled adapter bounded content-free start work.
+// The stable fence survives a lost response and every later lease generation.
+func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, ttl time.Duration, limit int) ([]Invocation, error) {
+	if err := s.ensureInvocationSchema(); err != nil {
+		return nil, err
+	}
+	if !ValidMachineID(machineID) || !ValidRequestToken(consumerID) || ttl <= 0 || limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("invalid invocation lease request")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer rollback(tx)
+	rows, err := tx.QueryContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,lease_generation FROM invocations
+		WHERE target_machine_id=? AND status=? AND not_before<=? AND (lease_until IS NULL OR lease_until<=? OR (lease_machine_id=? AND lease_consumer_id=?))
+		ORDER BY created_at,id LIMIT ?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli(), machineID, consumerID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("find invocations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var invocations []Invocation
+	for rows.Next() {
+		var invocation Invocation
+		if err := rows.Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.LeaseGeneration); err != nil {
+			return nil, fmt.Errorf("read invocation: %w", err)
+		}
+		token, err := randomToken()
+		if err != nil {
+			return nil, err
+		}
+		invocation.Status = InvocationPending
+		invocation.LeaseGeneration++
+		invocation.LeaseToken = token
+		invocation.LeaseUntil = now.Add(ttl).UTC()
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
+			return nil, fmt.Errorf("lease invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocation.ID, "leased", now); err != nil {
+			return nil, err
+		}
+		invocations = append(invocations, invocation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return invocations, nil
+}
+
+// ReportInvocation accepts a durable local handoff or returns it to the queue
+// with bounded retry. A stale or foreign lease cannot change the result.
+func (s *Store) ReportInvocation(machineID, invocationID, token string, generation int64, accepted bool, now time.Time) error {
+	if err := s.ensureInvocationSchema(); err != nil {
+		return err
+	}
+	if !ValidMachineID(machineID) || strings.TrimSpace(invocationID) == "" || !ValidRequestToken(token) || generation < 1 {
+		return ErrForbidden
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	var status InvocationStatus
+	var leaseMachine, leaseToken sql.NullString
+	var leaseGeneration int64
+	var leaseUntil sql.NullInt64
+	var attempts int
+	err = tx.QueryRowContext(context.Background(), `SELECT status,lease_machine_id,lease_token,lease_generation,lease_until,attempts FROM invocations WHERE id=?`, invocationID).Scan(&status, &leaseMachine, &leaseToken, &leaseGeneration, &leaseUntil, &attempts)
+	if errors.Is(err, sql.ErrNoRows) || status != InvocationPending || !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || leaseToken.String != token || leaseGeneration != generation || !leaseUntil.Valid || leaseUntil.Int64 <= now.UnixMilli() {
+		return ErrForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("read invocation lease: %w", err)
+	}
+	if accepted {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationSucceeded, invocationID); err != nil {
+			return fmt.Errorf("accept invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocationID, "accepted", now); err != nil {
+			return err
+		}
+	} else {
+		attempts++
+		status := InvocationPending
+		action := "retry"
+		if attempts >= maxInvocationAttempts {
+			status, action = InvocationFailed, "failed"
+		}
+		notBefore := now
+		if status == InvocationPending {
+			notBefore = now.Add(invocationBackoff(attempts))
+		}
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,attempts=?,not_before=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, status, attempts, notBefore.UnixMilli(), invocationID); err != nil {
+			return fmt.Errorf("retry invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocationID, action, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func invocationBackoff(attempt int) time.Duration {
+	// Leave a full poll interval for a transient local runtime failure before
+	// a second start attempt. The final terminal failure occurs after three
+	// leases, not by silently dropping the durable request.
+	backoff := 2 * time.Second << (attempt - 1)
+	if backoff > maxInvocationBackoff {
+		return maxInvocationBackoff
+	}
+	return backoff
+}
+
+// InvocationAudit returns body-free audit history for operational inspection.
+func (s *Store) InvocationAudit(invocationID string) ([]InvocationAuditEvent, error) {
+	if err := s.ensureInvocationSchema(); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(context.Background(), `SELECT action,created_at FROM invocation_audit WHERE invocation_id=? ORDER BY ordinal`, invocationID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var events []InvocationAuditEvent
+	for rows.Next() {
+		var event InvocationAuditEvent
+		var createdAt int64
+		if err := rows.Scan(&event.Action, &createdAt); err != nil {
+			return nil, err
+		}
+		event.CreatedAt = fromMillis(createdAt)
+		events = append(events, event)
+	}
+	return events, rows.Err()
+}
+
+func invocationByID(tx *sql.Tx, id string) (Invocation, error) {
+	var invocation Invocation
+	err := tx.QueryRowContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,status FROM invocations WHERE id=?`, id).Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.Status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Invocation{}, ErrForbidden
+	}
+	if err != nil {
+		return Invocation{}, fmt.Errorf("read invocation: %w", err)
+	}
+	return invocation, nil
+}
+
+func recordInvocationAudit(tx *sql.Tx, invocationID, action string, now time.Time) error {
+	var ordinal int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(ordinal),0)+1 FROM invocation_audit WHERE invocation_id=?`, invocationID).Scan(&ordinal); err != nil {
+		return fmt.Errorf("allocate invocation audit ordinal: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_audit(invocation_id,ordinal,action,created_at) VALUES(?,?,?,?)`, invocationID, ordinal, action, now.UnixMilli()); err != nil {
+		return fmt.Errorf("record invocation audit: %w", err)
+	}
+	return nil
+}
+
+// ensureInvocationSchema is lazy because the published SQLite-to-PostgreSQL
+// cutover snapshot has not yet gained invocation parity. Once invoke is used,
+// that cutover intentionally refuses the unknown tables rather than silently
+// dropping control-plane state; a future paired migration must carry it.
+func (s *Store) ensureInvocationSchema() error {
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS invocations (
+			id TEXT PRIMARY KEY,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			from_endpoint TEXT NOT NULL,
+			target_endpoint TEXT NOT NULL,
+			target_machine_id TEXT NOT NULL,
+			fence TEXT NOT NULL UNIQUE,
+			status TEXT NOT NULL CHECK(status IN ('pending', 'already_running', 'succeeded', 'failed')),
+			attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+			not_before INTEGER NOT NULL,
+			lease_machine_id TEXT,
+			lease_consumer_id TEXT,
+			lease_token TEXT,
+			lease_generation INTEGER NOT NULL DEFAULT 0,
+			lease_until INTEGER,
+			created_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS invocation_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			invocation_id TEXT NOT NULL REFERENCES invocations(id) ON DELETE CASCADE,
+			PRIMARY KEY(machine_id, key)
+		)`,
+		`CREATE TABLE IF NOT EXISTS invocation_audit (
+			invocation_id TEXT NOT NULL REFERENCES invocations(id) ON DELETE CASCADE,
+			ordinal INTEGER NOT NULL,
+			action TEXT NOT NULL CHECK(action IN ('requested', 'already_running', 'leased', 'retry', 'accepted', 'failed')),
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY(invocation_id, ordinal)
+		)`,
+		`CREATE INDEX IF NOT EXISTS invocations_machine_pending ON invocations(target_machine_id, status, not_before, lease_until)`,
+	} {
+		if _, err := s.db.ExecContext(context.Background(), statement); err != nil {
+			return fmt.Errorf("initialize invocation state: %w", err)
+		}
+	}
+	return nil
+}

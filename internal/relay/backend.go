@@ -66,6 +66,15 @@ type Backend interface {
 	ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error)
 }
 
+// InvocationBackend is intentionally separate from Backend while PostgreSQL
+// mail cutover parity is staged. Selected backends without it fail closed
+// rather than treating a normal message or notification as process control.
+type InvocationBackend interface {
+	RequestInvocation(InvokeInput) (Invocation, bool, error)
+	LeaseInvocations(machineID, consumerID string, now time.Time, ttl time.Duration, limit int) ([]Invocation, error)
+	ReportInvocation(machineID, invocationID, token string, generation int64, accepted bool, now time.Time) error
+}
+
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
 // the stable authenticated principal used by trusted attachment snapshots.
 // Legacy backends remain mail-only and need not implement it.

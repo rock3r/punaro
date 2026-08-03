@@ -32,6 +32,19 @@ type RelayClient interface {
 	Ack(ctx context.Context, delivery relay.Delivery) error
 }
 
+// InvocationRelayClient is the separate, body-free control-plane surface.
+type InvocationRelayClient interface {
+	LeaseInvocations(context.Context) ([]relay.Invocation, error)
+	ReportInvocation(context.Context, relay.Invocation, bool) error
+}
+
+// Invoker is a host-local, operator-configured process-start boundary. Its
+// implementation must deduplicate the stable invocation fence before starting
+// a role; no remote body reaches this interface.
+type Invoker interface {
+	Invoke(context.Context, relay.Invocation) error
+}
+
 // InboundMessage is an inert envelope injected into the local mailbox. The
 // original body remains data, while the stable relay IDs let downstream agents
 // identify duplicate at-least-once deliveries.
@@ -50,6 +63,7 @@ type Syncer struct {
 	Mailbox Mailbox
 	Relay   RelayClient
 	Journal *Journal
+	Invoker Invoker
 	Now     func() time.Time
 }
 
@@ -85,6 +99,45 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 			if err := s.forwardAndAcknowledge(ctx, endpoint, delivery, now().UTC()); err != nil {
 				return err
 			}
+		}
+	}
+	if s.Invoker != nil {
+		invocationRelay, ok := s.Relay.(InvocationRelayClient)
+		if !ok {
+			return fmt.Errorf("adapter invocation relay is unavailable")
+		}
+		if err := s.syncInvocations(ctx, invocationRelay, now().UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRelayClient, now time.Time) error {
+	invocations, err := relayClient.LeaseInvocations(ctx)
+	if err != nil {
+		return fmt.Errorf("lease runtime invocations: %w", err)
+	}
+	for _, invocation := range invocations {
+		state, err := s.Journal.ensureInvocation(invocation.ID, invocation.Fence, now)
+		if err != nil {
+			return fmt.Errorf("record invocation %q: %w", invocation.ID, err)
+		}
+		accepted := state == invocationAccepted
+		if !accepted {
+			if err := s.Invoker.Invoke(ctx, invocation); err != nil {
+				if reportErr := relayClient.ReportInvocation(ctx, invocation, false); reportErr != nil {
+					return fmt.Errorf("runtime invocation %q failed and retry report failed: %w", invocation.ID, reportErr)
+				}
+				return fmt.Errorf("run runtime invocation %q: %w", invocation.ID, err)
+			}
+			if err := s.Journal.markInvocationAccepted(invocation.ID, invocation.Fence, now); err != nil {
+				return fmt.Errorf("record accepted invocation %q: %w", invocation.ID, err)
+			}
+			accepted = true
+		}
+		if err := relayClient.ReportInvocation(ctx, invocation, accepted); err != nil {
+			return fmt.Errorf("report runtime invocation %q: %w", invocation.ID, err)
 		}
 	}
 	return nil
@@ -144,6 +197,13 @@ const (
 	deliveryAcknowledged deliveryState = "acknowledged"
 )
 
+type invocationState string
+
+const (
+	invocationPending  invocationState = "pending"
+	invocationAccepted invocationState = "accepted"
+)
+
 // Journal records the local side of the delivery transaction. It is deliberately
 // separate from agent-mailbox state so it remains available across mailbox CLI
 // process restarts.
@@ -168,6 +228,12 @@ func OpenJournal(database string) (*Journal, error) {
 			delivery_id TEXT PRIMARY KEY,
 			message_id TEXT NOT NULL,
 			state TEXT NOT NULL CHECK(state IN ('received', 'forwarded', 'acknowledged')),
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS inbound_invocations (
+			invocation_id TEXT PRIMARY KEY,
+			fence TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('pending', 'accepted')),
 			updated_at INTEGER NOT NULL
 		)`,
 	} {
@@ -222,6 +288,39 @@ func (j *Journal) MarkAcknowledged(deliveryID string, now time.Time) error {
 	}
 	if changed != 1 {
 		return errors.New("adapter journal delivery is missing")
+	}
+	return nil
+}
+
+func (j *Journal) ensureInvocation(invocationID, fence string, now time.Time) (invocationState, error) {
+	if strings.TrimSpace(invocationID) == "" || strings.TrimSpace(fence) == "" {
+		return "", fmt.Errorf("invocation ID and fence are required")
+	}
+	if _, err := j.db.ExecContext(context.Background(), `INSERT INTO inbound_invocations(invocation_id,fence,state,updated_at) VALUES(?,?,?,?) ON CONFLICT(invocation_id) DO NOTHING`, invocationID, fence, invocationPending, now.UnixMilli()); err != nil {
+		return "", err
+	}
+	var storedFence string
+	var state invocationState
+	if err := j.db.QueryRowContext(context.Background(), `SELECT fence,state FROM inbound_invocations WHERE invocation_id=?`, invocationID).Scan(&storedFence, &state); err != nil {
+		return "", err
+	}
+	if storedFence != fence {
+		return "", fmt.Errorf("invocation ID was reused with another fence")
+	}
+	return state, nil
+}
+
+func (j *Journal) markInvocationAccepted(invocationID, fence string, now time.Time) error {
+	result, err := j.db.ExecContext(context.Background(), `UPDATE inbound_invocations SET state=?,updated_at=? WHERE invocation_id=? AND fence=?`, invocationAccepted, now.UnixMilli(), invocationID, fence)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return errors.New("adapter invocation journal is missing")
 	}
 	return nil
 }

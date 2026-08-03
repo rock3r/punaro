@@ -23,15 +23,16 @@ import (
 )
 
 type adapterConfig struct {
-	relayURL      string
-	machineID     string
-	privateKey    ed25519.PrivateKey
-	attachedGroup string
-	mailboxBinary string
-	mailboxState  string
-	dataDir       string
-	pollInterval  time.Duration
-	accessToken   adapter.AccessServiceToken
+	relayURL       string
+	machineID      string
+	privateKey     ed25519.PrivateKey
+	attachedGroup  string
+	mailboxBinary  string
+	mailboxState   string
+	dataDir        string
+	pollInterval   time.Duration
+	accessToken    adapter.AccessServiceToken
+	invokerCommand string
 }
 
 func main() {
@@ -43,10 +44,12 @@ func main() {
 		err = runSend(os.Args[2:])
 	case os.Args[1] == "create":
 		err = runCreate(os.Args[2:])
+	case os.Args[1] == "invoke":
+		err = runInvoke(os.Args[2:])
 	case os.Args[1] == "attachment-notify":
 		err = runAttachmentNotify(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, attachment-notify)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, invoke, attachment-notify)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
@@ -89,6 +92,8 @@ func parseCreateArgs(args []string) (createRequest, error) {
 				capability |= relay.CapReceive
 			case "admin":
 				capability |= relay.CapAdmin
+			case "invoke":
+				capability |= relay.CapInvoke
 			default:
 				return createRequest{}, fmt.Errorf("invalid member capability")
 			}
@@ -99,6 +104,48 @@ func parseCreateArgs(args []string) (createRequest, error) {
 		request.members = append(request.members, relay.Member{Endpoint: endpoint, Capabilities: capability})
 	}
 	return request, nil
+}
+
+type invokeRequest struct {
+	conversationID string
+	fromEndpoint   string
+	targetEndpoint string
+	idempotencyKey string
+}
+
+func parseInvokeArgs(args []string) (invokeRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter invoke", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request invokeRequest
+	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
+	flags.StringVar(&request.fromEndpoint, "from", "", "attached invoking endpoint")
+	flags.StringVar(&request.targetEndpoint, "target", "", "offline receiving endpoint")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable invocation retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || strings.TrimSpace(request.targetEndpoint) == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		return invokeRequest{}, fmt.Errorf("--conversation, --from, --target, and --idempotency-key are required")
+	}
+	return request, nil
+}
+
+func runInvoke(args []string) error {
+	request, err := parseInvokeArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClient(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken)
+	if err != nil {
+		return err
+	}
+	invocation, err := client.Invoke(context.Background(), request.conversationID, request.fromEndpoint, request.targetEndpoint, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"status\":%q}\n", invocation.ID, invocation.Status)
+	return err
 }
 
 func runCreate(args []string) error {
@@ -271,7 +318,14 @@ func run() error {
 		return err
 	}
 	defer func() { _ = offerOutbox.Close() }()
-	syncer := adapter.Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal}
+	var invoker adapter.Invoker
+	if config.invokerCommand != "" {
+		invoker, err = adapter.NewCommandInvoker(config.invokerCommand)
+		if err != nil {
+			return fmt.Errorf("invocation runtime: %w", err)
+		}
+	}
+	syncer := adapter.Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Invoker: invoker}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	wake := make(chan struct{}, 1)
@@ -364,7 +418,7 @@ func loadConfig() (adapterConfig, error) {
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
-	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: strings.TrimSpace(os.Getenv("PUNARO_MAILBOX_STATE_DIR")), dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken}, nil
+	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: strings.TrimSpace(os.Getenv("PUNARO_MAILBOX_STATE_DIR")), dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, invokerCommand: strings.TrimSpace(os.Getenv("PUNARO_INVOKER_COMMAND"))}, nil
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {

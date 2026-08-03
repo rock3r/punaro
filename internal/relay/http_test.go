@@ -238,6 +238,69 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 	}
 }
 
+func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "invoke-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "invoke-advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin","invoke"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "invoke-create", "invoke-create")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var conversation Conversation
+	if err := json.NewDecoder(created.Body).Decode(&conversation); err != nil {
+		t.Fatal(err)
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"opaque work"}`, "invoke-message", "invoke-message"); response.Code != http.StatusCreated {
+		t.Fatalf("message status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":[]}`, "invoke-detach-b", ""); response.Code != http.StatusOK {
+		t.Fatalf("detach status=%d body=%s", response.Code, response.Body.String())
+	}
+	requested := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/invocations", `{"from_endpoint":"agent/a/session","target_endpoint":"agent/b/session"}`, "invoke-request", "invoke-request")
+	if requested.Code != http.StatusCreated || strings.Contains(requested.Body.String(), "opaque work") {
+		t.Fatalf("invoke status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	var invocation Invocation
+	if err := json.NewDecoder(requested.Body).Decode(&invocation); err != nil || invocation.ID == "" || invocation.Fence == "" || invocation.TargetMachineID != "machine-b" {
+		t.Fatalf("invocation=%#v err=%v", invocation, err)
+	}
+	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/invocations/lease", `{"consumer_id":"adapter-b"}`, "invoke-lease", "")
+	if lease.Code != http.StatusOK || strings.Contains(lease.Body.String(), "opaque work") {
+		t.Fatalf("lease status=%d body=%s", lease.Code, lease.Body.String())
+	}
+	var leased struct {
+		Invocations []Invocation `json:"invocations"`
+	}
+	if err := json.NewDecoder(lease.Body).Decode(&leased); err != nil || len(leased.Invocations) != 1 || leased.Invocations[0].ID != invocation.ID {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	outcomeBody, err := json.Marshal(map[string]any{"lease_token": leased.Invocations[0].LeaseToken, "lease_generation": leased.Invocations[0].LeaseGeneration, "accepted": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/invocations/"+invocation.ID+"/outcome", string(outcomeBody), "invoke-outcome", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("outcome status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

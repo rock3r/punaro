@@ -341,6 +341,33 @@ recipient       inject into local agent_mailbox
 recipient       POST /v1/deliveries/{id}/ack
 ```
 
+### Server-authorized invocation
+
+`notify` is still only the best-effort wake hint above: it can reach an
+already-attached adapter but cannot create an agent process. `invoke` is a
+separate, explicitly granted conversation capability. An attached member with
+`invoke` may submit `POST /v1/conversations/{id}/invocations` with only its
+endpoint, a receiving target endpoint, and an idempotency key. The server
+authorizes the caller's live ownership plus `invoke`, derives the target
+machine from the durable endpoint record, requires that target to have
+`receive`, verifies unacknowledged work exists, and creates a handoff only if
+the target is currently offline. An attached target produces the content-free
+`already_running` result instead; it never causes a second start.
+
+An invocation stores no message body. It has a durable ID, target machine,
+stable random fence, retry state, lease generation/token, and body-free audit
+events for request, lease, retry, acceptance, and terminal failure. The target
+machine's always-on adapter leases those records and hands the fixed local
+runtime command only `invocation_id`, conversation ID, target endpoint, and
+fence. The runtime must durably make a fence idempotent before it reports
+success and attaches the role; ordinary delivery then follows the existing
+lease/inject/ack flow. A failed handoff retries after 2, 4, then 8 seconds and
+becomes a visible terminal failure after three attempts. If the adapter crashes
+after local acceptance but before its server outcome, its private journal and
+the stable fence prevent a second start on the re-leased record. This is a
+fenced at-least-once handoff acknowledgement, not an unsupported claim of
+exactly-once process creation.
+
 The lease response is the source of truth. It contains bounded durable
 deliveries plus a map of conversation IDs to the recipient's highest contiguous
 acknowledged sequence. Every recipient has an independent
@@ -719,8 +746,11 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
+| `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
+| `POST` | `/v1/invocations/lease` | Lease content-free runtime handoffs for the authenticated machine. |
+| `POST` | `/v1/invocations/{id}/outcome` | Record one fenced local-runtime outcome. |
 | `GET` | `/v1/notifications` | Best-effort WebSocket wake-up stream. |
 
 Use opaque UUID/ULID identifiers. Endpoint names are labels, not URL
