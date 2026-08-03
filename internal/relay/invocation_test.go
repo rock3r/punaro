@@ -340,6 +340,47 @@ func TestInvokeExpiresAbandonedPendingHandoffBeforeCreatingFreshFence(t *testing
 	}
 }
 
+func TestInvokeDoesNotExpireAbandonedHandoffWithLiveLease(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, 2*invocationPendingRetention); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	request := InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)}
+	invocation, _, err := store.RequestInvocation(request)
+	if err != nil || invocation.Status != InvocationPending {
+		t.Fatalf("invocation=%#v err=%v", invocation, err)
+	}
+	leasedAt := now.Add(invocationPendingRetention + 3*time.Second)
+	leased, err := store.LeaseInvocations("recipient-machine", "adapter", leasedAt, time.Minute, 1)
+	if err != nil || len(leased) != 1 || leased[0].ID != invocation.ID {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	request.IdempotencyKey = "invoke-during-lease"
+	request.Now = leasedAt.Add(time.Second)
+	if coalesced, duplicate, err := store.RequestInvocation(request); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Status != InvocationPending {
+		t.Fatalf("coalesced=%#v duplicate=%t err=%v", coalesced, duplicate, err)
+	}
+}
+
 func TestInvokeRepairsPartialOptionalSchema(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

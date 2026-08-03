@@ -208,7 +208,7 @@ func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
 }
 
 func expireAbandonedInvocations(tx *sql.Tx, targetEndpoint string, now time.Time) error {
-	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? AND created_at<?`, targetEndpoint, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli())
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? AND created_at<? AND (lease_until IS NULL OR lease_until<=?)`, targetEndpoint, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("find abandoned invocations: %w", err)
 	}
