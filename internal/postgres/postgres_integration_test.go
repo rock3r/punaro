@@ -1418,13 +1418,13 @@ func testRelayMembershipControlSchemaDrift(ctx context.Context, t *testing.T, ap
 	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_request_hash_check; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_request_hash_check CHECK (request_hash ~ '^[0-9a-f]{64}$')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT replacement_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id) ON DELETE CASCADE`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT mail_conversation_control_idempotency_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT replacement_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id)`); err != nil {
 		t.Fatal(err)
 	}
 	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
 		t.Fatalf("renamed membership-control foreign key state=%#v err=%v", drifted, err)
 	}
-	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT replacement_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id) ON DELETE CASCADE`); err != nil {
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_conversation_control_idempotency DROP CONSTRAINT replacement_control_id_fkey; ALTER TABLE relay.mail_conversation_control_idempotency ADD CONSTRAINT mail_conversation_control_idempotency_control_id_fkey FOREIGN KEY (control_id) REFERENCES relay.mail_conversation_controls(id)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Ready(ctx); err != nil {

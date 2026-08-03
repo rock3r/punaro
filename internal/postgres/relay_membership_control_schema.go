@@ -40,7 +40,7 @@ WITH objects AS (
         (retries_oid,'mail_conversation_control_idempotency_key_check','c'::"char",ARRAY[2]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))'),
         (retries_oid,'mail_conversation_control_idempotency_request_hash_check','c'::"char",ARRAY[3]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'(request_hash ~ ''^[0-9a-f]{64}$''::text)'),
         (retries_oid,'mail_conversation_control_idempotency_control_id_key','u'::"char",ARRAY[4]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
-        (retries_oid,'mail_conversation_control_idempotency_control_id_fkey','f'::"char",ARRAY[4]::smallint[],controls_oid,ARRAY[1]::smallint[],'c'::"char",NULL::text)
+        (retries_oid,'mail_conversation_control_idempotency_control_id_fkey','f'::"char",ARRAY[4]::smallint[],controls_oid,ARRAY[1]::smallint[],'a'::"char",NULL::text)
     ) AS expected(table_oid,constraint_name,constraint_type,column_keys,foreign_table_oid,foreign_column_keys,delete_type,check_expression)
 ), actual_constraints AS (
     SELECT constraint_.conrelid,constraint_.conname,constraint_.contype,constraint_.conkey,
