@@ -886,6 +886,8 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 }
 
 func recipientCursorForLease(tx *sql.Tx, recipientIDs []string, conversationID string) (int64, error) {
+	var minimum int64
+	found := false
 	for _, recipientID := range recipientIDs {
 		var capabilities Capability
 		var err error
@@ -903,14 +905,19 @@ func recipientCursorForLease(tx *sql.Tx, recipientIDs []string, conversationID s
 		var cursor int64
 		err = tx.QueryRowContext(context.Background(), "SELECT sequence FROM recipient_cursors WHERE recipient_endpoint = ? AND conversation_id = ?", recipientID, conversationID).Scan(&cursor)
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, nil
+			cursor = 0
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return 0, fmt.Errorf("read recipient cursor: %w", err)
 		}
-		return cursor, nil
+		if !found || cursor < minimum {
+			minimum, found = cursor, true
+		}
 	}
-	return 0, ErrForbidden
+	if !found {
+		return 0, ErrForbidden
+	}
+	return minimum, nil
 }
 
 // AckDelivery acknowledges a local mailbox handoff. It is idempotent after a

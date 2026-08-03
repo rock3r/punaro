@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -339,12 +340,27 @@ func TestStoreKeepsRoleDeliveryKeysDistinctFromEndpointNames(t *testing.T) {
 	if err := store.BindRoleToSession("machine-reviewer", "reviewer", "role:reviewer", now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender/session", Body: "two identities", IdempotencyKey: "endpoint-role-collision", Now: now}); err != nil {
+	message, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender/session", Body: "two identities", IdempotencyKey: "endpoint-role-collision", Now: now})
+	if err != nil {
 		t.Fatalf("endpoint and role recipients collided: %v", err)
 	}
 	page, err := store.LeaseDeliveries("machine-reviewer", "reviewer-collision", "role:reviewer", conversation.ID, now, time.Minute, 10)
 	if err != nil || len(page.Deliveries) != 2 {
 		t.Fatalf("distinct endpoint and role deliveries page=%#v err=%v", page, err)
+	}
+	var endpointDeliveryID string
+	if err := store.db.QueryRowContext(context.Background(), "SELECT id FROM deliveries WHERE message_id = ? AND recipient_endpoint = ?", message.ID, "role:reviewer").Scan(&endpointDeliveryID); err != nil {
+		t.Fatal(err)
+	}
+	for _, delivery := range page.Deliveries {
+		if delivery.ID == endpointDeliveryID {
+			if err := store.AckDelivery("machine-reviewer", "role:reviewer", delivery.ID, delivery.LeaseToken, delivery.LeaseGeneration, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if cursor, err := store.RecipientCursor("machine-reviewer", "role:reviewer", conversation.ID, now); err != nil || cursor != 0 {
+		t.Fatalf("shared session cursor=%d err=%v, want pending-role zero", cursor, err)
 	}
 }
 
