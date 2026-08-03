@@ -1590,7 +1590,8 @@ WITH objects AS (
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
         (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.privilege_type='DELETE'))
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
@@ -1611,7 +1612,8 @@ WITH objects AS (
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
         (cursors_oid,'sequence','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.column_name='capabilities'))
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
@@ -1696,7 +1698,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',nonces_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',endpoints_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversations_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
-   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND CASE WHEN $1 >= 41 THEN NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,TRUNCATE,REFERENCES,TRIGGER') ELSE NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') END
    AND NOT has_table_privilege('punaro_app',messages_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',deliveries_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
