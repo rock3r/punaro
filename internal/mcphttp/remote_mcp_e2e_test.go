@@ -975,11 +975,49 @@ func validRemoteMCPE2EToolInputSchema(raw, expectedArguments json.RawMessage) bo
 		return false
 	}
 	for name := range arguments {
-		if _, found := schema.Properties[name]; !found {
+		property, found := schema.Properties[name]
+		if !found || !validRemoteMCPE2ESchemaValue(arguments[name], property) {
+			return false
+		}
+	}
+	for name := range required {
+		if _, found := arguments[name]; !found {
 			return false
 		}
 	}
 	return true
+}
+
+func validRemoteMCPE2ESchemaValue(value, property json.RawMessage) bool {
+	var definition struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(property, &definition) != nil {
+		return false
+	}
+	switch definition.Type {
+	case "string":
+		var target string
+		return json.Unmarshal(value, &target) == nil
+	case "boolean":
+		var target bool
+		return json.Unmarshal(value, &target) == nil
+	case "number":
+		var target json.Number
+		return json.Unmarshal(value, &target) == nil
+	case "integer":
+		var target json.Number
+		return json.Unmarshal(value, &target) == nil && !strings.ContainsAny(target.String(), ".eE")
+	case "object":
+		return validJSONObject(value, maxJSONRPCDepth)
+	case "array":
+		var target []json.RawMessage
+		return json.Unmarshal(value, &target) == nil
+	case "null":
+		return bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+	default:
+		return false
+	}
 }
 
 func jsonRawMessageEquals(left, right json.RawMessage) bool {
@@ -1033,6 +1071,7 @@ func remoteMCPE2EChallengeParameter(challenge, wanted string) (string, bool) {
 		if !closed {
 			return "", false
 		}
+		name = strings.ToLower(name)
 		if _, duplicate := parameters[name]; duplicate {
 			return "", false
 		}
@@ -1046,7 +1085,7 @@ func remoteMCPE2EChallengeParameter(challenge, wanted string) (string, bool) {
 		}
 		remaining = remaining[1:]
 	}
-	value, found := parameters[wanted]
+	value, found := parameters[strings.ToLower(wanted)]
 	return value, found
 }
 
