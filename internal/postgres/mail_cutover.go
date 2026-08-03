@@ -459,13 +459,14 @@ WITH objects AS (
         (to_regclass('relay.mail_conversation_idempotency'),'mail_conversation_idempotency_mutation_guard'),
         (to_regclass('relay.mail_request_nonces'),'mail_request_nonces_mutation_guard')
     ) AS expected(table_oid,trigger_name)
+	WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), guards AS (
-	SELECT count(*)=12 AND count(DISTINCT trigger.tgrelid)=12
+	SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END AND count(DISTINCT trigger.tgrelid)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND bool_and(trigger.tgfoid=objects.guard_oid AND trigger.tgenabled='O' AND NOT trigger.tgisinternal
        AND trigger.tgtype=30 AND trigger.tgconstraint=0 AND NOT trigger.tgdeferrable AND NOT trigger.tginitdeferred
        AND trigger.tgnargs=0 AND trigger.tgqual IS NULL AND trigger.tgnewtable IS NULL AND trigger.tgoldtable IS NULL AND trigger.tgattr::text='')
        AND (SELECT count(*) FROM pg_trigger AS inventory
-			WHERE inventory.tgrelid IN (SELECT table_oid FROM expected_guards) AND NOT inventory.tgisinternal)=12
+			WHERE inventory.tgrelid IN (SELECT table_oid FROM expected_guards) AND NOT inventory.tgisinternal)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
 	   AND (SELECT count(*) FROM pg_trigger AS inventory
 			WHERE inventory.tgrelid=ANY(ARRAY[to_regclass('relay.mail_cutover_epochs'),to_regclass('relay.mail_cutover_staging'),to_regclass('relay.mail_cutover_checkpoints')]) AND NOT inventory.tgisinternal)=0 AS exact
     FROM objects JOIN expected_guards ON true
@@ -487,7 +488,7 @@ WITH objects AS (
     FROM objects
 )
 SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL
-	AND objects.roles_oid IS NOT NULL AND objects.role_memberships_oid IS NOT NULL AND objects.role_bindings_oid IS NOT NULL
+	AND ($1 < 40 OR (objects.roles_oid IS NOT NULL AND objects.role_memberships_oid IS NOT NULL AND objects.role_bindings_oid IS NOT NULL))
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
    AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
