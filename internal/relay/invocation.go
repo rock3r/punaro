@@ -476,6 +476,49 @@ func (s *Store) ReportInvocation(machineID, invocationID, token string, generati
 	return tx.Commit()
 }
 
+// RejectInvocation terminally consumes a leased invocation which the relay can
+// no longer authorize for the enrolled machine. It deliberately does not use
+// ReportInvocation's runtime-failure path, so a narrowed enrollment cannot
+// turn policy denial into retry exhaustion.
+func (s *Store) RejectInvocation(machineID, invocationID, token string, generation int64, now time.Time) error {
+	if !ValidMachineID(machineID) || strings.TrimSpace(invocationID) == "" || !ValidRequestToken(token) || generation < 1 {
+		return ErrForbidden
+	}
+	exists, err := s.invocationSchemaExists()
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrForbidden
+	}
+	if err := s.ensureInvocationSchema(); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	var status InvocationStatus
+	var leaseMachine, leaseToken sql.NullString
+	var leaseGeneration int64
+	var leaseUntil sql.NullInt64
+	err = tx.QueryRowContext(context.Background(), `SELECT status,lease_machine_id,lease_token,lease_generation,lease_until FROM invocations WHERE id=?`, invocationID).Scan(&status, &leaseMachine, &leaseToken, &leaseGeneration, &leaseUntil)
+	if errors.Is(err, sql.ErrNoRows) || status != InvocationPending || !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || leaseToken.String != token || leaseGeneration != generation || !leaseUntil.Valid || leaseUntil.Int64 <= now.UnixMilli() {
+		return ErrForbidden
+	}
+	if err != nil {
+		return fmt.Errorf("read invocation lease: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), invocationID); err != nil {
+		return fmt.Errorf("reject invocation: %w", err)
+	}
+	if err := recordInvocationAudit(tx, invocationID, "failed", now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func invocationBackoff(attempt int) time.Duration {
 	// Leave a full poll interval for a transient local runtime failure before
 	// a second start attempt. The final terminal failure occurs after three
@@ -495,6 +538,9 @@ func (s *Store) InvocationAudit(invocationID string) ([]InvocationAuditEvent, er
 	}
 	if !exists {
 		return nil, nil
+	}
+	if err := s.ensureInvocationSchema(); err != nil {
+		return nil, err
 	}
 	rows, err := s.db.QueryContext(context.Background(), `SELECT action,created_at FROM invocation_audit WHERE invocation_id=? ORDER BY ordinal`, invocationID)
 	if err != nil {

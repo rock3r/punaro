@@ -387,7 +387,7 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 	if duplicate || invocation.Status == InvocationAlreadyRunning {
 		status = http.StatusOK
 	}
-	if !duplicate && invocation.Status == InvocationPending {
+	if !duplicate && invocation.Status == InvocationPending && h.auth.AllowsEndpoint(invocation.TargetMachineID, invocation.TargetEndpoint) {
 		// This only accelerates the adapter's durable invocation lease. As with a
 		// message wake, loss or duplication of the hint cannot change the start
 		// decision and carries no control body.
@@ -426,8 +426,9 @@ func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID
 		}
 		// An enrollment scope may narrow after the server queued work. Never
 		// return process-start authority for an endpoint that is no longer in
-		// scope; release the just-acquired lease without exposing it to the host.
-		if err := invocations.ReportInvocation(machineID, invocation.ID, invocation.LeaseToken, invocation.LeaseGeneration, false, now); err != nil {
+		// scope. This is terminal policy rejection, not a runtime failure, so it
+		// must not consume the bounded runtime retry budget.
+		if err := invocations.RejectInvocation(machineID, invocation.ID, invocation.LeaseToken, invocation.LeaseGeneration, now); err != nil {
 			writeStoreError(w, err)
 			return
 		}

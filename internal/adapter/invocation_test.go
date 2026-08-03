@@ -91,6 +91,10 @@ func TestSyncerReportsFailedRuntimeHandoffForBoundedRelayRetry(t *testing.T) {
 	if len(relayClient.reports) != 1 || relayClient.reports[0].accepted {
 		t.Fatalf("reports=%#v", relayClient.reports)
 	}
+	var retained int
+	if err := journal.db.QueryRowContext(context.Background(), `SELECT count(*) FROM inbound_invocations`).Scan(&retained); err != nil || retained != 0 {
+		t.Fatalf("retained invocation rows=%d err=%v", retained, err)
+	}
 }
 
 func TestSyncerDoesNotInvokeRoleThatAttachedDuringCycle(t *testing.T) {

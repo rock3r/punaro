@@ -150,6 +150,9 @@ func (s *Syncer) syncInvocations(ctx context.Context, relayClient InvocationRela
 				if reportErr := relayClient.ReportInvocation(ctx, invocation, false); reportErr != nil {
 					return fmt.Errorf("runtime invocation %q failed and retry report failed: %w", invocation.ID, reportErr)
 				}
+				if removeErr := s.Journal.removeInvocation(invocation.ID, invocation.Fence); removeErr != nil {
+					return fmt.Errorf("remove failed invocation %q: %w", invocation.ID, removeErr)
+				}
 				return fmt.Errorf("run runtime invocation %q: %w", invocation.ID, err)
 			}
 			if err := s.Journal.markInvocationAccepted(invocation.ID, invocation.Fence, now); err != nil {

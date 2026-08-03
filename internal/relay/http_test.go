@@ -315,6 +315,94 @@ func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
 	}
 }
 
+func TestHTTPInvocationLeaseRejectsOutOfScopeTargetWithoutRetry(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/allowed/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	notifier := NewNotifier()
+	targetNotifications := notifier.Register("machine-b")
+	t.Cleanup(targetNotifications.Close)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Notifier: notifier})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "scope-advertise-a", "")
+	// Simulate a persisted role whose machine's enrollment was narrowed after it
+	// was recorded. The direct store setup deliberately bypasses HTTP's current
+	// scope check so the lease route has to contain the old work safely.
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b/out-of-scope"}, clock, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin","invoke"]},{"endpoint":"agent/b/out-of-scope","capabilities":["receive"]}]}`, "scope-create", "scope-create")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	var conversation Conversation
+	if err := json.NewDecoder(created.Body).Decode(&conversation); err != nil {
+		t.Fatal(err)
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"opaque work"}`, "scope-message", "scope-message"); response.Code != http.StatusCreated {
+		t.Fatalf("message status=%d body=%s", response.Code, response.Body.String())
+	}
+	select {
+	case <-targetNotifications.Events():
+		// The ordinary message notification is expected. The assertion below
+		// verifies that the invocation itself adds no out-of-scope wake hint.
+	case <-time.After(time.Second):
+		t.Fatal("message did not wake target machine")
+	}
+	if err := store.AdvertiseEndpoints("machine-b", nil, clock, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	requested := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/invocations", `{"from_endpoint":"agent/a/session","target_endpoint":"agent/b/out-of-scope"}`, "scope-invoke", "scope-invoke")
+	if requested.Code != http.StatusCreated {
+		t.Fatalf("invoke status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	var invocation Invocation
+	if err := json.NewDecoder(requested.Body).Decode(&invocation); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case wake := <-targetNotifications.Events():
+		t.Fatalf("out-of-scope target received wake=%#v", wake)
+	case <-time.After(20 * time.Millisecond):
+	}
+	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/invocations/lease", `{"consumer_id":"adapter-b"}`, "scope-lease", "")
+	if lease.Code != http.StatusOK || lease.Body.String() != `{"invocations":[]}`+"\n" {
+		t.Fatalf("lease status=%d body=%s", lease.Code, lease.Body.String())
+	}
+	var status InvocationStatus
+	var attempts int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status,attempts FROM invocations WHERE id=?`, invocation.ID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != InvocationFailed || attempts != 1 {
+		t.Fatalf("status=%q attempts=%d", status, attempts)
+	}
+	if leased, err := store.LeaseInvocations("machine-b", "adapter-b", clock.Add(time.Hour), time.Minute, 1); err != nil || len(leased) != 0 {
+		t.Fatalf("terminalized invocation leased=%#v err=%v", leased, err)
+	}
+	audit, err := store.InvocationAudit(invocation.ID)
+	if err != nil || len(audit) != 3 || audit[0].Action != "requested" || audit[1].Action != "leased" || audit[2].Action != "failed" {
+		t.Fatalf("audit=%#v err=%v", audit, err)
+	}
+}
+
 func TestHTTPRejectsUnsignedEndpointClaimsAndUnknownJSON(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

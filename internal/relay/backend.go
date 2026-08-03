@@ -73,6 +73,7 @@ type InvocationBackend interface {
 	RequestInvocation(InvokeInput) (Invocation, bool, error)
 	LeaseInvocations(machineID, consumerID string, now time.Time, ttl time.Duration, limit int) ([]Invocation, error)
 	ReportInvocation(machineID, invocationID, token string, generation int64, accepted bool, now time.Time) error
+	RejectInvocation(machineID, invocationID, token string, generation int64, now time.Time) error
 }
 
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
