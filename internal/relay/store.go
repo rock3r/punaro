@@ -1042,7 +1042,7 @@ func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, er
 		JOIN endpoints e ON e.endpoint = rb.session_endpoint
 		WHERE d.message_id = ? AND rb.lease_until > ? AND e.machine_id = rb.machine_id
 		  AND e.ownership_generation = rb.ownership_generation AND e.lease_until > ?
-	) ORDER BY machine_id`, messageID, now.UnixMilli(), "role:", messageID, now.UnixMilli(), now.UnixMilli())
+	) ORDER BY machine_id`, messageID, now.UnixMilli(), roleRecipient(""), messageID, now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find message recipient machines: %w", err)
 	}
@@ -1096,10 +1096,13 @@ func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conv
 	return conversations, nil
 }
 
-func roleRecipient(role string) string { return "role:" + role }
+// roleRecipient is intentionally not a valid endpoint: the leading record
+// separator makes durable role deliveries unambiguous even if an endpoint is
+// named "role:...". This internal key is never exposed at the relay API.
+func roleRecipient(role string) string { return "\x1erole:" + role }
 
 func parseRoleRecipient(value string) (string, bool) {
-	role, found := strings.CutPrefix(value, "role:")
+	role, found := strings.CutPrefix(value, "\x1erole:")
 	return role, found && ValidRole(role)
 }
 

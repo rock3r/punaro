@@ -983,7 +983,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 		SourceFingerprint: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}
 	manifest := relay.MigrationSourceManifest{
-		Version: 2, SourceID: request.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: request.EpochID,
+		Version: 3, SourceID: request.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: request.EpochID,
 		TargetIdentity: request.TargetIdentity, Fingerprint: request.SourceFingerprint,
 		TableSHA256: relay.MigrationSourceHashes{
 			Endpoints: emptyMailCutoverDigest, Conversations: emptyMailCutoverDigest, Memberships: emptyMailCutoverDigest,

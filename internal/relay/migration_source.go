@@ -104,7 +104,7 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v2:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
+const migrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 
 // InspectMigrationSource reads an existing source without creating, migrating,
 // checkpointing, or changing its logical cutover state.
@@ -322,7 +322,7 @@ type migrationQueryer interface {
 }
 
 func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationSourceManifest, error) {
-	manifest := MigrationSourceManifest{Version: 2}
+	manifest := MigrationSourceManifest{Version: 3}
 	var storedFingerprint sql.NullString
 	var controlRows int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM relay_migration_control`).Scan(&controlRows); err != nil || controlRows != 1 {
@@ -636,9 +636,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
         OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
         OR EXISTS (SELECT 1 FROM messages AS message JOIN conversations AS conversation ON conversation.id=message.conversation_id WHERE message.sequence>conversation.next_sequence)
         OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))
-        OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,6)=role.role WHERE (substr(delivery.recipient_endpoint,1,5)='role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,5)<>'role:' AND endpoint.endpoint IS NULL))
+        OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
         OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor JOIN conversations AS conversation ON conversation.id=cursor.conversation_id WHERE cursor.sequence<0 OR cursor.sequence>conversation.next_sequence)
-        OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,6)=role.role WHERE (substr(cursor.recipient_endpoint,1,5)='role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,5)<>'role:' AND endpoint.endpoint IS NULL))
+        OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE (substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
         OR EXISTS (SELECT 1 FROM idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM idempotency GROUP BY message_id HAVING count(*)<>1)
         OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')

@@ -315,6 +315,39 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	}
 }
 
+func TestStoreKeepsRoleDeliveryKeysDistinctFromEndpointNames(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-sender", []string{"agent/sender/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-reviewer", []string{"role:reviewer"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/sender/session", []Member{
+		{Endpoint: "agent/sender/session", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "role:reviewer", Capabilities: CapReceive},
+		{Role: "reviewer", RoleMachineID: "machine-reviewer", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-reviewer", "reviewer", "role:reviewer", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender/session", Body: "two identities", IdempotencyKey: "endpoint-role-collision", Now: now}); err != nil {
+		t.Fatalf("endpoint and role recipients collided: %v", err)
+	}
+	page, err := store.LeaseDeliveries("machine-reviewer", "reviewer-collision", "role:reviewer", conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 2 {
+		t.Fatalf("distinct endpoint and role deliveries page=%#v err=%v", page, err)
+	}
+}
+
 func TestStoreDurableRoleSurvivesRestartButRequiresFreshBinding(t *testing.T) {
 	database := filepath.Join(t.TempDir(), "relay.db")
 	store, err := Open(database)

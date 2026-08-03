@@ -43,7 +43,7 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		SourceFingerprint: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}
 	manifest := relay.MigrationSourceManifest{
-		Version: 2, SourceID: valid.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: valid.EpochID,
+		Version: 3, SourceID: valid.SourceID, Phase: relay.MigrationSourcePrepared, EpochID: valid.EpochID,
 		TargetIdentity: valid.TargetIdentity, Fingerprint: valid.SourceFingerprint,
 		TableSHA256: relay.MigrationSourceHashes{
 			Endpoints: strings.Repeat("c", 64), Conversations: strings.Repeat("c", 64), Memberships: strings.Repeat("c", 64),

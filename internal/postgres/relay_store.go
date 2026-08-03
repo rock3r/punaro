@@ -449,7 +449,7 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid,'role:'||membership.role
+		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
 		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0
 		  AND NOT EXISTS (
@@ -737,7 +737,7 @@ func (d *Database) RecipientMachines(messageID string, now time.Time) ([]string,
 		WHERE delivery.message_id=$1::uuid AND endpoint.lease_until>$2
 		UNION
 		SELECT binding.machine_id FROM relay.mail_deliveries AS delivery
-		JOIN relay.mail_role_bindings AS binding ON delivery.recipient_endpoint='role:'||binding.role
+		JOIN relay.mail_role_bindings AS binding ON delivery.recipient_endpoint=chr(30)||'role:'||binding.role
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
 		WHERE delivery.message_id=$1::uuid AND binding.lease_until>$2
 		  AND endpoint.lease_until>$2 AND endpoint.machine_id=binding.machine_id
@@ -909,7 +909,7 @@ func postgresSessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generat
 	rows, err := tx.QueryContext(context.Background(), `SELECT recipient FROM (
 		SELECT $2::text AS recipient,0 AS ordinal
 		UNION ALL
-		SELECT 'role:'||binding.role,1 AS ordinal FROM relay.mail_role_bindings AS binding
+		SELECT chr(30)||'role:'||binding.role,1 AS ordinal FROM relay.mail_role_bindings AS binding
 		JOIN relay.mail_endpoints AS live ON live.endpoint=binding.session_endpoint
 		WHERE binding.machine_id=$1 AND binding.session_endpoint=$2 AND binding.ownership_generation=$3
 		  AND binding.lease_until>$4 AND live.machine_id=$1 AND live.lease_until>$4
@@ -964,7 +964,7 @@ func postgresAdvanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversation
 }
 
 func postgresParseRoleRecipient(value string) (string, bool) {
-	role, ok := strings.CutPrefix(value, "role:")
+	role, ok := strings.CutPrefix(value, "\x1erole:")
 	return role, ok && relay.ValidRole(role)
 }
 
