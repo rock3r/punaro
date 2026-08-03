@@ -323,7 +323,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
 		}
 	} else {
-		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_deliveries WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
 		}
 		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.Member.Endpoint); err != nil {

@@ -555,7 +555,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
-		if _, err := tx.ExecContext(context.Background(), "DELETE FROM deliveries WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Member.Endpoint, input.ConversationID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
 			return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
 		}
 		if _, err := tx.ExecContext(context.Background(), "DELETE FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.Member.Endpoint); err != nil {
