@@ -731,7 +731,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error 
 		OR EXISTS (SELECT 1 FROM idempotency GROUP BY message_id HAVING count(*)<>1)
         OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM conversation_idempotency GROUP BY conversation_id HAVING count(*)<>1)
-		OR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15)
+		OR EXISTS (SELECT 1 FROM conversation_controls WHERE operation NOT IN ('upsert_member','remove_member') OR member_capabilities<0 OR member_capabilities>15 OR (operation='upsert_member' AND member_capabilities=0) OR (operation='remove_member' AND member_capabilities<>0))
 		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)
 		OR EXISTS (SELECT 1 FROM uuid_values WHERE typeof(value)<>'text' OR length(value)<>36 OR substr(value,9,1)<>'-' OR substr(value,14,1)<>'-' OR substr(value,19,1)<>'-' OR substr(value,24,1)<>'-' OR lower(replace(value,'-','')) GLOB '*[^0-9a-f]*')
