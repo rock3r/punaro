@@ -181,10 +181,14 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		Members: []relay.Member{
 			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive},
+			{Role: "role/attachment-recipient", RoleMachineID: "attachment-recipient-machine", Capabilities: relay.CapReceive},
 		},
 	})
 	if err != nil {
 		t.Fatalf("project conversation: %v", err)
+	}
+	if err := app.BindRoleToSession("attachment-recipient-machine", "role/attachment-recipient", "agent/attachment/recipient", now, time.Hour); err != nil {
+		t.Fatalf("bind attachment recipient role: %v", err)
 	}
 	message, duplicateMessage, err := app.AppendMessage(relay.AppendInput{
 		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
@@ -645,9 +649,12 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		{`DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_messages WHERE id=$1`, []any{message.ID}},
 		{`DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_role_memberships WHERE conversation_id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_role_bindings WHERE role='role/attachment-recipient'`, nil},
 		{`DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, []any{conversation.ID}},
 		{`DELETE FROM relay.mail_conversations WHERE id=$1`, []any{conversation.ID}},
+		{`DELETE FROM relay.mail_roles WHERE role='role/attachment-recipient'`, nil},
 		{`DELETE FROM relay.mail_endpoints WHERE endpoint IN ('agent/attachment/uploader','agent/attachment/recipient')`, nil},
 		{`DELETE FROM attachment.ready_artifacts`, nil},
 		{`DELETE FROM attachment.ready_blob_manifest`, nil},

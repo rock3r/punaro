@@ -2,10 +2,10 @@ package postgres
 
 import "context"
 
-// attachmentRecipientControlsAvailable verifies the exact schema-v11 stable
+// attachmentRecipientControlsAvailable verifies the exact attachment-recipient
 // principal snapshot and download authority. Application code receives only
 // narrow routine execution, never direct lifecycle-table authority.
-func attachmentRecipientControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func attachmentRecipientControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -63,9 +63,11 @@ WITH objects AS (
       (authority_oid,'d7d7b06d7b82d2a3b94f362e04dea549','s'::"char",false,'boolean',false),
       (endpoint_bind_oid,'f1155124cc7e9dd23823b86d8285a3a0','v'::"char",true,'integer',false),
       (conversation_bind_oid,'e3fbcc33f912e09e815a0668f9c940a2','v'::"char",true,'uuid',false),
-      (message_bind_oid,'4fae53b06715a6dddfe87e1178fc9554','v'::"char",true,'integer',false),
+      (message_bind_oid,CASE WHEN $1 >= 40 THEN '5697d516f357fff358c1954bb7ccc81d'
+                             ELSE '4fae53b06715a6dddfe87e1178fc9554' END,'v'::"char",true,'integer',false),
       (project_records_oid,'4fe60fc8c8ddcb2d9f2abe97cf8c195c','v'::"char",true,'boolean',false),
-      (download_oid,'11c4af626ef77090e6957b96f6f11b72','s'::"char",true,'record',true)
+      (download_oid,CASE WHEN $1 >= 40 THEN '7eca1f695632cbd4f2b1bd39659829d8'
+                         ELSE '11c4af626ef77090e6957b96f6f11b72' END,'s'::"char",true,'record',true)
     ) AS expected(oid,body_hash,volatility,application_execute,result_type,returns_set)
 ), routine_safety AS (
     SELECT count(*) = 6
@@ -206,6 +208,6 @@ SELECT endpoint_oid IS NOT NULL AND conversation_oid IS NOT NULL AND message_oid
    AND has_function_privilege('punaro_app',message_bind_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',project_records_oid,'EXECUTE')
    AND has_function_privilege('punaro_app',download_oid,'EXECUTE')
-FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, check_safety, index_safety`).Scan(&available)
+FROM objects, table_safety, table_acl, routine_safety, routine_acl, constraint_safety, check_safety, index_safety`, schemaVersion).Scan(&available)
 	return available, err
 }

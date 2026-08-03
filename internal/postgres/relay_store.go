@@ -15,6 +15,7 @@ import (
 )
 
 var _ relay.Backend = (*Database)(nil)
+var _ relay.RoleBindingBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
 
@@ -111,6 +112,26 @@ func (d *Database) advertiseEndpoints(machineID string, authority relay.Principa
 			return relayDatabaseError(err, "advertise endpoint")
 		}
 	}
+	var roleBindingsAvailable bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_bindings') IS NOT NULL`).Scan(&roleBindingsAvailable); err != nil {
+		return relayDatabaseError(err, "inspect durable role bindings")
+	}
+	if roleBindingsAvailable {
+		// A normal advertisement renews only an already-live binding for this exact
+		// endpoint generation. A restarted or reclaimed endpoint must be bound
+		// explicitly, so stale role authority cannot be revived by advertisement.
+		for _, endpoint := range orderedEndpoints {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_role_bindings AS binding
+				SET lease_until=$1
+				FROM relay.mail_endpoints AS endpoint
+				WHERE binding.machine_id=$2 AND binding.session_endpoint=$3
+				  AND binding.lease_until>$4 AND endpoint.endpoint=$3
+				  AND endpoint.machine_id=$2 AND endpoint.lease_until=$1
+				  AND binding.ownership_generation=endpoint.ownership_generation`, until, machineID, endpoint, now.UTC()); err != nil {
+				return relayDatabaseError(err, "renew durable role binding")
+			}
+		}
+	}
 	var principalID, credentialLookupID any
 	var credentialGeneration any
 	if authority.PrincipalID != "" {
@@ -130,6 +151,78 @@ func (d *Database) advertiseEndpoints(machineID string, authority relay.Principa
 	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit endpoint advertisement")
+	}
+	return nil
+}
+
+// BindRoleToSession explicitly attaches one durable role to a live endpoint
+// currently owned by its immutable owner machine. The endpoint generation
+// fences the binding against expiry or takeover.
+func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.Time, ttl time.Duration) error {
+	if !relay.ValidMachineID(machineID) || !relay.ValidRole(role) || !relay.ValidEndpoint(endpoint) || ttl <= 0 {
+		return relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return errors.New("durable role binding cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return errors.New("durable role bindings are unavailable")
+	}
+	if !rolesAvailable {
+		return relay.ErrForbidden
+	}
+	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
+	if err != nil {
+		return err
+	}
+	var owner string
+	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1`, role).Scan(&owner); errors.Is(err, sql.ErrNoRows) || owner != machineID {
+		return relay.ErrForbidden
+	} else if err != nil {
+		return errors.New("durable role ownership is unavailable")
+	}
+	var endpointUntil time.Time
+	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint).Scan(&endpointUntil); err != nil {
+		return errors.New("durable role endpoint is unavailable")
+	}
+	until := now.Add(ttl).UTC()
+	if endpointUntil.Before(until) {
+		until = endpointUntil
+	}
+	var activeRoles int
+	if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_role_bindings
+		WHERE machine_id=$1 AND session_endpoint=$2 AND ownership_generation=$3 AND lease_until>$4 AND role<>$5`, machineID, endpoint, generation, now.UTC(), role).Scan(&activeRoles); err != nil {
+		return errors.New("durable role binding count is unavailable")
+	}
+	if activeRoles >= relay.MaxActiveRolesPerSession {
+		return relay.ErrConflict
+	}
+	var previousSession string
+	var previousGeneration int64
+	var previousLeaseUntil time.Time
+	err = tx.QueryRowContext(context.Background(), `SELECT session_endpoint,ownership_generation,lease_until FROM relay.mail_role_bindings WHERE role=$1 FOR UPDATE`, role).Scan(&previousSession, &previousGeneration, &previousLeaseUntil)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return errors.New("durable role binding is unavailable")
+	}
+	rebinding := err == nil && (previousSession != endpoint || previousGeneration != generation || !previousLeaseUntil.After(now.UTC()))
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
+		VALUES($1,$2,$3,$4,$5)
+		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint,machine_id=excluded.machine_id,ownership_generation=excluded.ownership_generation,lease_until=excluded.lease_until`, role, endpoint, machineID, generation, until); err != nil {
+		return relayDatabaseError(err, "bind durable role")
+	}
+	if rebinding {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries
+			SET lease_machine_id=NULL,lease_token=NULL,ownership_generation=NULL,consumer_generation=NULL,lease_until=NULL
+			WHERE recipient_endpoint=chr(30)||'role:'||$1 AND acked_at IS NULL`, role); err != nil {
+			return relayDatabaseError(err, "invalidate rebound role leases")
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return relayDatabaseError(err, "commit durable role binding")
 	}
 	return nil
 }
@@ -157,17 +250,31 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		return relay.Conversation{}, errors.New("invalid conversation project authority")
 	}
 	seen := make(map[string]struct{}, len(input.Members))
+	roles := make(map[string]string, len(input.Members))
 	creatorAdmin := false
 	for _, member := range input.Members {
-		if !relay.ValidEndpoint(member.Endpoint) || member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0 {
+		if member.Capabilities == 0 || member.Capabilities & ^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0 {
 			return relay.Conversation{}, errors.New("invalid conversation member")
 		}
-		if _, duplicate := seen[member.Endpoint]; duplicate {
-			return relay.Conversation{}, errors.New("duplicate conversation member")
-		}
-		seen[member.Endpoint] = struct{}{}
-		if member.Endpoint == input.CreatorEndpoint && member.Capabilities&(relay.CapSend|relay.CapReceive|relay.CapAdmin) == relay.CapSend|relay.CapReceive|relay.CapAdmin {
-			creatorAdmin = true
+		switch {
+		case member.Endpoint != "" && member.Role == "" && member.RoleMachineID == "":
+			if !relay.ValidEndpoint(member.Endpoint) {
+				return relay.Conversation{}, errors.New("invalid conversation member")
+			}
+			if _, duplicate := seen[member.Endpoint]; duplicate {
+				return relay.Conversation{}, errors.New("duplicate conversation member")
+			}
+			seen[member.Endpoint] = struct{}{}
+			if member.Endpoint == input.CreatorEndpoint && member.Capabilities&(relay.CapSend|relay.CapReceive|relay.CapAdmin) == relay.CapSend|relay.CapReceive|relay.CapAdmin {
+				creatorAdmin = true
+			}
+		case member.Endpoint == "" && relay.ValidRole(member.Role) && relay.ValidMachineID(member.RoleMachineID):
+			if _, duplicate := roles[member.Role]; duplicate {
+				return relay.Conversation{}, errors.New("duplicate conversation member")
+			}
+			roles[member.Role] = member.RoleMachineID
+		default:
+			return relay.Conversation{}, errors.New("invalid conversation member")
 		}
 	}
 	if !creatorAdmin {
@@ -220,13 +327,49 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 			return relay.Conversation{}, relay.ErrForbidden
 		}
 	}
+	orderedRoles := make([]string, 0, len(roles))
+	for role := range roles {
+		orderedRoles = append(orderedRoles, role)
+	}
+	sort.Strings(orderedRoles)
+	if len(orderedRoles) != 0 {
+		rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+		if err != nil {
+			return relay.Conversation{}, errors.New("durable role bindings are unavailable")
+		}
+		if !rolesAvailable {
+			return relay.Conversation{}, relay.ErrForbidden
+		}
+	}
+	for _, role := range orderedRoles {
+		owner := roles[role]
+		if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, role); err != nil {
+			return relay.Conversation{}, errors.New("durable role creation lock is unavailable")
+		}
+		var existingOwner string
+		err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1`, role).Scan(&existingOwner)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_roles(role,machine_id) VALUES($1,$2)`, role, owner); err != nil {
+				return relay.Conversation{}, relayDatabaseError(err, "create durable role")
+			}
+		case err != nil:
+			return relay.Conversation{}, errors.New("durable role ownership is unavailable")
+		case existingOwner != owner:
+			return relay.Conversation{}, relay.ErrForbidden
+		}
+	}
 	conversation := relay.Conversation{ID: uuid.NewString()}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversations(id,created_at) VALUES($1::uuid,$2)`, conversation.ID, input.Now.UTC()); err != nil {
 		return relay.Conversation{}, relayDatabaseError(err, "create conversation")
 	}
 	for _, member := range input.Members {
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, conversation.ID, member.Endpoint, member.Capabilities); err != nil {
-			return relay.Conversation{}, relayDatabaseError(err, "add conversation member")
+		if member.Endpoint != "" {
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, conversation.ID, member.Endpoint, member.Capabilities); err != nil {
+				return relay.Conversation{}, relayDatabaseError(err, "add conversation member")
+			}
+		} else if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_memberships(conversation_id,role,capabilities) VALUES($1::uuid,$2,$3)`, conversation.ID, member.Role, member.Capabilities); err != nil {
+			return relay.Conversation{}, relayDatabaseError(err, "add durable role member")
 		}
 	}
 	if input.ProjectID != "" {
@@ -258,13 +401,12 @@ func (d *Database) AuthorizeSender(conversationID, machineID, endpoint string, n
 	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
 		return err
 	}
-	var capabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapSend == 0 {
-		return relay.ErrForbidden
-	}
+	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, endpoint, now)
 	if err != nil {
-		return errors.New("sender authorization is unavailable")
+		return err
+	}
+	if capabilities&relay.CapSend == 0 {
+		return relay.ErrForbidden
 	}
 	return tx.Commit()
 }
@@ -311,13 +453,21 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if _, err := postgresEndpointOwnershipLocked(tx, input.FromEndpoint, input.SenderMachineID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
-	var capabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, input.FromEndpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapSend == 0 {
-		return relay.Message{}, false, relay.ErrForbidden
-	}
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
 	if err != nil {
-		return relay.Message{}, false, errors.New("message authorization is unavailable")
+		return relay.Message{}, false, errors.New("durable role bindings are unavailable")
+	}
+	if rolesAvailable {
+		if err := postgresLockSessionRoleBindings(tx, input.SenderMachineID, input.FromEndpoint, input.Now); err != nil {
+			return relay.Message{}, false, err
+		}
+	}
+	capabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.SenderMachineID, input.FromEndpoint, input.Now)
+	if err != nil {
+		return relay.Message{}, false, err
+	}
+	if capabilities&relay.CapSend == 0 {
+		return relay.Message{}, false, relay.ErrForbidden
 	}
 	hash := relay.AppendRequestHash(input)
 	var existingID, existingHash string
@@ -361,6 +511,14 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
+	if rolesAvailable {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
+		SELECT $1::uuid,chr(30)||'role:'||membership.role
+		FROM relay.mail_role_memberships AS membership
+		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0`, message.ID, message.ConversationID, relay.CapReceive); err != nil {
+			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+		}
+	}
 	if len(input.ArtifactIDs) != 0 {
 		encodedArtifacts, err := json.Marshal(input.ArtifactIDs)
 		if err != nil {
@@ -371,10 +529,8 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 			return relay.Message{}, false, relayDatabaseError(err, "bind message attachments")
 		}
 	}
-	if capabilities&relay.CapReceive != 0 {
-		if err := postgresAdvanceRecipientCursor(tx, input.FromEndpoint, input.ConversationID); err != nil {
-			return relay.Message{}, false, err
-		}
+	if err := postgresAdvanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
+		return relay.Message{}, false, err
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_message_idempotency(machine_id,key,request_hash,message_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, input.SenderMachineID, input.IdempotencyKey, hash, message.ID, input.Now.UTC()); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "record message retry")
@@ -405,6 +561,21 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if err != nil {
 		return relay.DeliveryLeasePage{}, err
 	}
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
+		return relay.DeliveryLeasePage{}, err
+	}
+	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, ownershipGeneration, now)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, err
+	}
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, errors.New("durable role bindings are unavailable")
+	}
+	encodedRecipientIDs, err := json.Marshal(recipientIDs)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, errors.New("delivery recipients are invalid")
+	}
 	var activeConsumer sql.NullString
 	var consumerGeneration int64
 	var consumerUntil sql.NullTime
@@ -424,9 +595,9 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	query := `SELECT delivery.id::text,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
 		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
-		WHERE delivery.recipient_endpoint=$1 AND delivery.acked_at IS NULL
+		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
 		  AND (delivery.lease_until IS NULL OR delivery.lease_until<=$2 OR delivery.ownership_generation IS NULL OR delivery.ownership_generation<>$3 OR delivery.consumer_generation IS NULL OR delivery.consumer_generation<>$4 OR delivery.lease_machine_id=$5)`
-	args := []any{endpoint, now.UTC(), ownershipGeneration, consumerGeneration, machineID}
+	args := []any{string(encodedRecipientIDs), now.UTC(), ownershipGeneration, consumerGeneration, machineID}
 	if conversationID != "" {
 		query += ` AND message.conversation_id=$6::uuid ORDER BY message.sequence,message.id LIMIT $7 FOR UPDATE OF delivery SKIP LOCKED`
 		args = append(args, conversationID, limit)
@@ -486,13 +657,13 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	for _, delivery := range deliveries {
 		conversationIDs[delivery.Message.ConversationID] = struct{}{}
 	}
-	cursors := make(map[string]int64, len(conversationIDs))
+	cursorIDs := make([]string, 0, len(conversationIDs))
 	for id := range conversationIDs {
-		cursor, err := postgresRecipientCursorForLease(tx, endpoint, id)
-		if err != nil {
-			return relay.DeliveryLeasePage{}, err
-		}
-		cursors[id] = cursor
+		cursorIDs = append(cursorIDs, id)
+	}
+	cursors, err := postgresRecipientCursorsForLease(tx, encodedRecipientIDs, cursorIDs, rolesAvailable)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "commit delivery lease")
@@ -500,24 +671,94 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	return relay.DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
 }
 
-func postgresRecipientCursorForLease(tx *sql.Tx, endpoint, conversationID string) (int64, error) {
-	var capabilities relay.Capability
-	err := tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
+func postgresRecipientCursorsForLease(tx *sql.Tx, encodedRecipientIDs []byte, conversationIDs []string, rolesAvailable bool) (map[string]int64, error) {
+	encodedConversationIDs, err := json.Marshal(conversationIDs)
+	if err != nil {
+		return nil, errors.New("recipient conversations are invalid")
+	}
+	query := `WITH recipients AS (
+		SELECT value AS recipient FROM jsonb_array_elements_text($1::jsonb)
+	), conversations AS (
+		SELECT value::uuid AS id FROM jsonb_array_elements_text($2::jsonb)
+	), authorized AS (
+		SELECT membership.conversation_id,membership.endpoint AS recipient
+		FROM relay.mail_memberships AS membership
+		JOIN conversations ON conversations.id=membership.conversation_id
+		JOIN recipients ON recipients.recipient=membership.endpoint
+		WHERE membership.capabilities&$3<>0`
+	if rolesAvailable {
+		query += ` UNION ALL
+		SELECT membership.conversation_id,chr(30)||'role:'||membership.role
+		FROM relay.mail_role_memberships AS membership
+		JOIN conversations ON conversations.id=membership.conversation_id
+		JOIN recipients ON recipients.recipient=chr(30)||'role:'||membership.role
+		WHERE membership.capabilities&$3<>0`
+	}
+	query += `
+	)
+	SELECT authorized.conversation_id::text,MIN(COALESCE(cursor.sequence,0))
+	FROM authorized LEFT JOIN relay.mail_recipient_cursors AS cursor
+	ON cursor.conversation_id=authorized.conversation_id AND cursor.recipient_endpoint=authorized.recipient
+	GROUP BY authorized.conversation_id`
+	rows, err := tx.QueryContext(context.Background(), query, string(encodedRecipientIDs), string(encodedConversationIDs), relay.CapReceive)
+	if err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
+	}
+	cursors := make(map[string]int64, len(conversationIDs))
+	for rows.Next() {
+		var conversationID string
+		var cursor int64
+		if err := rows.Scan(&conversationID, &cursor); err != nil {
+			_ = rows.Close()
+			return nil, errors.New("recipient cursor is malformed")
+		}
+		cursors[conversationID] = cursor
+	}
+	if err := rows.Close(); err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("recipient cursor authorization is unavailable")
+	}
+	if len(cursors) != len(conversationIDs) {
+		return nil, relay.ErrForbidden
+	}
+	return cursors, nil
+}
+
+func postgresRecipientCursorForLease(tx *sql.Tx, recipientIDs []string, conversationID string) (int64, error) {
+	var minimum int64
+	found := false
+	for _, recipientID := range recipientIDs {
+		var capabilities relay.Capability
+		var err error
+		if role, ok := postgresParseRoleRecipient(recipientID); ok {
+			err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND role=$2`, conversationID, role).Scan(&capabilities)
+		} else {
+			err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, recipientID).Scan(&capabilities)
+		}
+		if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
+			continue
+		}
+		if err != nil {
+			return 0, errors.New("recipient cursor authorization is unavailable")
+		}
+		var cursor int64
+		err = tx.QueryRowContext(context.Background(), `SELECT sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$1 AND conversation_id=$2::uuid`, recipientID, conversationID).Scan(&cursor)
+		if errors.Is(err, sql.ErrNoRows) {
+			cursor = 0
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, errors.New("recipient cursor is unavailable")
+		}
+		if !found || cursor < minimum {
+			minimum, found = cursor, true
+		}
+	}
+	if !found {
 		return 0, relay.ErrForbidden
 	}
-	if err != nil {
-		return 0, errors.New("recipient cursor authorization is unavailable")
-	}
-	var cursor int64
-	err = tx.QueryRowContext(context.Background(), `SELECT sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$1 AND conversation_id=$2::uuid`, endpoint, conversationID).Scan(&cursor)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, errors.New("recipient cursor is unavailable")
-	}
-	return cursor, nil
+	return minimum, nil
 }
 
 // AckDelivery conditionally acknowledges one fenced PostgreSQL delivery.
@@ -535,6 +776,13 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	if err != nil {
 		return err
 	}
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
+		return err
+	}
+	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, ownershipGeneration, now)
+	if err != nil {
+		return err
+	}
 	var recipient string
 	var leaseMachine, leaseToken sql.NullString
 	var leaseGeneration int64
@@ -545,7 +793,7 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 		delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,delivery.acked_at,message.conversation_id::text
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.id=$1::uuid FOR UPDATE OF delivery`, deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &acknowledged, &conversationID)
-	if errors.Is(err, sql.ErrNoRows) || recipient != endpoint {
+	if errors.Is(err, sql.ErrNoRows) || !postgresContainsString(recipientIDs, recipient) {
 		return relay.ErrForbidden
 	}
 	if err != nil {
@@ -564,7 +812,7 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$1 WHERE id=$2::uuid AND acked_at IS NULL`, now.UTC(), deliveryID); err != nil {
 		return relayDatabaseError(err, "acknowledge delivery")
 	}
-	if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+	if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -578,29 +826,26 @@ func (d *Database) RecipientCursor(machineID, endpoint, conversationID string, n
 	if _, err := uuid.Parse(conversationID); err != nil {
 		return 0, relay.ErrForbidden
 	}
-	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	tx, cancel, err := d.beginRelayTransaction(nil)
 	if err != nil {
 		return 0, errors.New("recipient cursor cannot be inspected")
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
-	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
+	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
+	if err != nil {
 		return 0, err
 	}
-	var capabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
-		return 0, relay.ErrForbidden
+	if err := postgresLockSessionRoleBindings(tx, machineID, endpoint, now); err != nil {
+		return 0, err
 	}
+	recipientIDs, err := postgresSessionRecipientIDs(tx, machineID, endpoint, generation, now)
 	if err != nil {
-		return 0, errors.New("recipient cursor authorization is unavailable")
+		return 0, err
 	}
-	var cursor int64
-	err = tx.QueryRowContext(context.Background(), `SELECT sequence FROM relay.mail_recipient_cursors WHERE recipient_endpoint=$1 AND conversation_id=$2::uuid`, endpoint, conversationID).Scan(&cursor)
-	if errors.Is(err, sql.ErrNoRows) {
-		cursor = 0
-	} else if err != nil {
-		return 0, errors.New("recipient cursor is unavailable")
+	cursor, err := postgresRecipientCursorForLease(tx, recipientIDs, conversationID)
+	if err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, errors.New("recipient cursor snapshot cannot commit")
@@ -615,9 +860,27 @@ func (d *Database) RecipientMachines(messageID string, now time.Time) ([]string,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	rows, err := d.relayPool().QueryContext(ctx, `SELECT DISTINCT endpoint.machine_id FROM relay.mail_deliveries AS delivery
+	rolesAvailable, err := postgresRoleBindingsAvailable(d.relayPool())
+	if err != nil {
+		return nil, errors.New("durable role bindings are unavailable")
+	}
+	query := `SELECT DISTINCT machine_id FROM (
+		SELECT endpoint.machine_id FROM relay.mail_deliveries AS delivery
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint
-		WHERE delivery.message_id=$1::uuid AND endpoint.lease_until>$2 ORDER BY endpoint.machine_id`, messageID, now.UTC())
+		WHERE delivery.message_id=$1::uuid AND endpoint.lease_until>$2
+	`
+	if rolesAvailable {
+		query += `UNION
+		SELECT binding.machine_id FROM relay.mail_deliveries AS delivery
+		JOIN relay.mail_role_bindings AS binding ON delivery.recipient_endpoint=chr(30)||'role:'||binding.role
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+		WHERE delivery.message_id=$1::uuid AND binding.lease_until>$2
+		  AND endpoint.lease_until>$2 AND endpoint.machine_id=binding.machine_id
+		  AND endpoint.ownership_generation=binding.ownership_generation
+	`
+	}
+	query += `) AS recipients ORDER BY machine_id`
+	rows, err := d.relayPool().QueryContext(ctx, query, messageID, now.UTC())
 	if err != nil {
 		return nil, errors.New("message recipients are unavailable")
 	}
@@ -640,10 +903,28 @@ func (d *Database) RecipientMachines(messageID string, now time.Time) ([]string,
 func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]relay.Conversation, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	rows, err := d.relayPool().QueryContext(ctx, `SELECT DISTINCT conversation.id::text FROM relay.mail_conversations AS conversation
+	rolesAvailable, err := postgresRoleBindingsAvailable(d.relayPool())
+	if err != nil {
+		return nil, errors.New("durable role bindings are unavailable")
+	}
+	query := `SELECT DISTINCT id FROM (
+		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
-		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2 ORDER BY conversation.id::text`, machineID, now.UTC())
+		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2
+	`
+	if rolesAvailable {
+		query += `UNION
+		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
+		JOIN relay.mail_role_memberships AS membership ON membership.conversation_id=conversation.id
+		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+		WHERE binding.machine_id=$1 AND binding.lease_until>$2 AND endpoint.machine_id=$1
+		  AND endpoint.lease_until>$2 AND endpoint.ownership_generation=binding.ownership_generation
+	`
+	}
+	query += `) AS visible ORDER BY id`
+	rows, err := d.relayPool().QueryContext(ctx, query, machineID, now.UTC())
 	if err != nil {
 		return nil, errors.New("machine conversations are unavailable")
 	}
@@ -735,6 +1016,144 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 	return nil
 }
 
+func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint string, now time.Time) (relay.Capability, error) {
+	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
+		return 0, err
+	}
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return 0, errors.New("session authorization is unavailable")
+	}
+	var capabilities int64
+	if !rolesAvailable {
+		err = tx.QueryRowContext(context.Background(), `SELECT COALESCE(capabilities::int,0) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
+	} else {
+		err = tx.QueryRowContext(context.Background(), `SELECT COALESCE(bit_or(capabilities::int),0) FROM (
+		SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2
+		UNION ALL
+		SELECT membership.capabilities FROM relay.mail_role_memberships AS membership
+		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
+		JOIN relay.mail_endpoints AS live ON live.endpoint=binding.session_endpoint
+		WHERE membership.conversation_id=$1::uuid AND binding.machine_id=$3 AND binding.session_endpoint=$2
+		  AND binding.lease_until>$4 AND live.machine_id=$3 AND live.lease_until>$4
+		  AND live.ownership_generation=binding.ownership_generation
+	) AS grants`, conversationID, endpoint, machineID, now.UTC()).Scan(&capabilities)
+	}
+	if err != nil {
+		return 0, errors.New("session authorization is unavailable")
+	}
+	if capabilities < 0 || capabilities > int64(relay.CapSend|relay.CapReceive|relay.CapAdmin) {
+		return 0, errors.New("session authorization is malformed")
+	}
+	return relay.Capability(capabilities), nil
+}
+
+// postgresLockSessionRoleBindings serializes a live session's role-authorized
+// work with a rebind. Role bindings are mutable fences, unlike immutable role
+// ownership records, so operations that lease, acknowledge, or append through
+// them must hold a shared lock until commit.
+func postgresLockSessionRoleBindings(tx *sql.Tx, machineID, endpoint string, now time.Time) error {
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	if !rolesAvailable {
+		return nil
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT binding.role FROM relay.mail_role_bindings AS binding
+		WHERE binding.machine_id=$1 AND binding.session_endpoint=$2 AND binding.lease_until>$3
+		FOR SHARE OF binding`, machineID, endpoint, now.UTC())
+	if err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return errors.New("session role binding is malformed")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("session role bindings are unavailable")
+	}
+	return nil
+}
+
+func postgresSessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generation int64, now time.Time) ([]string, error) {
+	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
+	if err != nil {
+		return nil, errors.New("session recipients are unavailable")
+	}
+	if !rolesAvailable {
+		return []string{endpoint}, nil
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT recipient FROM (
+		SELECT $2::text AS recipient,0 AS ordinal
+		UNION ALL
+		SELECT chr(30)||'role:'||binding.role,1 AS ordinal FROM relay.mail_role_bindings AS binding
+		JOIN relay.mail_endpoints AS live ON live.endpoint=binding.session_endpoint
+		WHERE binding.machine_id=$1 AND binding.session_endpoint=$2 AND binding.ownership_generation=$3
+		  AND binding.lease_until>$4 AND live.machine_id=$1 AND live.lease_until>$4
+		  AND live.ownership_generation=$3
+	) AS identities ORDER BY ordinal,recipient`, machineID, endpoint, generation, now.UTC())
+	if err != nil {
+		return nil, errors.New("session recipients are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var identities []string
+	for rows.Next() {
+		var identity string
+		if err := rows.Scan(&identity); err != nil {
+			return nil, errors.New("session recipient is malformed")
+		}
+		identities = append(identities, identity)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("session recipients are unavailable")
+	}
+	return identities, nil
+}
+
+func postgresRoleBindingsAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_bindings') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
+}
+
+func postgresAdvanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversationID string, now time.Time) error {
+	if _, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now); err != nil {
+		return err
+	}
+	var capabilities relay.Capability
+	err := tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
+		return nil
+	}
+	if err != nil {
+		return errors.New("sender cursor authorization is unavailable")
+	}
+	if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+		return err
+	}
+	return nil
+}
+
+func postgresParseRoleRecipient(value string) (string, bool) {
+	role, ok := strings.CutPrefix(value, "\x1erole:")
+	return role, ok && relay.ValidRole(role)
+}
+
+func postgresContainsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func relayDatabaseError(err error, operation string) error {
 	if isMaintenanceError(err) {
 		return relay.ErrMaintenance
@@ -775,28 +1194,32 @@ func (d *Database) relayPool() *sql.DB {
 	return d.db
 }
 
-func relayControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func relayControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
     SELECT to_regclass('relay.mail_endpoints') AS endpoints_oid,
            to_regclass('relay.mail_conversations') AS conversations_oid,
            to_regclass('relay.mail_memberships') AS memberships_oid,
+		   to_regclass('relay.mail_roles') AS roles_oid,
+		   to_regclass('relay.mail_role_memberships') AS role_memberships_oid,
+		   to_regclass('relay.mail_role_bindings') AS role_bindings_oid,
            to_regclass('relay.mail_messages') AS messages_oid,
            to_regclass('relay.mail_deliveries') AS deliveries_oid,
            to_regclass('relay.mail_recipient_cursors') AS cursors_oid,
            to_regclass('relay.mail_message_idempotency') AS message_idempotency_oid,
            to_regclass('relay.mail_conversation_idempotency') AS conversation_idempotency_oid,
            to_regclass('relay.mail_request_nonces') AS nonces_oid,
-           to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
-           to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
+		   to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
+		   to_regclass('relay.mail_role_bindings_session') AS role_bindings_index_oid,
+		   to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
            to_regclass('relay.mail_request_nonces_expiry') AS nonces_index_oid,
            to_regprocedure('relay.consume_mail_request_nonce(text,text,timestamp with time zone,timestamp with time zone)') AS consume_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS cutover_guard_oid
 ), table_ownership AS (
-    SELECT count(*)=9 AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
-    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+    SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
+    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
 ), expected_columns(table_oid,column_name,type_oid,required) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'endpoint','text'::regtype,true),(endpoints_oid,'machine_id','text'::regtype,true),
@@ -805,6 +1228,9 @@ WITH objects AS (
         (endpoints_oid,'consumer_lease_until','timestamptz'::regtype,false),
         (conversations_oid,'id','uuid'::regtype,true),(conversations_oid,'next_sequence','bigint'::regtype,true),(conversations_oid,'created_at','timestamptz'::regtype,true),
         (memberships_oid,'conversation_id','uuid'::regtype,true),(memberships_oid,'endpoint','text'::regtype,true),(memberships_oid,'capabilities','smallint'::regtype,true),
+		(roles_oid,'role','text'::regtype,true),(roles_oid,'machine_id','text'::regtype,true),
+		(role_memberships_oid,'conversation_id','uuid'::regtype,true),(role_memberships_oid,'role','text'::regtype,true),(role_memberships_oid,'capabilities','smallint'::regtype,true),
+		(role_bindings_oid,'role','text'::regtype,true),(role_bindings_oid,'session_endpoint','text'::regtype,true),(role_bindings_oid,'machine_id','text'::regtype,true),(role_bindings_oid,'ownership_generation','bigint'::regtype,true),(role_bindings_oid,'lease_until','timestamptz'::regtype,true),
         (messages_oid,'id','uuid'::regtype,true),(messages_oid,'conversation_id','uuid'::regtype,true),(messages_oid,'sequence','bigint'::regtype,true),
         (messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),
         (deliveries_oid,'id','uuid'::regtype,true),(deliveries_oid,'message_id','uuid'::regtype,true),(deliveries_oid,'recipient_endpoint','text'::regtype,true),
@@ -818,16 +1244,17 @@ WITH objects AS (
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), columns AS (
     SELECT NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
        AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
        AND (SELECT count(*)=2 FROM pg_attribute WHERE attrelid=ANY(ARRAY[message_idempotency_oid,conversation_idempotency_oid]) AND attname='request_hash' AND atttypid='bpchar'::regtype AND atttypmod=68)
-       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
+       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
     FROM objects
 ), expected_defaults(table_oid,column_name,expression) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -839,7 +1266,7 @@ WITH objects AS (
 ), actual_defaults AS (
     SELECT default_value.adrelid,attribute.attname,pg_get_expr(default_value.adbin,default_value.adrelid)
     FROM objects JOIN pg_attrdef AS default_value
-      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
     JOIN pg_attribute AS attribute ON attribute.attrelid=default_value.adrelid AND attribute.attnum=default_value.adnum
 ), defaults AS (
     SELECT NOT EXISTS (SELECT * FROM expected_defaults EXCEPT SELECT * FROM actual_defaults)
@@ -848,29 +1275,36 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'p'::"char",ARRAY[1]::smallint[]),(conversations_oid,'p'::"char",ARRAY[1]::smallint[]),
         (memberships_oid,'p'::"char",ARRAY[1,2]::smallint[]),(messages_oid,'p'::"char",ARRAY[1]::smallint[]),
+		(roles_oid,'p'::"char",ARRAY[1]::smallint[]),(role_memberships_oid,'p'::"char",ARRAY[1,2]::smallint[]),(role_bindings_oid,'p'::"char",ARRAY[1]::smallint[]),
         (deliveries_oid,'p'::"char",ARRAY[1]::smallint[]),(cursors_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (message_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),(conversation_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (nonces_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (messages_oid,'u'::"char",ARRAY[2,3]::smallint[]),(deliveries_oid,'u'::"char",ARRAY[2,3]::smallint[]),
         (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[])
     ) AS expected(table_oid,constraint_type,column_keys)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), actual_keys AS (
     SELECT con.conrelid,con.contype,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND con.contype IN ('p','u') AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), expected_foreign_keys(table_oid,column_keys,foreign_table_oid,foreign_column_keys) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (memberships_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(memberships_oid,ARRAY[2]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
         (messages_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(messages_oid,ARRAY[4]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
-        (deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(deliveries_oid,ARRAY[3]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
-        (cursors_oid,ARRAY[1]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
+		(role_memberships_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(role_memberships_oid,ARRAY[2]::smallint[],roles_oid,ARRAY[1]::smallint[]),
+		(role_bindings_oid,ARRAY[1]::smallint[],roles_oid,ARRAY[1]::smallint[]),(role_bindings_oid,ARRAY[2]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
+		(deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(deliveries_oid,ARRAY[3]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
+		(cursors_oid,ARRAY[1]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
         (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[])
     ) AS expected(table_oid,column_keys,foreign_table_oid,foreign_column_keys)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 < 40 OR (NOT (expected.table_oid=deliveries_oid AND expected.column_keys=ARRAY[3]::smallint[])
+                         AND NOT (expected.table_oid=cursors_oid AND expected.column_keys=ARRAY[1]::smallint[])))
 ), actual_foreign_keys AS (
     SELECT con.conrelid,con.conkey,con.confrelid,con.confkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid])
+      ON con.conrelid=ANY(ARRAY[memberships_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid])
      AND con.contype='f' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
      AND con.confupdtype='a' AND con.confdeltype='a' AND con.confmatchtype='s'
 ), expected_check_keys(table_oid,column_keys) AS (
@@ -878,20 +1312,22 @@ WITH objects AS (
         (endpoints_oid,ARRAY[1]::smallint[]),(endpoints_oid,ARRAY[2]::smallint[]),(endpoints_oid,ARRAY[4]::smallint[]),
         (endpoints_oid,ARRAY[5]::smallint[]),(endpoints_oid,ARRAY[6]::smallint[]),(endpoints_oid,ARRAY[5,7]::smallint[]),
         (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
+		(roles_oid,ARRAY[1]::smallint[]),(roles_oid,ARRAY[2]::smallint[]),(role_memberships_oid,ARRAY[3]::smallint[]),(role_bindings_oid,ARRAY[4]::smallint[]),
         (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
         (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND con.contype='c' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), check_expressions AS (
     SELECT NOT EXISTS (SELECT * FROM expected_check_keys EXCEPT ALL SELECT * FROM actual_check_keys)
        AND NOT EXISTS (SELECT * FROM actual_check_keys EXCEPT ALL SELECT * FROM expected_check_keys)
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(endpoint) >= 1) AND (char_length(endpoint) <= 512) AND (octet_length(endpoint) <= 2048) AND (endpoint !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)')
@@ -900,6 +1336,10 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))')
+	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(role) >= 1) AND (char_length(role) <= 512) AND (octet_length(role) <= 2048) AND (role !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))'))
+	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_bindings_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence > 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
@@ -912,23 +1352,26 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=nonces_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(nonce) >= 1) AND (char_length(nonce) <= 128) AND (octet_length(nonce) <= 512) AND (nonce !~ ''[[:cntrl:]]''::text))') AS exact
     FROM objects
 ), constraints AS (
-    SELECT count(*) FILTER (WHERE con.contype='p')=9
+    SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
-	       AND count(*) FILTER (WHERE con.contype='f')=10
-	       AND count(*) FILTER (WHERE con.contype='c')=18
+	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 40 THEN 12 ELSE 10 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_foreign_keys EXCEPT SELECT * FROM expected_foreign_keys)
 	       AND bool_and(check_expressions.exact) AS exact
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND con.convalidated CROSS JOIN check_expressions
 ), expected_guards(table_oid, trigger_name) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid, 'mail_endpoints_mutation_guard'),
         (conversations_oid, 'mail_conversations_mutation_guard'),
         (memberships_oid, 'mail_memberships_mutation_guard'),
+		(roles_oid, 'mail_roles_mutation_guard'),
+		(role_memberships_oid, 'mail_role_memberships_mutation_guard'),
+		(role_bindings_oid, 'mail_role_bindings_mutation_guard'),
         (messages_oid, 'mail_messages_mutation_guard'),
         (deliveries_oid, 'mail_deliveries_mutation_guard'),
         (cursors_oid, 'mail_recipient_cursors_mutation_guard'),
@@ -936,8 +1379,9 @@ WITH objects AS (
         (conversation_idempotency_oid, 'mail_conversation_idempotency_mutation_guard'),
         (nonces_oid, 'mail_request_nonces_mutation_guard')
     ) AS expected(table_oid, trigger_name)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), guards AS (
-    SELECT count(*)=9
+    SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND bool_and(trg.tgfoid IN (objects.legacy_guard_oid, objects.cutover_guard_oid) AND trg.tgenabled='O' AND NOT trg.tgisinternal
                     AND trg.tgtype=30 AND trg.tgconstraint=0
                     AND NOT trg.tgdeferrable AND NOT trg.tginitdeferred AND trg.tgnargs=0
@@ -954,29 +1398,32 @@ WITH objects AS (
        AND md5(regexp_replace(proc.prosrc,'^\s+|\s+$','','g'))='4c348d98b79375c10c6c53728b7368fb') AS exact
     FROM objects JOIN pg_proc AS proc ON proc.oid=consume_oid
 ), index_safety AS (
-    SELECT count(*)=3 AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
+    SELECT count(*)=CASE WHEN $1 >= 40 THEN 4 ELSE 3 END AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
        AND index.indnkeyatts=index.indnatts AND access_method.amname='btree'
        AND pg_get_userbyid(relation.relowner)='punaro_owner'
        AND CASE index.indexrelid
-           WHEN objects.endpoints_index_oid THEN index.indrelid=objects.endpoints_oid AND index.indkey::text='2 3 1'
-           WHEN objects.deliveries_index_oid THEN index.indrelid=objects.deliveries_oid AND index.indkey::text='3 10 9 1'
+		   WHEN objects.endpoints_index_oid THEN index.indrelid=objects.endpoints_oid AND index.indkey::text='2 3 1'
+		   WHEN objects.role_bindings_index_oid THEN index.indrelid=objects.role_bindings_oid AND index.indkey::text='3 2 5 1'
+		   WHEN objects.deliveries_index_oid THEN index.indrelid=objects.deliveries_oid AND index.indkey::text='3 10 9 1'
            WHEN objects.nonces_index_oid THEN index.indrelid=objects.nonces_oid AND index.indkey::text='3 1 2'
            ELSE false END) AS exact
-    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,deliveries_index_oid,nonces_index_oid])
+    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,role_bindings_index_oid,deliveries_index_oid,nonces_index_oid])
     JOIN pg_class AS relation ON relation.oid=index.indexrelid
     JOIN pg_am AS access_method ON access_method.oid=relation.relam
 ), expected_table_acl(table_oid,privilege_type) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'SELECT'),(endpoints_oid,'INSERT'),(conversations_oid,'SELECT'),(conversations_oid,'INSERT'),
         (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
+		(roles_oid,'SELECT'),(roles_oid,'INSERT'),(role_memberships_oid,'SELECT'),(role_memberships_oid,'INSERT'),(role_bindings_oid,'SELECT'),(role_bindings_oid,'INSERT'),
         (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
         (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
-      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
     CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
     WHERE NOT acl.is_grantable
@@ -988,14 +1435,16 @@ WITH objects AS (
         (endpoints_oid,'machine_id','UPDATE'),(endpoints_oid,'lease_until','UPDATE'),(endpoints_oid,'ownership_generation','UPDATE'),
         (endpoints_oid,'consumer_id','UPDATE'),(endpoints_oid,'consumer_generation','UPDATE'),(endpoints_oid,'consumer_lease_until','UPDATE'),
         (conversations_oid,'next_sequence','UPDATE'),
+		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
         (cursors_oid,'sequence','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
+    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
      AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
     CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
@@ -1005,9 +1454,10 @@ WITH objects AS (
        AND NOT EXISTS (SELECT * FROM actual_column_acl EXCEPT SELECT * FROM expected_column_acl) AS exact
 )
 SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND memberships_oid IS NOT NULL
+	AND ($1 < 40 OR (roles_oid IS NOT NULL AND role_memberships_oid IS NOT NULL AND role_bindings_oid IS NOT NULL))
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
-   AND endpoints_index_oid IS NOT NULL AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
+	   AND endpoints_index_oid IS NOT NULL AND ($1 < 40 OR role_bindings_index_oid IS NOT NULL) AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
    AND consume_oid IS NOT NULL AND (legacy_guard_oid IS NOT NULL OR cutover_guard_oid IS NOT NULL)
 	   AND table_ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND guards.exact AND function_safety.exact AND index_safety.exact
 	   AND table_acl.exact AND column_acl.exact
@@ -1021,14 +1471,14 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	       SELECT 1 FROM pg_class AS relation
 	       CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )
 	   AND NOT EXISTS (
 	       SELECT 1 FROM pg_attribute AS attribute
 	       CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
 	         AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )
@@ -1081,6 +1531,6 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',message_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversation_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-FROM objects,table_ownership,columns,defaults,constraints,guards,function_safety,index_safety,table_acl,column_acl`).Scan(&available)
+FROM objects,table_ownership,columns,defaults,constraints,guards,function_safety,index_safety,table_acl,column_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

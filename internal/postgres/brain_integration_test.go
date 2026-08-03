@@ -1558,7 +1558,7 @@ func testMemoryEvidenceIntegration(ctx context.Context, t *testing.T, app *Datab
 		{actor.ID, sourceProject, CapabilityMemoryPurge},
 		{actor.ID, sourceProject, CapabilityConversationReceive}, {actor.ID, sourceProject, CapabilityAttachmentDownload},
 		{actor.ID, otherProject, CapabilityMemoryRead}, {actor.ID, otherProject, CapabilityMemoryWrite},
-		{reader.ID, targetProject, CapabilityMemoryRead}, {reader.ID, sourceProject, CapabilityMemoryRead},
+		{reader.ID, targetProject, CapabilityMemoryRead}, {reader.ID, targetProject, CapabilityMemoryWrite}, {reader.ID, sourceProject, CapabilityMemoryRead},
 		{reader.ID, sourceProject, CapabilityConversationReceive}, {reader.ID, sourceProject, CapabilityAttachmentDownload},
 		{outsider.ID, targetProject, CapabilityMemoryRead}, {outsider.ID, targetProject, CapabilityMemoryWrite},
 	} {
@@ -1642,6 +1642,17 @@ VALUES ($1,$2,$3,$4,$5,$6,7,$6,'evidence.txt','text/plain','ready',statement_tim
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.recipient_grants(artifact_id,recipient_principal_id,message_id) VALUES ($1,$2,$3)`, artifactID, reader.ID, messageID); err != nil {
 		t.Fatal(err)
 	}
+	role := "role/evidence-reader"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_roles(role,machine_id) VALUES ($1,$2)`, role, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_role_memberships(conversation_id,role,capabilities) VALUES ($1,$2,2)`, conversationID, role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
+VALUES ($1,$2,$3,1,statement_timestamp()+interval '1 day')`, role, readerEndpoint, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
 	readEffects := func() [7]int64 {
 		var effects [7]int64
 		if err := ownerDB.QueryRowContext(ctx, `SELECT
@@ -1666,6 +1677,52 @@ VALUES ($1,$2,$3,$4,$5,$6,7,$6,'evidence.txt','text/plain','ready',statement_tim
 	baseRejected := MemoryEvidenceCreateRequest{
 		PrincipalID: actor.ID, ProjectID: targetProject, LogicalKey: "evidence.rejected", Kind: "evidence.excerpt", Trust: "observed",
 		Document: json.RawMessage(`{"excerpt":"bounded"}`),
+	}
+	// A reader may use message and attachment evidence through a durable role,
+	// even though the role has no static endpoint delivery or recipient grant.
+	// Removing the binding immediately revokes both evidence authorities.
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_deliveries WHERE message_id=$1 AND recipient_endpoint=$2`, messageID, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES ($1,chr(30) || 'role:' || $2)`, messageID, role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM attachment.recipient_grants WHERE artifact_id=$1 AND recipient_principal_id=$2`, artifactID, reader.ID); err != nil {
+		t.Fatal(err)
+	}
+	roleEvidence := MemoryEvidenceCreateRequest{
+		PrincipalID: reader.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171758",
+		LogicalKey: "evidence.role-reader", Kind: "evidence.excerpt", Trust: "observed", Document: json.RawMessage(`{"excerpt":"durable role source"}`),
+		Sources: []MemoryEvidenceSourceInput{
+			{Mode: MemorySourceLive, Kind: MemorySourceMessage, ProjectID: sourceProject, ResourceID: messageID},
+			{Mode: MemorySourceLive, Kind: MemorySourceAttachment, ProjectID: sourceProject, ResourceID: artifactID},
+		},
+	}
+	if _, err := app.CreateMemoryEvidence(ctx, roleEvidence); err != nil {
+		t.Fatalf("durable role evidence: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_role_bindings WHERE role=$1`, role); err != nil {
+		t.Fatal(err)
+	}
+	revokedRoleEvidence := roleEvidence
+	revokedRoleEvidence.IdempotencyKey = "17171717-1717-4717-8717-171717171759"
+	revokedRoleEvidence.LogicalKey = "evidence.revoked-role-reader"
+	assertRejectedAtomically("unbound durable role", revokedRoleEvidence)
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
+VALUES ($1,$2,$3,1,statement_timestamp()+interval '1 day')`, role, readerEndpoint, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `DELETE FROM relay.mail_deliveries WHERE message_id=$1 AND recipient_endpoint=chr(30) || 'role:' || $2`, messageID, role); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES ($1,$2)`, messageID, readerEndpoint); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO attachment.recipient_grants(artifact_id,recipient_principal_id,message_id) VALUES ($1,$2,$3)`, artifactID, reader.ID, messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.capability_grants SET revoked_at=statement_timestamp() WHERE principal_id=$1 AND project_id=$2 AND capability=$3 AND revoked_at IS NULL`, reader.ID, targetProject, CapabilityMemoryWrite); err != nil {
+		t.Fatal(err)
 	}
 	purgeFirstTarget, err := app.CreateMemory(ctx, MemoryCreateRequest{
 		PrincipalID: actor.ID, ProjectID: targetProject, IdempotencyKey: "17171717-1717-4717-8717-171717171750",
@@ -2279,8 +2336,11 @@ OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND resu
 		{"mail message", `DELETE FROM relay.mail_messages WHERE id=$1`, messageID},
 		{"mail recipient cursor", `DELETE FROM relay.mail_recipient_cursors WHERE conversation_id=$1`, conversationID},
 		{"mail membership", `DELETE FROM relay.mail_memberships WHERE conversation_id=$1`, conversationID},
+		{"mail role membership", `DELETE FROM relay.mail_role_memberships WHERE conversation_id=$1`, conversationID},
+		{"mail role binding", `DELETE FROM relay.mail_role_bindings WHERE role=$1`, role},
 		{"mail conversation idempotency", `DELETE FROM relay.mail_conversation_idempotency WHERE conversation_id=$1`, conversationID},
 		{"mail conversation", `DELETE FROM relay.mail_conversations WHERE id=$1`, conversationID},
+		{"mail role", `DELETE FROM relay.mail_roles WHERE role=$1`, role},
 	} {
 		if _, err := ownerDB.ExecContext(ctx, cleanup.query, cleanup.argument); err != nil {
 			t.Fatalf("clean up evidence %s: %v", cleanup.name, err)

@@ -39,6 +39,30 @@ func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
 	}
 }
 
+func TestParseCreateArgsAcceptsDurableRoleMemberAndBinding(t *testing.T) {
+	request, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", `{"role":"role/plan-reviewer","machine_id":"machine-b","capabilities":["send","receive"]}`, "--idempotency-key", "create-role-1"})
+	if err != nil || len(request.members) != 1 || request.members[0].Role != "role/plan-reviewer" || request.members[0].RoleMachineID != "machine-b" {
+		t.Fatalf("role member request=%#v err=%v", request, err)
+	}
+	request, err = parseCreateArgs([]string{"--creator", "agent/a", "--role-member", `{"role":"ops@west","machine_id":"machine:a","capabilities":["receive"]}`, "--idempotency-key", "create-role-delimiters"})
+	if err != nil || len(request.members) != 1 || request.members[0].Role != "ops@west" || request.members[0].RoleMachineID != "machine:a" {
+		t.Fatalf("delimited role member request=%#v err=%v", request, err)
+	}
+	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", "role/plan-reviewer@machine-b:receive", "--idempotency-key", "create-role-legacy"}); err == nil {
+		t.Fatal("ambiguous legacy role-member was accepted")
+	}
+	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--role-member", `{"role":"role/plan-reviewer","machine_id":"machine-b","capabilities":["receive","invoke"]}`, "--idempotency-key", "create-role-invoke"}); err == nil {
+		t.Fatal("role member with invoke capability was accepted")
+	}
+	binding, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer", "--session", "agent/b/new-session"})
+	if err != nil || binding.role != "role/plan-reviewer" || binding.session != "agent/b/new-session" {
+		t.Fatalf("role binding=%#v err=%v", binding, err)
+	}
+	if _, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer"}); err == nil {
+		t.Fatal("incomplete role binding accepted")
+	}
+}
+
 func TestParseInvokeArgsRequiresExplicitContentFreeTargetAndRetryKey(t *testing.T) {
 	if _, err := parseInvokeArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b"}); err == nil {
 		t.Fatal("invoke without idempotency key was accepted")

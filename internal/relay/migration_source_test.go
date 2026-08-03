@@ -33,10 +33,13 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 		MachineID: "machine-a", IdempotencyKey: "source-create", CreatorEndpoint: "agent/source/a", Now: now,
 		Members: []Member{
 			{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
-			{Endpoint: "agent/source/b", Capabilities: CapReceive},
+			{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
 		},
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", "role/source-reviewer", "agent/source/b", now, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	message, duplicate, err := store.AppendMessage(AppendInput{
@@ -60,10 +63,10 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 1 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 3 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
-	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 {
+	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 {
 		t.Fatalf("manifest counts=%#v", first.Counts)
 	}
 	if got := migrationSourcePhase(t, store); got != beforePhase {
@@ -116,6 +119,10 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	endpointCount, endpointSHA256 := endpointHasher.Evidence()
 	if endpointCount != prepared.Counts.Endpoints || endpointSHA256 != prepared.TableSHA256.Endpoints {
 		t.Fatalf("export evidence count=%d sha=%s manifest=%#v", endpointCount, endpointSHA256, prepared)
+	}
+	roleBatch, err := ReadMigrationSourceBatch(ctx, path, "mail_roles", "", 10)
+	if err != nil || len(roleBatch.Rows) != 1 || !roleBatch.Done {
+		t.Fatalf("role migration batch=%#v err=%v", roleBatch, err)
 	}
 	deliveryBatch, err := ReadMigrationSourceBatch(ctx, path, "mail_deliveries", "", 10)
 	if err != nil || len(deliveryBatch.Rows) != 1 || !deliveryBatch.Done {
@@ -252,9 +259,19 @@ func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a", "claude/jbr-reviewer"}, now, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	covered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"],"endpoints":["claude/jbr-reviewer"]}]`
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "machine-a", IdempotencyKey: "source-role", CreatorEndpoint: "agent/source/a", Members: []Member{
+		{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
+	}, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	covered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"],"endpoints":["claude/jbr-reviewer"]},{"id":"machine-b","public_key":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/reviewer/"]}]`
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, covered); err != nil {
 		t.Fatalf("covered enrollment rejected: %v", err)
+	}
+	roleUncovered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"],"endpoints":["claude/jbr-reviewer"]}]`
+	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, roleUncovered); err == nil {
+		t.Fatal("enrollment missing a durable role owner was accepted")
 	}
 	uncovered := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]}]`
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, uncovered); err == nil {
@@ -263,6 +280,72 @@ func TestCheckMigrationSourceEnrollmentCoverage(t *testing.T) {
 	reassigned := `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/source/"]},{"id":"machine-b","public_key":"AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["claude/"]}]`
 	if err := CheckMigrationSourceEnrollmentCoverage(ctx, path, reassigned); err == nil {
 		t.Fatal("another machine's authority was accepted for the persisted endpoint owner")
+	}
+}
+
+func TestMigrationSourceRefusesOutOfRangeRoleCapabilities(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "source-invalid-role-capability", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{
+			{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE role_memberships SET capabilities = 8"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("source with out-of-range durable role capabilities was accepted")
+	}
+}
+
+func TestMigrationSourceRefusesInvalidRoleBindingFence(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.July, 21, 9, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/source/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/source/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "source-invalid-role-binding", CreatorEndpoint: "agent/source/a", Now: now,
+		Members: []Member{
+			{Endpoint: "agent/source/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/source-reviewer", RoleMachineID: "machine-b", Capabilities: CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", "role/source-reviewer", "agent/source/b", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, "UPDATE role_bindings SET session_endpoint='agent/source/missing', ownership_generation=0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("source with an invalid durable role binding fence was accepted")
 	}
 }
 

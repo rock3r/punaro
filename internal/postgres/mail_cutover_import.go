@@ -15,7 +15,7 @@ import (
 )
 
 var mailCutoverTables = []string{
-	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_messages", "mail_deliveries",
+	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_request_nonces",
 }
 
@@ -327,6 +327,9 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
+	if manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings") {
+		return 0, emptyMailCutoverDigest
+	}
 	switch table {
 	case "mail_endpoints":
 		return manifest.Counts.Endpoints, manifest.TableSHA256.Endpoints
@@ -334,6 +337,12 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 		return manifest.Counts.Conversations, manifest.TableSHA256.Conversations
 	case "mail_memberships":
 		return manifest.Counts.Memberships, manifest.TableSHA256.Memberships
+	case "mail_roles":
+		return manifest.Counts.Roles, manifest.TableSHA256.Roles
+	case "mail_role_memberships":
+		return manifest.Counts.RoleMemberships, manifest.TableSHA256.RoleMemberships
+	case "mail_role_bindings":
+		return manifest.Counts.RoleBindings, manifest.TableSHA256.RoleBindings
 	case "mail_messages":
 		return manifest.Counts.Messages, manifest.TableSHA256.Messages
 	case "mail_deliveries":
@@ -362,6 +371,15 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities)
 	 SELECT (payload->>'conversation_id')::uuid,payload->>'endpoint',(payload->>'capabilities')::smallint
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_memberships' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_roles(role,machine_id)
+	 SELECT payload->>'role',payload->>'machine_id'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_roles' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_role_memberships(conversation_id,role,capabilities)
+	 SELECT (payload->>'conversation_id')::uuid,payload->>'role',(payload->>'capabilities')::smallint
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_role_memberships' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
+	 SELECT payload->>'role',payload->>'session_endpoint',payload->>'machine_id',(payload->>'ownership_generation')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'lease_until')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_role_bindings' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint,payload->>'from_endpoint',payload->>'body',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_messages' ORDER BY row_key COLLATE "C"`,

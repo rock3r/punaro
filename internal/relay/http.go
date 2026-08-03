@@ -90,6 +90,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.notifications(w, r, session)
 	case r.Method == http.MethodPut && r.URL.Path == "/v1/machines/me/endpoints":
 		h.advertiseEndpoints(w, body, machineID, authority, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/bindings":
+		h.bindRole(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
 		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
@@ -136,6 +138,27 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	var request struct {
+		Role            string `json:"role"`
+		SessionEndpoint string `json:"session_endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil || !h.auth.AllowsEndpoint(machineID, request.SessionEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	store, ok := h.store.(RoleBindingBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	if err := store.BindRoleToSession(machineID, request.Role, request.SessionEndpoint, now, h.endpointLeaseTTL); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
 	var request struct {
 		FromEndpoint string `json:"from_endpoint"`
@@ -165,13 +188,15 @@ func (h *handler) listConversations(w http.ResponseWriter, machineID string, now
 }
 
 func (h *handler) notifications(w http.ResponseWriter, r *http.Request, session MachineSession) {
+	// Register before completing the WebSocket handshake so a publisher that
+	// observes a successful dial cannot lose its first wake hint to setup race.
+	client := h.notifier.Register(session.MachineID)
+	defer client.Close()
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
-	client := h.notifier.Register(session.MachineID)
-	defer client.Close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	authenticationExpired := make(chan struct{})
@@ -283,8 +308,10 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		CreatorEndpoint string `json:"creator_endpoint"`
 		ProjectID       string `json:"project_id"`
 		Members         []struct {
-			Endpoint     string   `json:"endpoint"`
-			Capabilities []string `json:"capabilities"`
+			Endpoint      string   `json:"endpoint"`
+			Role          string   `json:"role"`
+			RoleMachineID string   `json:"role_machine_id"`
+			Capabilities  []string `json:"capabilities"`
 		} `json:"members"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
@@ -306,7 +333,17 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 			writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
 			return
 		}
-		members = append(members, Member{Endpoint: member.Endpoint, Capabilities: capabilities})
+		if member.Role != "" && capabilities&CapInvoke != 0 {
+			writeError(w, http.StatusBadRequest, "invalid conversation capabilities")
+			return
+		}
+		if member.RoleMachineID != "" {
+			if _, found := h.auth.machines[member.RoleMachineID]; !found {
+				writeError(w, http.StatusForbidden, "authorization denied")
+				return
+			}
+		}
+		members = append(members, Member{Endpoint: member.Endpoint, Role: member.Role, RoleMachineID: member.RoleMachineID, Capabilities: capabilities})
 	}
 	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
 	if err != nil {

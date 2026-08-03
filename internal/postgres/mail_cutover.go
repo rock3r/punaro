@@ -65,9 +65,9 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("invalid mail cutover manifest")
 	}
-	counts := []int64{manifest.Counts.Endpoints, manifest.Counts.Conversations, manifest.Counts.Memberships, manifest.Counts.Messages, manifest.Counts.Deliveries, manifest.Counts.RecipientCursors, manifest.Counts.MessageIdempotency, manifest.Counts.ConversationIdempotency, manifest.Counts.RequestNonces}
-	hashes := []string{manifest.TableSHA256.Endpoints, manifest.TableSHA256.Conversations, manifest.TableSHA256.Memberships, manifest.TableSHA256.Messages, manifest.TableSHA256.Deliveries, manifest.TableSHA256.RecipientCursors, manifest.TableSHA256.MessageIdempotency, manifest.TableSHA256.ConversationIdempotency, manifest.TableSHA256.RequestNonces}
-	if manifest.Version != 1 || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
+	counts := []int64{manifest.Counts.Endpoints, manifest.Counts.Conversations, manifest.Counts.Memberships, manifest.Counts.Roles, manifest.Counts.RoleMemberships, manifest.Counts.RoleBindings, manifest.Counts.Messages, manifest.Counts.Deliveries, manifest.Counts.RecipientCursors, manifest.Counts.MessageIdempotency, manifest.Counts.ConversationIdempotency, manifest.Counts.RequestNonces}
+	hashes := []string{manifest.TableSHA256.Endpoints, manifest.TableSHA256.Conversations, manifest.TableSHA256.Memberships, manifest.TableSHA256.Roles, manifest.TableSHA256.RoleMemberships, manifest.TableSHA256.RoleBindings, manifest.TableSHA256.Messages, manifest.TableSHA256.Deliveries, manifest.TableSHA256.RecipientCursors, manifest.TableSHA256.MessageIdempotency, manifest.TableSHA256.ConversationIdempotency, manifest.TableSHA256.RequestNonces}
+	if (manifest.Version != 1 && manifest.Version != 3) || manifest.SourceID != request.SourceID || manifest.Phase != relay.MigrationSourcePrepared || manifest.EpochID != request.EpochID || manifest.TargetIdentity != request.TargetIdentity || manifest.Fingerprint != request.SourceFingerprint {
 		return nil, errors.New("mail cutover manifest binding does not match")
 	}
 	for _, count := range counts {
@@ -75,13 +75,23 @@ func canonicalMailCutoverManifest(request MailCutoverRequest) ([]byte, error) {
 			return nil, errors.New("mail cutover manifest count is invalid")
 		}
 	}
-	for _, hash := range hashes {
+	for index, hash := range hashes {
+		if manifest.Version == 1 && index >= 3 && index <= 5 && hash == "" {
+			continue
+		}
 		if !mailCutoverDigestPattern.MatchString(hash) {
 			return nil, errors.New("mail cutover manifest hash is invalid")
 		}
 	}
-	canonical, err := json.Marshal(manifest)
-	if err != nil || len(canonical) > 8192 {
+	canonical := request.Manifest
+	if manifest.Version != 1 {
+		var err error
+		canonical, err = json.Marshal(manifest)
+		if err != nil {
+			return nil, errors.New("mail cutover manifest is too large")
+		}
+	}
+	if len(canonical) > 8192 {
 		return nil, errors.New("mail cutover manifest is too large")
 	}
 	digest := sha256.Sum256(canonical)
@@ -167,7 +177,7 @@ func (a *Administration) BeginMailCutover(ctx context.Context, actorPrincipalID 
 		return MailCutoverEpoch{}, errors.New("mail cutover state is unavailable")
 	}
 	var rows int64
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM relay.mail_endpoints)+(SELECT count(*) FROM relay.mail_conversations)+(SELECT count(*) FROM relay.mail_memberships)+(SELECT count(*) FROM relay.mail_messages)+(SELECT count(*) FROM relay.mail_deliveries)+(SELECT count(*) FROM relay.mail_recipient_cursors)+(SELECT count(*) FROM relay.mail_message_idempotency)+(SELECT count(*) FROM relay.mail_conversation_idempotency)+(SELECT count(*) FROM relay.mail_request_nonces)`).Scan(&rows); err != nil || rows != 0 {
+	if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM relay.mail_endpoints)+(SELECT count(*) FROM relay.mail_conversations)+(SELECT count(*) FROM relay.mail_memberships)+(SELECT count(*) FROM relay.mail_roles)+(SELECT count(*) FROM relay.mail_role_memberships)+(SELECT count(*) FROM relay.mail_role_bindings)+(SELECT count(*) FROM relay.mail_messages)+(SELECT count(*) FROM relay.mail_deliveries)+(SELECT count(*) FROM relay.mail_recipient_cursors)+(SELECT count(*) FROM relay.mail_message_idempotency)+(SELECT count(*) FROM relay.mail_conversation_idempotency)+(SELECT count(*) FROM relay.mail_request_nonces)`).Scan(&rows); err != nil || rows != 0 {
 		return MailCutoverEpoch{}, errors.New("mail cutover target is not empty")
 	}
 	if err := scanMailCutover(tx.QueryRowContext(ctx, `INSERT INTO relay.mail_cutover_epochs(epoch_id,source_id,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase) VALUES($1,$2,$3,$4,$5,$6,'importing') RETURNING epoch_id::text,source_id::text,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,created_at,updated_at,verified_at,activated_at,aborted_at`, request.EpochID, request.SourceID, request.TargetIdentity, request.SourceFingerprint, string(request.Manifest), request.ManifestSHA256), &existing); err != nil {
@@ -299,7 +309,7 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 		return errors.New("active mail cutover cannot be aborted")
 	}
 	if phase != MailCutoverAborted {
-		for _, table := range []string{"mail_request_nonces", "mail_conversation_idempotency", "mail_message_idempotency", "mail_recipient_cursors", "mail_deliveries", "mail_messages", "mail_memberships", "mail_conversations", "mail_endpoints"} {
+		for _, table := range []string{"mail_request_nonces", "mail_conversation_idempotency", "mail_message_idempotency", "mail_recipient_cursors", "mail_deliveries", "mail_messages", "mail_role_bindings", "mail_role_memberships", "mail_memberships", "mail_roles", "mail_conversations", "mail_endpoints"} {
 			// #nosec G202 -- table comes only from the fixed dependency-order allowlist.
 			if _, err := tx.ExecContext(ctx, `DELETE FROM relay.`+table); err != nil {
 				return errors.New("mail cutover cannot be aborted")
@@ -328,6 +338,9 @@ WITH objects AS (
     SELECT to_regclass('relay.mail_cutover_epochs') AS epochs_oid,
            to_regclass('relay.mail_cutover_staging') AS staging_oid,
            to_regclass('relay.mail_cutover_checkpoints') AS checkpoints_oid,
+		   to_regclass('relay.mail_roles') AS roles_oid,
+		   to_regclass('relay.mail_role_memberships') AS role_memberships_oid,
+		   to_regclass('relay.mail_role_bindings') AS role_bindings_oid,
 		   to_regclass('relay.mail_cutover_epochs_one_authority') AS active_index_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS guard_oid
 ), expected_columns(table_oid,column_name,type_oid,required) AS (
@@ -412,7 +425,7 @@ WITH objects AS (
            WHEN 'mail_cutover_epochs_verified_at_check' THEN pg_get_expr(con.conbin,con.conrelid)='((phase = ANY (ARRAY[''verified''::text, ''active''::text])) = (verified_at IS NOT NULL))'
            WHEN 'mail_cutover_epochs_activated_at_check' THEN pg_get_expr(con.conbin,con.conrelid)='((phase = ''active''::text) = (activated_at IS NOT NULL))'
            WHEN 'mail_cutover_epochs_aborted_at_check' THEN pg_get_expr(con.conbin,con.conrelid)='((phase = ''aborted''::text) = (aborted_at IS NOT NULL))'
-           WHEN 'mail_cutover_staging_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
+		   WHEN 'mail_cutover_staging_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)=CASE WHEN $1 >= 40 THEN '(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_roles''::text, ''mail_role_memberships''::text, ''mail_role_bindings''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))' ELSE '(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))' END
            WHEN 'mail_cutover_staging_row_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((octet_length(row_key) >= 1) AND (octet_length(row_key) <= 4096))'
 		WHEN 'mail_cutover_staging_payload_check' THEN pg_get_expr(con.conbin,con.conrelid)=CASE
 			WHEN $1 >= 9
@@ -420,7 +433,7 @@ WITH objects AS (
 			ELSE '((jsonb_typeof(payload) = ''object''::text) AND (octet_length((payload)::text) <= 65536))'
 		END
            WHEN 'mail_cutover_staging_row_sha256_check' THEN pg_get_expr(con.conbin,con.conrelid)='(row_sha256 ~ ''^[0-9a-f]{64}$''::text)'
-           WHEN 'mail_cutover_checkpoints_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)='(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))'
+		   WHEN 'mail_cutover_checkpoints_table_name_check' THEN pg_get_expr(con.conbin,con.conrelid)=CASE WHEN $1 >= 40 THEN '(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_roles''::text, ''mail_role_memberships''::text, ''mail_role_bindings''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))' ELSE '(table_name = ANY (ARRAY[''mail_endpoints''::text, ''mail_conversations''::text, ''mail_memberships''::text, ''mail_messages''::text, ''mail_deliveries''::text, ''mail_recipient_cursors''::text, ''mail_message_idempotency''::text, ''mail_conversation_idempotency''::text, ''mail_request_nonces''::text]))' END
            WHEN 'mail_cutover_checkpoints_last_key_check' THEN pg_get_expr(con.conbin,con.conrelid)='((last_key IS NULL) OR ((octet_length(last_key) >= 1) AND (octet_length(last_key) <= 4096)))'
            WHEN 'mail_cutover_checkpoints_row_count_check' THEN pg_get_expr(con.conbin,con.conrelid)='(row_count >= 0)'
            WHEN 'mail_cutover_checkpoints_rolling_sha256_check' THEN pg_get_expr(con.conbin,con.conrelid)='(rolling_sha256 ~ ''^[0-9a-f]{64}$''::text)'
@@ -443,9 +456,12 @@ WITH objects AS (
     FROM objects JOIN pg_proc AS proc ON proc.oid=guard_oid
 ), expected_guards(table_oid,trigger_name) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
-        (to_regclass('relay.mail_endpoints'),'mail_endpoints_mutation_guard'),
-        (to_regclass('relay.mail_conversations'),'mail_conversations_mutation_guard'),
-        (to_regclass('relay.mail_memberships'),'mail_memberships_mutation_guard'),
+		(to_regclass('relay.mail_endpoints'),'mail_endpoints_mutation_guard'),
+		(to_regclass('relay.mail_conversations'),'mail_conversations_mutation_guard'),
+		(to_regclass('relay.mail_memberships'),'mail_memberships_mutation_guard'),
+		(roles_oid,'mail_roles_mutation_guard'),
+		(role_memberships_oid,'mail_role_memberships_mutation_guard'),
+		(role_bindings_oid,'mail_role_bindings_mutation_guard'),
         (to_regclass('relay.mail_messages'),'mail_messages_mutation_guard'),
         (to_regclass('relay.mail_deliveries'),'mail_deliveries_mutation_guard'),
         (to_regclass('relay.mail_recipient_cursors'),'mail_recipient_cursors_mutation_guard'),
@@ -453,13 +469,14 @@ WITH objects AS (
         (to_regclass('relay.mail_conversation_idempotency'),'mail_conversation_idempotency_mutation_guard'),
         (to_regclass('relay.mail_request_nonces'),'mail_request_nonces_mutation_guard')
     ) AS expected(table_oid,trigger_name)
+	WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
 ), guards AS (
-    SELECT count(*)=9 AND count(DISTINCT trigger.tgrelid)=9
+	SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END AND count(DISTINCT trigger.tgrelid)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND bool_and(trigger.tgfoid=objects.guard_oid AND trigger.tgenabled='O' AND NOT trigger.tgisinternal
        AND trigger.tgtype=30 AND trigger.tgconstraint=0 AND NOT trigger.tgdeferrable AND NOT trigger.tginitdeferred
        AND trigger.tgnargs=0 AND trigger.tgqual IS NULL AND trigger.tgnewtable IS NULL AND trigger.tgoldtable IS NULL AND trigger.tgattr::text='')
        AND (SELECT count(*) FROM pg_trigger AS inventory
-			WHERE inventory.tgrelid IN (SELECT table_oid FROM expected_guards) AND NOT inventory.tgisinternal)=9
+			WHERE inventory.tgrelid IN (SELECT table_oid FROM expected_guards) AND NOT inventory.tgisinternal)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
 	   AND (SELECT count(*) FROM pg_trigger AS inventory
 			WHERE inventory.tgrelid=ANY(ARRAY[to_regclass('relay.mail_cutover_epochs'),to_regclass('relay.mail_cutover_staging'),to_regclass('relay.mail_cutover_checkpoints')]) AND NOT inventory.tgisinternal)=0 AS exact
     FROM objects JOIN expected_guards ON true
@@ -481,6 +498,7 @@ WITH objects AS (
     FROM objects
 )
 SELECT objects.epochs_oid IS NOT NULL AND objects.staging_oid IS NOT NULL AND objects.checkpoints_oid IS NOT NULL
+	AND ($1 < 40 OR (objects.roles_oid IS NOT NULL AND objects.role_memberships_oid IS NOT NULL AND objects.role_bindings_oid IS NOT NULL))
    AND objects.active_index_oid IS NOT NULL AND objects.guard_oid IS NOT NULL
    AND ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND active_index.exact AND routine.exact AND guards.exact AND table_acl.exact
    AND NOT has_function_privilege('punaro_app',objects.guard_oid,'EXECUTE')
