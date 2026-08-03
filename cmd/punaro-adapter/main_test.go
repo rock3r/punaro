@@ -85,6 +85,14 @@ func TestParseMemberControlArgsRequiresExplicitActorAndRetryKey(t *testing.T) {
 	if err != nil || request.actor != "agent/a" || request.member.Endpoint != "agent/b" || request.member.Capabilities != relay.CapReceive {
 		t.Fatalf("member set=%#v err=%v", request, err)
 	}
+	request, err = parseMemberSetArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--member", "role:reviewer:receive", "--idempotency-key", "control-colon"})
+	if err != nil || request.member.Endpoint != "role:reviewer" || request.member.Capabilities != relay.CapReceive {
+		t.Fatalf("member set with colon endpoint=%#v err=%v", request, err)
+	}
+	request, err = parseMemberRemoveArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--member", "role:reviewer", "--idempotency-key", "control-remove-colon"})
+	if err != nil || request.member.Endpoint != "role:reviewer" {
+		t.Fatalf("member remove with colon endpoint=%#v err=%v", request, err)
+	}
 	if _, err := parseMemberRemoveArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--member", "agent/b"}); err == nil {
 		t.Fatal("member remove without stable retry key accepted")
 	}

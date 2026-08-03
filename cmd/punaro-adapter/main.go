@@ -109,16 +109,14 @@ func parseMemberControlArgs(args []string, operation relay.ControlOperation) (me
 		return memberControlRequest{}, fmt.Errorf("--conversation, --actor, --member, and --idempotency-key are required")
 	}
 	if operation == relay.ControlRemoveMember {
-		if strings.Contains(rawMember, ":") {
-			return memberControlRequest{}, fmt.Errorf("member remove accepts an endpoint only")
-		}
 		request.member.Endpoint = rawMember
 		return request, nil
 	}
-	endpoint, permissions, found := strings.Cut(rawMember, ":")
-	if !found || endpoint == "" || permissions == "" {
+	separator := strings.LastIndex(rawMember, ":")
+	if separator <= 0 || separator == len(rawMember)-1 {
 		return memberControlRequest{}, fmt.Errorf("member set requires endpoint:send,receive,admin")
 	}
+	endpoint, permissions := rawMember[:separator], rawMember[separator+1:]
 	request.member.Endpoint = endpoint
 	for _, item := range strings.Split(permissions, ",") {
 		switch item {
