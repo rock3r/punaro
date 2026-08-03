@@ -41,7 +41,10 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
-	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	notifier := NewNotifier()
+	targetNotifications := notifier.Register("machine-b")
+	t.Cleanup(targetNotifications.Close)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Notifier: notifier})
 
 	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
 	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
@@ -257,7 +260,10 @@ func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
-	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	notifier := NewNotifier()
+	targetNotifications := notifier.Register("machine-b")
+	t.Cleanup(targetNotifications.Close)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Notifier: notifier})
 	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "invoke-advertise-a", "")
 	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "invoke-advertise-b", "")
 	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin","invoke"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "invoke-create", "invoke-create")
@@ -277,6 +283,14 @@ func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
 	requested := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/invocations", `{"from_endpoint":"agent/a/session","target_endpoint":"agent/b/session"}`, "invoke-request", "invoke-request")
 	if requested.Code != http.StatusCreated || strings.Contains(requested.Body.String(), "opaque work") {
 		t.Fatalf("invoke status=%d body=%s", requested.Code, requested.Body.String())
+	}
+	select {
+	case wake := <-targetNotifications.Events():
+		if wake.Type != "wake" || wake.TopicID != conversation.ID || wake.Sequence != 1 {
+			t.Fatalf("invoke wake=%#v", wake)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("invoke request did not wake target adapter")
 	}
 	var invocation Invocation
 	if err := json.NewDecoder(requested.Body).Decode(&invocation); err != nil || invocation.ID == "" || invocation.Fence == "" || invocation.TargetMachineID != "machine-b" {
