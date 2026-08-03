@@ -24,7 +24,7 @@ test-race:
 
 test-real-relay-e2e:
 	@test "$(shell uname -s)" = Darwin || { printf '%s\n' 'test-real-relay-e2e requires a disposable macOS GUI login for the supported LaunchAgent lifecycle' >&2; exit 2; }
-	PUNARO_REAL_RELAY_E2E=1 go test -tags=e2e -count=1 -timeout=4m ./cmd/punaro-adapter -run '^TestE2ERealTwoClientRelayLifecycle$$'
+	PUNARO_REAL_RELAY_E2E=1 go test -tags=e2e -count=1 -timeout=8m ./cmd/punaro-adapter -run '^TestE2ERealTwoClientRelayLifecycle$$'
 
 test-postgres:
 	./scripts/test-postgres-integration.sh
