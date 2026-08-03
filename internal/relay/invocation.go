@@ -145,7 +145,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		// retrying the same key after the endpoint detached could unexpectedly
 		// become a new start request.
 		invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationAlreadyRunning}
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at,terminal_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at,last_activity_at,terminal_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli(), input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 			return Invocation{}, false, fmt.Errorf("record already-running invocation: %w", err)
 		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
@@ -184,7 +184,7 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 		return Invocation{}, false, fmt.Errorf("find pending invocation: %w", err)
 	}
 	invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationPending}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at,last_activity_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 		return Invocation{}, false, fmt.Errorf("queue invocation: %w", err)
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
@@ -208,7 +208,7 @@ func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
 }
 
 func expireAbandonedInvocations(tx *sql.Tx, targetEndpoint string, now time.Time) error {
-	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? AND created_at<? AND (lease_until IS NULL OR lease_until<=?)`, targetEndpoint, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli(), now.UnixMilli())
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? AND (CASE WHEN last_activity_at>0 THEN last_activity_at ELSE created_at END)<? AND (lease_until IS NULL OR lease_until<=?)`, targetEndpoint, InvocationPending, now.Add(-invocationPendingRetention).UnixMilli(), now.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("find abandoned invocations: %w", err)
 	}
@@ -398,7 +398,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		invocation.LeaseGeneration++
 		invocation.LeaseToken = token
 		invocation.LeaseUntil = now.Add(ttl).UTC()
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET attempts=?,lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, attempts, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET attempts=?,last_activity_at=?,lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, attempts, now.UnixMilli(), machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
 			return nil, fmt.Errorf("lease invocation: %w", err)
 		}
 		if err := recordInvocationAudit(tx, invocation.ID, "leased", now); err != nil {
@@ -555,6 +555,7 @@ func (s *Store) ensureInvocationSchema() error {
 			lease_generation INTEGER NOT NULL DEFAULT 0,
 			target_ownership_generation INTEGER NOT NULL DEFAULT 0,
 			lease_until INTEGER,
+			last_activity_at INTEGER NOT NULL DEFAULT 0,
 			terminal_at INTEGER,
 			created_at INTEGER NOT NULL
 		)`,
@@ -583,6 +584,9 @@ func (s *Store) ensureInvocationSchema() error {
 		return err
 	}
 	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "terminal_at", "INTEGER"); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "last_activity_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil

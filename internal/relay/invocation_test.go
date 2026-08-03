@@ -375,7 +375,7 @@ func TestInvokeDoesNotExpireAbandonedHandoffWithLiveLease(t *testing.T) {
 		t.Fatalf("leased=%#v err=%v", leased, err)
 	}
 	request.IdempotencyKey = "invoke-during-lease"
-	request.Now = leasedAt.Add(time.Second)
+	request.Now = leasedAt.Add(time.Minute + time.Second)
 	if coalesced, duplicate, err := store.RequestInvocation(request); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Status != InvocationPending {
 		t.Fatalf("coalesced=%#v duplicate=%t err=%v", coalesced, duplicate, err)
 	}
