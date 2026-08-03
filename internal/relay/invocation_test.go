@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -174,7 +175,7 @@ func TestInvokeRejectsUnauthorizedAndDoesNotQueueAlreadyRunningTarget(t *testing
 	}
 }
 
-func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
+func TestInvokeFailsWhenTargetAttachmentChangesAfterRequest(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
@@ -209,7 +210,93 @@ func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
 		t.Fatalf("leased=%#v err=%v", leased, err)
 	}
 	audit, err := store.InvocationAudit(invocation.ID)
-	if err != nil || len(audit) != 2 || audit[1].Action != "already_running" {
+	if err != nil || len(audit) != 2 || audit[1].Action != "failed" {
 		t.Fatalf("audit=%#v err=%v", audit, err)
+	}
+}
+
+func TestInvokeDoesNotLeaseAcrossTargetOwnershipChange(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("owner-a", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("owner-a", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	invocation, _, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)})
+	if err != nil || invocation.Status != InvocationPending {
+		t.Fatalf("invocation=%#v err=%v", invocation, err)
+	}
+	if err := store.AdvertiseEndpoints("owner-b", []string{"agent/recipient"}, now.Add(3*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("owner-b", nil, now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if leased, err := store.LeaseInvocations("owner-a", "adapter-a", now.Add(5*time.Second), time.Minute, 1); err != nil || len(leased) != 0 {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	var status InvocationStatus
+	if err := store.db.QueryRowContext(context.Background(), `SELECT status FROM invocations WHERE id=?`, invocation.ID).Scan(&status); err != nil || status != InvocationFailed {
+		t.Fatalf("status=%q err=%v", status, err)
+	}
+}
+
+func TestInvokeCoalescesOnlyWithinPendingWorkConversation(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	create := func(key string) Conversation {
+		conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: key, CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message-" + key, Now: now}); err != nil {
+			t.Fatal(err)
+		}
+		return conversation
+	}
+	conversationA := create("create-a")
+	conversationB := create("create-b")
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	request := func(conversation Conversation, key string) Invocation {
+		invocation, duplicate, err := store.RequestInvocation(InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: key, Now: now.Add(2 * time.Second)})
+		if err != nil || duplicate {
+			t.Fatalf("invocation=%#v duplicate=%t err=%v", invocation, duplicate, err)
+		}
+		return invocation
+	}
+	invocationA := request(conversationA, "invoke-a")
+	invocationB := request(conversationB, "invoke-b")
+	if invocationA.ID == invocationB.ID || invocationA.Fence == invocationB.Fence {
+		t.Fatalf("cross-conversation invocation was coalesced: A=%#v B=%#v", invocationA, invocationB)
 	}
 }

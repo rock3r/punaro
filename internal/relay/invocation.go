@@ -72,7 +72,8 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	}
 	var targetMachine string
 	var targetLeaseUntil int64
-	err = tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until FROM endpoints WHERE endpoint=?`, input.TargetEndpoint).Scan(&targetMachine, &targetLeaseUntil)
+	var targetOwnershipGeneration int64
+	err = tx.QueryRowContext(context.Background(), `SELECT machine_id,lease_until,ownership_generation FROM endpoints WHERE endpoint=?`, input.TargetEndpoint).Scan(&targetMachine, &targetLeaseUntil, &targetOwnershipGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Invocation{}, false, ErrForbidden
 	}
@@ -91,7 +92,7 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 		// retrying the same key after the endpoint detached could unexpectedly
 		// become a new start request.
 		invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationAlreadyRunning}
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 			return Invocation{}, false, fmt.Errorf("record already-running invocation: %w", err)
 		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
@@ -109,7 +110,7 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 	// offline role. They must converge on one durable fence, rather than start
 	// separate runtime processes merely because their idempotency domains differ.
 	var pendingID string
-	err = tx.QueryRowContext(context.Background(), `SELECT id FROM invocations WHERE target_endpoint=? AND status=? ORDER BY created_at,id LIMIT 1`, input.TargetEndpoint, InvocationPending).Scan(&pendingID)
+	err = tx.QueryRowContext(context.Background(), `SELECT id FROM invocations WHERE conversation_id=? AND target_endpoint=? AND status=? ORDER BY created_at,id LIMIT 1`, input.ConversationID, input.TargetEndpoint, InvocationPending).Scan(&pendingID)
 	if err == nil {
 		invocation, err := invocationByID(tx, pendingID)
 		if err != nil {
@@ -130,7 +131,7 @@ func (s *Store) RequestInvocation(input InvokeInput) (Invocation, bool, error) {
 		return Invocation{}, false, fmt.Errorf("find pending invocation: %w", err)
 	}
 	invocation := Invocation{ID: uuid.NewString(), ConversationID: input.ConversationID, TargetEndpoint: input.TargetEndpoint, TargetMachineID: targetMachine, Fence: uuid.NewString(), Status: InvocationPending}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocations(id,conversation_id,from_endpoint,target_endpoint,target_machine_id,target_ownership_generation,fence,status,not_before,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, invocation.ID, invocation.ConversationID, input.FromEndpoint, invocation.TargetEndpoint, invocation.TargetMachineID, targetOwnershipGeneration, invocation.Fence, invocation.Status, input.Now.UnixMilli(), input.Now.UnixMilli()); err != nil {
 		return Invocation{}, false, fmt.Errorf("queue invocation: %w", err)
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO invocation_idempotency(machine_id,key,request_hash,invocation_id) VALUES(?,?,?,?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, invocation.ID); err != nil {
@@ -159,6 +160,36 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		return nil, err
 	}
 	defer rollback(tx)
+	// An invocation carries the endpoint ownership generation observed at
+	// authorization. A later detach or reassignment must not grant its old
+	// machine a process-start lease, even if the endpoint is offline again.
+	staleOwnerRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
+		LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
+		WHERE invocation.target_machine_id=? AND invocation.status=?
+		AND (endpoint.endpoint IS NULL OR endpoint.machine_id<>invocation.target_machine_id OR endpoint.ownership_generation<>invocation.target_ownership_generation)`, machineID, InvocationPending)
+	if err != nil {
+		return nil, fmt.Errorf("find invocation ownership changes: %w", err)
+	}
+	var staleOwnerIDs []string
+	for staleOwnerRows.Next() {
+		var invocationID string
+		if err := staleOwnerRows.Scan(&invocationID); err != nil {
+			_ = staleOwnerRows.Close()
+			return nil, fmt.Errorf("read invocation ownership change: %w", err)
+		}
+		staleOwnerIDs = append(staleOwnerIDs, invocationID)
+	}
+	if err := staleOwnerRows.Close(); err != nil || staleOwnerRows.Err() != nil {
+		return nil, fmt.Errorf("find invocation ownership changes: %w", err)
+	}
+	for _, invocationID := range staleOwnerIDs {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, invocationID); err != nil {
+			return nil, fmt.Errorf("fail stale invocation owner: %w", err)
+		}
+		if err := recordInvocationAudit(tx, invocationID, "failed", now); err != nil {
+			return nil, err
+		}
+	}
 	staleRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.lease_machine_id IS NULL
 		AND NOT EXISTS (SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE delivery.recipient_endpoint=invocation.target_endpoint AND delivery.acked_at IS NULL AND message.conversation_id=invocation.conversation_id)`, machineID, InvocationPending)
@@ -190,7 +221,8 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	// authoritative proof that starting another copy is no longer allowed.
 	onlineRows, err := tx.QueryContext(context.Background(), `SELECT invocation.id FROM invocations AS invocation
 		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint
-		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.lease_machine_id IS NULL AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli())
+		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.lease_machine_id IS NULL
+		AND endpoint.machine_id=invocation.target_machine_id AND endpoint.ownership_generation=invocation.target_ownership_generation AND endpoint.lease_until>?`, machineID, InvocationPending, now.UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("find online invocation targets: %w", err)
 	}
@@ -217,8 +249,9 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 			return nil, err
 		}
 	}
-	rows, err := tx.QueryContext(context.Background(), `SELECT id,conversation_id,target_endpoint,target_machine_id,fence,lease_generation,attempts,lease_until FROM invocations
-		WHERE target_machine_id=? AND status=? AND not_before<=? AND (lease_until IS NULL OR lease_until<=? OR (lease_machine_id=? AND lease_consumer_id=?))
+	rows, err := tx.QueryContext(context.Background(), `SELECT invocation.id,invocation.conversation_id,invocation.target_endpoint,invocation.target_machine_id,invocation.fence,invocation.lease_generation,invocation.attempts,invocation.lease_until FROM invocations AS invocation
+		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint AND endpoint.machine_id=invocation.target_machine_id AND endpoint.ownership_generation=invocation.target_ownership_generation
+		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.not_before<=? AND (invocation.lease_until IS NULL OR invocation.lease_until<=? OR (invocation.lease_machine_id=? AND invocation.lease_consumer_id=?))
 		ORDER BY created_at,id LIMIT ?`, machineID, InvocationPending, now.UnixMilli(), now.UnixMilli(), machineID, consumerID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("find invocations: %w", err)
@@ -402,6 +435,7 @@ func (s *Store) ensureInvocationSchema() error {
 			lease_consumer_id TEXT,
 			lease_token TEXT,
 			lease_generation INTEGER NOT NULL DEFAULT 0,
+			target_ownership_generation INTEGER NOT NULL DEFAULT 0,
 			lease_until INTEGER,
 			created_at INTEGER NOT NULL
 		)`,
@@ -424,6 +458,9 @@ func (s *Store) ensureInvocationSchema() error {
 		if _, err := s.db.ExecContext(context.Background(), statement); err != nil {
 			return fmt.Errorf("initialize invocation state: %w", err)
 		}
+	}
+	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "target_ownership_generation", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
 	}
 	return nil
 }

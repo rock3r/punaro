@@ -392,7 +392,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
-	if table != "endpoints" && table != "deliveries" && table != "relay_migration_control" {
+	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" {
 		return errors.New("invalid relay migration table")
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")") // #nosec G202 -- table is restricted above to fixed internal names.

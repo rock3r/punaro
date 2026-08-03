@@ -195,7 +195,9 @@ func (c *HTTPRelayClient) LeaseInvocations(ctx context.Context) ([]relay.Invocat
 	var response struct {
 		Invocations []relay.Invocation `json:"invocations"`
 	}
-	_, err := c.doJSON(ctx, http.MethodPost, "/v1/invocations/lease", map[string]any{"consumer_id": c.consumerID}, &response)
+	// A runtime handoff can take the full invocation timeout. Claim only one
+	// record per sync so queued work never burns leases while waiting locally.
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/invocations/lease", map[string]any{"consumer_id": c.consumerID, "limit": 1}, &response)
 	return response.Invocations, err
 }
 
