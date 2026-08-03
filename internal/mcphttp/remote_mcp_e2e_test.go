@@ -203,6 +203,22 @@ func TestRemoteMCPE2EJSONRPCFailureRejectsServerErrors(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPE2EJSONRPCFailureRequiresStructuredErrorAndRequestID(t *testing.T) {
+	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid Request"}}`)}
+	if !validRemoteMCPE2EJSONRPCFailureWithExpectedID(valid, json.RawMessage(`1`)) {
+		t.Fatal("valid structured JSON-RPC error rejected")
+	}
+	for _, response := range []remoteMCPE2EResponse{
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":null}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":"-32600","message":"Invalid Request"}}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"Invalid Request"}}`)},
+	} {
+		if validRemoteMCPE2EJSONRPCFailureWithExpectedID(response, json.RawMessage(`1`)) {
+			t.Fatal("invalid JSON-RPC error accepted")
+		}
+	}
+}
+
 func TestRemoteMCPE2EInitializeRequiresNegotiatedProtocol(t *testing.T) {
 	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e-initialize","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"candidate","version":"1"}}}`)}
 	if !validRemoteMCPE2EInitializeSuccess(valid, "2024-11-05") {
@@ -579,15 +595,18 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	}
 
 	validSessionID := remoteMCPE2EInitializeSession(t, client, config, config.Tokens.Valid)
-	for _, malformedRequest := range [][]byte{
-		[]byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`),
-		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","method":"tools/list"}`),
-		[]byte(`{"jsonrpc":"2.0","id":{},"method":"tools/list"}`),
-		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","extra":true}`),
+	for _, malformedRequest := range []struct {
+		body       []byte
+		expectedID json.RawMessage
+	}{
+		{body: []byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`)},
+		{body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","method":"tools/list"}`), expectedID: json.RawMessage(`1`)},
+		{body: []byte(`{"jsonrpc":"2.0","id":{},"method":"tools/list"}`), expectedID: json.RawMessage(`null`)},
+		{body: []byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","extra":true}`), expectedID: json.RawMessage(`1`)},
 	} {
-		malformed := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, malformedRequest)
+		malformed := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, malformedRequest.body)
 		remoteMCPE2ERedacted(t, malformed, config.sensitiveValues())
-		remoteMCPE2ERequireJSONRPCFailure(t, malformed)
+		remoteMCPE2ERequireJSONRPCFailureWithExpectedID(t, malformed, malformedRequest.expectedID)
 	}
 
 	authorized := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
@@ -889,6 +908,17 @@ func remoteMCPE2ERequireJSONRPCFailure(t *testing.T, response remoteMCPE2ERespon
 }
 
 func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
+	return validRemoteMCPE2EJSONRPCFailureWithExpectedID(response, nil)
+}
+
+func remoteMCPE2ERequireJSONRPCFailureWithExpectedID(t *testing.T, response remoteMCPE2EResponse, expectedID json.RawMessage) {
+	t.Helper()
+	if !validRemoteMCPE2EJSONRPCFailureWithExpectedID(response, expectedID) {
+		t.Fatal("MCP request did not fail closed")
+	}
+}
+
+func validRemoteMCPE2EJSONRPCFailureWithExpectedID(response remoteMCPE2EResponse, expectedID json.RawMessage) bool {
 	if response.Status >= 400 && response.Status < 500 {
 		return true
 	}
@@ -900,8 +930,21 @@ func validRemoteMCPE2EJSONRPCFailure(response remoteMCPE2EResponse) bool {
 		JSONRPC string          `json:"jsonrpc"`
 		Result  json.RawMessage `json:"result"`
 		Error   json.RawMessage `json:"error"`
+		ID      json.RawMessage `json:"id"`
 	}
-	return json.Unmarshal(payload, &envelope) == nil && envelope.JSONRPC == "2.0" && len(envelope.Result) == 0 && len(envelope.Error) != 0
+	if json.Unmarshal(payload, &envelope) != nil || envelope.JSONRPC != "2.0" || len(envelope.Result) != 0 || len(envelope.Error) == 0 || len(expectedID) == 0 || !remoteMCPE2EJSONValuesEqual(envelope.ID, expectedID) {
+		return false
+	}
+	var rpcError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+	return json.Unmarshal(envelope.Error, &rpcError) == nil && rpcError.Message != ""
+}
+
+func remoteMCPE2EJSONValuesEqual(left, right json.RawMessage) bool {
+	var leftValue, rightValue any
+	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
 }
 
 func remoteMCPE2EJSONRPCPayload(response remoteMCPE2EResponse) ([]byte, bool) {
