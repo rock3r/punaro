@@ -1088,8 +1088,9 @@ WITH objects AS (
            to_regclass('relay.mail_message_idempotency') AS message_idempotency_oid,
            to_regclass('relay.mail_conversation_idempotency') AS conversation_idempotency_oid,
            to_regclass('relay.mail_request_nonces') AS nonces_oid,
-           to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
-           to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
+		   to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
+		   to_regclass('relay.mail_role_bindings_session') AS role_bindings_index_oid,
+		   to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
            to_regclass('relay.mail_request_nonces_expiry') AS nonces_index_oid,
            to_regprocedure('relay.consume_mail_request_nonce(text,text,timestamp with time zone,timestamp with time zone)') AS consume_oid,
            to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
@@ -1275,15 +1276,16 @@ WITH objects AS (
        AND md5(regexp_replace(proc.prosrc,'^\s+|\s+$','','g'))='4c348d98b79375c10c6c53728b7368fb') AS exact
     FROM objects JOIN pg_proc AS proc ON proc.oid=consume_oid
 ), index_safety AS (
-    SELECT count(*)=3 AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
+    SELECT count(*)=CASE WHEN $1 >= 40 THEN 4 ELSE 3 END AND bool_and(index.indisvalid AND index.indisready AND index.indislive AND NOT index.indisunique
        AND index.indnkeyatts=index.indnatts AND access_method.amname='btree'
        AND pg_get_userbyid(relation.relowner)='punaro_owner'
        AND CASE index.indexrelid
-           WHEN objects.endpoints_index_oid THEN index.indrelid=objects.endpoints_oid AND index.indkey::text='2 3 1'
-           WHEN objects.deliveries_index_oid THEN index.indrelid=objects.deliveries_oid AND index.indkey::text='3 10 9 1'
+		   WHEN objects.endpoints_index_oid THEN index.indrelid=objects.endpoints_oid AND index.indkey::text='2 3 1'
+		   WHEN objects.role_bindings_index_oid THEN index.indrelid=objects.role_bindings_oid AND index.indkey::text='3 2 5 1'
+		   WHEN objects.deliveries_index_oid THEN index.indrelid=objects.deliveries_oid AND index.indkey::text='3 10 9 1'
            WHEN objects.nonces_index_oid THEN index.indrelid=objects.nonces_oid AND index.indkey::text='3 1 2'
            ELSE false END) AS exact
-    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,deliveries_index_oid,nonces_index_oid])
+    FROM objects JOIN pg_index AS index ON index.indexrelid=ANY(ARRAY[endpoints_index_oid,role_bindings_index_oid,deliveries_index_oid,nonces_index_oid])
     JOIN pg_class AS relation ON relation.oid=index.indexrelid
     JOIN pg_am AS access_method ON access_method.oid=relation.relam
 ), expected_table_acl(table_oid,privilege_type) AS (
@@ -1333,7 +1335,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	AND ($1 < 40 OR (roles_oid IS NOT NULL AND role_memberships_oid IS NOT NULL AND role_bindings_oid IS NOT NULL))
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
-   AND endpoints_index_oid IS NOT NULL AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
+	   AND endpoints_index_oid IS NOT NULL AND ($1 < 40 OR role_bindings_index_oid IS NOT NULL) AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
    AND consume_oid IS NOT NULL AND (legacy_guard_oid IS NOT NULL OR cutover_guard_oid IS NOT NULL)
 	   AND table_ownership.exact AND columns.exact AND defaults.exact AND constraints.exact AND guards.exact AND function_safety.exact AND index_safety.exact
 	   AND table_acl.exact AND column_acl.exact

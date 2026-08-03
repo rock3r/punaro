@@ -1402,6 +1402,103 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.Run(t, app, "postgres-contract")
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
+	testDurableRoleRebindFencesPostgresDelivery(t, app)
+}
+
+func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.July, 20, 17, 0, 0, 0, time.UTC)
+	const (
+		senderMachine = "postgres-role-fence-sender"
+		roleMachine   = "postgres-role-fence-owner"
+		sender        = "agent/postgres-role-fence/sender"
+		sessionA      = "agent/postgres-role-fence/a"
+		sessionB      = "agent/postgres-role-fence/b"
+		role          = "role/postgres-role-fence"
+	)
+	if err := app.AdvertiseEndpoints(senderMachine, []string{sender}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(roleMachine, []string{sessionA, sessionB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: senderMachine, IdempotencyKey: "postgres-role-fence-conversation", CreatorEndpoint: sender, Now: now,
+		Members: []relay.Member{
+			{Endpoint: sender, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: role, RoleMachineID: roleMachine, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.BindRoleToSession(roleMachine, role, sessionA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	message, _, err := app.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: sender, IdempotencyKey: "postgres-role-fence-message-a", Body: "fence a", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageA, err := app.LeaseDeliveries(roleMachine, "postgres-role-fence-consumer-a", sessionA, conversation.ID, now, time.Minute, 1)
+	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.ID != message.ID {
+		t.Fatalf("lease through initial role binding page=%#v err=%v", pageA, err)
+	}
+
+	lockTx, lockCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockCancel()
+	if _, err := postgresEndpointOwnershipLocked(lockTx, sessionA, roleMachine, now); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatal(err)
+	}
+	if err := postgresLockSessionRoleBindings(lockTx, roleMachine, sessionA, now); err != nil {
+		_ = lockTx.Rollback()
+		t.Fatal(err)
+	}
+	rebound := make(chan error, 1)
+	go func() { rebound <- app.BindRoleToSession(roleMachine, role, sessionB, now, time.Hour) }()
+	select {
+	case err := <-rebound:
+		_ = lockTx.Rollback()
+		t.Fatalf("role rebind bypassed active role authorization lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lockTx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rebound; err != nil {
+		t.Fatalf("rebind after role authorization lock: %v", err)
+	}
+	stale := pageA.Deliveries[0]
+	if err := app.AckDelivery(roleMachine, sessionA, stale.ID, stale.LeaseToken, stale.LeaseGeneration, now.Add(time.Second)); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("replaced session acknowledged stale durable-role lease: %v", err)
+	}
+	pageB, err := app.LeaseDeliveries(roleMachine, "postgres-role-fence-consumer-b", sessionB, conversation.ID, now.Add(time.Second), time.Minute, 1)
+	if err != nil || len(pageB.Deliveries) != 1 || pageB.Deliveries[0].ID != stale.ID {
+		t.Fatalf("rebound role lease page=%#v err=%v", pageB, err)
+	}
+	if err := app.AckDelivery(roleMachine, sessionB, pageB.Deliveries[0].ID, pageB.Deliveries[0].LeaseToken, pageB.Deliveries[0].LeaseGeneration, now.Add(time.Second)); err != nil {
+		t.Fatalf("replacement session acknowledgement: %v", err)
+	}
+
+	if err := app.BindRoleToSession(roleMachine, role, sessionB, now.Add(2*time.Second), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: sender, IdempotencyKey: "postgres-role-fence-message-b", Body: "fence b", Now: now.Add(3 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.LeaseDeliveries(roleMachine, "postgres-role-fence-consumer-b", sessionB, conversation.ID, now.Add(4*time.Second), time.Minute, 1); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("expired role binding leased delivery: %v", err)
+	}
+	if err := app.BindRoleToSession(roleMachine, role, sessionA, now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	pageA, err = app.LeaseDeliveries(roleMachine, "postgres-role-fence-consumer-a", sessionA, conversation.ID, now.Add(4*time.Second), time.Minute, 1)
+	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.Body != "fence b" {
+		t.Fatalf("rebound expired role lease page=%#v err=%v", pageA, err)
+	}
 }
 
 func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {
