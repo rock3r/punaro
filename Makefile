@@ -1,4 +1,4 @@
-.PHONY: test test-race test-postgres vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
+.PHONY: test test-race test-postgres memory-onboarding-e2e vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
 PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
@@ -24,6 +24,9 @@ test-race:
 
 test-postgres:
 	./scripts/test-postgres-integration.sh
+
+memory-onboarding-e2e:
+	./scripts/test-memory-onboarding-e2e.sh
 
 vet:
 	go vet ./...
