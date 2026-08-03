@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path"
 	"reflect"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -288,6 +287,10 @@ func TestRemoteMCPE2EDiscoveryMetadataRejectsDuplicateMembers(t *testing.T) {
 	duplicate := []byte(`{"resource":"https://other.example.test/mcp","resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"]}`)
 	if validRemoteMCPE2EDiscoveryMetadata(duplicate, "https://mcp.example.test/mcp", "https://auth.example.test") {
 		t.Fatal("duplicate discovery metadata accepted")
+	}
+	extraAuthorizationServer := []byte(`{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test","https://other.example.test"]}`)
+	if validRemoteMCPE2EDiscoveryMetadata(extraAuthorizationServer, "https://mcp.example.test/mcp", "https://auth.example.test") {
+		t.Fatal("discovery metadata with an extra authorization server accepted")
 	}
 }
 
@@ -663,7 +666,7 @@ func validRemoteMCPE2EDiscoveryMetadata(raw []byte, expectedResource, expectedAu
 		Resource             string   `json:"resource"`
 		AuthorizationServers []string `json:"authorization_servers"`
 	}
-	return json.Unmarshal(raw, &document) == nil && document.Resource == expectedResource && slices.Contains(document.AuthorizationServers, expectedAuthorizationServer)
+	return json.Unmarshal(raw, &document) == nil && document.Resource == expectedResource && len(document.AuthorizationServers) == 1 && document.AuthorizationServers[0] == expectedAuthorizationServer
 }
 
 func remoteMCPE2EMetadataURL(t *testing.T, resource string) string {
