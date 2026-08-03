@@ -15,6 +15,32 @@ import (
 
 func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 	clearAdapterEnvironment(t)
+	setupWindowsProfile(t)
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.machineID != "windows-profile-machine" {
+		t.Fatalf("machine ID=%q, want Windows profile value", config.machineID)
+	}
+}
+
+func TestWindowsLoadConfigRejectsSharedProfileACL(t *testing.T) {
+	clearAdapterEnvironment(t)
+	profile := setupWindowsProfile(t)
+	command := exec.Command("icacls.exe", profile, "/grant", "*S-1-1-0:(R)")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("share test fixture: %v (%s)", err, output)
+	}
+
+	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "adapter profile file must be a private regular file") {
+		t.Fatalf("shared profile error=%v, want private-file rejection", err)
+	}
+}
+
+func setupWindowsProfile(t *testing.T) string {
+	t.Helper()
 	localAppData := t.TempDir()
 	t.Setenv("LOCALAPPDATA", localAppData)
 	configDir := filepath.Join(localAppData, "Punaro", "config")
@@ -44,14 +70,7 @@ func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 	protectWindowsFixture(t, configDir)
 	protectWindowsFixture(t, keyFile)
 	protectWindowsFixture(t, profile)
-
-	config, err := loadConfig()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.machineID != "windows-profile-machine" {
-		t.Fatalf("machine ID=%q, want Windows profile value", config.machineID)
-	}
+	return profile
 }
 
 func protectWindowsFixture(t *testing.T, path string) {

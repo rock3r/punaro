@@ -72,7 +72,7 @@ func privateWindowsACL(path string) bool {
 	}
 	// Protect-PunaroPath emits one FullControl ACE for the current SID, with no
 	// inherited or shared grants. DACL() also rejects absent/null DACLs.
-	if dacl, _, err := sd.DACL(); err != nil || dacl == nil {
+	if dacl, _, err := sd.DACL(); err != nil || dacl == nil || dacl.AceCount != 1 {
 		return false
 	}
 	want := "D:P(A;;FA;;;" + user.User.Sid.String() + ")"
