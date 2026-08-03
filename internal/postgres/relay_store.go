@@ -1560,7 +1560,7 @@ WITH objects AS (
 ), expected_table_acl(table_oid,privilege_type) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'SELECT'),(endpoints_oid,'INSERT'),(conversations_oid,'SELECT'),(conversations_oid,'INSERT'),
-        (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
+        (memberships_oid,'SELECT'),(memberships_oid,'INSERT'),(memberships_oid,'DELETE'),(messages_oid,'SELECT'),(messages_oid,'INSERT'),
 		(roles_oid,'SELECT'),(roles_oid,'INSERT'),(role_memberships_oid,'SELECT'),(role_memberships_oid,'INSERT'),(role_bindings_oid,'SELECT'),(role_bindings_oid,'INSERT'),
         (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
@@ -1581,7 +1581,7 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'machine_id','UPDATE'),(endpoints_oid,'lease_until','UPDATE'),(endpoints_oid,'ownership_generation','UPDATE'),
         (endpoints_oid,'consumer_id','UPDATE'),(endpoints_oid,'consumer_generation','UPDATE'),(endpoints_oid,'consumer_lease_until','UPDATE'),
-        (conversations_oid,'next_sequence','UPDATE'),
+        (conversations_oid,'next_sequence','UPDATE'),(memberships_oid,'capabilities','UPDATE'),
 		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
@@ -1649,6 +1649,11 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'created_at','UPDATE')
    AND has_table_privilege('punaro_app',memberships_oid,'SELECT') AND has_table_privilege('punaro_app',memberships_oid,'INSERT')
+   AND has_table_privilege('punaro_app',memberships_oid,'DELETE')
+   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE')
+   AND has_column_privilege('punaro_app',memberships_oid,'capabilities','UPDATE')
+   AND NOT has_column_privilege('punaro_app',memberships_oid,'conversation_id','UPDATE')
+   AND NOT has_column_privilege('punaro_app',memberships_oid,'endpoint','UPDATE')
    AND has_table_privilege('punaro_app',messages_oid,'SELECT') AND has_table_privilege('punaro_app',messages_oid,'INSERT')
 	   AND has_table_privilege('punaro_app',deliveries_oid,'SELECT') AND has_table_privilege('punaro_app',deliveries_oid,'INSERT')
 	   AND NOT has_table_privilege('punaro_app',deliveries_oid,'UPDATE')
@@ -1672,7 +1677,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',nonces_oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',endpoints_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversations_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
-   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND NOT has_table_privilege('punaro_app',memberships_oid,'UPDATE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',messages_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',deliveries_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
