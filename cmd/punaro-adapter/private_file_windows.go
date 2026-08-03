@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -49,9 +49,9 @@ func readPrivateFile(path, label string, maximum int) ([]byte, error) {
 	return raw, nil
 }
 
-// privateWindowsACL accepts only the exact protected, current-user-only DACL
-// written by the Windows installer. This prevents an explicit profile path
-// from weakening the confidentiality boundary for embedded service secrets.
+// privateWindowsACL accepts only a protected, current-user-only FullControl
+// DACL. This prevents an explicit profile path from weakening the
+// confidentiality boundary for embedded service secrets.
 func privateWindowsACL(path string) bool {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
@@ -74,7 +74,14 @@ func privateWindowsACL(path string) bool {
 	// inherited or shared grants. DACL() also rejects absent/null DACLs.
 	if dacl, _, err := sd.DACL(); err != nil || dacl == nil || dacl.AceCount != 1 {
 		return false
+	} else {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, 0, &ace) != nil || ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 ||
+			ace.Mask != windows.ACCESS_MASK(0x1f01ff) {
+			return false
+		}
+		aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		return aceSID.Equals(user.User.Sid)
 	}
-	want := "D:P(A;;FA;;;" + user.User.Sid.String() + ")"
-	return strings.HasSuffix(sd.String(), want)
 }
