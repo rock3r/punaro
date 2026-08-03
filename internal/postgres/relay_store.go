@@ -173,7 +173,7 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 		return err
 	}
 	var owner string
-	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1 FOR UPDATE`, role).Scan(&owner); errors.Is(err, sql.ErrNoRows) || owner != machineID {
+	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1 FOR SHARE`, role).Scan(&owner); errors.Is(err, sql.ErrNoRows) || owner != machineID {
 		return relay.ErrForbidden
 	} else if err != nil {
 		return errors.New("durable role ownership is unavailable")
@@ -305,7 +305,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	for _, role := range orderedRoles {
 		owner := roles[role]
 		var existingOwner string
-		err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1 FOR UPDATE`, role).Scan(&existingOwner)
+		err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1 FOR SHARE`, role).Scan(&existingOwner)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_roles(role,machine_id) VALUES($1,$2)`, role, owner); err != nil {
