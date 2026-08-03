@@ -211,13 +211,11 @@ func TestStoreControlRejectsNewMemberBeyondConversationLimit(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	now := time.Date(2026, time.August, 3, 12, 35, 0, 0, time.UTC)
 	members := make([]Member, 0, 256)
-	endpoints := make([]string, 0, 257)
+	endpoints := make([]string, 0, 2)
 	members = append(members, Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin})
 	endpoints = append(endpoints, "agent/a")
 	for index := 1; index < 256; index++ {
-		endpoint := fmt.Sprintf("agent/member-%03d", index)
-		members = append(members, Member{Endpoint: endpoint, Capabilities: CapReceive})
-		endpoints = append(endpoints, endpoint)
+		members = append(members, Member{Role: fmt.Sprintf("role/member-%03d", index), RoleMachineID: fmt.Sprintf("machine-member-%03d", index), Capabilities: CapReceive})
 	}
 	endpoints = append(endpoints, "agent/overflow")
 	if err := store.AdvertiseEndpoints("machine-a", endpoints, now, time.Hour); err != nil {
@@ -229,6 +227,40 @@ func TestStoreControlRejectsNewMemberBeyondConversationLimit(t *testing.T) {
 	}
 	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/overflow", Capabilities: CapReceive}, IdempotencyKey: "member-limit", Now: now}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("overflow upsert error=%v, want conflict", err)
+	}
+}
+
+func TestStoreControlAcceptsBoundRoleAdministrator(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 40, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b", "agent/c"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/admin", RoleMachineID: "machine-b", Capabilities: CapAdmin},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", "role/admin", "agent/b", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	event, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/c", Capabilities: CapReceive}, IdempotencyKey: "role-admin-control", Now: now})
+	if err != nil {
+		t.Fatalf("bound role admin control: %v", err)
+	}
+	audit, err := store.ControlAudit(conversation.ID, "machine-b", "agent/b", now)
+	if err != nil || len(audit) != 1 || audit[0].ID != event.ID {
+		t.Fatalf("bound role admin audit=%#v err=%v", audit, err)
 	}
 }
 

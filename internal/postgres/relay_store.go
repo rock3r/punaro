@@ -245,7 +245,7 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 // ApplyControl mutates membership through the same explicit, server-authorized
 // control plane as SQLite. Controls never enter mail_messages or deliveries.
 func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
 		return relay.ControlEvent{}, false, relay.ErrForbidden
 	}
 	if _, err := uuid.Parse(input.ConversationID); err != nil {
@@ -285,13 +285,12 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.ControlEvent{}, false, errors.New("control retry state is unavailable")
 	}
-	var actorCapabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
-	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&relay.CapAdmin == 0 {
-		return relay.ControlEvent{}, false, relay.ErrForbidden
-	}
+	actorCapabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
 	if err != nil {
 		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
+	}
+	if actorCapabilities&relay.CapAdmin == 0 {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
 	}
 	var previous relay.Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.Member.Endpoint).Scan(&previous)
@@ -309,7 +308,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			return relay.ControlEvent{}, false, relay.ErrForbidden
 		}
 		var members int
-		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid`, input.ConversationID).Scan(&members); err != nil {
+		if err := tx.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid) + (SELECT count(*) FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid)`, input.ConversationID).Scan(&members); err != nil {
 			return relay.ControlEvent{}, false, errors.New("conversation member count is unavailable")
 		}
 		if members >= 256 {
@@ -318,7 +317,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	}
 	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
 		var remaining int
-		if err := tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0 AND endpoint<>$3`, input.ConversationID, relay.CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
+		if err := tx.QueryRowContext(context.Background(), `SELECT (SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0 AND endpoint<>$3) + (SELECT count(*) FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2)<>0)`, input.ConversationID, relay.CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
 			return relay.ControlEvent{}, false, errors.New("remaining admin state is unavailable")
 		}
 		if remaining == 0 {
@@ -389,13 +388,12 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 	if err := postgresEndpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
 		return nil, err
 	}
-	var capabilities relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, actorEndpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapAdmin == 0 {
-		return nil, relay.ErrForbidden
-	}
+	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
 	if err != nil {
 		return nil, errors.New("control audit authorization is unavailable")
+	}
+	if capabilities&relay.CapAdmin == 0 {
+		return nil, relay.ErrForbidden
 	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE conversation_id=$1::uuid ORDER BY created_at DESC,id DESC LIMIT 100`, conversationID)
 	if err != nil {
@@ -1231,7 +1229,7 @@ func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint
 	if err != nil {
 		return 0, errors.New("session authorization is unavailable")
 	}
-	if capabilities < 0 || capabilities > int64(relay.CapSend|relay.CapReceive|relay.CapAdmin) {
+	if capabilities < 0 || capabilities > int64(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) {
 		return 0, errors.New("session authorization is malformed")
 	}
 	return relay.Capability(capabilities), nil

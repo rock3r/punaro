@@ -532,13 +532,12 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return ControlEvent{}, false, fmt.Errorf("read control idempotency key: %w", err)
 	}
-	var actorCapabilities Capability
-	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, input.ActorEndpoint).Scan(&actorCapabilities)
-	if errors.Is(err, sql.ErrNoRows) || actorCapabilities&CapAdmin == 0 {
-		return ControlEvent{}, false, ErrForbidden
-	}
+	actorCapabilities, err := sessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
 	if err != nil {
 		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
+	}
+	if actorCapabilities&CapAdmin == 0 {
+		return ControlEvent{}, false, ErrForbidden
 	}
 	if input.Operation == ControlUpsertMember {
 		var previous Capability
@@ -551,7 +550,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, err
 			}
 			var members int
-			if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=?", input.ConversationID).Scan(&members); err != nil {
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=?)", input.ConversationID, input.ConversationID).Scan(&members); err != nil {
 				return ControlEvent{}, false, fmt.Errorf("count conversation members: %w", err)
 			}
 			if members >= 256 {
@@ -560,7 +559,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 		}
 		if err == nil && previous&CapAdmin != 0 && input.Member.Capabilities&CapAdmin == 0 {
 			var remaining int
-			if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=? AND (capabilities & ?) != 0)", input.ConversationID, CapAdmin, input.Member.Endpoint, input.ConversationID, CapAdmin).Scan(&remaining); err != nil {
 				return ControlEvent{}, false, fmt.Errorf("count remaining admins: %w", err)
 			}
 			if remaining == 0 {
@@ -597,7 +596,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 		}
 		if targetCapabilities&CapAdmin != 0 {
 			var remaining int
-			if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapAdmin, input.Member.Endpoint).Scan(&remaining); err != nil {
+			if err := tx.QueryRowContext(context.Background(), "SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0 AND endpoint != ?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=? AND (capabilities & ?) != 0)", input.ConversationID, CapAdmin, input.Member.Endpoint, input.ConversationID, CapAdmin).Scan(&remaining); err != nil {
 				return ControlEvent{}, false, fmt.Errorf("count remaining admins: %w", err)
 			}
 			if remaining == 0 {
@@ -649,13 +648,12 @@ func (s *Store) ControlAudit(conversationID, machineID, actorEndpoint string, no
 	if err := endpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
 		return nil, err
 	}
-	var capabilities Capability
-	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, actorEndpoint).Scan(&capabilities)
-	if errors.Is(err, sql.ErrNoRows) || capabilities&CapAdmin == 0 {
-		return nil, ErrForbidden
-	}
+	capabilities, err := sessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
 	if err != nil {
 		return nil, fmt.Errorf("authorize control audit: %w", err)
+	}
+	if capabilities&CapAdmin == 0 {
+		return nil, ErrForbidden
 	}
 	rows, err := tx.QueryContext(context.Background(), "SELECT id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM conversation_controls WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 100", conversationID)
 	if err != nil {
