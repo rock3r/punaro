@@ -167,7 +167,11 @@ func TestInvokeCrashLeasesAreBounded(t *testing.T) {
 	if err != nil || len(recovery) != 1 || recovery[0].Fence != invocation.Fence || !recovery[0].RecoveryOnly {
 		t.Fatalf("recovery=%#v err=%v", recovery, err)
 	}
-	if err := store.ReportInvocation("recipient-machine", recovery[0].ID, recovery[0].LeaseToken, recovery[0].LeaseGeneration, false, now.Add(8*time.Second)); err != nil {
+	replay, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(8500*time.Millisecond), time.Second, 10)
+	if err != nil || len(replay) != 1 || !replay[0].RecoveryOnly {
+		t.Fatalf("replay=%#v err=%v", replay, err)
+	}
+	if err := store.ReportInvocation("recipient-machine", replay[0].ID, replay[0].LeaseToken, replay[0].LeaseGeneration, false, now.Add(8500*time.Millisecond)); err != nil {
 		t.Fatal(err)
 	}
 	if leased, err := store.LeaseInvocations("recipient-machine", "adapter", now.Add(9*time.Second), time.Second, 10); err != nil || len(leased) != 0 {

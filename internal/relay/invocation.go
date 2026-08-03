@@ -396,7 +396,7 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 			return nil, err
 		}
 	}
-	rows, err := tx.QueryContext(context.Background(), `SELECT invocation.id,invocation.conversation_id,invocation.target_endpoint,invocation.target_machine_id,invocation.fence,invocation.lease_generation,invocation.attempts,invocation.lease_until FROM invocations AS invocation
+	rows, err := tx.QueryContext(context.Background(), `SELECT invocation.id,invocation.conversation_id,invocation.target_endpoint,invocation.target_machine_id,invocation.fence,invocation.lease_generation,invocation.attempts,invocation.recovery_only,invocation.lease_until FROM invocations AS invocation
 		JOIN endpoints AS endpoint ON endpoint.endpoint=invocation.target_endpoint AND endpoint.machine_id=invocation.target_machine_id
 		WHERE invocation.target_machine_id=? AND invocation.status=? AND invocation.not_before<=? AND (invocation.lease_until IS NULL OR invocation.lease_until<=? OR (invocation.lease_machine_id=? AND invocation.lease_consumer_id=?))
 		AND (endpoint.ownership_generation=invocation.target_ownership_generation OR (invocation.lease_machine_id=? AND invocation.lease_consumer_id=? AND invocation.lease_until>?))
@@ -409,11 +409,13 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	for rows.Next() {
 		var invocation Invocation
 		var attempts int
+		var recoveryOnly bool
 		var priorLeaseUntil sql.NullInt64
-		if err := rows.Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.LeaseGeneration, &attempts, &priorLeaseUntil); err != nil {
+		if err := rows.Scan(&invocation.ID, &invocation.ConversationID, &invocation.TargetEndpoint, &invocation.TargetMachineID, &invocation.Fence, &invocation.LeaseGeneration, &attempts, &recoveryOnly, &priorLeaseUntil); err != nil {
 			return nil, fmt.Errorf("read invocation: %w", err)
 		}
-		if !priorLeaseUntil.Valid || priorLeaseUntil.Int64 <= now.UnixMilli() {
+		freshLease := !priorLeaseUntil.Valid || priorLeaseUntil.Int64 <= now.UnixMilli()
+		if freshLease {
 			// A fresh lease, and a lease recovered after an adapter crash, each
 			// consume one bounded runtime-start attempt. Releasing a still-live
 			// lease to the same adapter does not.
@@ -422,11 +424,12 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 				// boundary before its adapter crashed. Reissue its stable fence only
 				// for journal/outcome recovery; the adapter must never start work
 				// from this lease when it lacks a durable accepted record.
-				invocation.RecoveryOnly = true
+				recoveryOnly = true
 			} else {
 				attempts++
 			}
 		}
+		invocation.RecoveryOnly = recoveryOnly
 		token, err := randomToken()
 		if err != nil {
 			return nil, err
@@ -435,11 +438,17 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 		invocation.LeaseGeneration++
 		invocation.LeaseToken = token
 		invocation.LeaseUntil = now.Add(ttl).UTC()
-		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET attempts=?,last_activity_at=?,lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, attempts, now.UnixMilli(), machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
+		if freshLease {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET attempts=?,last_activity_at=?,recovery_only=?,lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, attempts, now.UnixMilli(), recoveryOnly, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
+				return nil, fmt.Errorf("lease invocation: %w", err)
+			}
+		} else if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET lease_machine_id=?,lease_consumer_id=?,lease_token=?,lease_generation=?,lease_until=? WHERE id=?`, machineID, consumerID, token, invocation.LeaseGeneration, invocation.LeaseUntil.UnixMilli(), invocation.ID); err != nil {
 			return nil, fmt.Errorf("lease invocation: %w", err)
 		}
-		if err := recordInvocationAudit(tx, invocation.ID, "leased", now); err != nil {
-			return nil, err
+		if freshLease {
+			if err := recordInvocationAudit(tx, invocation.ID, "leased", now); err != nil {
+				return nil, err
+			}
 		}
 		invocations = append(invocations, invocation)
 	}
@@ -640,6 +649,7 @@ func (s *Store) ensureInvocationSchema() error {
 			lease_consumer_id TEXT,
 			lease_token TEXT,
 			lease_generation INTEGER NOT NULL DEFAULT 0,
+			recovery_only INTEGER NOT NULL DEFAULT 0,
 			target_ownership_generation INTEGER NOT NULL DEFAULT 0,
 			lease_until INTEGER,
 			last_activity_at INTEGER NOT NULL DEFAULT 0,
@@ -674,6 +684,9 @@ func (s *Store) ensureInvocationSchema() error {
 		return err
 	}
 	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "last_activity_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := ensureSQLiteColumn(context.Background(), s.db, "invocations", "recovery_only", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
