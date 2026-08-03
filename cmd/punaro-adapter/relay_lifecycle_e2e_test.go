@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -132,9 +133,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	// then let the durable forwarded journal state retry only the acknowledgement.
 	e2eEventually(t, 75*time.Second, func() bool { return proxy.retryAcknowledged.Load() }, "restarted receiver did not retry its relay acknowledgement")
 
-	if err := e2eMailboxError(receiverMailboxState, "wait", "--for", receiverEndpoint, "--timeout", "8s", "--json"); err == nil {
-		t.Fatal("receiver received a duplicate local handoff after acknowledgement")
-	}
+	e2eExpectMailboxTimeout(t, receiverMailboxState, receiverEndpoint)
 }
 
 type e2eClaimResult struct {
@@ -406,6 +405,15 @@ func e2eMailboxError(state string, arguments ...string) error {
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	return command.Run()
+}
+
+func e2eExpectMailboxTimeout(t *testing.T, state, endpoint string) {
+	t.Helper()
+	err := e2eMailboxError(state, "wait", "--for", endpoint, "--timeout", "8s", "--json")
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 2 {
+		t.Fatal("receiver mailbox did not report the expected empty-delivery timeout")
+	}
 }
 
 func e2eRun(t *testing.T, directory string, environment []string, binary string, arguments ...string) []byte {
