@@ -112,18 +112,24 @@ func (d *Database) advertiseEndpoints(machineID string, authority relay.Principa
 			return relayDatabaseError(err, "advertise endpoint")
 		}
 	}
-	// A normal advertisement renews only an already-live binding for this exact
-	// endpoint generation. A restarted or reclaimed endpoint must be bound
-	// explicitly, so stale role authority cannot be revived by advertisement.
-	for _, endpoint := range orderedEndpoints {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_role_bindings AS binding
-			SET lease_until=$1
-			FROM relay.mail_endpoints AS endpoint
-			WHERE binding.machine_id=$2 AND binding.session_endpoint=$3
-			  AND binding.lease_until>$4 AND endpoint.endpoint=$3
-			  AND endpoint.machine_id=$2 AND endpoint.lease_until=$1
-			  AND binding.ownership_generation=endpoint.ownership_generation`, until, machineID, endpoint, now.UTC()); err != nil {
-			return relayDatabaseError(err, "renew durable role binding")
+	var roleBindingsAvailable bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_bindings') IS NOT NULL`).Scan(&roleBindingsAvailable); err != nil {
+		return relayDatabaseError(err, "inspect durable role bindings")
+	}
+	if roleBindingsAvailable {
+		// A normal advertisement renews only an already-live binding for this exact
+		// endpoint generation. A restarted or reclaimed endpoint must be bound
+		// explicitly, so stale role authority cannot be revived by advertisement.
+		for _, endpoint := range orderedEndpoints {
+			if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_role_bindings AS binding
+				SET lease_until=$1
+				FROM relay.mail_endpoints AS endpoint
+				WHERE binding.machine_id=$2 AND binding.session_endpoint=$3
+				  AND binding.lease_until>$4 AND endpoint.endpoint=$3
+				  AND endpoint.machine_id=$2 AND endpoint.lease_until=$1
+				  AND binding.ownership_generation=endpoint.ownership_generation`, until, machineID, endpoint, now.UTC()); err != nil {
+				return relayDatabaseError(err, "renew durable role binding")
+			}
 		}
 	}
 	var principalID, credentialLookupID any
