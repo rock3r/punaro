@@ -991,7 +991,8 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 			Endpoints: emptyMailCutoverDigest, Conversations: emptyMailCutoverDigest, Memberships: emptyMailCutoverDigest,
 			Roles: emptyMailCutoverDigest, RoleMemberships: emptyMailCutoverDigest, RoleBindings: emptyMailCutoverDigest,
 			Messages: emptyMailCutoverDigest, Deliveries: emptyMailCutoverDigest, RecipientCursors: emptyMailCutoverDigest,
-			MessageIdempotency: emptyMailCutoverDigest, ConversationIdempotency: emptyMailCutoverDigest, RequestNonces: emptyMailCutoverDigest,
+			MessageIdempotency: emptyMailCutoverDigest, ConversationIdempotency: emptyMailCutoverDigest,
+			ControlEvents: emptyMailCutoverDigest, ControlIdempotency: emptyMailCutoverDigest, RequestNonces: emptyMailCutoverDigest,
 		},
 	}
 	canonicalManifest, _ := json.Marshal(manifest)
