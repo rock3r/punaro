@@ -25,6 +25,9 @@ import (
 )
 
 const maxMessageBodyBytes = 32 << 10
+
+// MaxActiveRolesPerSession bounds role-derived lease identities below SQLite's
+// parameter limit while keeping one session's work bounded.
 const MaxActiveRolesPerSession = 128
 
 var (

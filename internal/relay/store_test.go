@@ -316,6 +316,40 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	}
 }
 
+func TestStoreBoundsActiveRolesPerSession(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-creator", []string{"agent/creator/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-owner", []string{"agent/owner/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	members := []Member{{Endpoint: "agent/creator/session", Capabilities: CapSend | CapReceive | CapAdmin}}
+	for slot := 0; slot <= MaxActiveRolesPerSession; slot++ {
+		members = append(members, Member{
+			Role:          fmt.Sprintf("role/bound-%03d", slot),
+			RoleMachineID: "machine-owner",
+			Capabilities:  CapReceive,
+		})
+	}
+	if _, err := store.CreateConversation("agent/creator/session", members, now); err != nil {
+		t.Fatal(err)
+	}
+	for slot := 0; slot < MaxActiveRolesPerSession; slot++ {
+		if err := store.BindRoleToSession("machine-owner", fmt.Sprintf("role/bound-%03d", slot), "agent/owner/session", now, time.Minute); err != nil {
+			t.Fatalf("bind role %d: %v", slot, err)
+		}
+	}
+	if err := store.BindRoleToSession("machine-owner", fmt.Sprintf("role/bound-%03d", MaxActiveRolesPerSession), "agent/owner/session", now, time.Minute); !errors.Is(err, ErrConflict) {
+		t.Fatalf("over-bound session err=%v, want ErrConflict", err)
+	}
+}
+
 func TestStoreKeepsRoleDeliveryKeysDistinctFromEndpointNames(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
