@@ -127,6 +127,8 @@ BEGIN
     CROSS JOIN LATERAL aclexplode(coalesce(relation.relacl, acldefault(CASE WHEN relation.relkind = 'S' THEN 'S'::"char" ELSE 'r'::"char" END, relation.relowner))) privilege
     WHERE relation.relowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_owner')
       AND namespace.nspname NOT IN ('auth', 'relay', 'attachment', 'brain', 'audit', 'jobs', 'public')
+      AND namespace.nspname !~ '^pg_'
+      AND namespace.nspname <> 'information_schema'
       AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
       AND privilege.grantee = 0
   ) THEN
@@ -187,6 +189,16 @@ BEGIN
       AND procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
   ) THEN
     RAISE EXCEPTION 'refusing to rotate punaro_app while an application-owned trigger function remains; remove the trigger and rerun bootstrap';
+  END IF;
+  IF EXISTS (
+    SELECT 1
+    FROM pg_depend dependency
+    JOIN pg_proc procedure ON procedure.oid = dependency.refobjid
+    WHERE dependency.refclassid = 'pg_proc'::regclass
+      AND dependency.classid IN ('pg_constraint'::regclass, 'pg_attrdef'::regclass, 'pg_class'::regclass)
+      AND procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = 'punaro_app')
+  ) THEN
+    RAISE EXCEPTION 'refusing to rotate punaro_app while a stored expression references an application-owned function; remove the dependency and rerun bootstrap';
   END IF;
   IF EXISTS (
     SELECT 1
