@@ -211,6 +211,17 @@ func TestRemoteMCPE2ECandidateCommitMustMatchCheckout(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPE2EDiscoveryMetadataRejectsDuplicateMembers(t *testing.T) {
+	valid := []byte(`{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"]}`)
+	if !validRemoteMCPE2EDiscoveryMetadata(valid, "https://mcp.example.test/mcp", "https://auth.example.test") {
+		t.Fatal("valid discovery metadata rejected")
+	}
+	duplicate := []byte(`{"resource":"https://other.example.test/mcp","resource":"https://mcp.example.test/mcp","authorization_servers":["https://auth.example.test"]}`)
+	if validRemoteMCPE2EDiscoveryMetadata(duplicate, "https://mcp.example.test/mcp", "https://auth.example.test") {
+		t.Fatal("duplicate discovery metadata accepted")
+	}
+}
+
 func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 	var config remoteMCPE2EConfig
 	var insufficientScopeAuthorized, validForbidden bool
@@ -263,6 +274,10 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 			return
 		}
 		if token == config.Tokens.Valid && request.Header.Get("Mcp-Session-Id") != "fixture-valid-session" || token == config.Tokens.InsufficientScope && request.Header.Get("Mcp-Session-Id") != "fixture-insufficient-scope-session" {
+			response.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if request.Header.Get("Mcp-Protocol-Version") != config.ProtocolVersion {
 			response.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -487,11 +502,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	if metadata.Status != http.StatusOK || !strings.Contains(metadata.Header.Get("Content-Type"), "application/json") || metadata.Header.Get("Cache-Control") != "no-store" {
 		t.Fatal("protected-resource discovery did not return the required metadata response")
 	}
-	var document struct {
-		Resource             string   `json:"resource"`
-		AuthorizationServers []string `json:"authorization_servers"`
-	}
-	if json.Unmarshal(metadata.Body, &document) != nil || document.Resource != config.Resource || !slices.Contains(document.AuthorizationServers, config.AuthorizationServer) {
+	if !validRemoteMCPE2EDiscoveryMetadata(metadata.Body, config.Resource, config.AuthorizationServer) {
 		t.Fatal("protected-resource discovery metadata is invalid")
 	}
 
@@ -533,16 +544,16 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		[]byte(`{"jsonrpc":"2.0","id":{},"method":"tools/list"}`),
 		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","extra":true}`),
 	} {
-		malformed := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, malformedRequest)
+		malformed := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, malformedRequest)
 		remoteMCPE2ERedacted(t, malformed, config.sensitiveValues())
 		remoteMCPE2ERequireJSONRPCFailure(t, malformed)
 	}
 
-	authorized := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
+	authorized := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.Valid, validSessionID, config.ProtocolVersion, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
 	remoteMCPE2ERequireJSONRPCSuccess(t, authorized, config.AuthorizedTool.ExpectedResult)
 
 	insufficientScopeSessionID := remoteMCPE2EInitializeSession(t, client, config, config.Tokens.InsufficientScope)
-	insufficientScopeAuthorized := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, config.Tokens.InsufficientScope, insufficientScopeSessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
+	insufficientScopeAuthorized := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, config.Tokens.InsufficientScope, insufficientScopeSessionID, config.ProtocolVersion, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.AuthorizedTool.Name, "arguments": config.AuthorizedTool.Arguments}))
 	remoteMCPE2ERequireJSONRPCSuccess(t, insufficientScopeAuthorized, config.AuthorizedTool.ExpectedResult)
 	for _, probe := range []struct {
 		token     string
@@ -551,7 +562,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 		{token: config.Tokens.InsufficientScope, sessionID: insufficientScopeSessionID},
 		{token: config.Tokens.Valid, sessionID: validSessionID},
 	} {
-		forbidden := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, probe.token, probe.sessionID, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.ForbiddenTool.Name, "arguments": config.ForbiddenTool.Arguments}))
+		forbidden := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, probe.token, probe.sessionID, config.ProtocolVersion, remoteMCPE2ERequest(t, "tools/call", map[string]any{"name": config.ForbiddenTool.Name, "arguments": config.ForbiddenTool.Arguments}))
 		remoteMCPE2ERequireStatus(t, forbidden, config.ForbiddenTool.ExpectedStatus)
 		remoteMCPE2ERedacted(t, forbidden, config.sensitiveValues())
 		remoteMCPE2ERequireJSONRPCFailure(t, forbidden)
@@ -561,6 +572,17 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	remoteMCPE2ERequireStatus(t, redacted, http.StatusUnauthorized)
 	remoteMCPE2ERedacted(t, redacted, config.sensitiveValues())
 	t.Logf("remote MCP release-candidate E2E evidence passed for candidate_commit=%s", config.CandidateCommit)
+}
+
+func validRemoteMCPE2EDiscoveryMetadata(raw []byte, expectedResource, expectedAuthorizationServer string) bool {
+	if !validJSONObject(raw, maxJSONRPCDepth) {
+		return false
+	}
+	var document struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	return json.Unmarshal(raw, &document) == nil && document.Resource == expectedResource && slices.Contains(document.AuthorizationServers, expectedAuthorizationServer)
 }
 
 func remoteMCPE2EMetadataURL(t *testing.T, resource string) string {
@@ -599,6 +621,10 @@ func remoteMCPE2EDo(t *testing.T, client *http.Client, method, endpoint, token s
 }
 
 func remoteMCPE2EDoWithSession(t *testing.T, client *http.Client, method, endpoint, token, sessionID string, body []byte) remoteMCPE2EResponse {
+	return remoteMCPE2EDoWithMCPContext(t, client, method, endpoint, token, sessionID, "", body)
+}
+
+func remoteMCPE2EDoWithMCPContext(t *testing.T, client *http.Client, method, endpoint, token, sessionID, protocolVersion string, body []byte) remoteMCPE2EResponse {
 	t.Helper()
 	request, err := http.NewRequestWithContext(t.Context(), method, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -613,6 +639,9 @@ func remoteMCPE2EDoWithSession(t *testing.T, client *http.Client, method, endpoi
 	}
 	if sessionID != "" {
 		request.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	if protocolVersion != "" {
+		request.Header.Set("Mcp-Protocol-Version", protocolVersion)
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -671,7 +700,7 @@ func remoteMCPE2EInitializeSession(t *testing.T, client *http.Client, config rem
 	initialized := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, token, remoteMCPE2ERequestWithID(t, "remote-mcp-e2e-initialize", "initialize", map[string]any{"protocolVersion": config.ProtocolVersion, "capabilities": map[string]any{}, "clientInfo": map[string]string{"name": "punaro-remote-mcp-e2e", "version": "1"}}))
 	remoteMCPE2ERequireInitializeSuccess(t, initialized, config.ProtocolVersion)
 	sessionID := initialized.Header.Get("Mcp-Session-Id")
-	notification := remoteMCPE2EDoWithSession(t, client, http.MethodPost, config.Endpoint, token, sessionID, remoteMCPE2ENotification(t, "notifications/initialized", map[string]any{}))
+	notification := remoteMCPE2EDoWithMCPContext(t, client, http.MethodPost, config.Endpoint, token, sessionID, config.ProtocolVersion, remoteMCPE2ENotification(t, "notifications/initialized", map[string]any{}))
 	remoteMCPE2ERequireInitializedNotification(t, notification)
 	return sessionID
 }
