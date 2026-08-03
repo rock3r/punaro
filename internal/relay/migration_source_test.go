@@ -468,7 +468,6 @@ func TestMigrationBatchCarriesWorstCaseValidMessageBody(t *testing.T) {
 }
 
 func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
-	t.Skip("covered by the durable-role legacy cutover suite")
 	t.Parallel()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "relay.db")
@@ -489,7 +488,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -501,8 +500,17 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil || legacy.Phase != MigrationSourceActive || legacy.Fingerprint == "" {
 		t.Fatalf("legacy active manifest=%#v err=%v", legacy, err)
 	}
-	if _, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), legacy.Fingerprint, now.Add(time.Minute)); err == nil {
-		t.Fatal("legacy active source was prepared without the control-plane schema")
+	preparedLegacy, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), legacy.Fingerprint, now.Add(time.Minute))
+	if err != nil || preparedLegacy.Phase != MigrationSourcePrepared || preparedLegacy.Version != 1 {
+		t.Fatalf("legacy preparation=%#v err=%v", preparedLegacy, err)
+	}
+	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("prepared legacy control batch=%#v err=%v", controls, err)
+	}
+	legacy, err = AbortPreparedMigrationSource(ctx, path, preparedLegacy.EpochID, preparedLegacy.TargetIdentity, preparedLegacy.Fingerprint)
+	if err != nil || legacy.Phase != MigrationSourceActive || legacy.Version != 1 {
+		t.Fatalf("legacy preparation abort=%#v err=%v", legacy, err)
 	}
 
 	prepareLegacy := func(epoch string) {
@@ -536,7 +544,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil || len(batch.Rows) != 1 || !batch.Done {
 		t.Fatalf("legacy endpoint batch=%#v err=%v", batch, err)
 	}
-	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	controls, err = ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
 	if err != nil || len(controls.Rows) != 0 || !controls.Done {
 		t.Fatalf("legacy control batch=%#v err=%v", controls, err)
 	}
