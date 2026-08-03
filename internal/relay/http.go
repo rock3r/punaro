@@ -168,13 +168,15 @@ func (h *handler) listConversations(w http.ResponseWriter, machineID string, now
 }
 
 func (h *handler) notifications(w http.ResponseWriter, r *http.Request, session MachineSession) {
+	// Register before completing the WebSocket handshake so a publisher that
+	// observes a successful dial cannot lose its first wake hint to setup race.
+	client := h.notifier.Register(session.MachineID)
+	defer client.Close()
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled})
 	if err != nil {
 		return
 	}
 	defer func() { _ = connection.Close(websocket.StatusNormalClosure, "") }()
-	client := h.notifier.Register(session.MachineID)
-	defer client.Close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	authenticationExpired := make(chan struct{})
