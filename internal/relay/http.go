@@ -418,7 +418,21 @@ func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"invocations": leased})
+	allowed := leased[:0]
+	for _, invocation := range leased {
+		if h.auth.AllowsEndpoint(machineID, invocation.TargetEndpoint) {
+			allowed = append(allowed, invocation)
+			continue
+		}
+		// An enrollment scope may narrow after the server queued work. Never
+		// return process-start authority for an endpoint that is no longer in
+		// scope; release the just-acquired lease without exposing it to the host.
+		if err := invocations.ReportInvocation(machineID, invocation.ID, invocation.LeaseToken, invocation.LeaseGeneration, false, now); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invocations": allowed})
 }
 
 func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID, invocationID string, now time.Time) {
