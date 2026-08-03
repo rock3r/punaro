@@ -101,9 +101,10 @@ release command remains the authoritative deployed-candidate check.
 `candidate_commit` must match `git rev-parse HEAD` in the checkout that runs
 the command, and that checkout must have no changes (including untracked or
 ignored files), so release evidence cannot be attributed to another build or a
-modified test harness. The release target also rejects `GOFLAGS` build overlays,
-and the ordinary test target clears the remote-E2E environment variables before
-running its offline fixture.
+modified test harness. The release target also rejects `GOFLAGS` build overlays
+from either the environment or Go's persisted environment file, and the ordinary
+test target clears the remote-E2E environment variables before running its
+offline fixture.
 Record its CI job URL, exact command result, candidate commit, deployment image
 digest, approvers, residual risk, and rollback reference in the final
 release-evidence record under `docs/release-evidence/` only after the release

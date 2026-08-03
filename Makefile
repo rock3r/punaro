@@ -29,7 +29,7 @@ test-real-relay-e2e:
 
 remote-mcp-e2e:
 	@test -n "$${PUNARO_REMOTE_MCP_E2E_CONFIG:-}" || { printf '%s\n' 'set PUNARO_REMOTE_MCP_E2E_CONFIG to a private release-candidate config' >&2; exit 2; }
-	@case "$${GOFLAGS:-}" in *-overlay*) printf '%s\n' 'remote-mcp-e2e rejects GOFLAGS build overlays' >&2; exit 2;; esac
+	@case "$$(go env GOFLAGS)" in *-overlay*) printf '%s\n' 'remote-mcp-e2e rejects GOFLAGS build overlays' >&2; exit 2;; esac
 	PUNARO_REMOTE_MCP_E2E_LIVE=1 GOCACHE="$${GOCACHE:-/tmp/punaro-go-cache}" go test -tags=e2e ./internal/mcphttp -run '^TestRemoteMCPE2EReleaseCandidate$$' -count=1
 
 test-postgres:
