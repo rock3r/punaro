@@ -323,7 +323,7 @@ func TestStoreCreatesRoleBindingSessionIndex(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	var count int
-	if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='index' AND name='role_bindings_session'`).Scan(&count); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='role_bindings_session'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
