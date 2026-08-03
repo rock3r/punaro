@@ -56,7 +56,11 @@ func openPinnedInvocationExecutable(path string) (*os.File, error) {
 
 func trustedInvocationPathOwner(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	return ok && (stat.Uid == uint32(os.Geteuid()) || stat.Uid == 0)
+	if !ok {
+		return false
+	}
+	owner := int64(stat.Uid)
+	return owner == int64(os.Geteuid()) || owner == 0
 }
 
 func runPinnedInvocationExecutable(ctx context.Context, executable *os.File, invocation relay.Invocation) error {
