@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,7 +51,7 @@ func TestWindowsLoadConfigAllowsEnvironmentWithoutProfileRoot(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protectWindowsFixture(t, keyFile)
+	protectWindowsFixture(t, keyFile, false)
 	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
 	t.Setenv("PUNARO_MACHINE_ID", "environment-machine")
 	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
@@ -94,19 +95,17 @@ func setupWindowsProfile(t *testing.T) string {
 	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protectWindowsFixture(t, configDir)
-	protectWindowsFixture(t, keyFile)
-	protectWindowsFixture(t, profile)
+	protectWindowsFixture(t, configDir, true)
+	protectWindowsFixture(t, keyFile, false)
+	protectWindowsFixture(t, profile, false)
 	return profile
 }
 
-func protectWindowsFixture(t *testing.T, path string) {
+func protectWindowsFixture(t *testing.T, path string, directory bool) {
 	t.Helper()
-	user := os.Getenv("USERNAME")
-	if user == "" {
-		t.Fatal("Windows user name is unavailable")
-	}
-	command := exec.Command("icacls.exe", path, "/inheritance:r", "/grant:r", user+":(F)")
+	// Keep the fixture ACL identical to Protect-PunaroPath in install-client.ps1.
+	script := `$ErrorActionPreference = 'Stop'; $path = $args[0]; $directory = [bool]::Parse($args[1]); $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl = Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid); if ($directory) { $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit } else { $inheritance = [System.Security.AccessControl.InheritanceFlags]::None }; $rule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl`
+	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path, strconv.FormatBool(directory))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("protect test fixture: %v (%s)", err, output)
 	}
