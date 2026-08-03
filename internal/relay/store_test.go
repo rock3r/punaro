@@ -311,8 +311,8 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-reviewer", FromEndpoint: "agent/reviewer/second-session", Body: "role response", IdempotencyKey: "role-reconnect-response", Now: now.Add(3 * time.Second)}); err != nil {
 		t.Fatal(err)
 	}
-	if cursor, err := store.RecipientCursor("machine-reviewer", "agent/reviewer/second-session", conversation.ID, now.Add(3*time.Second)); err != nil || cursor != 2 {
-		t.Fatalf("durable role sender cursor=%d err=%v, want two", cursor, err)
+	if cursor, err := store.RecipientCursor("machine-reviewer", "agent/reviewer/second-session", conversation.ID, now.Add(3*time.Second)); err != nil || cursor != 1 {
+		t.Fatalf("durable role sender cursor=%d err=%v, want one until the self-role delivery is acknowledged", cursor, err)
 	}
 }
 

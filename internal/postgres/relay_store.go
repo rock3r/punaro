@@ -513,15 +513,7 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
-		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0
-		  AND NOT EXISTS (
-			SELECT 1 FROM relay.mail_role_bindings AS binding
-			JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
-			WHERE binding.role=membership.role AND binding.machine_id=$4
-			  AND binding.session_endpoint=$5 AND binding.lease_until>$6
-			  AND endpoint.machine_id=$4 AND endpoint.lease_until>$6
-			  AND endpoint.ownership_generation=binding.ownership_generation
-		)`, message.ID, message.ConversationID, relay.CapReceive, input.SenderMachineID, input.FromEndpoint, input.Now.UTC()); err != nil {
+		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0`, message.ID, message.ConversationID, relay.CapReceive); err != nil {
 			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
 		}
 	}
@@ -1129,31 +1121,19 @@ func postgresRoleBindingsAvailable(q queryer) (bool, error) {
 }
 
 func postgresAdvanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversationID string, now time.Time) error {
-	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
-	if err != nil {
+	if _, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now); err != nil {
 		return err
 	}
-	identities, err := postgresSessionRecipientIDs(tx, machineID, endpoint, generation, now)
-	if err != nil {
-		return err
+	var capabilities relay.Capability
+	err := tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
+		return nil
 	}
-	for _, identity := range identities {
-		var capabilities relay.Capability
-		var capabilityErr error
-		if role, isRole := postgresParseRoleRecipient(identity); isRole {
-			capabilityErr = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND role=$2`, conversationID, role).Scan(&capabilities)
-		} else {
-			capabilityErr = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, identity).Scan(&capabilities)
-		}
-		if errors.Is(capabilityErr, sql.ErrNoRows) || capabilities&relay.CapReceive == 0 {
-			continue
-		}
-		if capabilityErr != nil {
-			return errors.New("sender cursor authorization is unavailable")
-		}
-		if err := postgresAdvanceRecipientCursor(tx, identity, conversationID); err != nil {
-			return err
-		}
+	if err != nil {
+		return errors.New("sender cursor authorization is unavailable")
+	}
+	if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+		return err
 	}
 	return nil
 }

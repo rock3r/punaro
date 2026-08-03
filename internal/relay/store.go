@@ -848,9 +848,6 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 			_ = roleRows.Close()
 			return Message{}, false, err
 		}
-		if roleBoundToSession(tx, role, input.SenderMachineID, input.FromEndpoint, input.Now) {
-			continue
-		}
 		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, roleRecipient(role)); err != nil {
 			_ = roleRows.Close()
 			return Message{}, false, fmt.Errorf("create durable role delivery: %w", err)
@@ -1276,44 +1273,21 @@ func sessionRecipientIDs(tx *sql.Tx, machineID, endpoint string, generation int6
 }
 
 func advanceSessionCursors(tx *sql.Tx, machineID, endpoint, conversationID string, now time.Time) error {
-	generation, err := endpointOwnership(tx, endpoint, machineID, now)
-	if err != nil {
+	if _, err := endpointOwnership(tx, endpoint, machineID, now); err != nil {
 		return err
 	}
-	identities, err := sessionRecipientIDs(tx, machineID, endpoint, generation, now)
-	if err != nil {
-		return err
+	var capabilities Capability
+	err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", conversationID, endpoint).Scan(&capabilities)
+	if errors.Is(err, sql.ErrNoRows) || capabilities&CapReceive == 0 {
+		return nil
 	}
-	for _, identity := range identities {
-		var capabilities Capability
-		var capabilityErr error
-		if role, isRole := parseRoleRecipient(identity); isRole {
-			capabilityErr = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM role_memberships WHERE conversation_id = ? AND role = ?", conversationID, role).Scan(&capabilities)
-		} else {
-			capabilityErr = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id = ? AND endpoint = ?", conversationID, identity).Scan(&capabilities)
-		}
-		if errors.Is(capabilityErr, sql.ErrNoRows) || capabilities&CapReceive == 0 {
-			continue
-		}
-		if capabilityErr != nil {
-			return fmt.Errorf("authorize sender cursor: %w", capabilityErr)
-		}
-		if err := advanceRecipientCursor(tx, identity, conversationID); err != nil {
-			return err
-		}
+	if err != nil {
+		return fmt.Errorf("authorize sender cursor: %w", err)
+	}
+	if err := advanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+		return err
 	}
 	return nil
-}
-
-func roleBoundToSession(tx *sql.Tx, role, machineID, endpoint string, now time.Time) bool {
-	generation, err := endpointOwnership(tx, endpoint, machineID, now)
-	if err != nil {
-		return false
-	}
-	var found int
-	err = tx.QueryRowContext(context.Background(), `SELECT 1 FROM role_bindings WHERE role = ? AND machine_id = ?
-		AND session_endpoint = ? AND ownership_generation = ? AND lease_until > ?`, role, machineID, endpoint, generation, now.UnixMilli()).Scan(&found)
-	return err == nil && found == 1
 }
 
 func endpointActive(tx *sql.Tx, endpoint string, now time.Time) error {
