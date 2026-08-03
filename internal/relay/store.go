@@ -54,6 +54,9 @@ const (
 	CapReceive
 	// CapAdmin reserves room-administration authority for a live endpoint.
 	CapAdmin
+	// CapInvoke permits a content-free, server-authorized start handoff for an
+	// offline receiving member. Existing send/admin grants never imply it.
+	CapInvoke
 )
 
 // Member is an explicitly authorized conversation endpoint.
@@ -122,6 +125,55 @@ type CreateConversationInput struct {
 	CreatorEndpoint      string
 	Members              []Member
 	Now                  time.Time
+}
+
+// InvocationStatus is the durable state of a server-authorized runtime
+// handoff. A runtime receives no message body: it attaches the endpoint and
+// then obtains pending delivery through the normal path.
+type InvocationStatus string
+
+const (
+	// InvocationPending is queued or eligible for a retry lease.
+	InvocationPending InvocationStatus = "pending"
+	// InvocationAlreadyRunning records the idempotent no-op for an attached target.
+	InvocationAlreadyRunning InvocationStatus = "already_running"
+	// InvocationSucceeded records a host-local runtime acceptance.
+	InvocationSucceeded InvocationStatus = "succeeded"
+	// InvocationFailed records a terminal failure after bounded retry exhaustion.
+	InvocationFailed InvocationStatus = "failed"
+)
+
+// InvokeInput binds one caller retry domain to a receiving conversation member.
+// The target machine is derived from durable server state, never request JSON.
+type InvokeInput struct {
+	ConversationID  string
+	SenderMachineID string
+	FromEndpoint    string
+	TargetEndpoint  string
+	IdempotencyKey  string
+	Now             time.Time
+}
+
+// Invocation is content-free runtime work. Fence remains stable for every
+// retry so a host-local runtime can reject duplicate process starts.
+type Invocation struct {
+	ID              string           `json:"id"`
+	ConversationID  string           `json:"conversation_id"`
+	TargetEndpoint  string           `json:"target_endpoint"`
+	TargetMachineID string           `json:"target_machine_id"`
+	Fence           string           `json:"fence"`
+	Status          InvocationStatus `json:"status"`
+	LeaseToken      string           `json:"lease_token,omitempty"`
+	LeaseGeneration int64            `json:"lease_generation,omitempty"`
+	LeaseUntil      time.Time        `json:"lease_until,omitempty"`
+	RecoveryOnly    bool             `json:"recovery_only,omitempty"`
+}
+
+// InvocationAuditEvent is body-free durable evidence of authorization,
+// leasing, retry, and terminal handoff outcomes.
+type InvocationAuditEvent struct {
+	Action    string    `json:"action"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Store owns SQLite-backed relay state.
@@ -341,7 +393,7 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
-	if table != "endpoints" && table != "deliveries" && table != "relay_migration_control" {
+	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" {
 		return errors.New("invalid relay migration table")
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")") // #nosec G202 -- table is restricted above to fixed internal names.
@@ -394,6 +446,25 @@ func (s *Store) AdvertiseEndpoints(machineID string, endpoints []string, now tim
 		return err
 	}
 	defer rollback(tx)
+	// Read optional invocation state under the same SQLite transaction that
+	// changes endpoint ownership. A pre-transaction snapshot could miss a
+	// concurrently committed start lease and permit its owner to be replaced.
+	invocationSchemaExists, err := invocationSchemaExistsTx(tx)
+	if err != nil {
+		return err
+	}
+	if invocationSchemaExists {
+		for endpoint := range seen {
+			var handoffReserved bool
+			err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM invocations WHERE target_endpoint=? AND target_machine_id<>? AND ((status=? AND (lease_machine_id IS NOT NULL AND lease_until>? OR (lease_generation>0 AND last_activity_at>?))) OR (status=? AND not_before>?)))`, endpoint, machineID, InvocationPending, now.UnixMilli(), now.Add(-invocationPendingRetention).UnixMilli(), InvocationSucceeded, now.UnixMilli()).Scan(&handoffReserved)
+			if err != nil {
+				return fmt.Errorf("inspect live invocation lease: %w", err)
+			}
+			if handoffReserved {
+				return ErrConflict
+			}
+		}
+	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM endpoints WHERE machine_id = ? AND lease_until > ?`, machineID, now.UnixMilli())
 	if err != nil {
 		return fmt.Errorf("find attached endpoints: %w", err)
@@ -475,7 +546,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 	seen := make(map[string]struct{}, len(members))
 	creatorAdmin := false
 	for _, member := range members {
-		if !ValidEndpoint(member.Endpoint) || member.Capabilities == 0 || member.Capabilities & ^(CapSend|CapReceive|CapAdmin) != 0 {
+		if !ValidEndpoint(member.Endpoint) || member.Capabilities == 0 || member.Capabilities & ^(CapSend|CapReceive|CapAdmin|CapInvoke) != 0 {
 			return Conversation{}, fmt.Errorf("invalid conversation member")
 		}
 		if _, duplicate := seen[member.Endpoint]; duplicate {

@@ -99,6 +99,13 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.appendMessage(w, body, machineID, authority, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/invocations"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/invocations")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.requestInvocation(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/sender-validation"):
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/sender-validation")
 		if conversationID == "" || strings.Contains(conversationID, "/") {
@@ -108,6 +115,15 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.validateSender(w, body, machineID, conversationID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
+		h.leaseInvocations(w, body, machineID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/invocations/") && strings.HasSuffix(r.URL.Path, "/outcome"):
+		invocationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/invocations/"), "/outcome")
+		if invocationID == "" || strings.Contains(invocationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.reportInvocation(w, body, machineID, invocationID, now)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/deliveries/") && strings.HasSuffix(r.URL.Path, "/ack"):
 		deliveryID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/deliveries/"), "/ack")
 		if deliveryID == "" || strings.Contains(deliveryID, "/") {
@@ -124,7 +140,11 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 	var request struct {
 		FromEndpoint string `json:"from_endpoint"`
 	}
-	if err := decodeJSON(body, &request); err != nil || !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid sender validation request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}
@@ -336,6 +356,108 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 	writeJSON(w, status, message)
 }
 
+func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	invocations, ok := h.store.(InvocationBackend)
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		FromEndpoint   string `json:"from_endpoint"`
+		TargetEndpoint string `json:"target_endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid invocation request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	invocation, duplicate, err := invocations.RequestInvocation(InvokeInput{ConversationID: conversationID, SenderMachineID: machineID, FromEndpoint: request.FromEndpoint, TargetEndpoint: request.TargetEndpoint, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate || invocation.Status == InvocationAlreadyRunning {
+		status = http.StatusOK
+	}
+	if !duplicate && invocation.Status == InvocationPending && h.auth.AllowsEndpoint(invocation.TargetMachineID, invocation.TargetEndpoint) {
+		// This only accelerates the adapter's durable invocation lease. As with a
+		// message wake, loss or duplication of the hint cannot change the start
+		// decision and carries no control body.
+		h.notifier.Publish(invocation.TargetMachineID, invocation.ConversationID, 1)
+	}
+	writeJSON(w, status, invocation)
+}
+
+func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	invocations, ok := h.store.(InvocationBackend)
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		ConsumerID string `json:"consumer_id"`
+		Limit      int    `json:"limit"`
+	}
+	if err := decodeJSON(body, &request); err != nil || !ValidRequestToken(request.ConsumerID) {
+		writeError(w, http.StatusBadRequest, "invalid invocation lease request")
+		return
+	}
+	if request.Limit == 0 {
+		request.Limit = 50
+	}
+	leased, err := invocations.LeaseInvocations(machineID, request.ConsumerID, now, h.deliveryLeaseTTL, request.Limit)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	allowed := leased[:0]
+	for _, invocation := range leased {
+		if h.auth.AllowsEndpoint(machineID, invocation.TargetEndpoint) {
+			allowed = append(allowed, invocation)
+			continue
+		}
+		// An enrollment scope may narrow after the server queued work. Never
+		// return process-start authority for an endpoint that is no longer in
+		// scope. This is terminal policy rejection, not a runtime failure, so it
+		// must not consume the bounded runtime retry budget.
+		if err := invocations.RejectInvocation(machineID, invocation.ID, invocation.LeaseToken, invocation.LeaseGeneration, now); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invocations": allowed})
+}
+
+func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID, invocationID string, now time.Time) {
+	invocations, ok := h.store.(InvocationBackend)
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		LeaseToken      string `json:"lease_token"`
+		LeaseGeneration int64  `json:"lease_generation"`
+		Accepted        bool   `json:"accepted"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid invocation outcome")
+		return
+	}
+	if err := invocations.ReportInvocation(machineID, invocationID, request.LeaseToken, request.LeaseGeneration, request.Accepted, now); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
 	var request struct {
 		Endpoint       string `json:"endpoint"`
@@ -421,6 +543,8 @@ func parseCapabilities(values []string) (Capability, error) {
 			capabilities |= CapReceive
 		case "admin":
 			capabilities |= CapAdmin
+		case "invoke":
+			capabilities |= CapInvoke
 		default:
 			return 0, fmt.Errorf("unknown capability")
 		}

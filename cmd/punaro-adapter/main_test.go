@@ -39,6 +39,16 @@ func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
 	}
 }
 
+func TestParseInvokeArgsRequiresExplicitContentFreeTargetAndRetryKey(t *testing.T) {
+	if _, err := parseInvokeArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b"}); err == nil {
+		t.Fatal("invoke without idempotency key was accepted")
+	}
+	request, err := parseInvokeArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b", "--idempotency-key", "invoke-1"})
+	if err != nil || request.conversationID != "conversation-1" || request.fromEndpoint != "agent/a" || request.targetEndpoint != "agent/b" || request.idempotencyKey != "invoke-1" {
+		t.Fatalf("invoke request did not parse: %#v err=%v", request, err)
+	}
+}
+
 func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
 	t.Setenv("PUNARO_MACHINE_ID", "machine-a")

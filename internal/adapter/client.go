@@ -190,6 +190,27 @@ func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.D
 	return response.Deliveries, err
 }
 
+// LeaseInvocations obtains content-free, server-authorized local runtime work.
+func (c *HTTPRelayClient) LeaseInvocations(ctx context.Context) ([]relay.Invocation, error) {
+	var response struct {
+		Invocations []relay.Invocation `json:"invocations"`
+	}
+	// A runtime handoff can take the full invocation timeout. Claim only one
+	// record per sync so queued work never burns leases while waiting locally.
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/invocations/lease", map[string]any{"consumer_id": c.consumerID, "limit": 1}, &response)
+	return response.Invocations, err
+}
+
+// ReportInvocation records the host-local runtime outcome using the relay
+// lease fence. A failed report leaves the durable handoff for retry.
+func (c *HTTPRelayClient) ReportInvocation(ctx context.Context, invocation relay.Invocation, accepted bool) error {
+	if strings.TrimSpace(invocation.ID) == "" || !relay.ValidRequestToken(invocation.LeaseToken) || invocation.LeaseGeneration < 1 {
+		return fmt.Errorf("invocation lease is required")
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/invocations/"+url.PathEscape(invocation.ID)+"/outcome", map[string]any{"lease_token": invocation.LeaseToken, "lease_generation": invocation.LeaseGeneration, "accepted": accepted}, nil)
+	return err
+}
+
 // CreateConversation bootstraps an explicit, membership-scoped room from an
 // attached local endpoint. The relay still verifies endpoint ownership.
 func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, idempotencyKey string) (relay.Conversation, error) {
@@ -216,6 +237,9 @@ func capabilityNames(capabilities relay.Capability) []string {
 	if capabilities&relay.CapAdmin != 0 {
 		result = append(result, "admin")
 	}
+	if capabilities&relay.CapInvoke != 0 {
+		result = append(result, "invoke")
+	}
 	return result
 }
 
@@ -232,6 +256,17 @@ func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint
 		return message, &relayHTTPStatusError{status: status, err: err}
 	}
 	return message, nil
+}
+
+// Invoke requests a body-free server-authorized handoff for an offline
+// receiving member. The target machine and pending work are derived server-side.
+func (c *HTTPRelayClient) Invoke(ctx context.Context, conversationID, fromEndpoint, targetEndpoint, idempotencyKey string) (relay.Invocation, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" || strings.TrimSpace(targetEndpoint) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.Invocation{}, fmt.Errorf("conversation, invoking endpoint, target endpoint, and idempotency key are required")
+	}
+	var invocation relay.Invocation
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/invocations", map[string]any{"from_endpoint": fromEndpoint, "target_endpoint": targetEndpoint}, idempotencyKey, &invocation)
+	return invocation, err
 }
 
 // ValidateSender performs an authenticated, side-effect-free check that an
