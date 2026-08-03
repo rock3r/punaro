@@ -627,6 +627,10 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil || strings.Contains(string(body), `"control_events"`) || strings.Contains(string(body), `"control_idempotency"`) {
 		t.Fatalf("parent v3 manifest changed body=%s err=%v", body, err)
 	}
+	controls, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
+	if err != nil || len(controls.Rows) != 0 || !controls.Done {
+		t.Fatalf("parent v3 control batch=%#v err=%v", controls, err)
+	}
 	aborted, err := AbortPreparedMigrationSource(ctx, path, epoch, target, active.Fingerprint)
 	if err != nil || aborted.Version != 2 || aborted.Phase != MigrationSourceActive {
 		t.Fatalf("parent v3 abort=%#v err=%v", aborted, err)

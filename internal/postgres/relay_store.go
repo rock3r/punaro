@@ -269,6 +269,13 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if err := postgresLockSessionRoleBindings(tx, input.ActorMachineID, input.ActorEndpoint, input.Now); err != nil {
 		return relay.ControlEvent{}, false, err
 	}
+	actorCapabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
+	}
+	if actorCapabilities&relay.CapAdmin == 0 {
+		return relay.ControlEvent{}, false, relay.ErrForbidden
+	}
 	requestHash := relay.ControlRequestHash(input)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT control_id::text,request_hash FROM relay.mail_conversation_control_idempotency WHERE machine_id=$1 AND key=$2`, input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -287,13 +294,6 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.ControlEvent{}, false, errors.New("control retry state is unavailable")
-	}
-	actorCapabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
-	if err != nil {
-		return relay.ControlEvent{}, false, errors.New("control actor authorization is unavailable")
-	}
-	if actorCapabilities&relay.CapAdmin == 0 {
-		return relay.ControlEvent{}, false, relay.ErrForbidden
 	}
 	var previous relay.Capability
 	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, input.ConversationID, input.Member.Endpoint).Scan(&previous)

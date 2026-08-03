@@ -1428,7 +1428,7 @@ func testPostgresMembershipControls(t *testing.T, app *Database) {
 		MachineID: adminMachine, IdempotencyKey: "postgres-control-conversation", CreatorEndpoint: adminEndpoint, Now: now,
 		Members: []relay.Member{
 			{Endpoint: adminEndpoint, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-			{Endpoint: memberEndpoint, Capabilities: relay.CapReceive},
+			{Endpoint: memberEndpoint, Capabilities: relay.CapReceive | relay.CapAdmin},
 		},
 	})
 	if err != nil {
@@ -1436,30 +1436,30 @@ func testPostgresMembershipControls(t *testing.T, app *Database) {
 	}
 	input := relay.ControlInput{
 		ConversationID: conversation.ID, ActorMachineID: adminMachine, ActorEndpoint: adminEndpoint,
-		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: memberEndpoint, Capabilities: relay.CapSend},
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: memberEndpoint, Capabilities: relay.CapSend | relay.CapAdmin},
 		IdempotencyKey: "postgres-control-upsert", Now: now.Add(time.Second),
 	}
 	event, duplicate, err := app.ApplyControl(input)
-	if err != nil || duplicate || event.Operation != relay.ControlUpsertMember || event.Member.Capabilities != relay.CapSend {
+	if err != nil || duplicate || event.Operation != relay.ControlUpsertMember || event.Member.Capabilities != relay.CapSend|relay.CapAdmin {
 		t.Fatalf("first control event=%#v duplicate=%t err=%v", event, duplicate, err)
 	}
 	replayed, duplicate, err := app.ApplyControl(input)
 	if err != nil || !duplicate || replayed != event {
 		t.Fatalf("replayed control event=%#v duplicate=%t err=%v, want original %#v", replayed, duplicate, err, event)
 	}
-	if _, _, err := app.ApplyControl(relay.ControlInput{
-		ConversationID: conversation.ID, ActorMachineID: memberMachine, ActorEndpoint: memberEndpoint,
-		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: memberEndpoint, Capabilities: relay.CapReceive},
-		IdempotencyKey: "postgres-control-forbidden", Now: now.Add(2 * time.Second),
-	}); !errors.Is(err, relay.ErrForbidden) {
-		t.Fatalf("non-admin control err=%v, want forbidden", err)
-	}
 	audit, err := app.ControlAudit(conversation.ID, adminMachine, adminEndpoint, now.Add(2*time.Second))
 	if err != nil || len(audit) != 1 || audit[0] != event {
 		t.Fatalf("control audit=%#v err=%v, want %#v", audit, err, event)
 	}
-	if _, err := app.ControlAudit(conversation.ID, memberMachine, memberEndpoint, now.Add(2*time.Second)); !errors.Is(err, relay.ErrForbidden) {
-		t.Fatalf("non-admin audit err=%v, want forbidden", err)
+	if _, _, err := app.ApplyControl(relay.ControlInput{
+		ConversationID: conversation.ID, ActorMachineID: memberMachine, ActorEndpoint: memberEndpoint,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: adminEndpoint, Capabilities: relay.CapSend | relay.CapReceive},
+		IdempotencyKey: "postgres-control-revoke-admin", Now: now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatalf("revoke admin control: %v", err)
+	}
+	if _, _, err := app.ApplyControl(input); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("revoked admin replay err=%v, want forbidden", err)
 	}
 }
 

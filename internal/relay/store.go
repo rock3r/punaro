@@ -514,6 +514,13 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if err := endpointOwnedBy(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
 		return ControlEvent{}, false, err
 	}
+	actorCapabilities, err := sessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
+	}
+	if actorCapabilities&CapAdmin == 0 {
+		return ControlEvent{}, false, ErrForbidden
+	}
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT control_id,request_hash FROM conversation_control_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -531,13 +538,6 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return ControlEvent{}, false, fmt.Errorf("read control idempotency key: %w", err)
-	}
-	actorCapabilities, err := sessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
-	if err != nil {
-		return ControlEvent{}, false, fmt.Errorf("authorize control actor: %w", err)
-	}
-	if actorCapabilities&CapAdmin == 0 {
-		return ControlEvent{}, false, ErrForbidden
 	}
 	if input.Operation == ControlUpsertMember {
 		var previous Capability

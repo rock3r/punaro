@@ -122,7 +122,7 @@ func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
 	}
 	conversation, err := store.CreateConversation("agent/a", []Member{
 		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
-		{Endpoint: "agent/b", Capabilities: CapReceive},
+		{Endpoint: "agent/b", Capabilities: CapReceive | CapAdmin},
 	}, now)
 	if err != nil {
 		t.Fatal(err)
@@ -140,11 +140,8 @@ func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
 	if err != nil || duplicate || !second.CreatedAt.After(first.CreatedAt) {
 		t.Fatalf("same-timestamp control=%#v duplicate=%v first=%#v err=%v", second, duplicate, first, err)
 	}
-	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/c"}, IdempotencyKey: "control-2", Now: now}); !errors.Is(err, ErrForbidden) {
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-c", ActorEndpoint: "agent/c", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/b"}, IdempotencyKey: "control-2", Now: now}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("non-admin control err=%v, want forbidden", err)
-	}
-	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/a"}, IdempotencyKey: "control-3", Now: now}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("last-admin removal err=%v, want conflict", err)
 	}
 	events, err := store.ControlAudit(conversation.ID, "machine-a", "agent/a", now)
 	if err != nil || len(events) != 2 || events[0].ID != second.ID || events[1].ID != first.ID {
@@ -153,6 +150,12 @@ func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
 	var messages int
 	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages").Scan(&messages); err != nil || messages != 0 {
 		t.Fatalf("control entered message plane: messages=%d err=%v", messages, err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive}, IdempotencyKey: "revoke-admin-a", Now: now}); err != nil {
+		t.Fatalf("revoke admin control: %v", err)
+	}
+	if _, _, err := store.ApplyControl(input); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("revoked admin replay err=%v, want forbidden", err)
 	}
 }
 
