@@ -12,8 +12,8 @@ PUNARO_REMOTE_MCP_E2E_CONFIG=/private/punaro/remote-mcp-e2e.json make remote-mcp
 ```
 
 The target fails when the configuration variable is unset. The tagged Go test
-skips without it only so ordinary developer test runs cannot accidentally touch
-a remote deployment.
+skips unless the target explicitly enables it, so ordinary developer and CI
+test runs execute the offline TLS harness but cannot touch a remote deployment.
 
 Keep the configuration outside the repository, readable only by the release
 operator, and never attach it to CI logs or the release record. Its shape is:

@@ -18,6 +18,7 @@ memory-client:
 
 test:
 	go test -covermode=atomic ./...
+	go test -tags=e2e ./internal/mcphttp
 
 test-race:
 	go test -race -count=1 ./...
@@ -28,7 +29,7 @@ test-real-relay-e2e:
 
 remote-mcp-e2e:
 	@test -n "$${PUNARO_REMOTE_MCP_E2E_CONFIG:-}" || { printf '%s\n' 'set PUNARO_REMOTE_MCP_E2E_CONFIG to a private release-candidate config' >&2; exit 2; }
-	GOCACHE="$${GOCACHE:-/tmp/punaro-go-cache}" go test -tags=e2e ./internal/mcphttp -run '^TestRemoteMCPE2EReleaseCandidate$$' -count=1
+	PUNARO_REMOTE_MCP_E2E_LIVE=1 GOCACHE="$${GOCACHE:-/tmp/punaro-go-cache}" go test -tags=e2e ./internal/mcphttp -run '^TestRemoteMCPE2EReleaseCandidate$$' -count=1
 
 test-postgres:
 	./scripts/test-postgres-integration.sh

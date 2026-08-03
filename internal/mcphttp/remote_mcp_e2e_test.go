@@ -24,6 +24,7 @@ import (
 
 const (
 	remoteMCPE2EConfigEnv   = "PUNARO_REMOTE_MCP_E2E_CONFIG"
+	remoteMCPE2ELiveEnv     = "PUNARO_REMOTE_MCP_E2E_LIVE"
 	maxRemoteMCPE2EConfig   = 64 << 10
 	maxRemoteMCPE2EResponse = 1 << 20
 )
@@ -67,9 +68,20 @@ type remoteMCPE2EResponse struct {
 }
 
 func TestRemoteMCPE2EReleaseCandidate(t *testing.T) {
+	if !remoteMCPE2ELiveEnabled(os.Getenv(remoteMCPE2ELiveEnv)) {
+		t.Skip("set PUNARO_REMOTE_MCP_E2E_LIVE=1 to run the deployed remote MCP release-candidate test")
+	}
 	config := loadRemoteMCPE2EConfig(t)
 	runRemoteMCPE2EReleaseCandidate(t, config)
 }
+
+func TestRemoteMCPE2ELiveActivationIsExplicit(t *testing.T) {
+	if !remoteMCPE2ELiveEnabled("1") || remoteMCPE2ELiveEnabled("") || remoteMCPE2ELiveEnabled("true") {
+		t.Fatal("remote MCP live activation is not explicit")
+	}
+}
+
+func remoteMCPE2ELiveEnabled(value string) bool { return value == "1" }
 
 func TestRemoteMCPE2EConfigRejectsIncompleteOrUnsafeInputs(t *testing.T) {
 	valid := []byte(`{
