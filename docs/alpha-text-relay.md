@@ -248,6 +248,39 @@ When the adapter receives its credentials from an external secret provider,
 run that provider's environment wrapper around the test command. A wake is a
 best-effort hint only; fetch/lease/ack polling is still authoritative.
 
+## Disposable two-client lifecycle smoke test
+
+For release-candidate validation on macOS, run the disposable smoke test from
+an otherwise unused GUI login:
+
+```sh
+make test-real-relay-e2e
+```
+
+It builds a temporary loopback `punarod`, installs two independent fresh client
+homes with the supported client installer, and runs the receiving adapter with
+an isolated copy of the installed LaunchAgent definition. Its test-only label,
+disposable-profile source, and installed temporary binary path are the only
+changes, so it can exercise the supported service lifecycle without colliding
+with or inheriting settings from an operator's adapter in the same GUI login.
+The test creates and sends a conversation message,
+proves an enrolled but unauthorized client cannot lease the receiver endpoint,
+waits for and claims/acknowledges the local mailbox delivery, faults the first
+relay acknowledgement, restarts the installed receiver service, and verifies
+the durable retry completes after the relay's bounded lease-recovery window
+without another local handoff. The relay, client keys, mailbox state, and
+message input are generated inside a temporary directory and removed at
+completion. It prints neither their values nor mailbox contents.
+
+The test's isolated LaunchAgent carries the path to its disposable profile; it
+does not alter the user's LaunchAgent environment. The installer first creates
+an HTTPS relay profile; the test then redirects only that disposable profile to
+its private loopback relay proxy. This does not relax production installation
+or trust requirements.
+It never stops or replaces an operator's installed adapter. It is intentionally
+not a CI job: it exercises the actual local service manager and is independent
+of any deployment hostname, credentials, ingress, or operator topology.
+
 ## Telegram gateway
 
 The separately enrolled `punaro-telegram` process is described in the
