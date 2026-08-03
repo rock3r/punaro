@@ -55,6 +55,8 @@ jobs:
         run: ./scripts/verify-deployment-files.sh && ./scripts/verify-postgres-compose.sh && docker compose -f docker-compose.postgres-test.yml config --quiet
       - name: Build the reviewed container context
         run: docker build --tag punaro:ci .
+      - name: Exercise production Compose bootstrap
+        run: ./scripts/test-production-compose-bootstrap.sh
       - name: Verify container command set
         run: sh scripts/verify-container-binaries.sh
       - name: Smoke explicit container role

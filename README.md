@@ -78,6 +78,13 @@ docker compose up --build
 It deliberately publishes no port and does not load `.env`.  It is not a
 public deployment. See the operator guide before using containers or systemd.
 
+For the reviewed single-node production bundle, use
+[the reference production Compose guide](docs/production-compose.md). It starts
+only PostgreSQL and its one-shot role bootstrap by default, pins both image
+inputs, keeps PostgreSQL private, and accepts credentials only through
+read-only secret files. `punarod` is a non-default reference profile; the
+supported daemon lifecycle is the host-local `punaro` workflow.
+
 The separate PostgreSQL Compose file is integration-test infrastructure only;
 it does not change the SQLite relay or the alpha deployment:
 

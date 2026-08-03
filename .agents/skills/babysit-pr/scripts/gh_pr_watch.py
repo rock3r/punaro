@@ -50,11 +50,16 @@ CODERABBIT_CHECK_KEYWORDS = {
 }
 # Workflow name keyword fragments used to identify Cursor Bugbot CI runs.
 # The merge gate is hard-blocked unless the latest Bugbot run for the current
-# head SHA is `completed` with conclusion `success`.
+# head SHA is `completed` with conclusion `success`. Cursor currently reports
+# a clean manual Bugbot review as a neutral/skipped check, though, so the
+# accompanying SHA-matched clean review is also accepted (see below).
 BUGBOT_WORKFLOW_KEYWORDS = {
     "cursor",
     "bugbot",
 }
+# Cursor's authenticated GitHub identity for review records. This must stay
+# separate from the loose check/workflow name matcher above.
+CURSOR_BUGBOT_LOGIN = "cursor[bot]"
 TRUSTED_AUTHOR_ASSOCIATIONS = {
     "OWNER",
     "MEMBER",
@@ -537,6 +542,13 @@ def is_bugbot_name(name):
     return any(keyword in lower for keyword in BUGBOT_WORKFLOW_KEYWORDS)
 
 
+def is_primary_bugbot_check(check):
+    """Return whether a check is the review gate, not a sibling Cursor task."""
+    name = str(check.get("name") or "").lower()
+    workflow = str(check.get("workflow") or "").lower()
+    return (is_bugbot_name(name) or is_bugbot_name(workflow)) and "autofix" not in name and "autofix" not in workflow
+
+
 def bugbot_check_activity_sort_key(check):
     started = str(check.get("startedAt") or "")
     completed = str(check.get("completedAt") or "")
@@ -558,7 +570,8 @@ def summarize_bugbot_gate_from_checks(checks):
         workflow_name = str(check.get("workflow") or "")
         if not is_bugbot_name(check_name) and not is_bugbot_name(workflow_name):
             continue
-        bugbot_checks.append(check)
+        if is_primary_bugbot_check(check):
+            bugbot_checks.append(check)
 
     if not bugbot_checks:
         return {
@@ -615,6 +628,8 @@ def summarize_bugbot_gate_from_checks(checks):
         "run_id": None,
         "workflow_name": str(latest.get("name") or ""),
         "html_url": str(latest.get("link") or ""),
+        "started_at": str(latest.get("startedAt") or ""),
+        "matching_check_count": len(bugbot_checks),
         "source": "checks",
     }
 
@@ -664,6 +679,8 @@ def summarize_bugbot_gate_from_runs(runs, head_sha):
         "run_id": latest.get("id"),
         "workflow_name": latest.get("name") or latest.get("display_title") or "",
         "html_url": str(latest.get("html_url") or ""),
+        "started_at": str(latest.get("created_at") or ""),
+        "matching_check_count": len(bugbot_runs),
         "source": "actions_runs",
     }
 
@@ -964,11 +981,105 @@ def normalize_issue_comments(items):
                 "body": str(item.get("body") or ""),
                 "path": None,
                 "line": None,
-                "commit_id": None,
+                "commit_id": str(item.get("commit_id") or ""),
                 "url": str(item.get("html_url") or ""),
             }
         )
     return out
+
+
+def is_clean_bugbot_review_item(review, head_sha):
+    """Return whether one review is Cursor's clean result for `head_sha`."""
+    if not isinstance(review, dict):
+        return False
+    if str(review.get("kind") or "review") != "review":
+        return False
+    if str(review.get("author") or "").lower() != CURSOR_BUGBOT_LOGIN:
+        return False
+    if str(review.get("commit_id") or "") != str(head_sha or ""):
+        return False
+    if str(review.get("review_state") or "") != "COMMENTED":
+        return False
+    body = str(review.get("body") or "").strip().lower()
+    return "bugbot reviewed your changes and found no new issues" in body
+
+
+def has_clean_bugbot_review(reviews, head_sha, not_before=""):
+    """Return whether Cursor explicitly reported a clean review for `head_sha`.
+
+    Cursor Bugbot sometimes completes its GitHub check with a neutral/skipped
+    conclusion after a manually-triggered run, despite posting its authoritative
+    "found no new issues" review. Accept only that exact result from Cursor and
+    only when GitHub associates it with the current head SHA; a generic bot
+    comment or an older clean review must never make the gate green.
+    """
+    matching = [
+        review for review in reviews
+        if isinstance(review, dict)
+        and str(review.get("kind") or "review") == "review"
+        and str(review.get("author") or "").lower() == CURSOR_BUGBOT_LOGIN
+        and str(review.get("commit_id") or "") == str(head_sha or "")
+        and str(review.get("review_state") or "") == "COMMENTED"
+        and (
+            not not_before
+            or str(review.get("created_at") or "") >= str(not_before)
+        )
+    ]
+    if not matching:
+        return False
+    matching.sort(
+        key=lambda review: (
+            str(review.get("updated_at") or ""),
+            str(review.get("created_at") or ""),
+            int(str(review.get("id") or "0")) if str(review.get("id") or "0").isdigit() else 0,
+        )
+    )
+    return is_clean_bugbot_review_item(matching[-1], head_sha)
+
+
+def reconcile_clean_bugbot_review(bugbot_gate, reviews, head_sha):
+    """Accept Cursor's clean review when its completed check is neutral/skipped."""
+    if not isinstance(bugbot_gate, dict):
+        return bugbot_gate
+    if bugbot_gate.get("is_success"):
+        return bugbot_gate
+    if str(bugbot_gate.get("status") or "") != "completed":
+        return bugbot_gate
+    if str(bugbot_gate.get("conclusion") or "") not in {"neutral", "skipped"}:
+        return bugbot_gate
+    # GitHub's legacy check view does not expose a per-review run identifier.
+    # A clean review is therefore authoritative only when there is one Cursor
+    # check for this head; overlapping runs cannot be correlated safely.
+    if int(bugbot_gate.get("matching_check_count") or 1) != 1:
+        return bugbot_gate
+    if not has_clean_bugbot_review(reviews, head_sha, bugbot_gate.get("started_at")):
+        return bugbot_gate
+
+    reconciled = dict(bugbot_gate)
+    reconciled.update(
+        {
+            "conclusion": "success",
+            "is_success": True,
+            "source": "clean_bugbot_review",
+            "original_source": bugbot_gate.get("source"),
+            "original_conclusion": bugbot_gate.get("conclusion"),
+        }
+    )
+    return reconciled
+
+
+def reconcile_clean_bugbot_checks_summary(checks_summary, bugbot_gate):
+    """Remove only Bugbot's own skipped check after accepting its clean review."""
+    summary = dict(checks_summary)
+    if (
+        bugbot_gate.get("source") == "clean_bugbot_review"
+        and bugbot_gate.get("original_source") == "checks"
+        and str(bugbot_gate.get("original_conclusion") or "") in {"neutral", "skipped"}
+    ):
+        summary["skipping_count"] = max(
+            0, int(summary.get("skipping_count") or 0) - 1
+        )
+    return summary
 
 
 def normalize_review_comments(items):
@@ -990,7 +1101,7 @@ def normalize_review_comments(items):
                 "body": str(item.get("body") or ""),
                 "path": item.get("path"),
                 "line": line,
-                "commit_id": str(item.get("commit_id") or ""),
+                "commit_id": None,
                 "url": str(item.get("html_url") or ""),
             }
         )
@@ -1019,7 +1130,7 @@ def normalize_reviews(items):
                 "review_state": str(item.get("state") or "").upper(),
                 "path": None,
                 "line": None,
-                "commit_id": None,
+                "commit_id": str(item.get("commit_id") or ""),
                 "url": str(item.get("html_url") or ""),
             }
         )
@@ -1179,6 +1290,10 @@ def fetch_new_review_items(pr, state, fresh_state, authenticated_login=None):
         kind = item["kind"]
         item_updated_at = str(item.get("updated_at") or item.get("created_at") or "")
 
+        if is_clean_bugbot_review_item(item, head_sha):
+            seen_review.add(item_id)
+            seen_review_updated_at[item_id] = item_updated_at
+            continue
         if kind == "review" and str(item.get("review_state") or "") == "APPROVED":
             seen_review.add(item_id)
             seen_review_updated_at[item_id] = item_updated_at
@@ -1549,7 +1664,20 @@ def collect_snapshot(args):
         fresh_state=fresh_state,
         authenticated_login=authenticated_login,
     )
-
+    # Cursor can post a successful review while exposing its check as neutral.
+    # Reconcile only that narrowly identified result before deriving actions.
+    # Its skipped check is then accounted for as an accepted Bugbot result;
+    # unrelated skipped checks remain merge blockers.
+    review_payload = gh_api_list_paginated(
+        comment_endpoints(pr["repo"], pr["number"])["review"], repo=pr["repo"]
+    )
+    all_reviews = normalize_reviews(review_payload)
+    bugbot_gate = reconcile_clean_bugbot_review(
+        bugbot_gate, all_reviews, pr["head_sha"]
+    )
+    checks_summary = reconcile_clean_bugbot_checks_summary(
+        checks_summary, bugbot_gate
+    )
     # Track when checks first went all_terminal for the current head SHA.
     # This timestamp is used to enforce a grace period before emitting
     # stop_ready_to_merge, preventing a race where the script declares the PR

@@ -839,6 +839,13 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	}
 }
 
+func TestBootstrapCommandIsUnsupported(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"bootstrap"}, &stdout, &stderr); code != 2 || !strings.Contains(stderr.String(), "unsupported operator command") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestInitProvesPristineDSNPairBeforeMigration(t *testing.T) {
 	preserveDependencies(t)
 	root := t.TempDir()

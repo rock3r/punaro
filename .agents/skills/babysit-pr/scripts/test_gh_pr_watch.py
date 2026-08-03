@@ -303,6 +303,168 @@ class RetryEligibilityTests(unittest.TestCase):
         self.assertEqual(gate["conclusion"], "failure")
         self.assertFalse(gate["is_success"])
 
+    def test_reconcile_clean_bugbot_review_accepts_sha_matched_neutral_check(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "skipped",
+                "is_success": False,
+                "source": "checks",
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "abc123",
+                    "review_state": "COMMENTED",
+                    "body": "✅ Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertTrue(gate["is_success"])
+        self.assertEqual(gate["conclusion"], "success")
+        self.assertEqual(gate["source"], "clean_bugbot_review")
+
+    def test_reconcile_clean_bugbot_review_rejects_old_review(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "neutral",
+                "is_success": False,
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "old-sha",
+                    "review_state": "COMMENTED",
+                    "body": "Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertFalse(gate["is_success"])
+
+    def test_reconcile_clean_bugbot_review_rejects_review_before_current_check_started(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {
+                "required": True,
+                "status": "completed",
+                "conclusion": "skipped",
+                "is_success": False,
+                "source": "checks",
+                "started_at": "2026-07-31T12:00:00Z",
+            },
+            [
+                {
+                    "author": "cursor[bot]",
+                    "commit_id": "abc123",
+                    "review_state": "COMMENTED",
+                    "created_at": "2026-07-31T11:59:59Z",
+                    "body": "Bugbot reviewed your changes and found no new issues!",
+                }
+            ],
+            "abc123",
+        )
+
+        self.assertFalse(gate["is_success"])
+
+    def test_reconcile_clean_bugbot_review_rejects_overlapping_checks(self):
+        gate = watch.reconcile_clean_bugbot_review(
+            {"required": True, "status": "completed", "conclusion": "skipped", "is_success": False, "matching_check_count": 2},
+            [{"author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "body": "Bugbot reviewed your changes and found no new issues!"}],
+            "abc123",
+        )
+        self.assertFalse(gate["is_success"])
+
+    def test_primary_bugbot_check_excludes_autofix_sibling(self):
+        self.assertFalse(watch.is_primary_bugbot_check({"name": "Cursor Bugbot Autofix", "workflow": "Cursor Bugbot"}))
+        self.assertTrue(watch.is_primary_bugbot_check({"name": "Cursor Bugbot", "workflow": "Cursor Bugbot"}))
+
+    def test_summarize_bugbot_runs_counts_same_head_overlaps(self):
+        gate = watch.summarize_bugbot_gate_from_runs([
+            {"id": 1, "head_sha": "abc123", "name": "Cursor Bugbot", "status": "completed", "conclusion": "skipped", "created_at": "2026-07-31T12:00:00Z"},
+            {"id": 2, "head_sha": "abc123", "name": "Cursor Bugbot", "status": "completed", "conclusion": "skipped", "created_at": "2026-07-31T12:01:00Z"},
+        ], "abc123")
+        self.assertEqual(gate["matching_check_count"], 2)
+
+    def test_clean_bugbot_reconciliation_removes_its_neutral_check(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 2},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "checks",
+                "original_conclusion": "neutral",
+            },
+        )
+        self.assertEqual(summary["skipping_count"], 1)
+
+    def test_clean_bugbot_reconciliation_removes_its_skipped_check(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 2},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "checks",
+                "original_conclusion": "skipped",
+            },
+        )
+        self.assertEqual(summary["skipping_count"], 1)
+
+    def test_clean_bugbot_reconciliation_preserves_unrelated_skipped_check_for_actions_fallback(self):
+        summary = watch.reconcile_clean_bugbot_checks_summary(
+            {"skipping_count": 1},
+            {
+                "source": "clean_bugbot_review",
+                "original_source": "actions_runs",
+                "original_conclusion": "skipped",
+            },
+        )
+        self.assertEqual(summary["skipping_count"], 1)
+
+    def test_is_clean_bugbot_review_item_requires_cursor_clean_result(self):
+        self.assertTrue(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+        self.assertFalse(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor[bot]", "commit_id": "old",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+
+    def test_is_clean_bugbot_review_item_rejects_cursor_lookalike(self):
+        self.assertFalse(watch.is_clean_bugbot_review_item({
+            "kind": "review", "author": "cursor-helper", "commit_id": "abc123",
+            "review_state": "COMMENTED",
+            "body": "Bugbot reviewed your changes and found no new issues!",
+        }, "abc123"))
+
+    def test_has_clean_bugbot_review_requires_latest_matching_review_to_be_clean(self):
+        reviews = [
+            {
+                "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+                "review_state": "COMMENTED", "created_at": "2026-01-01T00:00:00Z",
+                "body": "Bugbot reviewed your changes and found no new issues!",
+            },
+            {
+                "kind": "review", "author": "cursor[bot]", "commit_id": "abc123",
+                "review_state": "COMMENTED", "created_at": "2026-01-01T00:01:00Z",
+                "body": "### A real finding",
+            },
+        ]
+        self.assertFalse(watch.has_clean_bugbot_review(reviews, "abc123"))
+
+    def test_has_clean_bugbot_review_orders_tied_review_ids_numerically(self):
+        reviews = [
+            {"kind": "review", "author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "id": "9", "created_at": "2026-01-01T00:00:00Z", "body": "Bugbot reviewed your changes and found no new issues!"},
+            {"kind": "review", "author": "cursor[bot]", "commit_id": "abc123", "review_state": "COMMENTED", "id": "10", "created_at": "2026-01-01T00:00:00Z", "body": "### A real finding"},
+        ]
+        self.assertFalse(watch.has_clean_bugbot_review(reviews, "abc123"))
+
     def test_summarize_bugbot_gate_prefers_pending_rerun_over_old_success(self):
         checks = [
             {
