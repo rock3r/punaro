@@ -100,7 +100,8 @@ WITH objects AS (
     WHERE relation.oid = ANY(ARRAY[endpoint_oid,conversation_oid,message_oid,grant_oid,evidence_oid])
 ), constraint_safety AS (
     SELECT count(*) = 27 AND bool_and(convalidated AND NOT condeferrable AND NOT condeferred)
-       AND count(*) FILTER (WHERE contype = 'f' AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's') = 13 AS exact
+       AND count(*) FILTER (WHERE contype = 'f' AND confupdtype = 'a' AND confdeltype = 'a' AND confmatchtype = 's') = 12
+       AND count(*) FILTER (WHERE conname = 'recipient_grant_endpoints_delivery_fkey' AND contype = 'f' AND confupdtype = 'c' AND confdeltype = 'a' AND confmatchtype = 's') = 1 AS exact
     FROM pg_constraint, objects
     WHERE conrelid = ANY(ARRAY[endpoint_oid,conversation_oid,message_oid,grant_oid,evidence_oid])
       AND contype <> 'n'

@@ -179,8 +179,8 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		ProjectID: project.ProjectID, IdempotencyKey: "attachment-conversation-create",
 		CreatorEndpoint: "agent/attachment/uploader", Now: now,
 		Members: []relay.Member{
-			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive},
+			{Endpoint: "agent/attachment/uploader", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin, Role: "coordinator"},
+			{Endpoint: "agent/attachment/recipient", Capabilities: relay.CapReceive, Role: "reviewer"},
 		},
 	})
 	if err != nil {
@@ -189,7 +189,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	message, duplicateMessage, err := app.AppendMessage(relay.AppendInput{
 		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
 		PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
-		FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+		FromEndpoint: "agent/attachment/uploader", TargetRole: "reviewer", Body: "trusted attachment reference",
 		ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
 	})
 	if err != nil || duplicateMessage {
@@ -198,7 +198,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if retried, duplicate, err := app.AppendMessage(relay.AppendInput{
 		ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
 		PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
-		FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+		FromEndpoint: "agent/attachment/uploader", TargetRole: "reviewer", Body: "trusted attachment reference",
 		ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
 	}); err != nil || !duplicate || retried.ID != message.ID {
 		t.Fatalf("attachment message retry=%#v duplicate=%t err=%v", retried, duplicate, err)
@@ -216,7 +216,7 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 		_, _, retryErr := app.AppendMessage(relay.AppendInput{
 			ConversationID: conversation.ID, SenderMachineID: "attachment-uploader-machine",
 			PrincipalID: uploader.ID, CredentialLookupID: uploaderLookup, CredentialGeneration: 1,
-			FromEndpoint: "agent/attachment/uploader", Body: "trusted attachment reference",
+			FromEndpoint: "agent/attachment/uploader", TargetRole: "reviewer", Body: "trusted attachment reference",
 			ArtifactIDs: []string{reservation.ArtifactID}, IdempotencyKey: "attachment-message-append", Now: now,
 		})
 		retryResult <- retryErr
