@@ -246,6 +246,54 @@ func TestInvokePrunesTerminalIdempotencyAndAuditAfterRetention(t *testing.T) {
 	}
 }
 
+func TestInvokeRetentionPreservesAnAcceptedAttachmentFence(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("sender-machine", []string{"agent/sender"}, now, 2*invocationTerminalRetention); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", []string{"agent/recipient"}, now, 2*invocationTerminalRetention); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{MachineID: "sender-machine", IdempotencyKey: "create", CreatorEndpoint: "agent/sender", Now: now, Members: []Member{{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin | CapInvoke}, {Endpoint: "agent/recipient", Capabilities: CapReceive}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", Body: "opaque work", IdempotencyKey: "message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("recipient-machine", nil, now.Add(time.Second), 2*invocationTerminalRetention); err != nil {
+		t.Fatal(err)
+	}
+	request := InvokeInput{ConversationID: conversation.ID, SenderMachineID: "sender-machine", FromEndpoint: "agent/sender", TargetEndpoint: "agent/recipient", IdempotencyKey: "invoke", Now: now.Add(2 * time.Second)}
+	invocation, _, err := store.RequestInvocation(request)
+	if err != nil || invocation.Status != InvocationPending {
+		t.Fatalf("invocation=%#v err=%v", invocation, err)
+	}
+	acceptedAt := now.Add(invocationTerminalRetention + 3*time.Second)
+	leased, err := store.LeaseInvocations("recipient-machine", "adapter", acceptedAt, time.Minute, 1)
+	if err != nil || len(leased) != 1 {
+		t.Fatalf("leased=%#v err=%v", leased, err)
+	}
+	if err := store.ReportInvocation("recipient-machine", leased[0].ID, leased[0].LeaseToken, leased[0].LeaseGeneration, true, acceptedAt); err != nil {
+		t.Fatal(err)
+	}
+	request.IdempotencyKey = "invoke-after-accept"
+	request.Now = acceptedAt.Add(time.Second)
+	if coalesced, duplicate, err := store.RequestInvocation(request); err != nil || !duplicate || coalesced.ID != invocation.ID || coalesced.Status != InvocationSucceeded {
+		t.Fatalf("coalesced=%#v duplicate=%t err=%v", coalesced, duplicate, err)
+	}
+	var remaining int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM invocations WHERE id=?`, invocation.ID).Scan(&remaining); err != nil || remaining != 1 {
+		t.Fatalf("accepted fence rows=%d err=%v", remaining, err)
+	}
+}
+
 func TestInvokeDoesNotStartTargetThatAttachedAfterRequest(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

@@ -191,7 +191,8 @@ func (s *Store) requestInvocationWithSchema(input InvokeInput, requestHash strin
 }
 
 func pruneExpiredTerminalInvocations(tx *sql.Tx, now time.Time) error {
-	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE status IN (?,?,?) AND created_at<?`, InvocationAlreadyRunning, InvocationSucceeded, InvocationFailed, now.Add(-invocationTerminalRetention).UnixMilli()); err != nil {
+	cutoff := now.Add(-invocationTerminalRetention).UnixMilli()
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM invocations WHERE created_at<? AND (status IN (?,?) OR (status=? AND not_before<?))`, cutoff, InvocationAlreadyRunning, InvocationFailed, InvocationSucceeded, now.UnixMilli()); err != nil {
 		return fmt.Errorf("prune terminal invocations: %w", err)
 	}
 	return nil
