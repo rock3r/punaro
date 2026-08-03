@@ -126,6 +126,23 @@ func TestRemoteMCPE2EChallengeRequiresExactResourceMetadata(t *testing.T) {
 	}
 }
 
+func TestRemoteMCPE2EMetadataURLPreservesEscapedResourcePath(t *testing.T) {
+	const resource = "https://mcp.example.test/mcp%20release"
+	const want = "https://mcp.example.test/.well-known/oauth-protected-resource/mcp%20release"
+	if got := remoteMCPE2EMetadataURL(t, resource); got != want {
+		t.Fatalf("metadata URL = %q, want %q", got, want)
+	}
+}
+
+func TestRemoteMCPE2ECleanCheckoutRejectsTrackedChanges(t *testing.T) {
+	if !validRemoteMCPE2ECleanCheckoutStatus("") {
+		t.Fatal("clean checkout rejected")
+	}
+	if validRemoteMCPE2ECleanCheckoutStatus(" M internal/mcphttp/remote_mcp_e2e_test.go\n") {
+		t.Fatal("tracked checkout change accepted")
+	}
+}
+
 func TestRemoteMCPE2EJSONRPCSuccessRequiresExactCorrelatedToolResult(t *testing.T) {
 	want := json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)
 	valid := remoteMCPE2EResponse{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"content":[{"type":"text","text":"release-candidate-e2e"}]}}`)}
@@ -271,7 +288,7 @@ func TestRemoteMCPE2EReleaseCandidateHarness(t *testing.T) {
 		if token == config.Tokens.Valid && bytes.Contains(body, []byte(`"name":"punaro_memory_propose"`)) {
 			validForbidden = true
 		}
-		if bytes.HasPrefix(body, []byte("[")) || bytes.Contains(body, []byte(`"method":"tools/list","method"`)) || bytes.Contains(body, []byte(`"id":{}`)) || bytes.Contains(body, []byte(`"extra":true`)) {
+		if bytes.HasPrefix(body, []byte("[")) || bytes.Count(body, []byte(`"method"`)) > 1 || bytes.Contains(body, []byte(`"id":{}`)) || bytes.Contains(body, []byte(`"extra":true`)) {
 			response.WriteHeader(http.StatusBadRequest)
 			return
 		}
@@ -361,12 +378,18 @@ func checkedOutRemoteMCPE2ECommit() (string, error) {
 	if err != nil {
 		return "", errors.New("candidate commit unavailable")
 	}
+	status, err := exec.Command("git", "status", "--porcelain", "--untracked-files=no").Output() // #nosec G204 -- fixed local Git command rejects tracked changes from release evidence.
+	if err != nil || !validRemoteMCPE2ECleanCheckoutStatus(string(status)) {
+		return "", errors.New("candidate checkout is not clean")
+	}
 	commit := strings.TrimSpace(string(output))
 	if !validCommit(commit) {
 		return "", errors.New("candidate commit unavailable")
 	}
 	return commit, nil
 }
+
+func validRemoteMCPE2ECleanCheckoutStatus(status string) bool { return status == "" }
 
 func validateRemoteMCPE2ECandidateCommit(configured, checkedOut string) error {
 	if configured != checkedOut {
@@ -552,7 +575,7 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	validSessionID := remoteMCPE2EInitializeSession(t, client, config, config.Tokens.Valid)
 	for _, malformedRequest := range [][]byte{
 		[]byte(`[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]`),
-		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","method":"tools/call"}`),
+		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","method":"tools/list"}`),
 		[]byte(`{"jsonrpc":"2.0","id":{},"method":"tools/list"}`),
 		[]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/list","extra":true}`),
 	} {
@@ -603,7 +626,13 @@ func remoteMCPE2EMetadataURL(t *testing.T, resource string) string {
 	if err != nil {
 		t.Fatal("remote MCP resource is invalid")
 	}
-	return (&url.URL{Scheme: parsed.Scheme, Host: parsed.Host, Path: "/.well-known/oauth-protected-resource" + parsed.EscapedPath()}).String()
+	const prefix = "/.well-known/oauth-protected-resource"
+	return (&url.URL{
+		Scheme:  parsed.Scheme,
+		Host:    parsed.Host,
+		Path:    prefix + parsed.Path,
+		RawPath: prefix + parsed.EscapedPath(),
+	}).String()
 }
 
 func remoteMCPE2ERequest(t *testing.T, method string, params any) []byte {
