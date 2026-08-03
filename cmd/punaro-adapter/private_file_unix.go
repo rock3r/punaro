@@ -21,7 +21,7 @@ func readPrivateFile(path, label string, maximum int) ([]byte, error) {
 	file := os.NewFile(uintptr(fd), path)
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || hasExtendedACL(fd) {
 		return nil, fmt.Errorf("%s file must be a private regular file", label)
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
