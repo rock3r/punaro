@@ -1499,6 +1499,26 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.Body != "fence b" {
 		t.Fatalf("rebound expired role lease page=%#v err=%v", pageA, err)
 	}
+	if err := app.AckDelivery(roleMachine, sessionA, pageA.Deliveries[0].ID, pageA.Deliveries[0].LeaseToken, pageA.Deliveries[0].LeaseGeneration, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("acknowledge rebound expired role delivery: %v", err)
+	}
+	if err := app.BindRoleToSession(roleMachine, role, sessionA, now.Add(5*time.Second), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: sender, IdempotencyKey: "postgres-role-fence-message-c", Body: "fence c", Now: now.Add(5 * time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	pageA, err = app.LeaseDeliveries(roleMachine, "postgres-role-fence-consumer-a", sessionA, conversation.ID, now.Add(5*time.Second), time.Minute, 1)
+	if err != nil || len(pageA.Deliveries) != 1 || pageA.Deliveries[0].Message.Body != "fence c" {
+		t.Fatalf("short-lived role lease page=%#v err=%v", pageA, err)
+	}
+	stale = pageA.Deliveries[0]
+	if err := app.BindRoleToSession(roleMachine, role, sessionA, now.Add(7*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AckDelivery(roleMachine, sessionA, stale.ID, stale.LeaseToken, stale.LeaseGeneration, now.Add(7*time.Second)); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("expired role binding rebind acknowledged stale lease: %v", err)
+	}
 }
 
 func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Database) {

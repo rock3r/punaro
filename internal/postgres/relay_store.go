@@ -202,11 +202,13 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 		return relay.ErrConflict
 	}
 	var previousSession string
-	err = tx.QueryRowContext(context.Background(), `SELECT session_endpoint FROM relay.mail_role_bindings WHERE role=$1 FOR UPDATE`, role).Scan(&previousSession)
+	var previousGeneration int64
+	var previousLeaseUntil time.Time
+	err = tx.QueryRowContext(context.Background(), `SELECT session_endpoint,ownership_generation,lease_until FROM relay.mail_role_bindings WHERE role=$1 FOR UPDATE`, role).Scan(&previousSession, &previousGeneration, &previousLeaseUntil)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return errors.New("durable role binding is unavailable")
 	}
-	rebinding := err == nil && previousSession != endpoint
+	rebinding := err == nil && (previousSession != endpoint || previousGeneration != generation || !previousLeaseUntil.After(now.UTC()))
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_bindings(role,session_endpoint,machine_id,ownership_generation,lease_until)
 		VALUES($1,$2,$3,$4,$5)
 		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint,machine_id=excluded.machine_id,ownership_generation=excluded.ownership_generation,lease_until=excluded.lease_until`, role, endpoint, machineID, generation, until); err != nil {

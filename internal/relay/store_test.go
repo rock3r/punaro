@@ -503,6 +503,52 @@ func TestStoreRejectsUnauthorizedOrExpiredRoleBindings(t *testing.T) {
 	}
 }
 
+func TestStoreRebindingExpiredRoleRevokesOutstandingLeases(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+	const (
+		ownerMachine  = "machine-expired-rebind-owner"
+		senderMachine = "machine-expired-rebind-sender"
+		ownerSession  = "agent/expired-rebind/owner"
+		senderSession = "agent/expired-rebind/sender"
+		role          = "role/expired-rebind"
+	)
+	if err := store.AdvertiseEndpoints(ownerMachine, []string{ownerSession}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints(senderMachine, []string{senderSession}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation(senderSession, []Member{
+		{Endpoint: senderSession, Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: role, RoleMachineID: ownerMachine, Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession(ownerMachine, role, ownerSession, now, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: senderSession, Body: "lease fence", IdempotencyKey: "expired-rebind-message", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries(ownerMachine, "expired-rebind-consumer", ownerSession, conversation.ID, now, time.Minute, 1)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("initial role lease page=%#v err=%v", page, err)
+	}
+	stale := page.Deliveries[0]
+	if err := store.BindRoleToSession(ownerMachine, role, ownerSession, now.Add(2*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AckDelivery(ownerMachine, ownerSession, stale.ID, stale.LeaseToken, stale.LeaseGeneration, now.Add(2*time.Second)); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expired binding rebind acknowledged stale lease: %v", err)
+	}
+}
+
 func TestStoreRenewsRoleBindingOnlyForTheSameLiveSession(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {

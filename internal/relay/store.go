@@ -592,11 +592,12 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 		return ErrConflict
 	}
 	var previousSession string
-	err = tx.QueryRowContext(context.Background(), "SELECT session_endpoint FROM role_bindings WHERE role=?", role).Scan(&previousSession)
+	var previousGeneration, previousLeaseUntil int64
+	err = tx.QueryRowContext(context.Background(), "SELECT session_endpoint, ownership_generation, lease_until FROM role_bindings WHERE role=?", role).Scan(&previousSession, &previousGeneration, &previousLeaseUntil)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read durable role binding: %w", err)
 	}
-	rebinding := err == nil && previousSession != sessionEndpoint
+	rebinding := err == nil && (previousSession != sessionEndpoint || previousGeneration != generation || previousLeaseUntil <= now.UnixMilli())
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_bindings(role, session_endpoint, machine_id, ownership_generation, lease_until)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(role) DO UPDATE SET session_endpoint=excluded.session_endpoint, machine_id=excluded.machine_id,
