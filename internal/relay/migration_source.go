@@ -46,8 +46,8 @@ type MigrationSourceCounts struct {
 	RecipientCursors        int64 `json:"recipient_cursors"`
 	MessageIdempotency      int64 `json:"message_idempotency"`
 	ConversationIdempotency int64 `json:"conversation_idempotency"`
-	ControlEvents           int64 `json:"control_events"`
-	ControlIdempotency      int64 `json:"control_idempotency"`
+	ControlEvents           int64 `json:"control_events,omitempty"`
+	ControlIdempotency      int64 `json:"control_idempotency,omitempty"`
 	RequestNonces           int64 `json:"request_nonces"`
 }
 
@@ -64,8 +64,8 @@ type MigrationSourceHashes struct {
 	RecipientCursors        string `json:"recipient_cursors"`
 	MessageIdempotency      string `json:"message_idempotency"`
 	ConversationIdempotency string `json:"conversation_idempotency"`
-	ControlEvents           string `json:"control_events"`
-	ControlIdempotency      string `json:"control_idempotency"`
+	ControlEvents           string `json:"control_events,omitempty"`
+	ControlIdempotency      string `json:"control_idempotency,omitempty"`
 	RequestNonces           string `json:"request_nonces"`
 }
 
@@ -302,6 +302,9 @@ func transitionPreparedMigrationSource(ctx context.Context, path, epochID, targe
 				return MigrationSourceManifest{}, errors.New("relay migration source cannot be reopened")
 			}
 			current.Phase, current.EpochID, current.TargetIdentity = MigrationSourceActive, "", ""
+			if current.Version == 3 && current.TableSHA256.ControlEvents == "" && current.TableSHA256.ControlIdempotency == "" {
+				current.Version = 2
+			}
 			current.lastTransition = "aborted"
 			return current, nil
 		}
@@ -367,6 +370,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
 	manifest := MigrationSourceManifest{Version: 3}
+	roleOnly := false
 	tableSpecs, schema := migrationTableSpecs, migrationSourceSchema
 	if roleTables == 0 {
 		if controlTables != 0 {
@@ -374,6 +378,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
 	} else if controlTables == 0 {
+		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
 	}
@@ -388,6 +393,12 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	manifest.ExpectedFingerprint = manifest.lastExpectedFingerprint
 	if manifest.Phase != MigrationSourceActive && manifest.Phase != MigrationSourcePrepared && manifest.Phase != MigrationSourceRetired {
 		return MigrationSourceManifest{}, errors.New("relay migration source phase is invalid")
+	}
+	// Parent releases recorded role-only prepared manifests as v3. Retain that
+	// durable identity until the existing epoch is retired or aborted; newly
+	// active role-only sources use v2 so fresh cutovers name the absent controls.
+	if roleOnly && manifest.Phase != MigrationSourceActive {
+		manifest.Version = 3
 	}
 	if manifest.Phase == MigrationSourceActive {
 		if manifest.EpochID != "" || manifest.TargetIdentity != "" || storedFingerprint.Valid {

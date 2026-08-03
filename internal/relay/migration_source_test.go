@@ -561,6 +561,57 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	}
 }
 
+func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	now := time.Date(2026, time.August, 3, 10, 0, 0, 0, time.UTC)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := InspectMigrationSource(ctx, path)
+	if err != nil || active.Version != 2 || active.Phase != MigrationSourceActive {
+		t.Fatalf("role-only active manifest=%#v err=%v", active, err)
+	}
+	epoch, target := uuid.NewString(), strings.Repeat("a", 64)
+	db, err = openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition=? WHERE singleton=1`, epoch, target, active.Fingerprint, epoch, target, active.Fingerprint, active.Fingerprint, now.UnixMilli(), "prepared")
+	closeErr := db.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("record parent prepared source err=%v close=%v", err, closeErr)
+	}
+	prepared, err := InspectMigrationSource(ctx, path)
+	if err != nil || prepared.Version != 3 || prepared.Phase != MigrationSourcePrepared || prepared.Fingerprint != active.Fingerprint {
+		t.Fatalf("parent v3 prepared manifest=%#v err=%v", prepared, err)
+	}
+	body, err := json.Marshal(prepared)
+	if err != nil || strings.Contains(string(body), `"control_events"`) || strings.Contains(string(body), `"control_idempotency"`) {
+		t.Fatalf("parent v3 manifest changed body=%s err=%v", body, err)
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, epoch, target, active.Fingerprint)
+	if err != nil || aborted.Version != 2 || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("parent v3 abort=%#v err=%v", aborted, err)
+	}
+}
+
 func TestMigrationSourceRefusesMissingOrPermissiveGuard(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
