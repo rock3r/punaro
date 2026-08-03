@@ -998,6 +998,9 @@ func validRemoteMCPE2ESchemaValue(value, property json.RawMessage) bool {
 	if json.Unmarshal(property, &definition) != nil {
 		return false
 	}
+	if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+		return definition.Type == "null"
+	}
 	switch definition.Type {
 	case "string":
 		var target string
@@ -1017,7 +1020,7 @@ func validRemoteMCPE2ESchemaValue(value, property json.RawMessage) bool {
 		var target []json.RawMessage
 		return json.Unmarshal(value, &target) == nil
 	case "null":
-		return bytes.Equal(bytes.TrimSpace(value), []byte("null"))
+		return false
 	default:
 		return false
 	}
