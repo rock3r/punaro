@@ -114,6 +114,9 @@ func TestEmptyInvocationLeaseDoesNotMaterializeControlState(t *testing.T) {
 	if err := store.ReportInvocation("machine-a", "fabricated", "token", 1, true, time.Now().UTC()); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("fabricated outcome err=%v", err)
 	}
+	if audit, err := store.InvocationAudit("unknown"); err != nil || len(audit) != 0 {
+		t.Fatalf("empty audit=%#v err=%v", audit, err)
+	}
 	var exists bool
 	if err := store.db.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='invocations')`).Scan(&exists); err != nil || exists {
 		t.Fatalf("invocation state exists=%t err=%v", exists, err)

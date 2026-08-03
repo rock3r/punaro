@@ -489,8 +489,12 @@ func invocationBackoff(attempt int) time.Duration {
 
 // InvocationAudit returns body-free audit history for operational inspection.
 func (s *Store) InvocationAudit(invocationID string) ([]InvocationAuditEvent, error) {
-	if err := s.ensureInvocationSchema(); err != nil {
+	exists, err := s.invocationSchemaExists()
+	if err != nil {
 		return nil, err
+	}
+	if !exists {
+		return nil, nil
 	}
 	rows, err := s.db.QueryContext(context.Background(), `SELECT action,created_at FROM invocation_audit WHERE invocation_id=? ORDER BY ordinal`, invocationID)
 	if err != nil {
