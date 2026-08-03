@@ -229,6 +229,10 @@ func TestRemoteMCPE2EInitializeRequiresNegotiatedProtocol(t *testing.T) {
 	if validRemoteMCPE2EInitializeSuccess(wrongVersion, "2024-11-05") {
 		t.Fatal("wrong initialize protocol accepted")
 	}
+	valid.Status = http.StatusCreated
+	if validRemoteMCPE2EInitializeSuccess(valid, "2024-11-05") {
+		t.Fatal("non-OK initialize response accepted")
+	}
 }
 
 func TestRemoteMCPE2EInitializedNotificationRequiresAccepted(t *testing.T) {
@@ -248,6 +252,11 @@ func TestRemoteMCPE2EJSONRPCResponseRequiresSupportedMediaType(t *testing.T) {
 	response.Header.Set("Content-Type", "text/plain")
 	if validRemoteMCPE2EJSONRPCSuccess(response, json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)) {
 		t.Fatal("unsupported MCP response media type accepted")
+	}
+	response.Header.Set("Content-Type", "application/json")
+	response.Status = http.StatusCreated
+	if validRemoteMCPE2EJSONRPCSuccess(response, json.RawMessage(`{"content":[{"type":"text","text":"release-candidate-e2e"}]}`)) {
+		t.Fatal("non-OK JSON-RPC response accepted")
 	}
 }
 
@@ -785,7 +794,7 @@ func remoteMCPE2EInitializeSession(t *testing.T, client *http.Client, config rem
 
 func validRemoteMCPE2EInitializeSuccess(response remoteMCPE2EResponse, expectedProtocolVersion string) bool {
 	payload, supported := remoteMCPE2EJSONRPCPayload(response)
-	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
+	if response.Status != http.StatusOK || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) {
 		return false
 	}
 	var envelope struct {
@@ -817,7 +826,7 @@ func validRemoteMCPE2EInitializedNotification(response remoteMCPE2EResponse) boo
 
 func validRemoteMCPE2EJSONRPCSuccess(response remoteMCPE2EResponse, expectedResult json.RawMessage) bool {
 	payload, supported := remoteMCPE2EJSONRPCPayload(response)
-	if response.Status < 200 || response.Status > 299 || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) || !validRemoteMCPE2EToolResult(expectedResult) {
+	if response.Status != http.StatusOK || !supported || !validJSONRPCValue(payload, maxJSONRPCDepth) || !validRemoteMCPE2EToolResult(expectedResult) {
 		return false
 	}
 	var envelope struct {
