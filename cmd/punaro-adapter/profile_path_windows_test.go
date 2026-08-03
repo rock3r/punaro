@@ -7,10 +7,11 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
@@ -29,10 +30,7 @@ func TestWindowsLoadConfigUsesInstalledProfile(t *testing.T) {
 func TestWindowsLoadConfigRejectsSharedProfileACL(t *testing.T) {
 	clearAdapterEnvironment(t)
 	profile := setupWindowsProfile(t)
-	command := exec.Command("icacls.exe", profile, "/grant", "*S-1-1-0:(R)")
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("share test fixture: %v (%s)", err, output)
-	}
+	setWindowsFixtureACL(t, profile, "(A;;FR;;;WD)")
 
 	if _, err := loadConfig(); err == nil || !strings.Contains(err.Error(), "adapter profile is unsafe") {
 		t.Fatalf("shared profile error=%v, want sanitized profile rejection", err)
@@ -50,7 +48,7 @@ func TestWindowsLoadConfigAllowsEnvironmentWithoutProfileRoot(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protectWindowsFixture(t, keyFile, false)
+	protectWindowsFixture(t, keyFile)
 	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
 	t.Setenv("PUNARO_MACHINE_ID", "environment-machine")
 	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
@@ -94,22 +92,32 @@ func setupWindowsProfile(t *testing.T) string {
 	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	protectWindowsFixture(t, configDir, true)
-	protectWindowsFixture(t, keyFile, false)
-	protectWindowsFixture(t, profile, false)
+	protectWindowsFixture(t, keyFile)
+	protectWindowsFixture(t, profile)
 	return profile
 }
 
-func protectWindowsFixture(t *testing.T, path string, directory bool) {
+func protectWindowsFixture(t *testing.T, path string) {
 	t.Helper()
-	// Keep the fixture ACL identical to Protect-PunaroPath in install-client.ps1.
-	inheritance := `[System.Security.AccessControl.InheritanceFlags]::None`
-	if directory {
-		inheritance = `[System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit`
+	setWindowsFixtureACL(t, path, "")
+}
+
+func setWindowsFixtureACL(t *testing.T, path, additionalACE string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user.User.Sid == nil {
+		t.Fatalf("current Windows user: %v", err)
 	}
-	script := `$ErrorActionPreference = 'Stop'; $path = $args[0]; $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl = Get-Acl -LiteralPath $path; $acl.SetAccessRuleProtection($true, $false); $acl.SetOwner($sid); $inheritance = ` + inheritance + `; $rule = New-Object -TypeName System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow); $acl.SetAccessRule($rule); Set-Acl -LiteralPath $path -AclObject $acl`
-	command := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("protect test fixture: %v (%s)", err, output)
+	sid := user.User.Sid.String()
+	sd, err := windows.SecurityDescriptorFromString("O:" + sid + "D:P(A;;FA;;;" + sid + ")" + additionalACE)
+	if err != nil {
+		t.Fatalf("build test ACL: %v", err)
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read test ACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, user.User.Sid, nil, dacl, nil); err != nil {
+		t.Fatalf("protect test fixture: %v", err)
 	}
 }
