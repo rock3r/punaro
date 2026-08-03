@@ -5,7 +5,7 @@ import "context"
 // relayMembershipControlsAvailable confirms that the content-free membership
 // control audit trail and retry ledger remain owned by the schema role and
 // cannot be rewritten by an application connection.
-func relayMembershipControlsAvailable(ctx context.Context, q queryer) (bool, error) {
+func relayMembershipControlsAvailable(ctx context.Context, q queryer, schemaVersion int64) (bool, error) {
 	var available bool
 	err := q.QueryRowContext(ctx, `
 WITH objects AS (
@@ -35,7 +35,7 @@ WITH objects AS (
         (controls_oid,'mail_conversation_controls_pkey','p'::"char",ARRAY[1]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
         (controls_oid,'mail_conversation_controls_conversation_id_fkey','f'::"char",ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[],'a'::"char",NULL::text),
         (controls_oid,'mail_conversation_controls_operation_check','c'::"char",ARRAY[4]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'(operation = ANY (ARRAY[''upsert_member''::text, ''remove_member''::text]))'),
-        (controls_oid,'mail_conversation_controls_member_capabilities_check','c'::"char",ARRAY[6]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'((member_capabilities >= 0) AND (member_capabilities <= 7))'),
+        (controls_oid,'mail_conversation_controls_member_capabilities_check','c'::"char",ARRAY[6]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",CASE WHEN $1 >= 43 THEN '((member_capabilities >= 0) AND (member_capabilities <= 15))' ELSE '((member_capabilities >= 0) AND (member_capabilities <= 7))' END),
         (retries_oid,'mail_conversation_control_idempotency_pkey','p'::"char",ARRAY[1,2]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",NULL::text),
         (retries_oid,'mail_conversation_control_idempotency_key_check','c'::"char",ARRAY[2]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))'),
         (retries_oid,'mail_conversation_control_idempotency_request_hash_check','c'::"char",ARRAY[3]::smallint[],NULL::oid,NULL::smallint[],NULL::"char",'(request_hash ~ ''^[0-9a-f]{64}$''::text)'),
@@ -75,6 +75,6 @@ WITH objects AS (
 )
 SELECT controls_oid IS NOT NULL AND retries_oid IS NOT NULL AND conversations_oid IS NOT NULL AND memberships_oid IS NOT NULL AND guard_oid IS NOT NULL
    AND relations.exact AND columns.exact AND constraints.exact AND guards.exact AND acl.exact
-FROM objects,relations,columns,constraints,guards,acl`).Scan(&available)
+FROM objects,relations,columns,constraints,guards,acl`, schemaVersion).Scan(&available)
 	return available, err
 }

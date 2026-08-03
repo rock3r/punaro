@@ -1229,7 +1229,7 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		snapshot.CurrentObjectsPresent = passObjectsPresent
 	}
 	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 41 {
-		controlObjectsPresent, err := relayMembershipControlsAvailable(ctx, q)
+		controlObjectsPresent, err := relayMembershipControlsAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
 		if err != nil {
 			return Snapshot{}, errors.New("PostgreSQL relay membership-control schema cannot be inspected")
 		}
