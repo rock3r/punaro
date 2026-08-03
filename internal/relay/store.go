@@ -562,7 +562,15 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			return ControlEvent{}, false, fmt.Errorf("remove conversation member: %w", err)
 		}
 	}
-	event := ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
+	createdAt := input.Now.UTC().Truncate(time.Millisecond)
+	var latestCreatedAt sql.NullInt64
+	if err := tx.QueryRowContext(context.Background(), "SELECT MAX(created_at) FROM conversation_controls WHERE conversation_id=?", input.ConversationID).Scan(&latestCreatedAt); err != nil {
+		return ControlEvent{}, false, fmt.Errorf("read latest control audit event: %w", err)
+	}
+	if latestCreatedAt.Valid && createdAt.UnixMilli() <= latestCreatedAt.Int64 {
+		createdAt = time.UnixMilli(latestCreatedAt.Int64 + 1).UTC()
+	}
+	event := ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: createdAt}
 	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES(?,?,?,?,?,?,?)", event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt.UnixMilli()); err != nil {
 		return ControlEvent{}, false, fmt.Errorf("record control audit event: %w", err)
 	}

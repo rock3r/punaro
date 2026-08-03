@@ -330,7 +330,15 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "remove conversation member")
 		}
 	}
-	event := relay.ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: input.Now.UTC().Truncate(time.Microsecond)}
+	createdAt := input.Now.UTC().Truncate(time.Microsecond)
+	var latestCreatedAt sql.NullTime
+	if err := tx.QueryRowContext(context.Background(), `SELECT MAX(created_at) FROM relay.mail_conversation_controls WHERE conversation_id=$1::uuid`, input.ConversationID).Scan(&latestCreatedAt); err != nil {
+		return relay.ControlEvent{}, false, errors.New("control audit order is unavailable")
+	}
+	if latestCreatedAt.Valid && !createdAt.After(latestCreatedAt.Time) {
+		createdAt = latestCreatedAt.Time.Add(time.Microsecond)
+	}
+	event := relay.ControlEvent{ID: uuid.NewString(), ConversationID: input.ConversationID, ActorEndpoint: input.ActorEndpoint, Operation: input.Operation, Member: input.Member, CreatedAt: createdAt}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, event.ID, event.ConversationID, event.ActorEndpoint, event.Operation, event.Member.Endpoint, event.Member.Capabilities, event.CreatedAt); err != nil {
 		return relay.ControlEvent{}, false, relayDatabaseError(err, "record control audit")
 	}

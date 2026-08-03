@@ -136,6 +136,10 @@ func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
 	if err != nil || !duplicate || again.ID != first.ID {
 		t.Fatalf("retry control=%#v duplicate=%v err=%v", again, duplicate, err)
 	}
+	second, duplicate, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/c"}, IdempotencyKey: "control-order", Now: now})
+	if err != nil || duplicate || !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("same-timestamp control=%#v duplicate=%v first=%#v err=%v", second, duplicate, first, err)
+	}
 	if _, _, err := store.ApplyControl(ControlInput{ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b", Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/c"}, IdempotencyKey: "control-2", Now: now}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("non-admin control err=%v, want forbidden", err)
 	}
@@ -143,7 +147,7 @@ func TestStoreControlRequiresLiveAdminAndIsDurablyIdempotent(t *testing.T) {
 		t.Fatalf("last-admin removal err=%v, want conflict", err)
 	}
 	events, err := store.ControlAudit(conversation.ID, "machine-a", "agent/a", now)
-	if err != nil || len(events) != 1 || events[0].Member.Endpoint != "agent/c" || events[0].Member.Capabilities != CapReceive {
+	if err != nil || len(events) != 2 || events[0].ID != second.ID || events[1].ID != first.ID {
 		t.Fatalf("audit=%#v err=%v", events, err)
 	}
 	var messages int
