@@ -180,6 +180,10 @@ func TestRemoteMCPE2ERevocationRequiresConfiguredClosedRejection(t *testing.T) {
 	if validRemoteMCPE2ERevocationResponse(invalidToken, http.StatusForbidden) || validRemoteMCPE2ERevocationResponse(inactiveSubject, http.StatusUnauthorized) {
 		t.Fatal("revocation accepted the wrong rejection boundary")
 	}
+	resultLeak := remoteMCPE2EResponse{Status: http.StatusForbidden, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":"remote-mcp-e2e","result":{"tools":[]}}`)}
+	if validRemoteMCPE2EOAuthFailureBody(resultLeak) {
+		t.Fatal("revoked bearer response exposing a JSON-RPC result accepted")
+	}
 }
 
 func TestRemoteMCPE2EConfigReadIsBounded(t *testing.T) {
@@ -650,6 +654,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	}
 	revoked := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.Tokens.Revoked.Token, remoteMCPE2ERequest(t, "tools/list", map[string]any{}))
 	remoteMCPE2ERedacted(t, revoked, config.sensitiveValues())
+	if !validRemoteMCPE2EOAuthFailureBody(revoked) {
+		t.Fatal("revoked bearer response exposed a JSON-RPC result")
+	}
 	if !validRemoteMCPE2ERevocationResponse(revoked, config.Tokens.Revoked.ExpectedStatus) {
 		t.Fatal("revoked bearer did not return the configured closed rejection")
 	}
@@ -705,6 +712,9 @@ func runRemoteMCPE2EReleaseCandidateWithClient(t *testing.T, config remoteMCPE2E
 	redacted := remoteMCPE2EDo(t, client, http.MethodPost, config.Endpoint, config.RedactionProbe, remoteMCPE2ERequest(t, "tools/list", map[string]any{"probe": config.RedactionProbe}))
 	remoteMCPE2ERequireStatus(t, redacted, http.StatusUnauthorized)
 	remoteMCPE2ERedacted(t, redacted, config.sensitiveValues())
+	if !validRemoteMCPE2EOAuthFailureBody(redacted) {
+		t.Fatal("redaction probe response exposed a JSON-RPC result")
+	}
 	t.Logf("remote MCP release-candidate E2E evidence passed for candidate_commit=%s", config.CandidateCommit)
 }
 
