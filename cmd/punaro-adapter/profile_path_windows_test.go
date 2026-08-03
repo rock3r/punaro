@@ -39,6 +39,33 @@ func TestWindowsLoadConfigRejectsSharedProfileACL(t *testing.T) {
 	}
 }
 
+func TestWindowsLoadConfigAllowsEnvironmentWithoutProfileRoot(t *testing.T) {
+	clearAdapterEnvironment(t)
+	t.Setenv("LOCALAPPDATA", "")
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyFile := filepath.Join(t.TempDir(), "machine.key")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	protectWindowsFixture(t, keyFile)
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
+	t.Setenv("PUNARO_MACHINE_ID", "environment-machine")
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
+	t.Setenv("PUNARO_ATTACHED_GROUP", "group/punaro-attached")
+	t.Setenv("PUNARO_ADAPTER_DATA_DIR", t.TempDir())
+
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.machineID != "environment-machine" {
+		t.Fatalf("machine ID=%q, want environment value", config.machineID)
+	}
+}
+
 func setupWindowsProfile(t *testing.T) string {
 	t.Helper()
 	localAppData := t.TempDir()

@@ -459,7 +459,10 @@ func loadAdapterProfile() (map[string]string, error) {
 		var err error
 		path, err = installedAdapterProfilePath()
 		if err != nil {
-			return nil, errors.New("adapter profile is unavailable")
+			// Preserve environment-only deployments when the optional default
+			// profile root is unavailable. An explicitly selected profile still
+			// fails closed below.
+			return map[string]string{}, nil
 		}
 	}
 	if !filepath.IsAbs(path) {
