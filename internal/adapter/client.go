@@ -219,7 +219,11 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 	}
 	encoded := make([]map[string]any, 0, len(members))
 	for _, member := range members {
-		encoded = append(encoded, map[string]any{"endpoint": member.Endpoint, "capabilities": capabilityNames(member.Capabilities), "role": member.Role})
+		item := map[string]any{"endpoint": member.Endpoint, "capabilities": capabilityNames(member.Capabilities)}
+		if member.Role != "" {
+			item["role"] = member.Role
+		}
+		encoded = append(encoded, item)
 	}
 	var conversation relay.Conversation
 	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "members": encoded}, idempotencyKey, &conversation)
@@ -264,7 +268,11 @@ func (c *HTTPRelayClient) send(ctx context.Context, conversationID, fromEndpoint
 		return relay.Message{}, fmt.Errorf("conversation, sender endpoint, and idempotency key are required")
 	}
 	var message relay.Message
-	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", map[string]any{"from_endpoint": fromEndpoint, "target_role": targetRole, "body": body}, idempotencyKey, &message)
+	request := map[string]any{"from_endpoint": fromEndpoint, "body": body}
+	if targetRole != "" {
+		request["target_role"] = targetRole
+	}
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", request, idempotencyKey, &message)
 	if err != nil {
 		return message, &relayHTTPStatusError{status: status, err: err}
 	}

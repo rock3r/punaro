@@ -631,7 +631,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 // The prior endpoint may be detached, so an administrator can rebind a durable
 // role after the old local session has stopped; the new endpoint must be active.
 func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previousEndpoint string, member Member, now time.Time) error {
-	if strings.TrimSpace(conversationID) == "" || !ValidMachineID(machineID) || !ValidEndpoint(adminEndpoint) || !ValidEndpoint(previousEndpoint) || !ValidEndpoint(member.Endpoint) || !ValidRole(member.Role) || member.Capabilities == 0 || member.Capabilities&^(CapSend|CapReceive|CapAdmin) != 0 {
+	if strings.TrimSpace(conversationID) == "" || !ValidMachineID(machineID) || !ValidEndpoint(adminEndpoint) || !ValidEndpoint(previousEndpoint) || !ValidEndpoint(member.Endpoint) || !ValidRole(member.Role) || member.Capabilities == 0 || member.Capabilities&^(CapSend|CapReceive|CapAdmin|CapInvoke) != 0 {
 		return ErrForbidden
 	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -677,7 +677,16 @@ func (s *Store) UpdateMembership(conversationID, machineID, adminEndpoint, previ
 		return fmt.Errorf("check conversation member update: %w", err)
 	}
 	if changed != 1 {
-		return ErrForbidden
+		var endpoint string
+		var capabilities Capability
+		var role string
+		err := tx.QueryRowContext(context.Background(), "SELECT endpoint, capabilities, role FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, member.Endpoint).Scan(&endpoint, &capabilities, &role)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && (endpoint != member.Endpoint || capabilities != member.Capabilities || role != member.Role)) {
+			return ErrForbidden
+		}
+		if err != nil {
+			return fmt.Errorf("read replayed membership update: %w", err)
+		}
 	}
 	return tx.Commit()
 }

@@ -600,11 +600,30 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 			if r.Header.Get("Idempotency-Key") != "send-1" {
 				t.Fatal("missing idempotency key")
 			}
+			var messageRequest map[string]json.RawMessage
+			if err := json.Unmarshal(body, &messageRequest); err != nil {
+				t.Fatal(err)
+			}
+			if _, hasTargetRole := messageRequest["target_role"]; hasTargetRole {
+				t.Fatal("ordinary send exposed target_role to a legacy relay")
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"reply","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/conversations":
 			if r.Header.Get("Idempotency-Key") != "create-1" {
 				t.Fatal("missing create idempotency key")
+			}
+			var conversationRequest struct {
+				Members []map[string]json.RawMessage `json:"members"`
+			}
+			if err := json.Unmarshal(body, &conversationRequest); err != nil {
+				t.Fatal(err)
+			}
+			if len(conversationRequest.Members) != 1 {
+				t.Fatalf("members=%#v", conversationRequest.Members)
+			}
+			if _, hasRole := conversationRequest.Members[0]["role"]; hasRole {
+				t.Fatal("ordinary create exposed role to a legacy relay")
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"conversation-created"}`))

@@ -294,7 +294,16 @@ func (d *Database) UpdateMembership(conversationID, machineID, adminEndpoint, pr
 		return errors.New("membership update result is unavailable")
 	}
 	if changed != 1 {
-		return relay.ErrForbidden
+		var endpoint string
+		var capabilities relay.Capability
+		var role string
+		err := tx.QueryRowContext(context.Background(), `SELECT endpoint,capabilities,role FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, member.Endpoint).Scan(&endpoint, &capabilities, &role)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && (endpoint != member.Endpoint || capabilities != member.Capabilities || role != member.Role)) {
+			return relay.ErrForbidden
+		}
+		if err != nil {
+			return errors.New("replayed membership update is unavailable")
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit membership update")
@@ -406,16 +415,42 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, errors.New("message retry state is unavailable")
 	}
-	var recipients int
+	recipients := make([]string, 0)
 	if input.TargetRole == "" {
-		err = tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND endpoint<>$3`, input.ConversationID, relay.CapReceive, input.FromEndpoint).Scan(&recipients)
+		rows, queryErr := tx.QueryContext(context.Background(), `SELECT endpoint FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND endpoint<>$3 FOR SHARE`, input.ConversationID, relay.CapReceive, input.FromEndpoint)
+		err = queryErr
+		if err == nil {
+			for rows.Next() {
+				var endpoint string
+				if err = rows.Scan(&endpoint); err != nil {
+					break
+				}
+				recipients = append(recipients, endpoint)
+			}
+			if closeErr := rows.Close(); err == nil {
+				err = closeErr
+			}
+		}
 	} else {
-		err = tx.QueryRowContext(context.Background(), `SELECT count(*) FROM relay.mail_memberships AS membership JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE membership.conversation_id=$1::uuid AND membership.role=$2 AND (membership.capabilities & $3) <> 0 AND membership.endpoint<>$4 AND endpoint.lease_until>$5`, input.ConversationID, input.TargetRole, relay.CapReceive, input.FromEndpoint, input.Now.UTC()).Scan(&recipients)
+		rows, queryErr := tx.QueryContext(context.Background(), `SELECT membership.endpoint FROM relay.mail_memberships AS membership JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE membership.conversation_id=$1::uuid AND membership.role=$2 AND (membership.capabilities & $3) <> 0 AND membership.endpoint<>$4 AND endpoint.lease_until>$5 FOR SHARE OF membership, endpoint`, input.ConversationID, input.TargetRole, relay.CapReceive, input.FromEndpoint, input.Now.UTC())
+		err = queryErr
+		if err == nil {
+			for rows.Next() {
+				var endpoint string
+				if err = rows.Scan(&endpoint); err != nil {
+					break
+				}
+				recipients = append(recipients, endpoint)
+			}
+			if closeErr := rows.Close(); err == nil {
+				err = closeErr
+			}
+		}
 	}
 	if err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "find message recipients")
 	}
-	if input.TargetRole != "" && recipients == 0 {
+	if input.TargetRole != "" && len(recipients) == 0 {
 		return relay.Message{}, false, relay.ErrNoEligibleRecipient
 	}
 	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, TargetRole: input.TargetRole, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
@@ -427,9 +462,10 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,target_role,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.TargetRole, message.Body, message.CreatedAt); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "append message")
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid, membership.endpoint FROM relay.mail_memberships AS membership JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0 AND membership.endpoint<>$4 AND ($5='' OR (membership.role=$5 AND endpoint.lease_until>$6))`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, message.TargetRole, input.Now.UTC()); err != nil {
-		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
+	for _, recipient := range recipients {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, message.ID, recipient); err != nil {
+			return relay.Message{}, false, relayDatabaseError(err, "create recipient delivery")
+		}
 	}
 	if len(input.ArtifactIDs) != 0 {
 		encodedArtifacts, err := json.Marshal(input.ArtifactIDs)

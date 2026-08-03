@@ -137,6 +137,9 @@ func TestMembershipRoleChangesRequireAdminAndSurviveRestart(t *testing.T) {
 	if err := store.UpdateMembership(conversation.ID, "machine-admin", "agent/admin", "agent/old", Member{Endpoint: "agent/new", Capabilities: CapReceive, Role: "implementer"}, now); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.UpdateMembership(conversation.ID, "machine-admin", "agent/admin", "agent/old", Member{Endpoint: "agent/new", Capabilities: CapReceive, Role: "implementer"}, now); err != nil {
+		t.Fatalf("replayed rebinding: %v", err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
