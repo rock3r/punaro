@@ -266,6 +266,9 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
 		return relay.ControlEvent{}, false, err
 	}
+	if err := postgresLockSessionRoleBindings(tx, input.ActorMachineID, input.ActorEndpoint, input.Now); err != nil {
+		return relay.ControlEvent{}, false, err
+	}
 	requestHash := relay.ControlRequestHash(input)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT control_id::text,request_hash FROM relay.mail_conversation_control_idempotency WHERE machine_id=$1 AND key=$2`, input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -386,6 +389,9 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
 	if err := postgresEndpointOwnedBy(tx, actorEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	if err := postgresLockSessionRoleBindings(tx, machineID, actorEndpoint, now); err != nil {
 		return nil, err
 	}
 	capabilities, err := postgresSessionCapabilities(tx, conversationID, machineID, actorEndpoint, now)
