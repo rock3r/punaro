@@ -261,9 +261,6 @@ func (s *Store) LeaseInvocations(machineID, consumerID string, now time.Time, tt
 	if err := s.ensureInvocationSchema(); err != nil {
 		return nil, err
 	}
-	if err := s.ensureInvocationSchema(); err != nil {
-		return nil, err
-	}
 	if !ValidMachineID(machineID) || !ValidRequestToken(consumerID) || ttl <= 0 || limit < 1 || limit > 100 {
 		return nil, fmt.Errorf("invalid invocation lease request")
 	}
