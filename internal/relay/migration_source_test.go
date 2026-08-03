@@ -635,6 +635,10 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil || preparedV2.Version != 2 || preparedV2.Phase != MigrationSourcePrepared {
 		t.Fatalf("role-only v2 preparation=%#v err=%v", preparedV2, err)
 	}
+	preparedV2AfterRestart, err := InspectMigrationSource(ctx, path)
+	if err != nil || preparedV2AfterRestart.Version != 2 || preparedV2AfterRestart.Phase != MigrationSourcePrepared || preparedV2AfterRestart.Fingerprint != preparedV2.Fingerprint {
+		t.Fatalf("role-only v2 restart manifest=%#v err=%v", preparedV2AfterRestart, err)
+	}
 	active, err = AbortPreparedMigrationSource(ctx, path, epoch, target, preparedV2.Fingerprint)
 	if err != nil || active.Version != 2 || active.Phase != MigrationSourceActive {
 		t.Fatalf("role-only v2 abort=%#v err=%v", active, err)

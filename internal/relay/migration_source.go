@@ -226,7 +226,14 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		return MigrationSourceManifest{}, errors.New("invalid relay migration preparation")
 	}
 	return mutateMigrationSource(ctx, path, func(conn *sql.Conn, current MigrationSourceManifest) (MigrationSourceManifest, error) {
-		if current.Phase == MigrationSourcePrepared && current.EpochID == epochID && current.TargetIdentity == targetIdentity && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastExpectedFingerprint == expectedFingerprint && current.lastResultFingerprint == current.Fingerprint && current.lastCutoff == now.UTC().UnixMilli() && current.lastTransition == "prepared" {
+		cutoff := now.UTC().UnixMilli()
+		if current.Version == 2 {
+			// The transition journal predates the v2 schema. Its signed cutoff is
+			// otherwise opaque bookkeeping, so retain v2 identity durably without
+			// changing the parent schema's accepted transition vocabulary.
+			cutoff = -cutoff
+		}
+		if current.Phase == MigrationSourcePrepared && current.EpochID == epochID && current.TargetIdentity == targetIdentity && current.lastEpochID == epochID && current.lastTargetIdentity == targetIdentity && current.lastExpectedFingerprint == expectedFingerprint && current.lastResultFingerprint == current.Fingerprint && current.lastCutoff == cutoff && current.lastTransition == "prepared" {
 			return current, nil
 		}
 		if current.Phase != MigrationSourceActive || current.Fingerprint != expectedFingerprint {
@@ -252,7 +259,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		if err != nil {
 			return MigrationSourceManifest{}, err
 		}
-		if _, err := conn.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition='prepared',changed_at=? WHERE singleton=1 AND phase='active'`, epochID, targetIdentity, prepared.Fingerprint, epochID, targetIdentity, expectedFingerprint, prepared.Fingerprint, now.UTC().UnixMilli(), now.UTC().UnixMilli()); err != nil {
+		if _, err := conn.ExecContext(ctx, `UPDATE relay_migration_control SET phase='prepared',epoch_id=?,target_identity=?,fingerprint=?,last_epoch_id=?,last_target_identity=?,last_expected_fingerprint=?,last_result_fingerprint=?,last_cutoff=?,last_transition='prepared',changed_at=? WHERE singleton=1 AND phase='active'`, epochID, targetIdentity, prepared.Fingerprint, epochID, targetIdentity, expectedFingerprint, prepared.Fingerprint, cutoff, now.UTC().UnixMilli()); err != nil {
 			return MigrationSourceManifest{}, errors.New("relay migration source cannot be prepared")
 		}
 		prepared.Phase = MigrationSourcePrepared
@@ -263,7 +270,7 @@ func PrepareMigrationSource(ctx context.Context, path, epochID, targetIdentity, 
 		prepared.lastExpectedFingerprint = expectedFingerprint
 		prepared.ExpectedFingerprint = expectedFingerprint
 		prepared.lastResultFingerprint = prepared.Fingerprint
-		prepared.lastCutoff = now.UTC().UnixMilli()
+		prepared.lastCutoff = cutoff
 		prepared.lastTransition = "prepared"
 		return prepared, nil
 	})
@@ -397,7 +404,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	// Parent releases recorded role-only prepared manifests as v3. Retain that
 	// durable identity until the existing epoch is retired or aborted; newly
 	// active role-only sources use v2 so fresh cutovers name the absent controls.
-	if roleOnly && manifest.Phase != MigrationSourceActive {
+	if roleOnly && manifest.Phase != MigrationSourceActive && manifest.lastCutoff >= 0 {
 		manifest.Version = 3
 	}
 	if manifest.Phase == MigrationSourceActive {
