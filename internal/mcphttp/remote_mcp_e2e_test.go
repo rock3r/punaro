@@ -210,6 +210,7 @@ func TestRemoteMCPE2EJSONRPCFailureRequiresStructuredErrorAndRequestID(t *testin
 	}
 	for _, response := range []remoteMCPE2EResponse{
 		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":null}`)},
+		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":0,"message":"Invalid Request"}}`)},
 		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":"-32600","message":"Invalid Request"}}`)},
 		{Status: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: []byte(`{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"Invalid Request"}}`)},
 	} {
@@ -939,7 +940,7 @@ func validRemoteMCPE2EJSONRPCFailureWithExpectedID(response remoteMCPE2EResponse
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	}
-	return json.Unmarshal(envelope.Error, &rpcError) == nil && rpcError.Message != ""
+	return json.Unmarshal(envelope.Error, &rpcError) == nil && rpcError.Code != 0 && rpcError.Message != ""
 }
 
 func remoteMCPE2EJSONValuesEqual(left, right json.RawMessage) bool {
