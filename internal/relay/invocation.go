@@ -238,6 +238,48 @@ func expireAbandonedInvocations(tx *sql.Tx, targetEndpoint string, now time.Time
 	return nil
 }
 
+// failRevokedInvocations closes every not-yet-terminal start authority for an
+// endpoint in a conversation whose receive membership was revoked. Invocation
+// state is optional while SQLite-to-PostgreSQL parity is staged, so controls
+// must not create it merely to revoke membership.
+func failRevokedInvocations(tx *sql.Tx, conversationID, targetEndpoint string, now time.Time) error {
+	exists, err := invocationSchemaExistsTx(tx)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM invocations WHERE conversation_id=? AND target_endpoint=? AND status=?`, conversationID, targetEndpoint, InvocationPending)
+	if err != nil {
+		return fmt.Errorf("find revoked invocations: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("read revoked invocation: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close revoked invocations: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("find revoked invocations: %w", err)
+	}
+	for _, id := range ids {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE invocations SET status=?,terminal_at=?,lease_machine_id=NULL,lease_consumer_id=NULL,lease_token=NULL,lease_until=NULL WHERE id=?`, InvocationFailed, now.UnixMilli(), id); err != nil {
+			return fmt.Errorf("fail revoked invocation: %w", err)
+		}
+		if err := recordInvocationAudit(tx, id, "failed", now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // expireAbandonedLeasedInvocations closes the crash-recovery window before an
 // adapter can obtain another lease. A never-leased request remains eligible for
 // its first start even if it is old; only a prior runtime handoff needs this
