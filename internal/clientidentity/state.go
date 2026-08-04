@@ -161,6 +161,11 @@ func canonicalOrigin(raw string) (string, bool) {
 	return parsed.String(), true
 }
 
+// CanonicalOrigin validates and canonicalizes the one fixed HTTPS authority a
+// native client is allowed to contact. Callers must persist the returned value
+// before accepting credentials or network input.
+func CanonicalOrigin(raw string) (string, bool) { return canonicalOrigin(raw) }
+
 func canonicalHost(hostname string) string {
 	if strings.Contains(hostname, ":") {
 		return "[" + hostname + "]"

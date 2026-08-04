@@ -217,6 +217,59 @@ the local sidecar cannot repair, bypass, or broaden those decisions. After
 SQLite retirement, rollback is restore or forward repair, not a client profile
 edit.
 
+### Supported device-credential enrollment
+
+Installers now include `punaro-enroll` (`punaro-enroll.exe` on Windows). It is
+the supported way to make the public per-device enrollment binding and persist
+the returned bearer credential. It never accepts an enrollment code, bearer
+credential, private key, or Access secret in an argument or environment
+variable.
+
+On the client, create state for the fixed origin. The directory must be new or
+private and owned by the current user. On macOS/Linux use a directory below
+`~/.config/punaro`; on Windows use one below `%LOCALAPPDATA%\Punaro`:
+
+```sh
+punaro-enroll prepare \
+  --origin https://punaro.example \
+  --state-dir "$HOME/.config/punaro/device-enrollment"
+```
+
+The command prints only the canonical origin and an opaque `client_binding`.
+Give that public value to the server owner. The owner previews and creates the
+least-privilege grant with `punaro-admin client add`; the owner chooses the
+projects and cannot be overridden by the client. Treat its resulting JSON as
+short-lived enrollment material: transfer it through an approved protected
+channel into a current-user-only regular file on that client. Do not paste it
+into terminal commands, shell history, environment variables, diagnostic
+bundles, or source-controlled configuration.
+
+Redeem that protected file on the client:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
+```
+
+`punaro-enroll` checks the exact binding before any network request, contacts
+only the canonical HTTPS origin selected during `prepare`, and writes a private
+recovery journal before redemption. If a network interruption occurs, rerun
+the same `redeem` command; if the transfer file is gone, use `punaro-enroll
+recover` with the state and credential paths. The retry has the same idempotency
+key, so it cannot mint a second device credential. A rejected (including
+expired, already-used, or revoked) enrollment fails closed and tells the user
+to request a new enrollment; its private recovery journal is removed so the
+replacement material is not blocked. After success, remove the transferred material
+through its approved secret-handling process; the identity sidecar remains
+non-secret and the recovery journal is removed.
+
+The server owner rotates or revokes a device with `punaro-admin credential
+rotate` or `punaro-admin credential revoke`, using the content-free credential
+inventory. Rotation and revocation are server-controlled: a local identity
+sidecar or copied credential cannot restore access.
+
 ## 4. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree

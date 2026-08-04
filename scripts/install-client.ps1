@@ -135,6 +135,7 @@ $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-keygen') -Output (Join-Path $binDir 'punaro-keygen.exe')
 foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {
     $source = Join-Path $repoDir "deploy\windows\$name"
@@ -203,3 +204,4 @@ Write-Output 'Punaro Windows client installed. Approve this public machine enrol
 Get-Content -LiteralPath $enrollmentFile
 Write-Output 'Next: add this machine''s distinct Access token pair to adapter.env; bind and attach desired aliases; then rerun with -Enable.'
 Write-Output 'After device-credential enrollment, use punaro-trusted-attachment.exe with a protected credential file and safe download root.'
+Write-Output 'Run punaro-enroll.exe prepare before the server owner issues the one-time enrollment for this device; redeem only a protected enrollment-material file.'
