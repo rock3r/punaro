@@ -156,9 +156,12 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if journal.ClientBinding != state.ClientBinding || !validJournal(journal) {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
+	if err := syncPrivateDirectory(*stateDir); err != nil {
+		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
+	}
 	response, result := postRedemption(state.Origin, journal)
 	if result == redemptionRejected {
-		if err := os.Remove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
 		}
 		return enrollmentError(stderr, "enrollment was rejected; request a new enrollment", 1)
@@ -169,7 +172,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := writeCredential(*credentialPath, response.Credential); err != nil {
 		return enrollmentError(stderr, "credential persistence failed; retry this command", 1)
 	}
-	if err := os.Remove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return enrollmentError(stderr, "credential persisted; remove the private recovery file before continuing", 1)
 	}
 	return writeJSON(stdout, struct {

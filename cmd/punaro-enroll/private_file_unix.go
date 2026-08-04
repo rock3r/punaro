@@ -132,13 +132,22 @@ func writePrivateNew(path string, raw []byte) error {
 	return nil
 }
 
-func syncPrivateDirectory(path string) error {
+var syncPrivateDirectory = syncPrivateDirectoryImpl
+
+func syncPrivateDirectoryImpl(path string) error {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = unix.Close(fd) }()
 	return unix.Fsync(fd)
+}
+
+func removePrivate(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncPrivateDirectory(filepath.Dir(path))
 }
 func writeCredential(path, credential string) error {
 	if credential == "" || stringsContainsWhitespace(credential) {
