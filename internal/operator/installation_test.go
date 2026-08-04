@@ -111,6 +111,7 @@ func TestInitRejectsMemoryMutationsWithoutReadAPI(t *testing.T) {
 
 func TestInitPublishesUnifiedRelayAndTrustedAttachmentSurface(t *testing.T) {
 	options := validInitOptions(t)
+	options.RelayEnabled = true
 	options.RelayMachinesJSON = testRelayMachinesJSON
 	options.TrustedAttachmentsEnabled = true
 	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "attachments")
@@ -184,6 +185,7 @@ func TestCheckPathsRejectsAttachmentDarkLegacyTemplate(t *testing.T) {
 
 func TestInitRejectsRelayAuthorityWithLANListenerBeforeBootstrap(t *testing.T) {
 	options := validInitOptions(t)
+	options.RelayEnabled = true
 	options.RelayMachinesJSON = testRelayMachinesJSON
 	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}
 	called := false
@@ -1000,6 +1002,25 @@ func TestMailCutoverRelayConfigurationRepairsExactLegacyTemplates(t *testing.T) 
 	environment, err := os.ReadFile(EnvFile(installation.Directory))
 	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_ENABLED=false\n") || !strings.Contains(string(environment), "PUNARO_RELAY_MACHINES_JSON='"+testRelayMachinesJSON+"'\n") {
 		t.Fatalf("environment=%q err=%v", environment, err)
+	}
+}
+
+func TestLoadAllowsDarkRelayEnrollmentOnLANListener(t *testing.T) {
+	options := validInitOptions(t)
+	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}
+	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: name}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured := configureTestRelayMachines(t, installation)
+	if configured.RelayEnabled {
+		t.Fatal("mail cutover enrollment enabled the relay")
+	}
+	loaded, err := Load(installation.Directory)
+	if err != nil || loaded.RelayEnabled || loaded.RelayMachinesJSON != testRelayMachinesJSON {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
 	}
 }
 

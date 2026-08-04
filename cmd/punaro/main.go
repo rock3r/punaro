@@ -415,7 +415,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		}
 		return createOwner(ctx, ownerFile, name)
 	}
-	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}, HealthListenAddr: *healthListen, MemoryAPIEnabled: *memoryAPI, MemoryMutationsEnabled: *memoryMutations, TrustedAttachmentsEnabled: *trustedAttachments, TrustedAttachmentBlobDir: *trustedAttachmentBlobDir, RelayMachinesJSON: relayMachinesJSON}, bootstrap)
+	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}, HealthListenAddr: *healthListen, MemoryAPIEnabled: *memoryAPI, MemoryMutationsEnabled: *memoryMutations, TrustedAttachmentsEnabled: *trustedAttachments, TrustedAttachmentBlobDir: *trustedAttachmentBlobDir, RelayEnabled: relayMachinesJSON != "", RelayMachinesJSON: relayMachinesJSON}, bootstrap)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
 		return 1

@@ -115,6 +115,7 @@ type InitOptions struct {
 	MemoryMutationsEnabled    bool
 	TrustedAttachmentsEnabled bool
 	TrustedAttachmentBlobDir  string
+	RelayEnabled              bool
 	RelayMachinesJSON         string
 }
 
@@ -219,7 +220,7 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayMachinesJSON: installation.RelayMachinesJSON}); err != nil {
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: installation.RelayEnabled, RelayMachinesJSON: installation.RelayMachinesJSON}); err != nil {
 		return Installation{}, errors.New("initialization staging configuration is invalid")
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {
@@ -350,11 +351,14 @@ func validateStatic(options InitOptions) (Installation, error) {
 		if err != nil {
 			return Installation{}, err
 		}
-		if !listener.IsLoopback(policy.ListenAddr) {
-			return Installation{}, errors.New("relay authority requires a loopback device listener")
-		}
 	}
-	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: options.TrustedAttachmentBlobDir, RelayEnabled: relayMachines != "", RelayMachinesJSON: relayMachines}, nil
+	if options.RelayEnabled && relayMachines == "" {
+		return Installation{}, errors.New("enabled relay requires machine enrollment")
+	}
+	if options.RelayEnabled && !listener.IsLoopback(policy.ListenAddr) {
+		return Installation{}, errors.New("relay authority requires a loopback device listener")
+	}
+	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: options.TrustedAttachmentBlobDir, RelayEnabled: options.RelayEnabled, RelayMachinesJSON: relayMachines}, nil
 }
 
 // Load reads only a completely published installation marker.
@@ -387,7 +391,7 @@ func Load(directory string) (Installation, error) {
 	if installation.RelayEnabled && installation.RelayMachinesJSON == "" {
 		return Installation{}, errors.New("published installation relay configuration is invalid")
 	}
-	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayMachinesJSON: installation.RelayMachinesJSON})
+	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: installation.RelayEnabled, RelayMachinesJSON: installation.RelayMachinesJSON})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
 	}
