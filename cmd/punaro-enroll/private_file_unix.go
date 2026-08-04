@@ -72,13 +72,22 @@ func readPrivate(path string, maximum int) ([]byte, error) {
 	if !filepath.IsAbs(path) {
 		return nil, errors.New("unsafe private file")
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !privateFile(info) {
+		return nil, errors.New("unsafe private file")
+	}
+	// O_NONBLOCK avoids a FIFO replacement blocking between the pre-open
+	// Lstat and the post-open fstat validation below.
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), path) // #nosec G115 -- unix.Open returns a non-negative descriptor for os.NewFile.
 	defer func() { _ = file.Close() }()
-	info, err := file.Stat()
+	info, err = file.Stat()
 	if err != nil || !privateFile(info) {
 		return nil, errors.New("unsafe private file")
 	}

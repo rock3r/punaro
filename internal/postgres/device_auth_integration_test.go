@@ -112,8 +112,9 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, pending.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey}); !errors.Is(err, ErrInvalidEnrollment) {
-		t.Fatalf("expired redemption retry error=%v", err)
+	expiredReplay, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey})
+	if err != nil || expiredReplay.Encoded != credential.Encoded || expiredReplay.LookupID != credential.LookupID {
+		t.Fatalf("expired redemption retry=%#v err=%v", expiredReplay, err)
 	}
 	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: uuid.NewString()}); !errors.Is(err, ErrInvalidEnrollment) {
 		t.Fatalf("single-use replay error=%v", err)
