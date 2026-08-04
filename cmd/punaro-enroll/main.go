@@ -117,6 +117,9 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || privateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
+	if err := preflightCredentialDestination(*credentialPath); err != nil {
+		return enrollmentError(stderr, "private credential destination is unavailable", 2)
+	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
 	if err != nil || state.LegacyMachineID != "" {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
@@ -180,6 +183,20 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		LookupID   string `json:"lookup_id"`
 		Generation int64  `json:"generation"`
 	}{Origin: state.Origin, LookupID: response.LookupID, Generation: response.Generation})
+}
+
+func preflightCredentialDestination(path string) error {
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// A credential path is single-use. Treat every existing entry, including a
+	// regular private credential, as unavailable before redemption so no server
+	// principal is minted when the response cannot be persisted locally.
+	return errors.New("credential destination exists")
 }
 
 func invalid(stderr io.Writer) int { return enrollmentError(stderr, "invalid arguments", 2) }

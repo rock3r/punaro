@@ -82,6 +82,34 @@ func TestRedeemFailsClosedForBindingMismatchWithoutContactingOrigin(t *testing.T
 	}
 }
 
+func TestRedeemPreflightsCredentialDestinationBeforeContactingOrigin(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("redemption contacted the origin before preflighting credential destination")
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	var prepared publicEnrollment
+	var preparedOut bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, &preparedOut, io.Discard); code != 0 || json.Unmarshal(preparedOut.Bytes(), &prepared) != nil {
+		t.Fatalf("prepare code=%d output=%q", code, preparedOut.String())
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	credentialPath := filepath.Join(stateDir, "credential")
+	if err := writePrivateNew(credentialPath, []byte("existing credential\n")); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialPath}, io.Discard, &stderr); code != 2 || stderr.String() != "punaro-enroll: private credential destination is unavailable\n" {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
+		t.Fatalf("preflight created a recovery journal: %v", err)
+	}
+}
+
 func TestEnsurePrivateDirCreatesNestedStateDirectory(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "first", "second", "state")
 	if err := ensurePrivateDir(stateDir); err != nil {
