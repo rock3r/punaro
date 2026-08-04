@@ -624,7 +624,7 @@ func loadClientIdentity(settings map[string]string, relayURL, machineID string) 
 		return errors.New("client identity configuration is invalid")
 	}
 	state, err := clientidentity.Parse(raw)
-	if err != nil || state.Match(relayURL, binding, machineID) != nil {
+	if err != nil || state.MatchLegacyAdapter(relayURL, binding, machineID) != nil {
 		return errors.New("client identity configuration does not match this adapter")
 	}
 	return nil

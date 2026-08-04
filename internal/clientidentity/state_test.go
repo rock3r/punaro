@@ -121,6 +121,9 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := fresh.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err != nil {
 		t.Fatalf("fresh identity adapter match: %v", err)
 	}
+	if err := fresh.MatchLegacyAdapter("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err == nil {
+		t.Fatal("fresh identity unexpectedly matched a legacy adapter")
+	}
 	for name, match := range map[string][3]string{
 		"origin":         {"https://other.example", "11111111-1111-4111-8111-111111111111", "laptop-1"},
 		"client binding": {"https://punaro.example", "22222222-2222-4222-8222-222222222222", "laptop-1"},

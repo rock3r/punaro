@@ -280,6 +280,12 @@ func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing
 	if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "other.example") {
 		t.Fatalf("cross-origin identity state error=%v", err)
 	}
+	if err := os.WriteFile(identity, []byte(`{"version":1,"origin":"https://relay.example","client_binding":"`+binding+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("fresh identity state unexpectedly matched legacy adapter")
+	}
 	if err := os.WriteFile(profile, append(profileContents[:len(profileContents)-len("PUNARO_CLIENT_BINDING="+binding+"\n")], nil...), 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
 		t.Fatal(err)
 	}

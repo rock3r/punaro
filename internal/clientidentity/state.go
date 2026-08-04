@@ -109,6 +109,16 @@ func (s State) Match(origin, clientBinding, legacyMachineID string) error {
 	return nil
 }
 
+// MatchLegacyAdapter verifies the transition state for an adapter that still
+// authenticates with its legacy machine identity. Fresh post-enrollment
+// clients use Match and have no legacy machine relationship to prove.
+func (s State) MatchLegacyAdapter(origin, clientBinding, machineID string) error {
+	if s.LegacyMachineID == "" {
+		return ErrStateMismatch
+	}
+	return s.Match(origin, clientBinding, machineID)
+}
+
 func (s State) validate() error {
 	if s.Version != Version || !validOrigin(s.Origin) || !validBinding(s.ClientBinding) || (s.LegacyMachineID != "" && !validLegacyMachineID(s.LegacyMachineID)) {
 		return ErrInvalidState
