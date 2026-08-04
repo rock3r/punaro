@@ -140,7 +140,18 @@ func syncPrivateDirectoryImpl(path string) error {
 		return err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	return unix.Fsync(fd)
+	if err := unix.Fsync(fd); err != nil {
+		// Some supported filesystems do not implement directory fsync. A global
+		// synchronous flush is slower, but preserves the durable-publication
+		// invariant without allowing an already-written journal to poison all
+		// later recovery attempts.
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) {
+			unix.Sync()
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 func removePrivate(path string) error {
