@@ -83,6 +83,13 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := zoneState.Match("https://[FE80::1%25EtherNet]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical IPv6 zone match: %v", err)
 	}
+	multiPercentZoneState, err := Parse([]byte(`{"version":1,"origin":"https://[fe80::1%25Ether%25Net]","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
+	if err != nil {
+		t.Fatalf("parse IPv6 multi-percent zone state: %v", err)
+	}
+	if err := multiPercentZoneState.Match("https://[FE80::1%25Ether%25Net]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical IPv6 multi-percent zone match: %v", err)
+	}
 	fresh, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`))
 	if err != nil {
 		t.Fatalf("parse fresh identity: %v", err)

@@ -152,7 +152,7 @@ func canonicalHost(hostname string) string {
 }
 
 func canonicalHostname(hostname string) string {
-	if zone := strings.LastIndexByte(hostname, '%'); zone > 0 && strings.Contains(hostname[:zone], ":") {
+	if zone := strings.IndexByte(hostname, '%'); zone > 0 && strings.Contains(hostname[:zone], ":") {
 		return strings.ToLower(hostname[:zone]) + hostname[zone:]
 	}
 	return strings.ToLower(hostname)
