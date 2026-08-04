@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/relay"
+	"golang.org/x/net/idna"
 )
 
 // Version is the current compatible client identity state schema.
@@ -128,7 +129,10 @@ func canonicalOrigin(raw string) (string, bool) {
 	if strings.HasPrefix(parsed.Host, "[") && !validIPv6Hostname(parsed.Hostname()) {
 		return "", false
 	}
-	hostname := canonicalHostname(parsed.Hostname())
+	hostname, ok := canonicalHostname(parsed.Hostname())
+	if !ok {
+		return "", false
+	}
 	if port := parsed.Port(); port != "" {
 		value, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || value == 0 {
@@ -154,15 +158,19 @@ func canonicalHost(hostname string) string {
 	return hostname
 }
 
-func canonicalHostname(hostname string) string {
+func canonicalHostname(hostname string) (string, bool) {
 	address, zone, hasZone := strings.Cut(hostname, "%")
 	if canonical, ok := canonicalIPv6(address); ok {
 		if hasZone {
-			return canonical + "%" + zone
+			return canonical + "%" + zone, true
 		}
-		return canonical
+		return canonical, true
 	}
-	return strings.ToLower(hostname)
+	canonical, err := idna.Lookup.ToASCII(hostname)
+	if err != nil {
+		return "", false
+	}
+	return strings.ToLower(canonical), true
 }
 
 func validIPv6Hostname(hostname string) bool {

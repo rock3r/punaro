@@ -99,6 +99,13 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := ipv6State.Match("https://[2001:0DB8:0000:0000:0000:0000:0000:0001]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical IPv6 spelling match: %v", err)
 	}
+	idnaState, err := Parse([]byte(`{"version":1,"origin":"https://xn--i-9bb.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
+	if err != nil {
+		t.Fatalf("parse IDNA state: %v", err)
+	}
+	if err := idnaState.Match("https://İ.example", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical IDNA host match: %v", err)
+	}
 	fresh, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`))
 	if err != nil {
 		t.Fatalf("parse fresh identity: %v", err)
