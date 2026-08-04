@@ -125,7 +125,7 @@ func canonicalOrigin(raw string) (string, bool) {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", false
 	}
-	hostname := strings.ToLower(parsed.Hostname())
+	hostname := canonicalHostname(parsed.Hostname())
 	if port := parsed.Port(); port != "" {
 		value, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || value == 0 {
@@ -149,6 +149,13 @@ func canonicalHost(hostname string) string {
 		return "[" + hostname + "]"
 	}
 	return hostname
+}
+
+func canonicalHostname(hostname string) string {
+	if zone := strings.LastIndexByte(hostname, '%'); zone > 0 && strings.Contains(hostname[:zone], ":") {
+		return strings.ToLower(hostname[:zone]) + hostname[zone:]
+	}
+	return strings.ToLower(hostname)
 }
 
 func validBinding(raw string) bool {
