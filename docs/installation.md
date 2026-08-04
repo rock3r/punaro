@@ -253,6 +253,30 @@ punaro-enroll redeem \
   --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
 ```
 
+If the public origin is protected by Cloudflare Access, create a distinct
+service token for this device and have its secret manager write the paired
+values into a current-user-only, non-symlinked JSON file such as:
+
+```json
+{"client_id":"...","client_secret":"..."}
+```
+
+Pass only that protected file path to the same command:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --access-file /absolute/private/cloudflare-access.json
+```
+
+The command uses the service token only to establish an origin-scoped Access
+session and send the admission headers; it never accepts, prints, or stores
+either value in arguments, environment variables, generated profile defaults,
+or diagnostics. Continue to keep the token in the owner-only adapter profile
+for the installed relay adapter; do not reuse it on another device.
+
 `punaro-enroll` checks the exact binding before any network request, contacts
 only the canonical HTTPS origin selected during `prepare`, and writes a private
 recovery journal before redemption. If a network interruption occurs, rerun

@@ -31,6 +31,40 @@ type AccessServiceToken struct {
 	ClientSecret string
 }
 
+// OpenAccessSession establishes a Cloudflare Access session for an HTTPS
+// origin using a service token. The returned client owns an origin-scoped
+// cookie jar; callers must still attach the service-token headers to their
+// protected request. It is deliberately usable by bootstrap clients, which
+// cannot sign an adapter request before device enrollment completes.
+func OpenAccessSession(ctx context.Context, rawURL string, client *http.Client, token AccessServiceToken) (*http.Client, error) {
+	baseURL, err := url.Parse(rawURL)
+	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return nil, fmt.Errorf("invalid relay URL")
+	}
+	if baseURL.Scheme != "https" && (baseURL.Scheme != "http" || !loopbackHost(baseURL.Hostname())) {
+		return nil, fmt.Errorf("relay URL must use HTTPS except for a loopback development listener")
+	}
+	if (token.ClientID == "") != (token.ClientSecret == "") {
+		return nil, fmt.Errorf("cloudflare Access service token must contain both ID and secret")
+	}
+	if client == nil {
+		client = http.DefaultClient
+	}
+	clientCopy := *client
+	if token.ClientID == "" || loopbackHost(baseURL.Hostname()) {
+		return &clientCopy, nil
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("create Cloudflare Access cookie jar: %w", err)
+	}
+	clientCopy.Jar = jar
+	if err := (&accessSession{baseURL: baseURL, client: &clientCopy, token: token}).ensure(ctx); err != nil {
+		return nil, err
+	}
+	return &clientCopy, nil
+}
+
 // HTTPRelayClient is the signed HTTPS client used by one enrolled adapter.
 type HTTPRelayClient struct {
 	baseURL     *url.URL

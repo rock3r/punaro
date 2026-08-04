@@ -146,6 +146,34 @@ func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testi
 	}
 }
 
+func TestRedeemSendsProtectedAccessServiceToken(t *testing.T) {
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("CF-Access-Client-Id") != "access-id" || r.Header.Get("CF-Access-Client-Secret") != "access-secret" {
+			t.Fatalf("Access headers were missing: %#v", r.Header)
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	var prepared publicEnrollment
+	var preparedOut bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, &preparedOut, io.Discard); code != 0 || json.Unmarshal(preparedOut.Bytes(), &prepared) != nil {
+		t.Fatalf("prepare code=%d output=%q", code, preparedOut.String())
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	accessFile := writeTestMaterial(t, `{"client_id":"access-id","client_secret":"access-secret"}`)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential"), "--access-file", accessFile}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("redeem code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestEnsurePrivateDirCreatesNestedStateDirectory(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "first", "second", "state")
 	if err := ensurePrivateDir(stateDir); err != nil {

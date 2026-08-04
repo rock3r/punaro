@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clientidentity"
 )
 
@@ -42,6 +43,11 @@ type enrollmentMaterial struct {
 	EnrollmentID  string `json:"enrollment_id"`
 	ClientBinding string `json:"client_binding"`
 	Code          string `json:"code"`
+}
+
+type accessMaterial struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
 }
 
 type redemptionJournal struct {
@@ -111,6 +117,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	stateDir := flags.String("state-dir", "", "absolute private enrollment state directory")
 	materialPath := flags.String("enrollment-file", "", "absolute protected enrollment material file")
 	credentialPath := flags.String("credential-file", "", "absolute private credential destination under state-dir")
+	accessPath := flags.String("access-file", "", "absolute protected Cloudflare Access service-token file")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
@@ -120,6 +127,10 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
 	if err != nil || state.LegacyMachineID != "" {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
+	}
+	accessToken, err := loadAccessToken(*accessPath)
+	if err != nil {
+		return enrollmentError(stderr, "Access admission material is invalid", 2)
 	}
 	journalPath := filepath.Join(*stateDir, redemptionJournalName)
 	journal, journalErr := loadJournal(journalPath)
@@ -168,7 +179,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
-	response, result := postRedemption(state.Origin, journal)
+	response, result := postRedemption(state.Origin, journal, accessToken)
 	if result == redemptionRejected {
 		if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
@@ -260,6 +271,28 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
 	return value, nil
+}
+
+func loadAccessToken(path string) (adapter.AccessServiceToken, error) {
+	if path == "" {
+		return adapter.AccessServiceToken{}, nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return adapter.AccessServiceToken{}, errors.New("unsafe Access material")
+	}
+	raw, err := readPrivate(path, maxEnrollmentFile)
+	if err != nil {
+		return adapter.AccessServiceToken{}, err
+	}
+	var value accessMaterial
+	if err := decodeExact(raw, &value, "client_id", "client_secret"); err != nil || !validAccessValue(value.ClientID) || !validAccessValue(value.ClientSecret) {
+		return adapter.AccessServiceToken{}, errors.New("invalid Access material")
+	}
+	return adapter.AccessServiceToken{ClientID: value.ClientID, ClientSecret: value.ClientSecret}, nil
+}
+
+func validAccessValue(value string) bool {
+	return value != "" && !strings.ContainsAny(value, " \t\r\n")
 }
 
 func loadJournal(path string) (redemptionJournal, error) {
@@ -368,7 +401,7 @@ const (
 	redemptionSucceeded
 )
 
-func postRedemption(origin string, journal redemptionJournal) (redemptionResponse, redemptionResult) {
+func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken) (redemptionResponse, redemptionResult) {
 	body, err := json.Marshal(journal)
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
@@ -378,7 +411,17 @@ func postRedemption(origin string, journal redemptionJournal) (redemptionRespons
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := newEnrollmentHTTPClient().Do(request)
+	client, err := adapter.OpenAccessSession(context.Background(), origin, newEnrollmentHTTPClient(), accessToken)
+	if err != nil {
+		return redemptionResponse{}, redemptionUnavailable
+	}
+	if accessToken.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", accessToken.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", accessToken.ClientSecret)
+	}
+	clientCopy := *client
+	clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	response, err := clientCopy.Do(request)
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}
