@@ -1257,6 +1257,20 @@ cancels any blocked write. This bounds authority after the last successful check
 closure, key retirement, credential rotation/revocation, principal disablement,
 mapping removal, timeout, or database failure closes the socket.
 
+Every native client records its non-secret transition relationship in a
+versioned private local sidecar: version, canonical fixed HTTPS origin, opaque
+client-generated enrollment binding, and, only during a mailbox migration, the exact
+legacy machine ID. Device credentials, enrollment codes, private keys, Access
+tokens, project grants, endpoint aliases, and mailbox state are never fields in
+that record. The adapter accepts the sidecar only when its matching protected
+profile supplies the same origin, binding, and machine; malformed, stale,
+cross-origin, cross-device, partial, or unknown-version state fails before a
+transport action. The sidecar is intentionally optional for an unchanged
+legacy profile and cannot select a grant, mint a credential, or activate the
+M-9 bridge. Fresh enrollment, protected credential persistence, and
+platform-specific sidecar creation belong to the client onboarding flow; the
+owner-controlled server cutover remains the irreversible authority boundary.
+
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the
 source fingerprint, exact counts, and PostgreSQL target identity without a

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/clientidentity"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -53,6 +54,8 @@ var adapterProfileKeys = map[string]struct{}{
 	"PUNARO_CF_ACCESS_CLIENT_ID":      {},
 	"PUNARO_CF_ACCESS_CLIENT_SECRET":  {},
 	"PUNARO_INVOKER_COMMAND":          {},
+	"PUNARO_CLIENT_IDENTITY_FILE":     {},
+	"PUNARO_CLIENT_BINDING":           {},
 }
 
 func main() {
@@ -573,6 +576,9 @@ func loadConfig() (adapterConfig, error) {
 	if relayURL == "" || machineID == "" || keyFile == "" || group == "" {
 		return adapterConfig{}, errors.New("adapter configuration is incomplete")
 	}
+	if err := loadClientIdentity(settings, relayURL, machineID); err != nil {
+		return adapterConfig{}, err
+	}
 	key, err := loadPrivateKey(keyFile)
 	if err != nil {
 		return adapterConfig{}, err
@@ -603,6 +609,25 @@ func loadConfig() (adapterConfig, error) {
 		return adapterConfig{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
 	return adapterConfig{relayURL: relayURL, machineID: machineID, privateKey: key, attachedGroup: group, mailboxBinary: mailboxBinary, mailboxState: settings["PUNARO_MAILBOX_STATE_DIR"], dataDir: dataDir, pollInterval: pollInterval, accessToken: accessToken, invokerCommand: settings["PUNARO_INVOKER_COMMAND"]}, nil
+}
+
+func loadClientIdentity(settings map[string]string, relayURL, machineID string) error {
+	path, binding := settings["PUNARO_CLIENT_IDENTITY_FILE"], settings["PUNARO_CLIENT_BINDING"]
+	if path == "" && binding == "" {
+		return nil
+	}
+	if path == "" || binding == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("client identity configuration is invalid")
+	}
+	raw, err := readPrivateFile(path, "client identity", maxAdapterProfileSize)
+	if err != nil {
+		return errors.New("client identity configuration is invalid")
+	}
+	state, err := clientidentity.Parse(raw)
+	if err != nil || state.MatchLegacyAdapter(relayURL, binding, machineID) != nil {
+		return errors.New("client identity configuration does not match this adapter")
+	}
+	return nil
 }
 
 // loadAdapterProfile reads the installer-managed profile as plain data rather

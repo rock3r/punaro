@@ -180,6 +180,34 @@ use. `PUNARO_ADAPTER_PROFILE_FILE` is the explicit alternative profile path;
 it must be absolute and satisfy the same private regular-file checks. The
 default profile remains the supported interactive path.
 
+### Unified client identity transition contract
+
+Device credentials and the existing mailbox Ed25519 key are distinct
+per-device credentials. Neither may be copied between machines or derived from
+the other. The supported enrollment workflow will write a private, non-secret client
+identity sidecar and adds both of these profile entries together:
+
+```text
+PUNARO_CLIENT_IDENTITY_FILE=/absolute/private/client-identity.json
+PUNARO_CLIENT_BINDING=the-enrollment-client-binding
+```
+
+The sidecar contains only version `1`, the fixed canonical HTTPS origin, the
+opaque client binding, and (during a legacy transition) the exact legacy
+machine ID. It never contains an enrollment code, bearer credential, private
+key, Access token, project grant, or mailbox address. The adapter refuses a
+missing pair, unsafe sidecar, unknown version, or origin/binding/machine
+mismatch before it opens a transport client. Existing legacy profiles without
+both entries continue their existing path; adding the sidecar alone neither
+changes relay authority nor grants access.
+
+The server's owner-controlled mail cutover remains the only action that can
+activate the PostgreSQL relay transition. Credential rotation, revocation,
+disabled principals, or an unavailable authority fail the server bridge closed;
+the local sidecar cannot repair, bypass, or broaden those decisions. After
+SQLite retirement, rollback is restore or forward repair, not a client profile
+edit.
+
 ## 4. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree
