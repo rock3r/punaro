@@ -13,10 +13,13 @@ import (
 	"github.com/google/uuid"
 )
 
+// Version is the current compatible client identity state schema.
 const Version = 1
 
 var (
-	ErrInvalidState  = errors.New("client identity state is invalid")
+	// ErrInvalidState reports malformed, unsafe, or unsupported state data.
+	ErrInvalidState = errors.New("client identity state is invalid")
+	// ErrStateMismatch reports state belonging to another local client.
 	ErrStateMismatch = errors.New("client identity state does not match this client")
 )
 
@@ -135,7 +138,7 @@ func validLegacyMachineID(raw string) bool {
 	for index, character := range raw {
 		letter := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
 		digit := character >= '0' && character <= '9'
-		if !(letter || digit || (index > 0 && (character == '.' || character == '_' || character == '-'))) {
+		if !letter && !digit && (index == 0 || (character != '.' && character != '_' && character != '-')) {
 			return false
 		}
 	}

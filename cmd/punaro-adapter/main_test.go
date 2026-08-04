@@ -262,12 +262,12 @@ func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing
 	if err := os.WriteFile(identity, []byte(`{"version":1,"origin":"https://relay.example","client_binding":"`+binding+`","legacy_machine_id":"profile-machine"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	profileContents, err := os.ReadFile(profile)
+	profileContents, err := os.ReadFile(profile) // #nosec G304 -- test fixture path from writeInstallerProfile.
 	if err != nil {
 		t.Fatal(err)
 	}
 	profileContents = append(profileContents, []byte("PUNARO_CLIENT_IDENTITY_FILE="+identity+"\nPUNARO_CLIENT_BINDING="+binding+"\n")...)
-	if err := os.WriteFile(profile, profileContents, 0o600); err != nil {
+	if err := os.WriteFile(profile, profileContents, 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
 		t.Fatal(err)
 	}
 	t.Setenv(adapterProfileFileEnv, profile)
@@ -280,7 +280,7 @@ func TestLoadConfigRequiresMatchingOptInClientIdentityBeforeTransport(t *testing
 	if _, err := loadConfig(); err == nil || strings.Contains(err.Error(), "other.example") {
 		t.Fatalf("cross-origin identity state error=%v", err)
 	}
-	if err := os.WriteFile(profile, append(profileContents[:len(profileContents)-len("PUNARO_CLIENT_BINDING="+binding+"\n")], nil...), 0o600); err != nil {
+	if err := os.WriteFile(profile, append(profileContents[:len(profileContents)-len("PUNARO_CLIENT_BINDING="+binding+"\n")], nil...), 0o600); err != nil { // #nosec G703 -- test fixture path from writeInstallerProfile.
 		t.Fatal(err)
 	}
 	if _, err := loadConfig(); err == nil {
