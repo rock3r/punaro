@@ -1271,6 +1271,25 @@ M-9 bridge. Fresh enrollment, protected credential persistence, and
 platform-specific sidecar creation belong to the client onboarding flow; the
 owner-controlled server cutover remains the irreversible authority boundary.
 
+The supported onboarding client is `punaro-enroll`. `prepare` creates a
+private current-user state directory and records only the canonical HTTPS
+origin plus a fresh opaque binding in the versioned non-secret sidecar. It
+prints that public binding for the server owner to use in the exact
+least-privilege `trusted-agent` grant preview. `redeem` reads the server's
+short-lived enrollment JSON only from a protected local file, requires its
+binding to equal the sidecar before any request, and posts only to that stored
+origin. Before any network operation it creates a protected recovery journal
+containing the code and fresh idempotency UUID. Server retry with that UUID
+yields the same credential; successful persistence removes the journal. No
+command-line argument, environment variable, sidecar, normal output, or
+diagnostic includes the code or bearer credential. POSIX storage rejects
+symlinks, non-regular files, non-owner files, and group/other-readable state.
+Windows storage rejects reparse points and requires a protected DACL with the
+current user as owner and sole FullControl ACE. Malformed, cross-device,
+cross-origin, unavailable, expired, already-used, or revoked enrollment fails
+closed; only the server owner can issue a replacement, rotate a credential, or
+revoke it.
+
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the
 source fingerprint, exact counts, and PostgreSQL target identity without a

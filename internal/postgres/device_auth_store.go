@@ -366,17 +366,20 @@ func (d *Database) redeemEnrollment(ctx context.Context, redeem RedeemEnrollment
 	}
 	var storedCode []byte
 	var storedBinding, label, issuer string
-	var usable bool
+	var unexpired, active bool
 	var redemptionKey, principalID, lookupID, requiredLegacy sql.NullString
 	var credentialTTL sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT code_digest, client_binding::text, label, issuer_principal_id::text,
-expires_at > statement_timestamp() AND invalidated_at IS NULL,
+expires_at > statement_timestamp(), invalidated_at IS NULL,
 redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, credential_ttl_seconds, legacy_principal_id::text
-FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &usable, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
+FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &unexpired, &active, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
 	if err != nil || storedBinding != redeem.ClientBinding || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 || requiredLegacy.Valid != (legacyProof != nil) {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
-	if !usable {
+	// Expiry prevents the first redemption, but a row already bound to this
+	// idempotency key must remain recoverable after a lost response. An
+	// invalidated enrollment remains unavailable in either state.
+	if !active || (!unexpired && !redemptionKey.Valid) {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
 	if requiredLegacy.Valid {
@@ -733,7 +736,8 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
     SELECT id FROM auth.pending_enrollments
-	WHERE expires_at <= statement_timestamp() OR invalidated_at IS NOT NULL
+	WHERE invalidated_at IS NOT NULL
+	   OR (redeemed_at IS NULL AND expires_at <= statement_timestamp())
     ORDER BY expires_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates

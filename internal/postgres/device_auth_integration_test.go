@@ -112,8 +112,17 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, pending.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey}); !errors.Is(err, ErrInvalidEnrollment) {
-		t.Fatalf("expired redemption retry error=%v", err)
+	pruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "prune trigger", AllProjects: true, TTL: time.Minute}
+	_, pruneHash, err := PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, pruneTrigger, pruneHash); err != nil {
+		t.Fatalf("create enrollment after expired redemption: %v", err)
+	}
+	expiredReplay, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey})
+	if err != nil || expiredReplay.Encoded != credential.Encoded || expiredReplay.LookupID != credential.LookupID {
+		t.Fatalf("expired redemption retry=%#v err=%v", expiredReplay, err)
 	}
 	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: uuid.NewString()}); !errors.Is(err, ErrInvalidEnrollment) {
 		t.Fatalf("single-use replay error=%v", err)
@@ -184,8 +193,8 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	var redeemedRows, redeemedGrantRows int
 	if err := ownerDB.QueryRowContext(ctx, `SELECT
         (SELECT count(*) FROM auth.pending_enrollments WHERE id = $1),
-        (SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, pending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 0 || redeemedGrantRows != 0 {
-		t.Fatalf("expired redeemed enrollment rows=%d grants=%d err=%v, want pruned", redeemedRows, redeemedGrantRows, err)
+		(SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, pending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 1 || redeemedGrantRows == 0 {
+		t.Fatalf("expired redeemed enrollment rows=%d grants=%d err=%v, want retained recovery", redeemedRows, redeemedGrantRows, err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, expiredPending.ID); err != nil {
 		t.Fatal(err)
