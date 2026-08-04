@@ -75,10 +75,13 @@ func writePrivateNew(path string, raw []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
+	// The private file is complete and durable at this point. Preserve it if
+	// syncing the containing directory is unsupported or fails so a retry can
+	// recover rather than being blocked by an erased post-write state.
+	removeOnFailure = false
 	if err := syncPrivateDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
-	removeOnFailure = false
 	return nil
 }
 
