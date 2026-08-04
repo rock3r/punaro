@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 // Version is the current compatible client identity state schema.
@@ -132,15 +133,5 @@ func validBinding(raw string) bool {
 }
 
 func validLegacyMachineID(raw string) bool {
-	if raw == "" || len(raw) > 128 {
-		return false
-	}
-	for index, character := range raw {
-		letter := character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
-		digit := character >= '0' && character <= '9'
-		if !letter && !digit && (index == 0 || (character != '.' && character != '_' && character != '-')) {
-			return false
-		}
-	}
-	return true
+	return relay.ValidMachineID(raw)
 }

@@ -20,6 +20,10 @@ func TestParseAcceptsVersionOneFreshAndMigratingStates(t *testing.T) {
 	if migrating.LegacyMachineID != "laptop-1" {
 		t.Fatalf("migrating state=%+v", migrating)
 	}
+	legacyRelayID, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"machine:west"}`))
+	if err != nil || legacyRelayID.LegacyMachineID != "machine:west" {
+		t.Fatalf("relay-compatible legacy state=%+v err=%v", legacyRelayID, err)
+	}
 }
 
 func TestParseRejectsUnsafeOrAmbiguousState(t *testing.T) {
@@ -31,7 +35,7 @@ func TestParseRejectsUnsafeOrAmbiguousState(t *testing.T) {
 		"query":           `{"version":1,"origin":"https://punaro.example?token=no","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"relative":        `{"version":1,"origin":"/punaro","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad binding":     `{"version":1,"origin":"https://punaro.example","client_binding":"not-a-binding"}`,
-		"bad machine":     `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"other machine"}`,
+		"bad machine":     `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"other\nmachine"}`,
 		"null machine":    `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":null}`,
 		"trailing":        `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"} true`,
 	} {
