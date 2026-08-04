@@ -126,6 +126,9 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" {
 		return enrollmentError(stderr, "state preparation failed", 2)
 	}
+	if err := syncPrivateDirectory(*stateDir); err != nil {
+		return enrollmentError(stderr, "state preparation failed", 2)
+	}
 	return writeJSON(stdout, publicEnrollment{Origin: state.Origin, ClientBinding: state.ClientBinding})
 }
 

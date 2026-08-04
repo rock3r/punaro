@@ -70,6 +70,27 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 	}
 }
 
+func TestPrepareRetriesIdentityDirectorySyncBeforePublishingBinding(t *testing.T) {
+	originalSync := syncPrivateDirectory
+	firstSync := true
+	syncPrivateDirectory = func(string) error {
+		if firstSync {
+			firstSync = false
+			return os.ErrInvalid
+		}
+		return nil
+	}
+	t.Cleanup(func() { syncPrivateDirectory = originalSync })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("first prepare code=%d", code)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "client_binding") {
+		t.Fatalf("retry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
 func TestRedeemFailsClosedForBindingMismatchWithoutContactingOrigin(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
