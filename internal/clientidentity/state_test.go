@@ -35,6 +35,7 @@ func TestParseRejectsUnsafeOrAmbiguousState(t *testing.T) {
 		"no hostname":      `{"version":1,"origin":"https://:443","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad IPv6 literal": `{"version":1,"origin":"https://[foo:bar]","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"empty IPv6 zone":  `{"version":1,"origin":"https://[fe80::1%25]","client_binding":"11111111-1111-4111-8111-111111111111"}`,
+		"unsafe IPv6 zone": `{"version":1,"origin":"https://[fe80::1%25a]b]","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"query":            `{"version":1,"origin":"https://punaro.example?token=no","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"relative":         `{"version":1,"origin":"/punaro","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad binding":      `{"version":1,"origin":"https://punaro.example","client_binding":"not-a-binding"}`,

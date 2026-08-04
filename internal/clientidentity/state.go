@@ -175,11 +175,24 @@ func canonicalHostname(hostname string) (string, bool) {
 
 func validIPv6Hostname(hostname string) bool {
 	address, zone, hasZone := strings.Cut(hostname, "%")
-	if hasZone && zone == "" {
+	if hasZone && !validIPv6Zone(zone) {
 		return false
 	}
 	_, ok := canonicalIPv6(address)
 	return ok
+}
+
+func validIPv6Zone(zone string) bool {
+	if zone == "" {
+		return false
+	}
+	for _, character := range zone {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("-._~%", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func canonicalIPv6(address string) (string, bool) {
