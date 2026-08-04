@@ -265,6 +265,9 @@ func validateInit(options InitOptions) (Installation, error) {
 		if err := requireTrustedPrivateDirectory(options.TrustedAttachmentBlobDir); err != nil {
 			return Installation{}, fmt.Errorf("trusted attachment blob directory: %w", err)
 		}
+		if !attachmentBlobDirectoryContained(options.DataDir, options.TrustedAttachmentBlobDir) {
+			return Installation{}, errors.New("trusted attachment blob directory must resolve beneath the data directory")
+		}
 	}
 	dataInfo, dataErr := os.Stat(options.DataDir)
 	backupInfo, backupErr := os.Stat(options.BackupDir)
@@ -334,7 +337,7 @@ func validateStatic(options InitOptions) (Installation, error) {
 		return Installation{}, errors.New("memory mutations require the memory API")
 	}
 	if options.TrustedAttachmentsEnabled {
-		if !filepath.IsAbs(options.TrustedAttachmentBlobDir) || filepath.Clean(options.TrustedAttachmentBlobDir) != options.TrustedAttachmentBlobDir || !nestedPath(options.DataDir, options.TrustedAttachmentBlobDir) {
+		if !filepath.IsAbs(options.TrustedAttachmentBlobDir) || filepath.Clean(options.TrustedAttachmentBlobDir) != options.TrustedAttachmentBlobDir || !safeEnvPath(options.TrustedAttachmentBlobDir) || !nestedPath(options.DataDir, options.TrustedAttachmentBlobDir) {
 			return Installation{}, errors.New("trusted attachments require a private blob directory beneath the data directory")
 		}
 	} else if options.TrustedAttachmentBlobDir != "" {
@@ -346,6 +349,9 @@ func validateStatic(options InitOptions) (Installation, error) {
 		relayMachines, err = canonicalRelayMachinesJSON(options.RelayMachinesJSON)
 		if err != nil {
 			return Installation{}, err
+		}
+		if !listener.IsLoopback(policy.ListenAddr) {
+			return Installation{}, errors.New("relay authority requires a loopback device listener")
 		}
 	}
 	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: options.TrustedAttachmentBlobDir, RelayEnabled: relayMachines != "", RelayMachinesJSON: relayMachines}, nil
@@ -387,6 +393,9 @@ func Load(directory string) (Installation, error) {
 	}
 	if installation.HealthListenAddr != validated.HealthListenAddr || installation.HealthURL != validated.HealthURL {
 		return Installation{}, errors.New("published installation health URL is invalid")
+	}
+	if installation.TrustedAttachmentsEnabled && !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir) {
+		return Installation{}, errors.New("published installation trusted attachment directory is invalid")
 	}
 	installation.Directory = directory
 	return installation, nil
@@ -478,6 +487,9 @@ func CheckPaths(installation Installation) []string {
 		if err := requireTrustedPrivateDirectory(installation.TrustedAttachmentBlobDir); err != nil {
 			failures = append(failures, "trusted attachment blob directory unavailable or unsafe")
 		}
+		if !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir) {
+			failures = append(failures, "trusted attachment blob directory is outside data directory")
+		}
 	}
 	if overlaps, err := canonicalDirectoriesOverlap(installation.DataDir, installation.BackupDir); err == nil && overlaps {
 		failures = append(failures, "data and backup directories overlap")
@@ -506,9 +518,9 @@ func CheckPaths(installation Installation) []string {
 		if envAvailable {
 			envCurrent = string(body) == daemonEnv(installation)
 			envPreTrustedAttachments = !installation.TrustedAttachmentsEnabled && string(body) == preTrustedAttachmentsDaemonEnv(installation)
-			envPreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsDaemonEnv(installation)
-			envPreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
-			envLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
+			envPreMemoryMutations = !installation.TrustedAttachmentsEnabled && !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsDaemonEnv(installation)
+			envPreMemoryAPI = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
+			envLegacy = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
 		}
 		if !envCurrent && !envPreTrustedAttachments && !envPreMemoryMutations && !envPreMemoryAPI && !envLegacy {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
@@ -525,9 +537,9 @@ func CheckPaths(installation Installation) []string {
 		if overrideAvailable {
 			overrideCurrent = string(body) == composeOverride()
 			overridePreTrustedAttachments = !installation.TrustedAttachmentsEnabled && string(body) == preTrustedAttachmentsComposeOverride()
-			overridePreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsComposeOverride()
-			overridePreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
-			overrideLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
+			overridePreMemoryMutations = !installation.TrustedAttachmentsEnabled && !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsComposeOverride()
+			overridePreMemoryAPI = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
+			overrideLegacy = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
 		}
 		if !overrideCurrent && !overridePreTrustedAttachments && !overridePreMemoryMutations && !overridePreMemoryAPI && !overrideLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
@@ -713,6 +725,18 @@ func safeEnvPath(value string) bool {
 func nestedPath(parent, child string) bool {
 	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
 	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func attachmentBlobDirectoryContained(dataDir, blobDir string) bool {
+	canonicalData, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return false
+	}
+	canonicalBlob, err := filepath.EvalSymlinks(blobDir)
+	if err != nil {
+		return false
+	}
+	return nestedPath(canonicalData, canonicalBlob)
 }
 
 func canonicalDirectoriesOverlap(first, second string) (bool, error) {

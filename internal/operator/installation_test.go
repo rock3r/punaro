@@ -148,6 +148,75 @@ func TestInitRejectsUnsafeUnifiedOptionalInputsBeforeBootstrap(t *testing.T) {
 	}
 }
 
+func TestInitRejectsDotenvUnsafeTrustedAttachmentBlobPath(t *testing.T) {
+	options := validInitOptions(t)
+	options.TrustedAttachmentsEnabled = true
+	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "attachments#unsafe")
+	if _, err := validateStatic(options); err == nil {
+		t.Fatal("dotenv-unsafe attachment blob path was accepted")
+	}
+}
+
+func TestCheckPathsRejectsAttachmentDarkLegacyTemplate(t *testing.T) {
+	options := validInitOptions(t)
+	options.MemoryAPIEnabled = true
+	options.TrustedAttachmentsEnabled = true
+	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "attachments")
+	if err := os.Mkdir(options.TrustedAttachmentBlobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: name}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(preMemoryMutationsDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(preMemoryMutationsComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if failures := CheckPaths(installation); !containsFailure(failures, "generated daemon environment does not match installation configuration") || !containsFailure(failures, "generated Compose override does not match installation configuration") {
+		t.Fatalf("attachment-dark templates accepted: %v", failures)
+	}
+}
+
+func TestInitRejectsRelayAuthorityWithLANListenerBeforeBootstrap(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}
+	called := false
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || called {
+		t.Fatalf("LAN relay authority err=%v bootstrap=%t", err, called)
+	}
+}
+
+func TestInitRejectsAttachmentDirectoryResolvedOutsideDataBeforeBootstrap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink containment is covered by Unix path semantics")
+	}
+	options := validInitOptions(t)
+	outside := filepath.Join(filepath.Dir(options.DataDir), "outside")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(outside, "attachments"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(options.DataDir, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	options.TrustedAttachmentsEnabled = true
+	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "nested", "attachments")
+	if attachmentBlobDirectoryContained(options.DataDir, options.TrustedAttachmentBlobDir) {
+		t.Fatalf("escaped attachment directory was accepted: data=%q blob=%q", options.DataDir, options.TrustedAttachmentBlobDir)
+	}
+}
+
 func TestLoadRejectsEnabledRelayWithoutAuthority(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {

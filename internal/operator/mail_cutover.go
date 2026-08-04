@@ -257,21 +257,21 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 				preTrustedAttachmentsOld = preTrustedAttachmentsComposeOverride()
 			}
 		}
-		if !base.MemoryMutationsEnabled {
+		if !base.TrustedAttachmentsEnabled && !base.MemoryMutationsEnabled {
 			if file.path == EnvFile(directory) {
 				preMemoryMutationsOld = preMemoryMutationsDaemonEnv(base)
 			} else {
 				preMemoryMutationsOld = preMemoryMutationsComposeOverride()
 			}
 		}
-		if !base.MemoryAPIEnabled {
+		if !base.TrustedAttachmentsEnabled && !base.MemoryAPIEnabled {
 			if file.path == EnvFile(directory) {
 				preMemoryAPIOld = preMemoryAPIDaemonEnv(base)
 			} else {
 				preMemoryAPIOld = preMemoryAPIComposeOverride()
 			}
 		}
-		if !base.MemoryAPIEnabled && base.MailCutover == nil && base.RelayMachinesJSON == "" {
+		if !base.TrustedAttachmentsEnabled && !base.MemoryAPIEnabled && base.MailCutover == nil && base.RelayMachinesJSON == "" {
 			if file.path == EnvFile(directory) {
 				legacyOld = legacyDaemonEnv(base)
 			} else {
