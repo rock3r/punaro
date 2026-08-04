@@ -1259,7 +1259,7 @@ mapping removal, timeout, or database failure closes the socket.
 
 Every native client records its non-secret transition relationship in a
 versioned private local sidecar: version, canonical fixed HTTPS origin, opaque
-server-issued client binding, and, only during a mailbox migration, the exact
+client-generated enrollment binding, and, only during a mailbox migration, the exact
 legacy machine ID. Device credentials, enrollment codes, private keys, Access
 tokens, project grants, endpoint aliases, and mailbox state are never fields in
 that record. The adapter accepts the sidecar only when its matching protected
