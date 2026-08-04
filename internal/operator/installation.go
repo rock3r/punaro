@@ -277,6 +277,9 @@ func validateInit(options InitOptions) (Installation, error) {
 		if err != nil {
 			return Installation{}, errors.New("trusted attachment blob directory cannot be resolved")
 		}
+		if !filepath.IsAbs(canonicalData) || filepath.Clean(canonicalData) != canonicalData || !safeEnvPath(canonicalData) || !filepath.IsAbs(canonicalBlob) || filepath.Clean(canonicalBlob) != canonicalBlob || !safeEnvPath(canonicalBlob) || !nestedPath(canonicalData, canonicalBlob) {
+			return Installation{}, errors.New("resolved trusted attachment paths are unsafe")
+		}
 		installation.DataDir = canonicalData
 		installation.TrustedAttachmentBlobDir = canonicalBlob
 	}
