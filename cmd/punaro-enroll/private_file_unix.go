@@ -158,7 +158,14 @@ func removePrivate(path string) error {
 	if err := os.Remove(path); err != nil {
 		return err
 	}
-	return syncPrivateDirectory(filepath.Dir(path))
+	if err := syncPrivateDirectory(filepath.Dir(path)); err != nil {
+		// The credential is already safely persisted when this is called. A
+		// journal that survives a crash is harmless: recovering it replays the
+		// same idempotency key. Do not convert a successful enrollment into a
+		// failure merely because its best-effort cleanup could not be synced.
+		unix.Sync()
+	}
+	return nil
 }
 func writeCredential(path, credential string) error {
 	if credential == "" || stringsContainsWhitespace(credential) {
