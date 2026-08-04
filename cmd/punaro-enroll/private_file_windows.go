@@ -58,8 +58,16 @@ func ensurePrivateDir(path string) error {
 		} else {
 			created = true
 		}
-		if created && protectWindowsPath(directory) != nil {
-			return errors.New("could not protect private directory")
+		if created {
+			if err := protectWindowsPath(directory); err != nil {
+				_ = os.Remove(directory) // #nosec G703 -- exact empty directory created by this invocation.
+				return errors.New("could not protect private directory")
+			}
+			if err := privateDir(directory); err != nil {
+				_ = os.Remove(directory) // #nosec G703 -- exact new directory failed post-protection verification.
+				return err
+			}
+			continue
 		}
 		if err := privateDir(directory); err != nil {
 			return err
@@ -186,7 +194,9 @@ func privateWindowsACL(path string) bool {
 	return aceSID.Equals(user.User.Sid)
 }
 
-func protectWindowsPath(path string) error {
+var protectWindowsPath = protectWindowsPathImpl
+
+func protectWindowsPathImpl(path string) error {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil || user.User.Sid == nil {

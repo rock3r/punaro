@@ -75,3 +75,16 @@ func TestEnsurePrivateDirProtectsOnlyNewNestedDirectories(t *testing.T) {
 		t.Fatal("new state directory is not private")
 	}
 }
+
+func TestEnsurePrivateDirRemovesNewDirectoryWhenACLProtectionFails(t *testing.T) {
+	original := protectWindowsPath
+	protectWindowsPath = func(string) error { return errors.New("ACL failure") }
+	t.Cleanup(func() { protectWindowsPath = original })
+	directory := filepath.Join(t.TempDir(), "new-state")
+	if err := ensurePrivateDir(directory); err == nil {
+		t.Fatal("ACL protection failure was accepted")
+	}
+	if _, err := os.Lstat(directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed directory remains: %v", err)
+	}
+}
