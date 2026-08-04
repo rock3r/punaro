@@ -184,7 +184,7 @@ default profile remains the supported interactive path.
 
 Device credentials and the existing mailbox Ed25519 key are distinct
 per-device credentials. Neither may be copied between machines or derived from
-the other. A supported enrollment flow writes a private, non-secret client
+the other. The supported enrollment workflow will write a private, non-secret client
 identity sidecar and adds both of these profile entries together:
 
 ```text
