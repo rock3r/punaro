@@ -95,7 +95,8 @@ func (s State) Encode() ([]byte, error) {
 // Match proves the supplied non-secret local configuration is for exactly this
 // identity. It deliberately exposes no stored values in mismatch errors.
 func (s State) Match(origin, clientBinding, legacyMachineID string) error {
-	if s.validate() != nil || !validOrigin(origin) || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != origin || s.ClientBinding != clientBinding || s.LegacyMachineID != legacyMachineID {
+	canonicalOrigin, ok := canonicalOrigin(origin)
+	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || s.LegacyMachineID != legacyMachineID {
 		return ErrStateMismatch
 	}
 	return nil
@@ -109,8 +110,17 @@ func (s State) validate() error {
 }
 
 func validOrigin(raw string) bool {
+	canonical, ok := canonicalOrigin(raw)
+	return ok && canonical == raw
+}
+
+func canonicalOrigin(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil && parsed.Opaque == "" && parsed.Path == "" && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.Host == strings.ToLower(parsed.Host) && parsed.String() == raw
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Host != strings.ToLower(parsed.Host) {
+		return "", false
+	}
+	parsed.Path = ""
+	return parsed.String(), true
 }
 
 func validBinding(raw string) bool {

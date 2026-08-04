@@ -51,6 +51,9 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := state.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("match state: %v", err)
 	}
+	if err := state.Match("https://punaro.example/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical trailing-slash match: %v", err)
+	}
 	for name, match := range map[string][3]string{
 		"origin":         {"https://other.example", "11111111-1111-4111-8111-111111111111", "laptop-1"},
 		"client binding": {"https://punaro.example", "22222222-2222-4222-8222-222222222222", "laptop-1"},
