@@ -177,10 +177,29 @@ func canonicalHostname(hostname string) (string, bool) {
 		return canonical, true
 	}
 	canonical, err := idna.Lookup.ToASCII(hostname)
-	if err != nil {
+	if err != nil || !validDNSName(canonical) {
 		return "", false
 	}
 	return strings.ToLower(canonical), true
+}
+
+func validDNSName(hostname string) bool {
+	if len(hostname) == 0 || len(hostname) > 253 {
+		return false
+	}
+	labels := strings.Split(hostname, ".")
+	if labels[len(labels)-1] == "" {
+		labels = labels[:len(labels)-1]
+	}
+	if len(labels) == 0 {
+		return false
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+	}
+	return true
 }
 
 func validIPv6Hostname(hostname string) bool {
