@@ -34,6 +34,7 @@ func TestParseRejectsUnsafeOrAmbiguousState(t *testing.T) {
 		"non HTTPS":        `{"version":1,"origin":"http://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"no hostname":      `{"version":1,"origin":"https://:443","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad IPv6 literal": `{"version":1,"origin":"https://[foo:bar]","client_binding":"11111111-1111-4111-8111-111111111111"}`,
+		"empty IPv6 zone":  `{"version":1,"origin":"https://[fe80::1%25]","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"query":            `{"version":1,"origin":"https://punaro.example?token=no","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"relative":         `{"version":1,"origin":"/punaro","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad binding":      `{"version":1,"origin":"https://punaro.example","client_binding":"not-a-binding"}`,
@@ -90,6 +91,13 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	}
 	if err := multiPercentZoneState.Match("https://[FE80::1%25Ether%25Net]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical IPv6 multi-percent zone match: %v", err)
+	}
+	ipv6State, err := Parse([]byte(`{"version":1,"origin":"https://[2001:db8::1]","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
+	if err != nil {
+		t.Fatalf("parse IPv6 state: %v", err)
+	}
+	if err := ipv6State.Match("https://[2001:0DB8:0000:0000:0000:0000:0000:0001]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical IPv6 spelling match: %v", err)
 	}
 	fresh, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`))
 	if err != nil {

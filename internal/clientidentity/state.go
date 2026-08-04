@@ -155,15 +155,34 @@ func canonicalHost(hostname string) string {
 }
 
 func canonicalHostname(hostname string) string {
-	if zone := strings.IndexByte(hostname, '%'); zone > 0 && strings.Contains(hostname[:zone], ":") {
-		return strings.ToLower(hostname[:zone]) + hostname[zone:]
+	address, zone, hasZone := strings.Cut(hostname, "%")
+	if canonical, ok := canonicalIPv6(address); ok {
+		if hasZone {
+			return canonical + "%" + zone
+		}
+		return canonical
 	}
 	return strings.ToLower(hostname)
 }
 
 func validIPv6Hostname(hostname string) bool {
-	address, _, _ := strings.Cut(hostname, "%")
-	return strings.Contains(address, ":") && net.ParseIP(address) != nil
+	address, zone, hasZone := strings.Cut(hostname, "%")
+	if hasZone && zone == "" {
+		return false
+	}
+	_, ok := canonicalIPv6(address)
+	return ok
+}
+
+func canonicalIPv6(address string) (string, bool) {
+	parsed := net.ParseIP(address)
+	if parsed == nil || !strings.Contains(address, ":") {
+		return "", false
+	}
+	if ipv4 := parsed.To4(); ipv4 != nil {
+		return "::ffff:" + ipv4.String(), true
+	}
+	return parsed.String(), true
 }
 
 func validBinding(raw string) bool {
