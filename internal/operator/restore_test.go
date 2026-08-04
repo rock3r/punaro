@@ -68,6 +68,50 @@ func TestPrepareAndPublishRestoreCreatesOnlyNewInstallation(t *testing.T) {
 	}
 }
 
+func TestPrepareRestorePreservesUnifiedRelayAndAttachmentSettings(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- private test directory.
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(root, "backups")
+	if err := os.Mkdir(backupDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownerDSN := filepath.Join(root, "target-owner.dsn")
+	appDSN := filepath.Join(root, "target-app.dsn")
+	protectedFile(t, ownerDSN)
+	protectedFile(t, appDSN)
+	options := RestoreOptions{
+		Source:       Installation{Version: 1, Image: testImage, OwnerPrincipalID: "11111111-1111-4111-8111-111111111111", OwnerName: "Primary operator", Ingress: ingress.Policy{Mode: ingress.Internet, ListenAddr: "127.0.0.1:8080", PublicURL: "https://punaro.example"}, HealthListenAddr: "127.0.0.1:8081", HealthURL: "http://127.0.0.1:8081", TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: "/retired/punaro-data/attachments", RelayEnabled: true, RelayMachinesJSON: testRelayMachinesJSON},
+		Directory:    filepath.Join(root, "restored-installation"),
+		DataDir:      filepath.Join(root, "restored-data"),
+		BackupDir:    backupDir,
+		OwnerDSNFile: ownerDSN,
+		AppDSNFile:   appDSN,
+	}
+	options.Source.DataDir = "/retired/punaro-data"
+	installation, err := PrepareRestore(options)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != filepath.Join(options.DataDir, "attachments") || !installation.RelayEnabled || installation.RelayMachinesJSON != testRelayMachinesJSON {
+		t.Fatalf("prepared installation=%#v", installation)
+	}
+	if err := os.Mkdir(options.DataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(installation.TrustedAttachmentBlobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishRestore(installation); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	loaded, err := Load(options.Directory)
+	if err != nil || !loaded.TrustedAttachmentsEnabled || loaded.TrustedAttachmentBlobDir != installation.TrustedAttachmentBlobDir || !loaded.RelayEnabled || loaded.RelayMachinesJSON != testRelayMachinesJSON {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+}
+
 func TestPrepareRestoreRefusesExistingOrOverlappingTargets(t *testing.T) {
 	tests := []struct {
 		name   string

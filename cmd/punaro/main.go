@@ -367,6 +367,9 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials from the trusted LAN")
 	memoryAPI := flags.Bool("memory-api", false, "enable the authenticated native memory API")
 	memoryMutations := flags.Bool("memory-mutations", false, "enable authenticated canonical memory mutations (requires --memory-api)")
+	relayMachinesFile := flags.String("relay-machines-file", "", "protected relay machine enrollment JSON file")
+	trustedAttachments := flags.Bool("trusted-attachments", false, "enable trusted attachment storage")
+	trustedAttachmentBlobDir := flags.String("trusted-attachment-blob-dir", "", "existing private attachment blob directory below --data-dir")
 	healthListen := flags.String("health-listen-addr", "127.0.0.1:8081", "distinct loopback-only health listener")
 	resume := flags.Bool("resume", false, "resume a durably staged initialization")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" {
@@ -382,6 +385,15 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	}
 	if *dataDir == "" || *backupDir == "" || *image == "" || *ownerDSN == "" || *appDSN == "" || *ownerName == "" || *mode == "" {
 		return 2
+	}
+	relayMachinesJSON := ""
+	if *relayMachinesFile != "" {
+		var err error
+		relayMachinesJSON, err = operator.ReadRelayMachinesFile(*relayMachinesFile)
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "punaro init failed: relay enrollment file is unavailable")
+			return 1
+		}
 	}
 	bootstrap := func(ctx context.Context, ownerFile, name string) (punaropostgres.Principal, error) {
 		state, err := inspectSchema(ctx, *appDSN)
@@ -403,7 +415,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		}
 		return createOwner(ctx, ownerFile, name)
 	}
-	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}, HealthListenAddr: *healthListen, MemoryAPIEnabled: *memoryAPI, MemoryMutationsEnabled: *memoryMutations}, bootstrap)
+	installation, err := operator.Init(context.Background(), operator.InitOptions{Directory: *directory, DataDir: *dataDir, BackupDir: *backupDir, Image: *image, OwnerDSNFile: *ownerDSN, AppDSNFile: *appDSN, OwnerName: *ownerName, Ingress: ingress.Policy{Mode: ingress.Mode(*mode), ListenAddr: *listen, PublicURL: *publicURL, TrustedLAN: *trustedLAN, AllowPlaintext: *allowLANHTTP}, HealthListenAddr: *healthListen, MemoryAPIEnabled: *memoryAPI, MemoryMutationsEnabled: *memoryMutations, TrustedAttachmentsEnabled: *trustedAttachments, TrustedAttachmentBlobDir: *trustedAttachmentBlobDir, RelayEnabled: relayMachinesJSON != "", RelayMachinesJSON: relayMachinesJSON}, bootstrap)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punaro init failed: %v\n", err)
 		return 1
@@ -754,7 +766,7 @@ func createBackupWithUpdate(ctx context.Context, installation operator.Installat
 	}
 	options := punarobackup.CreateOptions{
 		BackupRoot:       installation.BackupDir,
-		BlobRoot:         filepath.Join(installation.DataDir, "blobs"),
+		BlobRoot:         backupBlobRoot(installation),
 		InstallationFile: operator.ConfigFile(installation.Directory),
 		EnvironmentFile:  operator.EnvFile(installation.Directory),
 		ComposeFile:      operator.OverrideFile(installation.Directory),
@@ -881,6 +893,9 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		AppDSNFile:            canonicalAppDSN,
 		DatabaseIdentity:      targetIdentity,
 	}
+	if prepared.TrustedAttachmentsEnabled {
+		target.BlobRoot = prepared.TrustedAttachmentBlobDir
+	}
 	if updateMarker != nil {
 		target.UpdateID = updateMarker.UpdateID
 		target.ManifestSHA256 = updateMarker.ManifestSHA256
@@ -890,7 +905,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 	finalizationStage := ""
 	state, err := punarobackup.Restore(ctx, punarobackup.RestoreOptions{
 		BackupDirectory: request.BackupDirectory,
-		TargetDataDir:   request.DataDir,
+		TargetDataDir:   prepared.DataDir,
 		Target:          target,
 		Preflight: func(preflightCtx context.Context) error {
 			currentIdentity, identityErr := postgresDatabaseIdentity(preflightCtx, request.AppDSNFile)
@@ -1015,6 +1030,13 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		return punarobackup.State{}, errors.New("restored installation identity changed")
 	}
 	return state, nil
+}
+
+func backupBlobRoot(installation operator.Installation) string {
+	if installation.TrustedAttachmentsEnabled {
+		return installation.TrustedAttachmentBlobDir
+	}
+	return filepath.Join(installation.DataDir, "blobs")
 }
 
 func receiptMatchesBinding(receipt operator.UpdateRecoveryReceipt, binding punarobackup.UpdateBinding) bool {

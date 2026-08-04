@@ -77,39 +77,46 @@ func validateRelayMachinesJSON(raw string) error {
 // Installation is the content-free operator configuration. DSN values remain
 // in separately protected files and are never copied here.
 type Installation struct {
-	Version                int                     `json:"version"`
-	Directory              string                  `json:"-"`
-	DataDir                string                  `json:"data_dir"`
-	BackupDir              string                  `json:"backup_dir"`
-	Image                  string                  `json:"image"`
-	OwnerDSNFile           string                  `json:"owner_dsn_file"`
-	AppDSNFile             string                  `json:"app_dsn_file"`
-	OwnerPrincipalID       string                  `json:"owner_principal_id"`
-	OwnerName              string                  `json:"owner_name"`
-	RuntimeUID             string                  `json:"runtime_uid"`
-	RuntimeGID             string                  `json:"runtime_gid"`
-	Ingress                ingress.Policy          `json:"ingress"`
-	HealthListenAddr       string                  `json:"health_listen_addr"`
-	HealthURL              string                  `json:"health_url"`
-	MemoryAPIEnabled       bool                    `json:"memory_api_enabled"`
-	MemoryMutationsEnabled bool                    `json:"memory_mutations_enabled"`
-	RelayMachinesJSON      string                  `json:"relay_machines_json,omitempty"`
-	MailCutover            *MailCutoverPublication `json:"mail_cutover,omitempty"`
+	Version                   int                     `json:"version"`
+	Directory                 string                  `json:"-"`
+	DataDir                   string                  `json:"data_dir"`
+	BackupDir                 string                  `json:"backup_dir"`
+	Image                     string                  `json:"image"`
+	OwnerDSNFile              string                  `json:"owner_dsn_file"`
+	AppDSNFile                string                  `json:"app_dsn_file"`
+	OwnerPrincipalID          string                  `json:"owner_principal_id"`
+	OwnerName                 string                  `json:"owner_name"`
+	RuntimeUID                string                  `json:"runtime_uid"`
+	RuntimeGID                string                  `json:"runtime_gid"`
+	Ingress                   ingress.Policy          `json:"ingress"`
+	HealthListenAddr          string                  `json:"health_listen_addr"`
+	HealthURL                 string                  `json:"health_url"`
+	MemoryAPIEnabled          bool                    `json:"memory_api_enabled"`
+	MemoryMutationsEnabled    bool                    `json:"memory_mutations_enabled"`
+	TrustedAttachmentsEnabled bool                    `json:"trusted_attachments_enabled"`
+	TrustedAttachmentBlobDir  string                  `json:"trusted_attachment_blob_dir,omitempty"`
+	RelayEnabled              bool                    `json:"relay_enabled"`
+	RelayMachinesJSON         string                  `json:"relay_machines_json,omitempty"`
+	MailCutover               *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
 
 // InitOptions is the complete explicit input to a first installation.
 type InitOptions struct {
-	Directory              string
-	DataDir                string
-	BackupDir              string
-	Image                  string
-	OwnerDSNFile           string
-	AppDSNFile             string
-	OwnerName              string
-	Ingress                ingress.Policy
-	HealthListenAddr       string
-	MemoryAPIEnabled       bool
-	MemoryMutationsEnabled bool
+	Directory                 string
+	DataDir                   string
+	BackupDir                 string
+	Image                     string
+	OwnerDSNFile              string
+	AppDSNFile                string
+	OwnerName                 string
+	Ingress                   ingress.Policy
+	HealthListenAddr          string
+	MemoryAPIEnabled          bool
+	MemoryMutationsEnabled    bool
+	TrustedAttachmentsEnabled bool
+	TrustedAttachmentBlobDir  string
+	RelayEnabled              bool
+	RelayMachinesJSON         string
 }
 
 // BootstrapOwner is the only database mutation performed by Init.
@@ -213,7 +220,7 @@ func Resume(ctx context.Context, directory string, recoverOwner RecoverOwner) (I
 		return Installation{}, errors.New("initialization staging configuration is corrupt")
 	}
 	installation.Directory = directory
-	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled}); err != nil {
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: installation.RelayEnabled, RelayMachinesJSON: installation.RelayMachinesJSON}); err != nil {
 		return Installation{}, errors.New("initialization staging configuration is invalid")
 	}
 	if failures := CheckPaths(installation); len(failures) != 0 {
@@ -254,6 +261,27 @@ func validateInit(options InitOptions) (Installation, error) {
 	}
 	if err := requireTrustedPrivateDirectory(options.BackupDir); err != nil {
 		return Installation{}, fmt.Errorf("backup directory: %w", err)
+	}
+	if options.TrustedAttachmentsEnabled {
+		if err := requireTrustedPrivateDirectory(options.TrustedAttachmentBlobDir); err != nil {
+			return Installation{}, fmt.Errorf("trusted attachment blob directory: %w", err)
+		}
+		if !attachmentBlobDirectoryContained(options.DataDir, options.TrustedAttachmentBlobDir) {
+			return Installation{}, errors.New("trusted attachment blob directory must resolve beneath the data directory")
+		}
+		canonicalData, err := filepath.EvalSymlinks(options.DataDir)
+		if err != nil {
+			return Installation{}, errors.New("data directory cannot be resolved")
+		}
+		canonicalBlob, err := filepath.EvalSymlinks(options.TrustedAttachmentBlobDir)
+		if err != nil {
+			return Installation{}, errors.New("trusted attachment blob directory cannot be resolved")
+		}
+		if !filepath.IsAbs(canonicalData) || filepath.Clean(canonicalData) != canonicalData || !safeEnvPath(canonicalData) || !filepath.IsAbs(canonicalBlob) || filepath.Clean(canonicalBlob) != canonicalBlob || !safeEnvPath(canonicalBlob) || !nestedPath(canonicalData, canonicalBlob) {
+			return Installation{}, errors.New("resolved trusted attachment paths are unsafe")
+		}
+		installation.DataDir = canonicalData
+		installation.TrustedAttachmentBlobDir = canonicalBlob
 	}
 	dataInfo, dataErr := os.Stat(options.DataDir)
 	backupInfo, backupErr := os.Stat(options.BackupDir)
@@ -322,7 +350,28 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if options.MemoryMutationsEnabled && !options.MemoryAPIEnabled {
 		return Installation{}, errors.New("memory mutations require the memory API")
 	}
-	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled}, nil
+	if options.TrustedAttachmentsEnabled {
+		if !filepath.IsAbs(options.TrustedAttachmentBlobDir) || filepath.Clean(options.TrustedAttachmentBlobDir) != options.TrustedAttachmentBlobDir || !safeEnvPath(options.TrustedAttachmentBlobDir) || !nestedPath(options.DataDir, options.TrustedAttachmentBlobDir) {
+			return Installation{}, errors.New("trusted attachments require a private blob directory beneath the data directory")
+		}
+	} else if options.TrustedAttachmentBlobDir != "" {
+		return Installation{}, errors.New("trusted attachment blob directory requires trusted attachments")
+	}
+	relayMachines := ""
+	if options.RelayMachinesJSON != "" {
+		var err error
+		relayMachines, err = canonicalRelayMachinesJSON(options.RelayMachinesJSON)
+		if err != nil {
+			return Installation{}, err
+		}
+	}
+	if options.RelayEnabled && relayMachines == "" {
+		return Installation{}, errors.New("enabled relay requires machine enrollment")
+	}
+	if options.RelayEnabled && !listener.IsLoopback(policy.ListenAddr) {
+		return Installation{}, errors.New("relay authority requires a loopback device listener")
+	}
+	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: options.TrustedAttachmentBlobDir, RelayEnabled: options.RelayEnabled, RelayMachinesJSON: relayMachines}, nil
 }
 
 // Load reads only a completely published installation marker.
@@ -352,12 +401,18 @@ func Load(directory string) (Installation, error) {
 			return Installation{}, errors.New("published installation relay enrollment is invalid")
 		}
 	}
-	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled})
+	if installation.RelayEnabled && installation.RelayMachinesJSON == "" {
+		return Installation{}, errors.New("published installation relay configuration is invalid")
+	}
+	validated, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: installation.RelayEnabled, RelayMachinesJSON: installation.RelayMachinesJSON})
 	if err != nil {
 		return Installation{}, errors.New("published installation configuration is invalid")
 	}
 	if installation.HealthListenAddr != validated.HealthListenAddr || installation.HealthURL != validated.HealthURL {
 		return Installation{}, errors.New("published installation health URL is invalid")
+	}
+	if installation.TrustedAttachmentsEnabled && !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir) {
+		return Installation{}, errors.New("published installation trusted attachment directory is invalid")
 	}
 	installation.Directory = directory
 	return installation, nil
@@ -445,6 +500,14 @@ func CheckPaths(installation Installation) []string {
 	if err := requireTrustedPrivateDirectory(installation.BackupDir); err != nil {
 		failures = append(failures, "backup directory unavailable or unsafe")
 	}
+	if installation.TrustedAttachmentsEnabled {
+		if err := requireTrustedPrivateDirectory(installation.TrustedAttachmentBlobDir); err != nil {
+			failures = append(failures, "trusted attachment blob directory unavailable or unsafe")
+		}
+		if !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir) {
+			failures = append(failures, "trusted attachment blob directory is outside data directory")
+		}
+	}
 	if overlaps, err := canonicalDirectoriesOverlap(installation.DataDir, installation.BackupDir); err == nil && overlaps {
 		failures = append(failures, "data and backup directories overlap")
 	}
@@ -462,7 +525,7 @@ func CheckPaths(installation Installation) []string {
 		failures = append(failures, "daemon-writable data directory overlaps database credentials or operator state")
 	}
 	envPath := EnvFile(installation.Directory)
-	envAvailable, envCurrent, envPreMemoryMutations, envPreMemoryAPI, envLegacy := false, false, false, false, false
+	envAvailable, envCurrent, envPreTrustedAttachments, envPreMemoryMutations, envPreMemoryAPI, envLegacy := false, false, false, false, false, false
 	if err := requireTrustedProtectedFile(envPath, 64<<10); err != nil {
 		failures = append(failures, "generated daemon environment unavailable or unsafe")
 	} else {
@@ -471,16 +534,17 @@ func CheckPaths(installation Installation) []string {
 		envAvailable = err == nil
 		if envAvailable {
 			envCurrent = string(body) == daemonEnv(installation)
-			envPreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsDaemonEnv(installation)
-			envPreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
-			envLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
+			envPreTrustedAttachments = !installation.TrustedAttachmentsEnabled && string(body) == preTrustedAttachmentsDaemonEnv(installation)
+			envPreMemoryMutations = !installation.TrustedAttachmentsEnabled && !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsDaemonEnv(installation)
+			envPreMemoryAPI = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && string(body) == preMemoryAPIDaemonEnv(installation)
+			envLegacy = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyDaemonEnv(installation)
 		}
-		if !envCurrent && !envPreMemoryMutations && !envPreMemoryAPI && !envLegacy {
+		if !envCurrent && !envPreTrustedAttachments && !envPreMemoryMutations && !envPreMemoryAPI && !envLegacy {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 		}
 	}
 	overridePath := OverrideFile(installation.Directory)
-	overrideAvailable, overrideCurrent, overridePreMemoryMutations, overridePreMemoryAPI, overrideLegacy := false, false, false, false, false
+	overrideAvailable, overrideCurrent, overridePreTrustedAttachments, overridePreMemoryMutations, overridePreMemoryAPI, overrideLegacy := false, false, false, false, false, false
 	if err := requireTrustedProtectedFile(overridePath, 64<<10); err != nil {
 		failures = append(failures, "generated Compose override unavailable or unsafe")
 	} else {
@@ -489,17 +553,18 @@ func CheckPaths(installation Installation) []string {
 		overrideAvailable = err == nil
 		if overrideAvailable {
 			overrideCurrent = string(body) == composeOverride()
-			overridePreMemoryMutations = !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsComposeOverride()
-			overridePreMemoryAPI = !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
-			overrideLegacy = !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
+			overridePreTrustedAttachments = !installation.TrustedAttachmentsEnabled && string(body) == preTrustedAttachmentsComposeOverride()
+			overridePreMemoryMutations = !installation.TrustedAttachmentsEnabled && !installation.MemoryMutationsEnabled && string(body) == preMemoryMutationsComposeOverride()
+			overridePreMemoryAPI = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && string(body) == preMemoryAPIComposeOverride()
+			overrideLegacy = !installation.TrustedAttachmentsEnabled && !installation.MemoryAPIEnabled && installation.MailCutover == nil && installation.RelayMachinesJSON == "" && string(body) == legacyComposeOverride()
 		}
-		if !overrideCurrent && !overridePreMemoryMutations && !overridePreMemoryAPI && !overrideLegacy {
+		if !overrideCurrent && !overridePreTrustedAttachments && !overridePreMemoryMutations && !overridePreMemoryAPI && !overrideLegacy {
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
 	}
 	if envAvailable && overrideAvailable {
-		sameGeneration := envCurrent && overrideCurrent || envPreMemoryMutations && overridePreMemoryMutations || envPreMemoryAPI && overridePreMemoryAPI || envLegacy && overrideLegacy
-		if !sameGeneration && (envCurrent || envPreMemoryMutations || envPreMemoryAPI || envLegacy) && (overrideCurrent || overridePreMemoryMutations || overridePreMemoryAPI || overrideLegacy) {
+		sameGeneration := envCurrent && overrideCurrent || envPreTrustedAttachments && overridePreTrustedAttachments || envPreMemoryMutations && overridePreMemoryMutations || envPreMemoryAPI && overridePreMemoryAPI || envLegacy && overrideLegacy
+		if !sameGeneration && (envCurrent || envPreTrustedAttachments || envPreMemoryMutations || envPreMemoryAPI || envLegacy) && (overrideCurrent || overridePreTrustedAttachments || overridePreMemoryMutations || overridePreMemoryAPI || overrideLegacy) {
 			failures = append(failures, "generated daemon environment does not match installation configuration")
 			failures = append(failures, "generated Compose override does not match installation configuration")
 		}
@@ -522,9 +587,13 @@ func localURL(listenAddr string) string {
 
 func daemonEnv(installation Installation) string {
 	relayStore, relayEnabled, credentialTransition := "sqlite", "false", "false"
+	if installation.RelayEnabled {
+		relayStore, relayEnabled = "postgres", "true"
+	}
 	if installation.MailCutover != nil {
 		relayStore, relayEnabled, credentialTransition = "postgres", "true", "true"
 	}
+	blobDir := attachmentContainerBlobDir(installation)
 	return strings.Join([]string{
 		"PUNARO_IMAGE=" + installation.Image,
 		"PUNARO_HOST_DATA_DIR=" + installation.DataDir,
@@ -536,6 +605,8 @@ func daemonEnv(installation Installation) string {
 		"PUNARO_DEVICE_AUTH_ENABLED=true",
 		fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t", installation.MemoryAPIEnabled),
 		fmt.Sprintf("PUNARO_MEMORY_MUTATIONS_ENABLED=%t", installation.MemoryMutationsEnabled),
+		fmt.Sprintf("PUNARO_TRUSTED_ATTACHMENTS_ENABLED=%t", installation.TrustedAttachmentsEnabled),
+		"PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=" + blobDir,
 		"PUNARO_RELAY_ENABLED=" + relayEnabled,
 		"PUNARO_RELAY_MACHINES_JSON='" + installation.RelayMachinesJSON + "'",
 		"PUNARO_RELAY_STORE=" + relayStore,
@@ -549,8 +620,34 @@ func daemonEnv(installation Installation) string {
 	}, "\n") + "\n"
 }
 
+func attachmentContainerBlobDir(installation Installation) string {
+	if !installation.TrustedAttachmentsEnabled {
+		return ""
+	}
+	canonicalData, err := filepath.EvalSymlinks(installation.DataDir)
+	if err != nil {
+		return ""
+	}
+	canonicalBlob, err := filepath.EvalSymlinks(installation.TrustedAttachmentBlobDir)
+	if err != nil {
+		return ""
+	}
+	relative, err := filepath.Rel(canonicalData, canonicalBlob)
+	if err != nil || !nestedPath(canonicalData, canonicalBlob) {
+		return ""
+	}
+	return filepath.ToSlash(filepath.Join("/var/lib/punaro", relative))
+}
+
 func preMemoryMutationsDaemonEnv(installation Installation) string {
-	return strings.Replace(daemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_MUTATIONS_ENABLED=%t\n", installation.MemoryMutationsEnabled), "", 1)
+	return strings.Replace(preTrustedAttachmentsDaemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_MUTATIONS_ENABLED=%t\n", installation.MemoryMutationsEnabled), "", 1)
+}
+
+func preTrustedAttachmentsDaemonEnv(installation Installation) string {
+	return strings.NewReplacer(
+		fmt.Sprintf("PUNARO_TRUSTED_ATTACHMENTS_ENABLED=%t\n", installation.TrustedAttachmentsEnabled), "",
+		"PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR="+attachmentContainerBlobDir(installation)+"\n", "",
+	).Replace(daemonEnv(installation))
 }
 
 func legacyDaemonEnv(installation Installation) string {
@@ -564,6 +661,13 @@ func legacyDaemonEnv(installation Installation) string {
 
 func preMemoryAPIDaemonEnv(installation Installation) string {
 	return strings.Replace(preMemoryMutationsDaemonEnv(installation), fmt.Sprintf("PUNARO_MEMORY_API_ENABLED=%t\n", installation.MemoryAPIEnabled), "", 1)
+}
+
+func preTrustedAttachmentsComposeOverride() string {
+	return strings.NewReplacer(
+		"      PUNARO_TRUSTED_ATTACHMENTS_ENABLED: ${PUNARO_TRUSTED_ATTACHMENTS_ENABLED:-false}\n", "",
+		"      PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR: ${PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR:-}\n", "",
+	).Replace(composeOverride())
 }
 
 func composeOverride() string {
@@ -590,6 +694,8 @@ func composeOverride() string {
       PUNARO_DEVICE_AUTH_ENABLED: ${PUNARO_DEVICE_AUTH_ENABLED:?required}
       PUNARO_MEMORY_API_ENABLED: ${PUNARO_MEMORY_API_ENABLED:-false}
       PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}
+      PUNARO_TRUSTED_ATTACHMENTS_ENABLED: ${PUNARO_TRUSTED_ATTACHMENTS_ENABLED:-false}
+      PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR: ${PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR:-}
       PUNARO_RELAY_ENABLED: ${PUNARO_RELAY_ENABLED:?required}
       PUNARO_RELAY_MACHINES_JSON: ${PUNARO_RELAY_MACHINES_JSON:-}
       PUNARO_RELAY_STORE: ${PUNARO_RELAY_STORE:?required}
@@ -610,7 +716,7 @@ func composeOverride() string {
 }
 
 func preMemoryMutationsComposeOverride() string {
-	return strings.Replace(composeOverride(), "      PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}\n", "", 1)
+	return strings.Replace(preTrustedAttachmentsComposeOverride(), "      PUNARO_MEMORY_MUTATIONS_ENABLED: ${PUNARO_MEMORY_MUTATIONS_ENABLED:-false}\n", "", 1)
 }
 
 func legacyComposeOverride() string {
@@ -647,6 +753,18 @@ func safeEnvPath(value string) bool {
 func nestedPath(parent, child string) bool {
 	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(child))
 	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func attachmentBlobDirectoryContained(dataDir, blobDir string) bool {
+	canonicalData, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return false
+	}
+	canonicalBlob, err := filepath.EvalSymlinks(blobDir)
+	if err != nil {
+		return false
+	}
+	return nestedPath(canonicalData, canonicalBlob)
 }
 
 func canonicalDirectoriesOverlap(first, second string) (bool, error) {

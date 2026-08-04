@@ -1,17 +1,24 @@
 # Installation guide
 
-Punaro has two intentionally separate installation paths:
+Punaro has a supported unified server lifecycle and separate per-machine client
+installers:
 
-- **Server**: one Linux systemd relay, owned by an operator. It remains
-  loopback-only; a separately configured authenticated ingress reaches it.
+- **Server**: one Linux operator lifecycle, initialized once with `punaro init`.
+  It generates the complete daemon configuration from explicit inputs and
+  keeps the service, database, health listener, and credentials host-local.
 - **Client**: one adapter for each agent machine and user account. Each gets a
   unique machine key, Access token, and `agent/<machine>/` endpoint namespace.
 
 The scripts build from the source checkout you run them from. Use a reviewed,
 pinned checkout or a verified release artifact; do not pipe a network download
-into a shell. Neither installer accepts or prints secret values.
+into a shell. Neither installer accepts or prints secret values. For the
+supported fresh server path, follow the [production Compose lifecycle](production-compose.md#first-installation).
+It is the sole path that configures relay authority, device authentication,
+trusted attachment storage, memory APIs, ingress, and lifecycle recovery
+together. `scripts/install-server.sh` below is retained only for historical
+alpha relay deployments; do not use it for a new unified server.
 
-## 1. Install the server
+## Historical alpha server installer (not for new unified servers)
 
 First collect the **public** client enrollment records into one JSON array on
 the relay host. The client installer prints each record; it contains a public
@@ -130,8 +137,10 @@ if you decline it during client setup.
 
 ## 3. Approve and configure the client
 
-1. Add the printed JSON record to the relay's `PUNARO_RELAY_MACHINES_JSON`,
-   then restart `punarod`. Do not widen it to `codex/` or `claude/`.
+1. For a new unified server, add the printed JSON record to the protected
+   relay-machine file before the initial `punaro init --relay-machines-file`.
+   Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
+   `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this
    machine, if the relay is Access-protected. Use a secret manager or editor to
    add its paired client ID and secret to the owner-only

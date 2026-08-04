@@ -417,6 +417,17 @@ func testInstallation(t *testing.T) string {
 	return directory
 }
 
+func TestBackupBlobRootUsesConfiguredTrustedAttachmentDirectory(t *testing.T) {
+	installation := operator.Installation{DataDir: "/var/lib/punaro-data", TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: "/var/lib/punaro-data/attachments"}
+	if got, want := backupBlobRoot(installation), installation.TrustedAttachmentBlobDir; got != want {
+		t.Fatalf("blob root=%q want=%q", got, want)
+	}
+	installation.TrustedAttachmentsEnabled = false
+	if got, want := backupBlobRoot(installation), "/var/lib/punaro-data/blobs"; got != want {
+		t.Fatalf("legacy blob root=%q want=%q", got, want)
+	}
+}
+
 func preserveDependencies(t *testing.T) {
 	t.Helper()
 	originalInspect, originalOwner, originalMigrate, originalMaintenance := inspectSchema, inspectOwner, migratePristinePair, maintenanceActive
@@ -806,7 +817,7 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 	preserveDependencies(t)
 	root := t.TempDir()
-	for _, name := range []string{"data", "backup"} {
+	for _, name := range []string{"data", "backup", "data/attachments"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -815,6 +826,10 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, name), []byte("postgres://invalid\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	relayMachines := filepath.Join(root, "relay-machines.json")
+	if err := os.WriteFile(relayMachines, []byte(`[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	sequence := []string{}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
@@ -832,10 +847,15 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		sequence = append(sequence, "owner")
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
 	}
-	args := []string{"init", "--directory", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "backup"), "--image", cliTestImage, "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator", "--mode", "internet", "--public-url", "https://punaro.example"}
+	args := []string{"init", "--directory", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "backup"), "--image", cliTestImage, "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator", "--mode", "internet", "--public-url", "https://punaro.example", "--relay-machines-file", relayMachines, "--trusted-attachments", "--trusted-attachment-blob-dir", filepath.Join(root, "data", "attachments")}
 	var stdout, stderr bytes.Buffer
 	if code := run(args, &stdout, &stderr); code != 0 || strings.Join(sequence, ",") != "inspect,migrate,inspect,owner" {
 		t.Fatalf("code=%d sequence=%v stdout=%q stderr=%q", code, sequence, stdout.String(), stderr.String())
+	}
+	installation, err := operator.Load(filepath.Join(root, "install"))
+	wantBlobDir, canonicalErr := filepath.EvalSymlinks(filepath.Join(root, "data", "attachments"))
+	if err != nil || canonicalErr != nil || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != wantBlobDir {
+		t.Fatalf("installation=%#v err=%v", installation, err)
 	}
 }
 

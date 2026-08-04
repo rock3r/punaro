@@ -55,7 +55,7 @@ func ParseInstallationArtifact(body []byte) (Installation, error) {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}
 	validationDirectory := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), ".punaro-backup-source")
-	validated, err := validateStatic(InitOptions{Directory: validationDirectory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled})
+	validated, err := validateStatic(InitOptions{Directory: validationDirectory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: installation.RelayEnabled, RelayMachinesJSON: installation.RelayMachinesJSON})
 	if err != nil || validated.HealthURL != installation.HealthURL {
 		return Installation{}, errors.New("backup installation configuration is invalid")
 	}
@@ -116,7 +116,14 @@ func PrepareRestore(options RestoreOptions) (Installation, error) {
 	if err != nil {
 		return Installation{}, err
 	}
-	installation, err := validateStatic(InitOptions{Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Source.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.Source.OwnerName, Ingress: options.Source.Ingress, HealthListenAddr: options.Source.HealthListenAddr, MemoryAPIEnabled: options.Source.MemoryAPIEnabled, MemoryMutationsEnabled: options.Source.MemoryMutationsEnabled})
+	blobDir := ""
+	if options.Source.TrustedAttachmentsEnabled {
+		blobDir, err = remapAttachmentBlobDir(options.Source, options.DataDir)
+		if err != nil {
+			return Installation{}, err
+		}
+	}
+	installation, err := validateStatic(InitOptions{Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Source.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.Source.OwnerName, Ingress: options.Source.Ingress, HealthListenAddr: options.Source.HealthListenAddr, MemoryAPIEnabled: options.Source.MemoryAPIEnabled, MemoryMutationsEnabled: options.Source.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.Source.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: blobDir, RelayEnabled: options.Source.RelayEnabled, RelayMachinesJSON: options.Source.RelayMachinesJSON})
 	if err != nil {
 		return Installation{}, err
 	}
@@ -136,7 +143,7 @@ func PrepareRestore(options RestoreOptions) (Installation, error) {
 // PublishRestore atomically publishes generated configuration after verified
 // database/timeline/blob restore has created the new data directory.
 func PublishRestore(installation Installation) error {
-	if uuid.Validate(installation.OwnerPrincipalID) != nil || requireTrustedPrivateDirectory(installation.DataDir) != nil || requireTrustedPrivateDirectory(installation.BackupDir) != nil || requireTrustedProtectedFile(installation.OwnerDSNFile, 64<<10) != nil || requireTrustedProtectedFile(installation.AppDSNFile, 64<<10) != nil {
+	if uuid.Validate(installation.OwnerPrincipalID) != nil || requireTrustedPrivateDirectory(installation.DataDir) != nil || requireTrustedPrivateDirectory(installation.BackupDir) != nil || requireTrustedProtectedFile(installation.OwnerDSNFile, 64<<10) != nil || requireTrustedProtectedFile(installation.AppDSNFile, 64<<10) != nil || installation.TrustedAttachmentsEnabled && (requireTrustedPrivateDirectory(installation.TrustedAttachmentBlobDir) != nil || !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir)) {
 		return errors.New("restored installation inputs are unavailable or unsafe")
 	}
 	if existing, err := Load(installation.Directory); err == nil {
@@ -166,6 +173,17 @@ func PublishRestore(installation Installation) error {
 	}
 	published = true
 	return nil
+}
+
+func remapAttachmentBlobDir(source Installation, targetDataDir string) (string, error) {
+	if !filepath.IsAbs(source.DataDir) || filepath.Clean(source.DataDir) != source.DataDir || !filepath.IsAbs(source.TrustedAttachmentBlobDir) || filepath.Clean(source.TrustedAttachmentBlobDir) != source.TrustedAttachmentBlobDir || !nestedPath(source.DataDir, source.TrustedAttachmentBlobDir) {
+		return "", errors.New("restore source attachment directory is invalid")
+	}
+	relative, err := filepath.Rel(source.DataDir, source.TrustedAttachmentBlobDir)
+	if err != nil {
+		return "", errors.New("restore source attachment directory is invalid")
+	}
+	return filepath.Join(targetDataDir, relative), nil
 }
 
 func canonicalPlannedPath(path string) (string, error) {
