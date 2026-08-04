@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -253,6 +254,15 @@ func validCode(value string) bool {
 	return len(value) == 43 && !strings.ContainsAny(value, " \t\r\n")
 }
 
+func validCredential(value, lookupID string) bool {
+	prefix, secret, found := strings.Cut(value, ".")
+	if !found || prefix != lookupID || !validUUID(prefix) || strings.ContainsAny(secret, " \t\r\n") {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(secret)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == secret
+}
+
 func decodeExact(raw []byte, target any, fields ...string) error {
 	return decodeFields(raw, target, fields, nil)
 }
@@ -310,7 +320,7 @@ func decodeFields(raw []byte, target any, required, optional []string) error {
 
 func decodeRedemptionResponse(raw []byte) (redemptionResponse, error) {
 	var value redemptionResponse
-	if err := decodeFields(raw, &value, []string{"principal_id", "lookup_id", "credential", "generation"}, []string{"expires_at"}); err != nil || !validUUID(value.PrincipalID) || !validUUID(value.LookupID) || value.Credential == "" || strings.ContainsAny(value.Credential, " \t\r\n") || value.Generation < 1 {
+	if err := decodeFields(raw, &value, []string{"principal_id", "lookup_id", "credential", "generation"}, []string{"expires_at"}); err != nil || !validUUID(value.PrincipalID) || !validUUID(value.LookupID) || !validCredential(value.Credential, value.LookupID) || value.Generation < 1 {
 		return redemptionResponse{}, errors.New("invalid redemption response")
 	}
 	return value, nil

@@ -15,7 +15,7 @@ import (
 func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "state")
 	var prepared publicEnrollment
-	credential := "punaro_device_" + "credential_secret"
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
 	calls := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -105,7 +105,7 @@ func TestEnrollmentMaterialRejectsDuplicateOrUnknownFields(t *testing.T) {
 }
 
 func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *testing.T) {
-	response, err := decodeRedemptionResponse([]byte(`{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"punaro_device_credential","generation":1,"expires_at":"2030-01-02T03:04:05Z"}`))
+	response, err := decodeRedemptionResponse([]byte(`{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"22222222-2222-4222-8222-222222222222.` + strings.Repeat("A", 43) + `","generation":1,"expires_at":"2030-01-02T03:04:05Z"}`))
 	if err != nil || response.ExpiresAt.IsZero() {
 		t.Fatalf("expiring response err=%v response=%#v", err, response)
 	}
