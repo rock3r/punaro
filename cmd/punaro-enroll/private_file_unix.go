@@ -14,7 +14,7 @@ import (
 
 func safeStateDir(path string) bool { return filepath.IsAbs(path) && filepath.Clean(path) == path }
 func safeStateChild(directory, path string) bool {
-	return safeStateDir(directory) && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
+	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
 }
 
 func ensurePrivateDir(path string) error {

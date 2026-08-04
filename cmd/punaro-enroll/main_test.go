@@ -156,6 +156,17 @@ func TestEnsurePrivateDirCreatesNestedStateDirectory(t *testing.T) {
 	}
 }
 
+func TestSafeStateChildRejectsNonCanonicalTraversal(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if !safeStateChild(directory, filepath.Join(directory, "credential")) {
+		t.Fatal("direct state child was rejected")
+	}
+	nonCanonical := directory + string(filepath.Separator) + "link" + string(filepath.Separator) + ".." + string(filepath.Separator) + "credential"
+	if safeStateChild(directory, nonCanonical) {
+		t.Fatal("non-canonical child path was accepted")
+	}
+}
+
 func TestEnrollmentMaterialRejectsDuplicateOrUnknownFields(t *testing.T) {
 	for name, raw := range map[string]string{
 		"duplicate": `{"enrollment_id":"33333333-3333-4333-8333-333333333333","enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`,
