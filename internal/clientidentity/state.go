@@ -120,9 +120,10 @@ func validOrigin(raw string) bool {
 
 func canonicalOrigin(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Host != strings.ToLower(parsed.Host) {
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", false
 	}
+	parsed.Host = strings.ToLower(parsed.Host)
 	parsed.Path = ""
 	return parsed.String(), true
 }

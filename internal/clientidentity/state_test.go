@@ -58,6 +58,16 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := state.Match("https://punaro.example/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical trailing-slash match: %v", err)
 	}
+	if err := state.Match("https://Relay.Example/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err == nil {
+		t.Fatal("mixed-case origin unexpectedly matched a different relay")
+	}
+	mixedCaseState, err := Parse([]byte(`{"version":1,"origin":"https://relay.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
+	if err != nil {
+		t.Fatalf("parse lowercase canonical state: %v", err)
+	}
+	if err := mixedCaseState.Match("https://Relay.Example/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical mixed-case host match: %v", err)
+	}
 	for name, match := range map[string][3]string{
 		"origin":         {"https://other.example", "11111111-1111-4111-8111-111111111111", "laptop-1"},
 		"client binding": {"https://punaro.example", "22222222-2222-4222-8222-222222222222", "laptop-1"},
