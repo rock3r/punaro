@@ -736,7 +736,8 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
     SELECT id FROM auth.pending_enrollments
-	WHERE expires_at <= statement_timestamp() OR invalidated_at IS NOT NULL
+	WHERE invalidated_at IS NOT NULL
+	   OR (redeemed_at IS NULL AND expires_at <= statement_timestamp())
     ORDER BY expires_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates
