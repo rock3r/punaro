@@ -888,11 +888,13 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 	}
 	target := punarobackup.RestoreTarget{
 		InstallationDirectory: filepath.Join(canonicalInstallationParent, filepath.Base(request.Directory)),
-		BlobRoot:              backupBlobRoot(prepared),
 		BackupRoot:            canonicalNewBackup,
 		OwnerDSNFile:          canonicalOwnerDSN,
 		AppDSNFile:            canonicalAppDSN,
 		DatabaseIdentity:      targetIdentity,
+	}
+	if prepared.TrustedAttachmentsEnabled {
+		target.BlobRoot = prepared.TrustedAttachmentBlobDir
 	}
 	if updateMarker != nil {
 		target.UpdateID = updateMarker.UpdateID

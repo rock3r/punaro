@@ -56,6 +56,24 @@ func TestRestorePublishesVerifiedBlobsAfterDatabaseAndTimeline(t *testing.T) {
 	}
 }
 
+func TestRestoreCreatesConfiguredEmptyBlobRoot(t *testing.T) {
+	backupDirectory, _ := createRestoreFixture(t, false)
+	targetParent := t.TempDir()
+	requirePrivate(t, targetParent)
+	target := filepath.Join(targetParent, "restored-data")
+	targetConfig := restoreTargetFixture(targetParent)
+	targetConfig.BlobRoot = filepath.Join(target, "attachments")
+	_, err := Restore(context.Background(), RestoreOptions{BackupDirectory: backupDirectory, TargetDataDir: target, Target: targetConfig, Preflight: func(context.Context) error { return nil }, RestoreDump: func(context.Context, io.Reader) error { return nil }, RotateTimeline: func(_ context.Context, manifest Manifest) (State, error) {
+		return State{InstallationID: manifest.State.InstallationID, TimelineID: "7c016e76-aadb-48f8-b460-e75f7d90e888", ChangeSequence: manifest.State.ChangeSequence}, nil
+	}, Finalize: func(context.Context, State) error { return nil }})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if info, statErr := os.Stat(targetConfig.BlobRoot); statErr != nil || !info.IsDir() {
+		t.Fatalf("attachment root info=%v err=%v", info, statErr)
+	}
+}
+
 func TestRestoreResumesAfterPublishedFinalizationFailureWithoutRepeatingMutation(t *testing.T) {
 	backupDirectory, _ := createRestoreFixture(t, true)
 	targetParent := t.TempDir()

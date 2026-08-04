@@ -157,6 +157,9 @@ func Restore(ctx context.Context, options RestoreOptions) (State, error) {
 		if err := os.RemoveAll(stage); err != nil || os.Mkdir(stage, 0o700) != nil {
 			return fail(PhasePreflight, "restore blob staging cannot be reserved")
 		}
+		if options.Target.BlobRoot != "" && os.MkdirAll(filepath.Join(stage, blobRelative), 0o700) != nil {
+			return fail(PhasePreflight, "restore attachment staging cannot be reserved")
+		}
 		for _, entry := range manifest.Files {
 			if !strings.HasPrefix(entry.Path, "blobs/") {
 				continue
