@@ -110,6 +110,42 @@ func TestRedeemPreflightsCredentialDestinationBeforeContactingOrigin(t *testing.
 	}
 }
 
+func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testing.T) {
+	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444"}
+	if err := writePrivateNew(filepath.Join(stateDir, redemptionJournalName), mustJSON(journal)); err != nil {
+		t.Fatal(err)
+	}
+	credentialPath := filepath.Join(stateDir, "credential")
+	if err := writePrivateNew(credentialPath, []byte(credential+"\n")); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"recover", "--state-dir", stateDir, "--credential-file", credentialPath}, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("recover code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
+		t.Fatalf("recovery journal remains: %v", err)
+	}
+}
+
 func TestEnsurePrivateDirCreatesNestedStateDirectory(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), "first", "second", "state")
 	if err := ensurePrivateDir(stateDir); err != nil {

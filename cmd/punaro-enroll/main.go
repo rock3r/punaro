@@ -117,9 +117,6 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || privateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
-	if err := preflightCredentialDestination(*credentialPath); err != nil {
-		return enrollmentError(stderr, "private credential destination is unavailable", 2)
-	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
 	if err != nil || state.LegacyMachineID != "" {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
@@ -129,6 +126,9 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if recoveryOnly {
 		if journalErr != nil {
 			return enrollmentError(stderr, "no recoverable enrollment was found", 2)
+		}
+		if err := preflightCredentialDestination(*credentialPath, true); err != nil {
+			return enrollmentError(stderr, "private credential destination is unavailable", 2)
 		}
 	} else {
 		material, err := loadMaterial(*materialPath)
@@ -143,9 +143,15 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if journal.EnrollmentID != material.EnrollmentID || journal.ClientBinding != material.ClientBinding || journal.Code != material.Code {
 				return enrollmentError(stderr, "existing enrollment recovery does not match material", 2)
 			}
+			if err := preflightCredentialDestination(*credentialPath, true); err != nil {
+				return enrollmentError(stderr, "private credential destination is unavailable", 2)
+			}
 		case !errors.Is(journalErr, os.ErrNotExist):
 			return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 		default:
+			if err := preflightCredentialDestination(*credentialPath, false); err != nil {
+				return enrollmentError(stderr, "private credential destination is unavailable", 2)
+			}
 			key, err := uuid.NewRandom()
 			if err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
@@ -185,7 +191,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	}{Origin: state.Origin, LookupID: response.LookupID, Generation: response.Generation})
 }
 
-func preflightCredentialDestination(path string) error {
+func preflightCredentialDestination(path string, recoveryInProgress bool) error {
 	_, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -193,9 +199,17 @@ func preflightCredentialDestination(path string) error {
 	if err != nil {
 		return err
 	}
+	if recoveryInProgress {
+		// A matching credential can already be present if the process crashed
+		// after persistence and before removing the journal. Verify that it is a
+		// protected private file, then let the idempotent response comparison in
+		// writeCredential complete that interrupted recovery.
+		_, err := readPrivate(path, maxEnrollmentFile)
+		return err
+	}
 	// A credential path is single-use. Treat every existing entry, including a
-	// regular private credential, as unavailable before redemption so no server
-	// principal is minted when the response cannot be persisted locally.
+	// regular private credential, as unavailable before the first redemption so
+	// no server principal is minted when the response cannot be persisted.
 	return errors.New("credential destination exists")
 }
 
