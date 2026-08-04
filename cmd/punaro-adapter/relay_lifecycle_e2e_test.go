@@ -24,7 +24,78 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/clientidentity"
 )
+
+func TestE2EClientIdentitySidecarGatesInstalledAdapter(t *testing.T) {
+	if os.Getenv("PUNARO_REAL_RELAY_E2E") != "1" {
+		t.Skip("set PUNARO_REAL_RELAY_E2E=1 to run the installed client identity smoke test")
+	}
+	mailbox, err := exec.LookPath("agent-mailbox")
+	if err != nil {
+		t.Fatal("agent-mailbox is required for the installed client identity smoke test")
+	}
+
+	root := e2eRepositoryRoot(t)
+	fixture := t.TempDir()
+	home := filepath.Join(fixture, "client")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal("create disposable client home")
+	}
+	machineID := "e2e-identity-" + uuid.NewString()
+	const origin = "https://127.0.0.1:1"
+	e2eInstallClient(t, root, home, origin, machineID, mailbox, filepath.Join(home, "mailbox"), false)
+
+	profile := filepath.Join(home, ".config", "punaro", "adapter.env")
+	identity := filepath.Join(home, ".config", "punaro", "client-identity.json")
+	binding := uuid.NewString()
+	state := clientidentity.State{Version: clientidentity.Version, Origin: origin, ClientBinding: binding, LegacyMachineID: machineID}
+	raw, err := state.Encode()
+	if err != nil {
+		t.Fatal("encode identity sidecar")
+	}
+	if err := os.WriteFile(identity, raw, 0o600); err != nil {
+		t.Fatal("write identity sidecar")
+	}
+	profileRaw, err := os.ReadFile(profile)
+	if err != nil {
+		t.Fatal("read installed profile")
+	}
+	profileRaw = append(profileRaw, []byte("PUNARO_CLIENT_IDENTITY_FILE="+identity+"\nPUNARO_CLIENT_BINDING="+binding+"\n")...)
+	if err := os.WriteFile(profile, profileRaw, 0o600); err != nil {
+		t.Fatal("write installed profile identity settings")
+	}
+
+	adapterBinary := filepath.Join(home, ".local", "bin", "punaro-adapter")
+	environment := e2eEnvironment(e2eGoEnvironment(), map[string]string{adapterProfileFileEnv: profile})
+	if err := os.WriteFile(identity, []byte(`{"version":1,"origin":"https://127.0.0.1:2","client_binding":"`+binding+`","legacy_machine_id":"`+machineID+`"}`), 0o600); err != nil {
+		t.Fatal("write cross-origin identity sidecar")
+	}
+	rejected := exec.Command(adapterBinary)
+	rejected.Env = environment
+	output, err := rejected.CombinedOutput()
+	if err == nil || strings.Contains(string(output), binding) || strings.Contains(string(output), machineID) {
+		t.Fatalf("cross-origin installed adapter error=%v output=%q", err, output)
+	}
+	if err := os.WriteFile(identity, raw, 0o600); err != nil {
+		t.Fatal("restore matching identity sidecar")
+	}
+
+	started := exec.Command(adapterBinary)
+	started.Env = environment
+	started.Stdout = io.Discard
+	started.Stderr = io.Discard
+	if err := started.Start(); err != nil {
+		t.Fatal("start installed adapter with matching identity")
+	}
+	time.Sleep(250 * time.Millisecond)
+	if err := started.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal("stop installed adapter")
+	}
+	if err := started.Wait(); err != nil {
+		t.Fatalf("matching identity adapter did not stop cleanly: %v", err)
+	}
+}
 
 func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	if os.Getenv("PUNARO_REAL_RELAY_E2E") != "1" {
