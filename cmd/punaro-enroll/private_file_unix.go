@@ -132,6 +132,40 @@ func writePrivateNew(path string, raw []byte) error {
 	return nil
 }
 
+func writePrivateAtomic(path string, raw []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return err
+	}
+	removeOnFailure = false
+	return syncPrivateDirectory(filepath.Dir(path))
+}
+
 var syncPrivateDirectory = syncPrivateDirectoryImpl
 
 func syncPrivateDirectoryImpl(path string) error {

@@ -27,6 +27,7 @@ const (
 	identityFileName      = "client-identity.json"
 	redemptionJournalName = "redemption-recovery.json"
 	maxEnrollmentFile     = 4096
+	maxEnrollmentMaterial = 64 * 1024
 )
 
 var newEnrollmentHTTPClient = func() *http.Client {
@@ -71,6 +72,7 @@ type redemptionJournal struct {
 	ClientBinding  string `json:"client_binding"`
 	Code           string `json:"code"`
 	IdempotencyKey string `json:"idempotency_key"`
+	Credential     string `json:"credential,omitempty"`
 }
 
 type redemptionResponse struct {
@@ -154,7 +156,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		if journalErr != nil {
 			return enrollmentError(stderr, "no recoverable enrollment was found", 2)
 		}
-		if err := preflightCredentialDestination(*credentialPath, true); err != nil {
+		if err := preflightCredentialDestination(*credentialPath, journal.Credential); err != nil {
 			return enrollmentError(stderr, "private credential destination is unavailable", 2)
 		}
 	} else {
@@ -170,13 +172,13 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if journal.EnrollmentID != material.EnrollmentID || journal.ClientBinding != material.ClientBinding || journal.Code != material.Code {
 				return enrollmentError(stderr, "existing enrollment recovery does not match material", 2)
 			}
-			if err := preflightCredentialDestination(*credentialPath, true); err != nil {
+			if err := preflightCredentialDestination(*credentialPath, journal.Credential); err != nil {
 				return enrollmentError(stderr, "private credential destination is unavailable", 2)
 			}
 		case !errors.Is(journalErr, os.ErrNotExist):
 			return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 		default:
-			if err := preflightCredentialDestination(*credentialPath, false); err != nil {
+			if err := preflightCredentialDestination(*credentialPath, ""); err != nil {
 				return enrollmentError(stderr, "private credential destination is unavailable", 2)
 			}
 			key, err := uuid.NewRandom()
@@ -205,6 +207,13 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if result != redemptionSucceeded {
 		return enrollmentError(stderr, "enrollment is temporarily unavailable; retry this command", 1)
 	}
+	if journal.Credential != "" && journal.Credential != response.Credential {
+		return enrollmentError(stderr, "enrollment is temporarily unavailable; retry this command", 1)
+	}
+	journal.Credential = response.Credential
+	if err := writePrivateAtomic(journalPath, mustJSON(journal)); err != nil {
+		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
+	}
 	if err := writeCredential(*credentialPath, response.Credential); err != nil {
 		return enrollmentError(stderr, "credential persistence failed; retry this command", 1)
 	}
@@ -218,7 +227,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	}{Origin: state.Origin, LookupID: response.LookupID, Generation: response.Generation})
 }
 
-func preflightCredentialDestination(path string, recoveryInProgress bool) error {
+func preflightCredentialDestination(path, expectedCredential string) error {
 	_, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -226,13 +235,16 @@ func preflightCredentialDestination(path string, recoveryInProgress bool) error 
 	if err != nil {
 		return err
 	}
-	if recoveryInProgress {
+	if expectedCredential != "" {
 		// A matching credential can already be present if the process crashed
-		// after persistence and before removing the journal. Verify that it is a
-		// protected private file, then let the idempotent response comparison in
-		// writeCredential complete that interrupted recovery.
-		_, err := readPrivate(path, maxEnrollmentFile)
-		return err
+		// after persistence and before removing the journal. The journal stores
+		// the server-confirmed value before it publishes the credential, so an
+		// unrelated protected state file cannot be mistaken for that credential.
+		raw, err := readPrivate(path, maxEnrollmentFile)
+		if err != nil || string(raw) != expectedCredential+"\n" {
+			return errors.New("credential destination exists")
+		}
+		return nil
 	}
 	// A credential path is single-use. Treat every existing entry, including a
 	// regular private credential, as unavailable before the first redemption so
@@ -278,7 +290,7 @@ func loadIdentity(path string) (clientidentity.State, error) {
 }
 
 func loadMaterial(path string) (enrollmentMaterial, error) {
-	raw, err := readPrivate(path, maxEnrollmentFile)
+	raw, err := readPrivate(path, maxEnrollmentMaterial)
 	if err != nil {
 		return enrollmentMaterial{}, err
 	}
@@ -353,7 +365,7 @@ func loadJournal(path string) (redemptionJournal, error) {
 		return redemptionJournal{}, err
 	}
 	var value redemptionJournal
-	if err := decodeExact(raw, &value, "enrollment_id", "client_binding", "code", "idempotency_key"); err != nil || !validJournal(value) {
+	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key"}, []string{"credential"}); err != nil || !validJournal(value) {
 		return redemptionJournal{}, errors.New("invalid recovery journal")
 	}
 	return value, nil
@@ -363,7 +375,7 @@ func validMaterial(value enrollmentMaterial) bool {
 	return validUUID(value.EnrollmentID) && validUUID(value.ClientBinding) && validCode(value.Code)
 }
 func validJournal(value redemptionJournal) bool {
-	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey)
+	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && (value.Credential == "" || validStoredCredential(value.Credential))
 }
 func validUUID(value string) bool {
 	parsed, err := uuid.Parse(value)
@@ -376,6 +388,15 @@ func validCode(value string) bool {
 func validCredential(value, lookupID string) bool {
 	prefix, secret, found := strings.Cut(value, ".")
 	if !found || prefix != lookupID || !validUUID(prefix) || strings.ContainsAny(secret, " \t\r\n") {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(secret)
+	return err == nil && len(decoded) == 32 && base64.RawURLEncoding.EncodeToString(decoded) == secret
+}
+
+func validStoredCredential(value string) bool {
+	prefix, secret, found := strings.Cut(value, ".")
+	if !found || !validUUID(prefix) || strings.ContainsAny(secret, " \t\r\n") {
 		return false
 	}
 	decoded, err := base64.RawURLEncoding.Strict().DecodeString(secret)

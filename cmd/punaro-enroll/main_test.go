@@ -152,7 +152,7 @@ func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444"}
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444", Credential: credential}
 	if err := writePrivateNew(filepath.Join(stateDir, redemptionJournalName), mustJSON(journal)); err != nil {
 		t.Fatal(err)
 	}
@@ -240,6 +240,14 @@ func TestEnrollmentMaterialAcceptsStrictAdminEnvelope(t *testing.T) {
 	if _, err := loadMaterial(invalid); err == nil {
 		t.Fatal("admin envelope accepted an unknown grant field")
 	}
+	longGrants := "[" + strings.TrimSuffix(strings.Repeat(`{"scope":"installation","capability":"project.create"},`, 100), ",") + "]"
+	longEnvelope := `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","expires_at":"2030-01-02T03:04:05Z","preview_hash":"0000000000000000000000000000000000000000000000000000000000000000","grants":` + longGrants + `}`
+	if len(longEnvelope) <= maxEnrollmentFile {
+		t.Fatalf("long enrollment material=%d bytes", len(longEnvelope))
+	}
+	if _, err := loadMaterial(writeTestMaterial(t, longEnvelope)); err != nil {
+		t.Fatalf("large admin envelope rejected: %v", err)
+	}
 }
 
 func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *testing.T) {
@@ -305,6 +313,32 @@ func TestAccessDenialRetainsRecoveryJournal(t *testing.T) {
 				t.Fatalf("Access denial removed recovery journal: %v", err)
 			}
 		})
+	}
+}
+
+func TestRecoverRejectsUnrelatedExistingCredentialBeforeContactingOrigin(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("recovery contacted the origin before rejecting an unrelated credential file")
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444"}
+	if err := writePrivateNew(filepath.Join(stateDir, redemptionJournalName), mustJSON(journal)); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	if code := run([]string{"recover", "--state-dir", stateDir, "--credential-file", filepath.Join(stateDir, identityFileName)}, io.Discard, &stderr); code != 2 || !strings.Contains(stderr.String(), "private credential destination is unavailable") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }
 

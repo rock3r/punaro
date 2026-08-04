@@ -149,6 +149,46 @@ func writePrivateNew(path string, raw []byte) error {
 	removeOnFailure = false
 	return nil
 }
+
+func writePrivateAtomic(path string, raw []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := protectWindowsPath(temporary); err != nil || !privateWindowsACL(temporary) {
+		return errors.New("could not protect private file")
+	}
+	file, err = os.OpenFile(temporary, os.O_WRONLY|os.O_TRUNC, 0) // #nosec G304 -- DACL is verified private before this secret write.
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		return err
+	}
+	removeOnFailure = false
+	return nil
+}
 func writeCredential(path, credential string) error {
 	if credential == "" || strings.ContainsAny(credential, " \t\r\n") {
 		return errors.New("invalid credential")
