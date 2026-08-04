@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -71,11 +72,11 @@ func Parse(raw []byte) (State, error) {
 		return State{}, ErrInvalidState
 	}
 	if rawMachine, present := fields["legacy_machine_id"]; present {
-		var machine *string
-		if json.Unmarshal(rawMachine, &machine) != nil || machine == nil {
+		var machine string
+		if json.Unmarshal(rawMachine, &machine) != nil || !validLegacyMachineID(machine) {
 			return State{}, ErrInvalidState
 		}
-		state.LegacyMachineID = *machine
+		state.LegacyMachineID = machine
 	}
 	if err := state.validate(); err != nil {
 		return State{}, ErrInvalidState
@@ -120,8 +121,14 @@ func validOrigin(raw string) bool {
 
 func canonicalOrigin(raw string) (string, bool) {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", false
+	}
+	if port := parsed.Port(); port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || value == 0 {
+			return "", false
+		}
 	}
 	parsed.Host = strings.ToLower(parsed.Host)
 	parsed.Path = ""

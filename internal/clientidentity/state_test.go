@@ -32,10 +32,12 @@ func TestParseRejectsUnsafeOrAmbiguousState(t *testing.T) {
 		"unknown":         `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","credential":"must-not-be-stored"}`,
 		"unknown version": `{"version":2,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"non HTTPS":       `{"version":1,"origin":"http://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`,
+		"no hostname":     `{"version":1,"origin":"https://:443","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"query":           `{"version":1,"origin":"https://punaro.example?token=no","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"relative":        `{"version":1,"origin":"/punaro","client_binding":"11111111-1111-4111-8111-111111111111"}`,
 		"bad binding":     `{"version":1,"origin":"https://punaro.example","client_binding":"not-a-binding"}`,
 		"bad machine":     `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"other\nmachine"}`,
+		"empty machine":   `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":""}`,
 		"null machine":    `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":null}`,
 		"trailing":        `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"} true`,
 	} {
