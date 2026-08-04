@@ -853,7 +853,8 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		t.Fatalf("code=%d sequence=%v stdout=%q stderr=%q", code, sequence, stdout.String(), stderr.String())
 	}
 	installation, err := operator.Load(filepath.Join(root, "install"))
-	if err != nil || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != filepath.Join(root, "data", "attachments") {
+	wantBlobDir, canonicalErr := filepath.EvalSymlinks(filepath.Join(root, "data", "attachments"))
+	if err != nil || canonicalErr != nil || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != wantBlobDir {
 		t.Fatalf("installation=%#v err=%v", installation, err)
 	}
 }

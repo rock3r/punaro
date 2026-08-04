@@ -903,7 +903,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 	finalizationStage := ""
 	state, err := punarobackup.Restore(ctx, punarobackup.RestoreOptions{
 		BackupDirectory: request.BackupDirectory,
-		TargetDataDir:   request.DataDir,
+		TargetDataDir:   prepared.DataDir,
 		Target:          target,
 		Preflight: func(preflightCtx context.Context) error {
 			currentIdentity, identityErr := postgresDatabaseIdentity(preflightCtx, request.AppDSNFile)

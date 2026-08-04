@@ -241,6 +241,33 @@ func TestAttachmentContainerBlobDirUsesResolvedPath(t *testing.T) {
 	}
 }
 
+func TestTrustedAttachmentPathResolvesForPublication(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink containment is covered by Unix path semantics")
+	}
+	options := validInitOptions(t)
+	resolved := filepath.Join(options.DataDir, "resolved", "attachments")
+	if err := os.MkdirAll(resolved, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(options.DataDir, "resolved"), filepath.Join(options.DataDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	configured := filepath.Join(options.DataDir, "linked", "attachments")
+	canonical, err := filepath.EvalSymlinks(configured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalData, err := filepath.EvalSymlinks(options.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation := Installation{DataDir: canonicalData, TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: canonical}
+	if canonical != filepath.Join(canonicalData, "resolved", "attachments") || attachmentContainerBlobDir(installation) != "/var/lib/punaro/resolved/attachments" {
+		t.Fatalf("canonical=%q data=%q container=%q", canonical, canonicalData, attachmentContainerBlobDir(installation))
+	}
+}
+
 func TestLoadRejectsEnabledRelayWithoutAuthority(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {

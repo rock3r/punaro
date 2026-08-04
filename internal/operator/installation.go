@@ -269,6 +269,16 @@ func validateInit(options InitOptions) (Installation, error) {
 		if !attachmentBlobDirectoryContained(options.DataDir, options.TrustedAttachmentBlobDir) {
 			return Installation{}, errors.New("trusted attachment blob directory must resolve beneath the data directory")
 		}
+		canonicalData, err := filepath.EvalSymlinks(options.DataDir)
+		if err != nil {
+			return Installation{}, errors.New("data directory cannot be resolved")
+		}
+		canonicalBlob, err := filepath.EvalSymlinks(options.TrustedAttachmentBlobDir)
+		if err != nil {
+			return Installation{}, errors.New("trusted attachment blob directory cannot be resolved")
+		}
+		installation.DataDir = canonicalData
+		installation.TrustedAttachmentBlobDir = canonicalBlob
 	}
 	dataInfo, dataErr := os.Stat(options.DataDir)
 	backupInfo, backupErr := os.Stat(options.BackupDir)
