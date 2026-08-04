@@ -18,8 +18,46 @@ func safeStateChild(directory, path string) bool {
 }
 
 func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
+	info, err := os.Lstat(path)
+	if err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("unsafe private directory")
+		}
+		return privateDir(path)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+
+	// Create one directory at a time so each newly published directory entry
+	// can be synced before files are placed below it. MkdirAll cannot tell us
+	// which entries this invocation created.
+	missing := []string{path}
+	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+		info, err := os.Lstat(parent)
+		if err == nil {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+				return errors.New("unsafe private directory")
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) || parent == filepath.Dir(parent) {
+			return err
+		}
+		missing = append(missing, parent)
+	}
+	for index := len(missing) - 1; index >= 0; index-- {
+		directory := missing[index]
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return err
+			}
+		} else if err := syncPrivateDirectory(filepath.Dir(directory)); err != nil {
+			return err
+		}
+		if err := privateDir(directory); err != nil {
+			return err
+		}
 	}
 	return privateDir(path)
 }

@@ -52,3 +52,26 @@ func TestWindowsPrivateDACL(t *testing.T) {
 		t.Fatalf("private file round trip failed: %v %q", err, raw)
 	}
 }
+
+func TestEnsurePrivateDirRejectsExistingUnsafeDirectoryWithoutChangingIt(t *testing.T) {
+	directory := t.TempDir()
+	if privateWindowsACL(directory) {
+		t.Skip("temporary directory is already private")
+	}
+	if err := ensurePrivateDir(directory); err == nil {
+		t.Fatal("existing directory with inherited ACL was accepted")
+	}
+	if privateWindowsACL(directory) {
+		t.Fatal("existing directory ACL was changed")
+	}
+}
+
+func TestEnsurePrivateDirProtectsOnlyNewNestedDirectories(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "new", "nested", "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatalf("ensure private state directory: %v", err)
+	}
+	if !privateWindowsACL(directory) {
+		t.Fatal("new state directory is not private")
+	}
+}

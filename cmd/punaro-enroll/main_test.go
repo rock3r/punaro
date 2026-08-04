@@ -46,10 +46,7 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
 	t.Cleanup(func() { newEnrollmentHTTPClient = original })
 
-	material := filepath.Join(t.TempDir(), "material.json")
-	if err := os.WriteFile(material, []byte(`{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
 	credentialFile := filepath.Join(stateDir, "device.credential")
 	var firstRedeemOut, firstRedeemErr bytes.Buffer
 	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialFile}, &firstRedeemOut, &firstRedeemErr); code != 1 || !strings.Contains(firstRedeemErr.String(), "retry") {
@@ -78,26 +75,29 @@ func TestRedeemFailsClosedForBindingMismatchWithoutContactingOrigin(t *testing.T
 	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
 		t.Fatal("prepare failed")
 	}
-	material := filepath.Join(t.TempDir(), "material.json")
-	if err := os.WriteFile(material, []byte(`{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, &stdout, &stderr); code != 2 || stdout.Len() != 0 || stderr.String() != "punaro-enroll: enrollment material does not match this device\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
+func TestEnsurePrivateDirCreatesNestedStateDirectory(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "first", "second", "state")
+	if err := ensurePrivateDir(stateDir); err != nil {
+		t.Fatalf("ensure private state directory: %v", err)
+	}
+	if err := privateDir(stateDir); err != nil {
+		t.Fatalf("created state directory is not private: %v", err)
+	}
+}
+
 func TestEnrollmentMaterialRejectsDuplicateOrUnknownFields(t *testing.T) {
-	directory := t.TempDir()
 	for name, raw := range map[string]string{
 		"duplicate": `{"enrollment_id":"33333333-3333-4333-8333-333333333333","enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`,
 		"unknown":   `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","origin":"https://attacker.test"}`,
 	} {
-		path := filepath.Join(directory, name+".json")
-		if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		path := writeTestMaterial(t, raw)
 		if _, err := loadMaterial(path); err == nil {
 			t.Fatalf("%s material was accepted", name)
 		}
@@ -128,10 +128,7 @@ func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	material := filepath.Join(t.TempDir(), "material.json")
-	if err := os.WriteFile(material, []byte(`{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
 	var stderr bytes.Buffer
 	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "request a new enrollment") {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
@@ -139,4 +136,17 @@ func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
 		t.Fatalf("rejected enrollment recovery was retained: %v", err)
 	}
+}
+
+func writeTestMaterial(t *testing.T, raw string) string {
+	t.Helper()
+	directory := filepath.Join(t.TempDir(), "material")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "material.json")
+	if err := writePrivateNew(path, []byte(raw)); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
