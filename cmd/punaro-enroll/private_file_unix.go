@@ -58,6 +58,12 @@ func writePrivateNew(path string, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(path) // #nosec G703 -- exclusive new child of the validated private state directory.
+		}
+	}()
 	if _, err := file.Write(raw); err != nil {
 		_ = file.Close()
 		return err
@@ -66,7 +72,23 @@ func writePrivateNew(path string, raw []byte) error {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := syncPrivateDirectory(filepath.Dir(path)); err != nil {
+		return err
+	}
+	removeOnFailure = false
+	return nil
+}
+
+func syncPrivateDirectory(path string) error {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	return unix.Fsync(fd)
 }
 func writeCredential(path, credential string) error {
 	if credential == "" || stringsContainsWhitespace(credential) {

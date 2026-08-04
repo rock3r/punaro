@@ -68,6 +68,12 @@ func writePrivateNew(path string, raw []byte) error {
 	if err != nil {
 		return err
 	}
+	removeOnFailure := true
+	defer func() {
+		if removeOnFailure {
+			_ = os.Remove(path) // #nosec G703 -- exclusive new child of the validated private state directory.
+		}
+	}()
 	if err := file.Close(); err != nil {
 		return err
 	}
@@ -89,7 +95,11 @@ func writePrivateNew(path string, raw []byte) error {
 		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	removeOnFailure = false
+	return nil
 }
 func writeCredential(path, credential string) error {
 	if credential == "" || strings.ContainsAny(credential, " \t\r\n") {
