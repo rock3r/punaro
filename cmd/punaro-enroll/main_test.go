@@ -207,6 +207,18 @@ func TestEnrollmentMaterialRejectsDuplicateOrUnknownFields(t *testing.T) {
 	}
 }
 
+func TestEnrollmentMaterialAcceptsStrictAdminEnvelope(t *testing.T) {
+	path := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","expires_at":"2030-01-02T03:04:05Z","preview_hash":"0000000000000000000000000000000000000000000000000000000000000000","grants":[{"scope":"installation","capability":"project.create"}]}`)
+	material, err := loadMaterial(path)
+	if err != nil || material.EnrollmentID != "33333333-3333-4333-8333-333333333333" {
+		t.Fatalf("admin envelope material=%#v err=%v", material, err)
+	}
+	invalid := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"44444444-4444-4444-8444-444444444444","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","expires_at":"2030-01-02T03:04:05Z","preview_hash":"0000000000000000000000000000000000000000000000000000000000000000","grants":[{"scope":"installation","capability":"project.create","ignored":true}]}`)
+	if _, err := loadMaterial(invalid); err == nil {
+		t.Fatal("admin envelope accepted an unknown grant field")
+	}
+}
+
 func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *testing.T) {
 	response, err := decodeRedemptionResponse([]byte(`{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"22222222-2222-4222-8222-222222222222.` + strings.Repeat("A", 43) + `","generation":1,"expires_at":"2030-01-02T03:04:05Z"}`))
 	if err != nil || response.ExpiresAt.IsZero() {

@@ -199,7 +199,11 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("disposable enrollment setup failed")
 	}
-	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", fmt.Sprintf(`{"enrollment_id":%q,"client_binding":%q,"code":%q}`, pending.ID, pending.ClientBinding, pending.Code))
+	pendingRaw, err := json.Marshal(pending)
+	if err != nil {
+		t.Fatal("encode enrollment material")
+	}
+	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", string(pendingRaw))
 	credentialFile := filepath.Join(enrollmentState, "device.credential")
 	redeemed := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "redeem", "--state-dir", enrollmentState, "--enrollment-file", material, "--credential-file", credentialFile)
 	if bytes.Contains(redeemed, []byte(pending.Code)) || bytes.Contains(redeemed, []byte(`"credential"`)) {

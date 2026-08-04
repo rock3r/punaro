@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,6 +44,21 @@ type enrollmentMaterial struct {
 	EnrollmentID  string `json:"enrollment_id"`
 	ClientBinding string `json:"client_binding"`
 	Code          string `json:"code"`
+}
+
+type enrollmentEnvelope struct {
+	EnrollmentID  string            `json:"enrollment_id"`
+	ClientBinding string            `json:"client_binding"`
+	Code          string            `json:"code"`
+	ExpiresAt     time.Time         `json:"expires_at"`
+	PreviewHash   string            `json:"preview_hash"`
+	Grants        []json.RawMessage `json:"grants"`
+}
+
+type enrollmentGrantPreview struct {
+	Scope      string `json:"scope"`
+	ProjectID  string `json:"project_id"`
+	Capability string `json:"capability"`
 }
 
 type accessMaterial struct {
@@ -267,10 +283,46 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 		return enrollmentMaterial{}, err
 	}
 	var value enrollmentMaterial
-	if err := decodeExact(raw, &value, "enrollment_id", "client_binding", "code"); err != nil || !validMaterial(value) {
+	if err := decodeExact(raw, &value, "enrollment_id", "client_binding", "code"); err == nil && validMaterial(value) {
+		return value, nil
+	}
+	var envelope enrollmentEnvelope
+	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
-	return value, nil
+	return enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}, nil
+}
+
+func validPreviewHash(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32 && hex.EncodeToString(decoded) == value
+}
+
+func validGrantPreview(rawGrants []json.RawMessage) bool {
+	if len(rawGrants) == 0 {
+		return false
+	}
+	for _, raw := range rawGrants {
+		var grant enrollmentGrantPreview
+		if err := decodeFields(raw, &grant, []string{"scope", "capability"}, []string{"project_id"}); err != nil || !validGrantPreviewItem(grant) {
+			return false
+		}
+	}
+	return true
+}
+
+func validGrantPreviewItem(grant enrollmentGrantPreview) bool {
+	if grant.Capability == "" || len(grant.Capability) > 128 || strings.ContainsAny(grant.Capability, " \t\r\n") {
+		return false
+	}
+	switch grant.Scope {
+	case "installation", "all_projects":
+		return grant.ProjectID == ""
+	case "project":
+		return validUUID(grant.ProjectID)
+	default:
+		return false
+	}
 }
 
 func loadAccessToken(path string) (adapter.AccessServiceToken, error) {
