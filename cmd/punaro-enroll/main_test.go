@@ -110,6 +110,29 @@ func TestRedeemPreflightsCredentialDestinationBeforeContactingOrigin(t *testing.
 	}
 }
 
+func TestRedeemRejectsRecoveryJournalAsCredentialDestinationBeforeContactingOrigin(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("redemption contacted the origin before rejecting the reserved credential path")
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	var prepared publicEnrollment
+	var preparedOut bytes.Buffer
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, &preparedOut, io.Discard); code != 0 || json.Unmarshal(preparedOut.Bytes(), &prepared) != nil {
+		t.Fatalf("prepare code=%d output=%q", code, preparedOut.String())
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, redemptionJournalName)}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("code=%d", code)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
+		t.Fatalf("reserved credential path created a recovery journal: %v", err)
+	}
+}
+
 func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testing.T) {
 	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -230,7 +253,11 @@ func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *test
 }
 
 func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"unauthenticated"}`)
+	}))
 	defer server.Close()
 	original := newEnrollmentHTTPClient
 	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
@@ -250,6 +277,34 @@ func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
 		t.Fatalf("rejected enrollment recovery was retained: %v", err)
+	}
+}
+
+func TestAccessDenialRetainsRecoveryJournal(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }))
+			defer server.Close()
+			original := newEnrollmentHTTPClient
+			newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+			t.Cleanup(func() { newEnrollmentHTTPClient = original })
+			stateDir := filepath.Join(t.TempDir(), "state")
+			if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+				t.Fatal("prepare failed")
+			}
+			identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+			var stderr bytes.Buffer
+			if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "retry") {
+				t.Fatalf("code=%d stderr=%q", code, stderr.String())
+			}
+			if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); err != nil {
+				t.Fatalf("Access denial removed recovery journal: %v", err)
+			}
+		})
 	}
 }
 

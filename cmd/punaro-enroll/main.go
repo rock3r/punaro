@@ -137,7 +137,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
-	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || privateDir(*stateDir) != nil {
+	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || filepath.Base(*credentialPath) == redemptionJournalName || privateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
@@ -478,7 +478,7 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusBadRequest {
+	if response.StatusCode == http.StatusBadRequest || (response.StatusCode == http.StatusUnauthorized && response.Header.Get("WWW-Authenticate") == "Bearer" && responseDeclaresUnauthenticated(response.Body)) {
 		return redemptionResponse{}, redemptionRejected
 	}
 	if response.StatusCode != http.StatusCreated || response.Header.Get("Cache-Control") != "no-store" {
@@ -493,4 +493,15 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	return value, redemptionSucceeded
+}
+
+func responseDeclaresUnauthenticated(body io.Reader) bool {
+	raw, err := io.ReadAll(io.LimitReader(body, 1025))
+	if err != nil || len(raw) > 1024 {
+		return false
+	}
+	var value struct {
+		Error string `json:"error"`
+	}
+	return decodeExact(raw, &value, "error") == nil && value.Error == "unauthenticated"
 }
