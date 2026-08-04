@@ -93,6 +93,13 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := multiPercentZoneState.Match("https://[FE80::1%25Ether%25Net]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical IPv6 multi-percent zone match: %v", err)
 	}
+	spaceZoneState, err := Parse([]byte(`{"version":1,"origin":"https://[fe80::1%25Ethernet%202]","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
+	if err != nil {
+		t.Fatalf("parse IPv6 space-zone state: %v", err)
+	}
+	if err := spaceZoneState.Match("https://[FE80::1%25Ethernet%202]", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical IPv6 space-zone match: %v", err)
+	}
 	ipv6State, err := Parse([]byte(`{"version":1,"origin":"https://[2001:db8::1]","client_binding":"11111111-1111-4111-8111-111111111111","legacy_machine_id":"laptop-1"}`))
 	if err != nil {
 		t.Fatalf("parse IPv6 state: %v", err)

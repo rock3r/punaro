@@ -183,16 +183,7 @@ func validIPv6Hostname(hostname string) bool {
 }
 
 func validIPv6Zone(zone string) bool {
-	if zone == "" {
-		return false
-	}
-	for _, character := range zone {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("-._~%", character) {
-			continue
-		}
-		return false
-	}
-	return true
+	return zone != "" && !strings.ContainsAny(zone, "[]")
 }
 
 func canonicalIPv6(address string) (string, bool) {
