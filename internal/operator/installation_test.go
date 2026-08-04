@@ -219,6 +219,28 @@ func TestInitRejectsAttachmentDirectoryResolvedOutsideDataBeforeBootstrap(t *tes
 	}
 }
 
+func TestAttachmentContainerBlobDirUsesResolvedPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink containment is covered by Unix path semantics")
+	}
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	realBlobDir := filepath.Join(dataDir, "resolved", "attachments")
+	if err := os.MkdirAll(realBlobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dataDir, "resolved"), filepath.Join(dataDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	installation := Installation{DataDir: dataDir, TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: filepath.Join(dataDir, "linked", "attachments")}
+	if !attachmentBlobDirectoryContained(installation.DataDir, installation.TrustedAttachmentBlobDir) {
+		t.Fatal("resolved blob directory was rejected")
+	}
+	if got, want := attachmentContainerBlobDir(installation), "/var/lib/punaro/resolved/attachments"; got != want {
+		t.Fatalf("container blob path=%q want=%q", got, want)
+	}
+}
+
 func TestLoadRejectsEnabledRelayWithoutAuthority(t *testing.T) {
 	options := validInitOptions(t)
 	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {

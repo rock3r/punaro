@@ -611,7 +611,18 @@ func attachmentContainerBlobDir(installation Installation) string {
 	if !installation.TrustedAttachmentsEnabled {
 		return ""
 	}
-	relative, _ := filepath.Rel(installation.DataDir, installation.TrustedAttachmentBlobDir)
+	canonicalData, err := filepath.EvalSymlinks(installation.DataDir)
+	if err != nil {
+		return ""
+	}
+	canonicalBlob, err := filepath.EvalSymlinks(installation.TrustedAttachmentBlobDir)
+	if err != nil {
+		return ""
+	}
+	relative, err := filepath.Rel(canonicalData, canonicalBlob)
+	if err != nil || !nestedPath(canonicalData, canonicalBlob) {
+		return ""
+	}
 	return filepath.ToSlash(filepath.Join("/var/lib/punaro", relative))
 }
 
