@@ -70,6 +70,16 @@ func TestStateMatchRejectsCrossDeviceOriginAndLegacyIdentity(t *testing.T) {
 	if err := mixedCaseState.Match("https://Relay.Example/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
 		t.Fatalf("canonical mixed-case host match: %v", err)
 	}
+	if err := mixedCaseState.Match("https://Relay.Example:00443/", "11111111-1111-4111-8111-111111111111", "laptop-1"); err != nil {
+		t.Fatalf("canonical default-port match: %v", err)
+	}
+	fresh, err := Parse([]byte(`{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111"}`))
+	if err != nil {
+		t.Fatalf("parse fresh identity: %v", err)
+	}
+	if err := fresh.Match("https://punaro.example", "11111111-1111-4111-8111-111111111111", "adapter-machine"); err != nil {
+		t.Fatalf("fresh identity adapter match: %v", err)
+	}
 	for name, match := range map[string][3]string{
 		"origin":         {"https://other.example", "11111111-1111-4111-8111-111111111111", "laptop-1"},
 		"client binding": {"https://punaro.example", "22222222-2222-4222-8222-222222222222", "laptop-1"},

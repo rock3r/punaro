@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -101,7 +102,7 @@ func (s State) Encode() ([]byte, error) {
 // identity. It deliberately exposes no stored values in mismatch errors.
 func (s State) Match(origin, clientBinding, legacyMachineID string) error {
 	canonicalOrigin, ok := canonicalOrigin(origin)
-	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || s.LegacyMachineID != legacyMachineID {
+	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || (s.LegacyMachineID != "" && s.LegacyMachineID != legacyMachineID) {
 		return ErrStateMismatch
 	}
 	return nil
@@ -124,15 +125,29 @@ func canonicalOrigin(raw string) (string, bool) {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || strings.HasSuffix(parsed.Host, ":") || parsed.User != nil || parsed.Opaque != "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", false
 	}
+	hostname := strings.ToLower(parsed.Hostname())
 	if port := parsed.Port(); port != "" {
 		value, err := strconv.ParseUint(port, 10, 16)
 		if err != nil || value == 0 {
 			return "", false
 		}
+		if value == 443 {
+			parsed.Host = canonicalHost(hostname)
+		} else {
+			parsed.Host = net.JoinHostPort(hostname, strconv.FormatUint(value, 10))
+		}
+	} else {
+		parsed.Host = canonicalHost(hostname)
 	}
-	parsed.Host = strings.ToLower(parsed.Host)
 	parsed.Path = ""
 	return parsed.String(), true
+}
+
+func canonicalHost(hostname string) string {
+	if strings.Contains(hostname, ":") {
+		return "[" + hostname + "]"
+	}
+	return hostname
 }
 
 func validBinding(raw string) bool {
