@@ -16,11 +16,13 @@ func TestRestorePublishesVerifiedBlobsAfterDatabaseAndTimeline(t *testing.T) {
 	targetParent := t.TempDir()
 	requirePrivate(t, targetParent)
 	target := filepath.Join(targetParent, "restored-data")
+	targetConfig := restoreTargetFixture(targetParent)
+	targetConfig.BlobRoot = filepath.Join(target, "attachments")
 	called := []string{}
 	state, err := Restore(context.Background(), RestoreOptions{
 		BackupDirectory: backupDirectory,
 		TargetDataDir:   target,
-		Target:          restoreTargetFixture(targetParent),
+		Target:          targetConfig,
 		Preflight:       func(context.Context) error { return nil },
 		RestoreDump: func(_ context.Context, dump io.Reader) error {
 			called = append(called, "database")
@@ -49,7 +51,7 @@ func TestRestorePublishesVerifiedBlobsAfterDatabaseAndTimeline(t *testing.T) {
 		t.Fatalf("unexpected restored state: %#v", state)
 	}
 	// #nosec G304 -- fixed child of the private test restore target.
-	if body, err := os.ReadFile(filepath.Join(target, "blobs", "ready")); err != nil || string(body) != "blob" {
+	if body, err := os.ReadFile(filepath.Join(target, "attachments", "ready")); err != nil || string(body) != "blob" {
 		t.Fatalf("restored blob=%q err=%v", body, err)
 	}
 }

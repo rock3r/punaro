@@ -766,7 +766,7 @@ func createBackupWithUpdate(ctx context.Context, installation operator.Installat
 	}
 	options := punarobackup.CreateOptions{
 		BackupRoot:       installation.BackupDir,
-		BlobRoot:         filepath.Join(installation.DataDir, "blobs"),
+		BlobRoot:         backupBlobRoot(installation),
 		InstallationFile: operator.ConfigFile(installation.Directory),
 		EnvironmentFile:  operator.EnvFile(installation.Directory),
 		ComposeFile:      operator.OverrideFile(installation.Directory),
@@ -888,6 +888,7 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 	}
 	target := punarobackup.RestoreTarget{
 		InstallationDirectory: filepath.Join(canonicalInstallationParent, filepath.Base(request.Directory)),
+		BlobRoot:              backupBlobRoot(prepared),
 		BackupRoot:            canonicalNewBackup,
 		OwnerDSNFile:          canonicalOwnerDSN,
 		AppDSNFile:            canonicalAppDSN,
@@ -1027,6 +1028,13 @@ func restoreBackup(ctx context.Context, request restoreRequest) (punarobackup.St
 		return punarobackup.State{}, errors.New("restored installation identity changed")
 	}
 	return state, nil
+}
+
+func backupBlobRoot(installation operator.Installation) string {
+	if installation.TrustedAttachmentsEnabled {
+		return installation.TrustedAttachmentBlobDir
+	}
+	return filepath.Join(installation.DataDir, "blobs")
 }
 
 func receiptMatchesBinding(receipt operator.UpdateRecoveryReceipt, binding punarobackup.UpdateBinding) bool {

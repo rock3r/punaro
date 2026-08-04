@@ -50,6 +50,7 @@ type RestoreOptions struct {
 // RestoreTarget binds every non-secret target identity to the durable journal.
 type RestoreTarget struct {
 	InstallationDirectory string `json:"installation_directory"`
+	BlobRoot              string `json:"blob_root,omitempty"`
 	BackupRoot            string `json:"backup_root"`
 	OwnerDSNFile          string `json:"owner_dsn_file"`
 	AppDSNFile            string `json:"app_dsn_file"`
@@ -85,6 +86,14 @@ func Restore(ctx context.Context, options RestoreOptions) (State, error) {
 	}
 	if options.Preflight == nil || options.RestoreDump == nil || options.RotateTimeline == nil || options.Finalize == nil || !filepath.IsAbs(options.TargetDataDir) || filepath.Clean(options.TargetDataDir) != options.TargetDataDir || !validRestoreTarget(options.Target) {
 		return fail(PhasePreflight, "restore inputs are invalid")
+	}
+	blobRoot := options.Target.BlobRoot
+	if blobRoot == "" {
+		blobRoot = filepath.Join(options.TargetDataDir, "blobs")
+	}
+	blobRelative, blobErr := filepath.Rel(options.TargetDataDir, blobRoot)
+	if blobErr != nil || !validRelativePath(blobRelative) {
+		return fail(PhasePreflight, "restore blob root is invalid")
 	}
 	manifest, err := Verify(options.BackupDirectory)
 	if err != nil {
@@ -157,8 +166,8 @@ func Restore(ctx context.Context, options RestoreOptions) (State, error) {
 				return fail(PhasePreflight, "backup blob path is invalid")
 			}
 			source := filepath.Join(options.BackupDirectory, filepath.FromSlash(entry.Path))
-			destination := filepath.Join(stage, "blobs", filepath.FromSlash(relative))
-			if err := copyProtectedFile(source, destination, entry.Size); err != nil || verifyFile(stage, entry) != nil {
+			destination := filepath.Join(stage, blobRelative, filepath.FromSlash(relative))
+			if err := copyProtectedFile(source, destination, entry.Size); err != nil || verifyBlobFile(filepath.Join(stage, blobRelative), entry) != nil {
 				return fail(PhasePreflight, "verified backup blob could not be staged")
 			}
 		}
@@ -170,7 +179,7 @@ func Restore(ctx context.Context, options RestoreOptions) (State, error) {
 	if info, statErr := os.Lstat(options.TargetDataDir); statErr == nil && info.IsDir() {
 		blobVerificationRoot = options.TargetDataDir
 	}
-	if err := verifyManifestBlobs(blobVerificationRoot, manifest); err != nil {
+	if err := verifyManifestBlobs(filepath.Join(blobVerificationRoot, blobRelative), manifest); err != nil {
 		if blobVerificationRoot == options.TargetDataDir {
 			return fail(PhaseDataPublished, "published restore blobs do not match the verified backup")
 		}
@@ -237,7 +246,7 @@ func Restore(ctx context.Context, options RestoreOptions) (State, error) {
 			return fail(PhaseDataPublished, "restore data was published but its journal marker is not durable; retry the exact restore command")
 		}
 	}
-	if err := verifyManifestBlobs(options.TargetDataDir, manifest); err != nil {
+	if err := verifyManifestBlobs(blobRoot, manifest); err != nil {
 		return fail(PhaseDataPublished, "published restore blobs do not match the verified backup")
 	}
 
@@ -281,6 +290,9 @@ func validRestoreTarget(target RestoreTarget) bool {
 			return false
 		}
 	}
+	if target.BlobRoot != "" && (!filepath.IsAbs(target.BlobRoot) || filepath.Clean(target.BlobRoot) != target.BlobRoot) {
+		return false
+	}
 	decoded, err := hex.DecodeString(target.DatabaseIdentity)
 	if target.OwnerDSNFile == target.AppDSNFile || err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != target.DatabaseIdentity {
 		return false
@@ -298,12 +310,21 @@ func validRestoreTarget(target RestoreTarget) bool {
 func verifyManifestBlobs(root string, manifest Manifest) error {
 	for _, entry := range manifest.Files {
 		if strings.HasPrefix(entry.Path, "blobs/") {
-			if err := verifyFile(root, entry); err != nil {
+			if err := verifyBlobFile(root, entry); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func verifyBlobFile(root string, entry File) error {
+	relative := strings.TrimPrefix(entry.Path, "blobs/")
+	if !validRelativePath(relative) {
+		return errors.New("backup blob path is invalid")
+	}
+	entry.Path = relative
+	return verifyFile(root, entry)
 }
 
 func manifestFile(manifest Manifest, path string) (File, bool) {

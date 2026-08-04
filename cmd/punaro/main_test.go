@@ -417,6 +417,17 @@ func testInstallation(t *testing.T) string {
 	return directory
 }
 
+func TestBackupBlobRootUsesConfiguredTrustedAttachmentDirectory(t *testing.T) {
+	installation := operator.Installation{DataDir: "/var/lib/punaro-data", TrustedAttachmentsEnabled: true, TrustedAttachmentBlobDir: "/var/lib/punaro-data/attachments"}
+	if got, want := backupBlobRoot(installation), installation.TrustedAttachmentBlobDir; got != want {
+		t.Fatalf("blob root=%q want=%q", got, want)
+	}
+	installation.TrustedAttachmentsEnabled = false
+	if got, want := backupBlobRoot(installation), "/var/lib/punaro-data/blobs"; got != want {
+		t.Fatalf("legacy blob root=%q want=%q", got, want)
+	}
+}
+
 func preserveDependencies(t *testing.T) {
 	t.Helper()
 	originalInspect, originalOwner, originalMigrate, originalMaintenance := inspectSchema, inspectOwner, migratePristinePair, maintenanceActive
