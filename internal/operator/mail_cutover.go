@@ -66,14 +66,7 @@ func publishMailCutover(directory string, publication MailCutoverPublication, af
 // ConfigureMailCutoverRelayMachines durably records the exact non-secret
 // static relay authority before any irreversible source transition begins.
 func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Installation, error) {
-	if !filepath.IsAbs(enrollmentFile) || filepath.Clean(enrollmentFile) != enrollmentFile || requireTrustedProtectedFile(enrollmentFile, maxRelayMachinesBytes) != nil {
-		return Installation{}, errors.New("mail cutover relay enrollment file is unavailable")
-	}
-	body, err := os.ReadFile(enrollmentFile) // #nosec G304 -- explicit protected operator input.
-	if err != nil {
-		return Installation{}, errors.New("mail cutover relay enrollment file is unavailable")
-	}
-	canonical, err := canonicalRelayMachinesJSON(string(body))
+	canonical, err := ReadRelayMachinesFile(enrollmentFile)
 	if err != nil {
 		return Installation{}, err
 	}
@@ -92,6 +85,23 @@ func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Instal
 	}
 	installation.RelayMachinesJSON = canonical
 	return publishMailCutoverInstallation(directory, installation, nil)
+}
+
+// ReadRelayMachinesFile loads a protected, bounded relay enrollment file for
+// either initial installation or an explicit mail-cutover transition.
+func ReadRelayMachinesFile(enrollmentFile string) (string, error) {
+	if !filepath.IsAbs(enrollmentFile) || filepath.Clean(enrollmentFile) != enrollmentFile || requireTrustedProtectedFile(enrollmentFile, maxRelayMachinesBytes) != nil {
+		return "", errors.New("relay enrollment file is unavailable")
+	}
+	body, err := os.ReadFile(enrollmentFile) // #nosec G304 -- explicit protected operator input.
+	if err != nil {
+		return "", errors.New("relay enrollment file is unavailable")
+	}
+	canonical, err := canonicalRelayMachinesJSON(string(body))
+	if err != nil {
+		return "", err
+	}
+	return canonical, nil
 }
 
 func publishMailCutoverInstallation(directory string, installation Installation, afterStep func(string) error) (Installation, error) {
@@ -239,7 +249,14 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 			return Installation{}, errors.New("mail cutover recovery file is unavailable")
 		}
 		body, err := os.ReadFile(file.path) // #nosec G304 -- validated fixed generated path.
-		legacyOld, preMemoryAPIOld, preMemoryMutationsOld := "", "", ""
+		legacyOld, preTrustedAttachmentsOld, preMemoryAPIOld, preMemoryMutationsOld := "", "", "", ""
+		if !base.TrustedAttachmentsEnabled {
+			if file.path == EnvFile(directory) {
+				preTrustedAttachmentsOld = preTrustedAttachmentsDaemonEnv(base)
+			} else {
+				preTrustedAttachmentsOld = preTrustedAttachmentsComposeOverride()
+			}
+		}
 		if !base.MemoryMutationsEnabled {
 			if file.path == EnvFile(directory) {
 				preMemoryMutationsOld = preMemoryMutationsDaemonEnv(base)
@@ -261,7 +278,7 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 				legacyOld = legacyComposeOverride()
 			}
 		}
-		if err != nil || string(body) != file.old && string(body) != file.intended && string(body) != preMemoryMutationsOld && string(body) != preMemoryAPIOld && string(body) != legacyOld {
+		if err != nil || string(body) != file.old && string(body) != file.intended && string(body) != preTrustedAttachmentsOld && string(body) != preMemoryMutationsOld && string(body) != preMemoryAPIOld && string(body) != legacyOld {
 			return Installation{}, errors.New("mail cutover recovery file does not match either durable state")
 		}
 	}

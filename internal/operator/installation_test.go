@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -105,6 +106,66 @@ func TestInitRejectsMemoryMutationsWithoutReadAPI(t *testing.T) {
 	options.MemoryMutationsEnabled = true
 	if _, err := validateStatic(options); err == nil || !strings.Contains(err.Error(), "require the memory API") {
 		t.Fatalf("memory mutations without read API err=%v", err)
+	}
+}
+
+func TestInitPublishesUnifiedRelayAndTrustedAttachmentSurface(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	options.TrustedAttachmentsEnabled = true
+	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "attachments")
+	if err := os.Mkdir(options.TrustedAttachmentBlobDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: name}, nil
+	})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	environment, err := os.ReadFile(EnvFile(installation.Directory))
+	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_ENABLED=true\n") || !strings.Contains(string(environment), "PUNARO_RELAY_STORE=postgres\n") || !strings.Contains(string(environment), "PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true\n") || !strings.Contains(string(environment), "PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=/var/lib/punaro/attachments\n") {
+		t.Fatalf("environment=%q err=%v", environment, err)
+	}
+	if len(CheckPaths(installation)) != 0 {
+		t.Fatalf("paths=%v", CheckPaths(installation))
+	}
+}
+
+func TestInitRejectsUnsafeUnifiedOptionalInputsBeforeBootstrap(t *testing.T) {
+	options := validInitOptions(t)
+	options.TrustedAttachmentsEnabled = true
+	options.TrustedAttachmentBlobDir = filepath.Join(options.DataDir, "missing-attachments")
+	called := false
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || called {
+		t.Fatalf("missing attachment storage err=%v bootstrap=%t", err, called)
+	}
+	if _, err := os.Stat(options.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid input created installation directory: %v", err)
+	}
+}
+
+func TestLoadRejectsEnabledRelayWithoutAuthority(t *testing.T) {
+	options := validInitOptions(t)
+	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: name}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.RelayEnabled = true
+	body, err := json.Marshal(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(installation.Directory, configName), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(installation.Directory); err == nil || !strings.Contains(err.Error(), "relay configuration") {
+		t.Fatalf("enabled relay without authority err=%v", err)
 	}
 }
 
@@ -870,6 +931,40 @@ func TestMailCutoverRelayConfigurationRepairsExactLegacyTemplates(t *testing.T) 
 	environment, err := os.ReadFile(EnvFile(installation.Directory))
 	if err != nil || !strings.Contains(string(environment), "PUNARO_RELAY_ENABLED=false\n") || !strings.Contains(string(environment), "PUNARO_RELAY_MACHINES_JSON='"+testRelayMachinesJSON+"'\n") {
 		t.Fatalf("environment=%q err=%v", environment, err)
+	}
+}
+
+func TestMailCutoverRelayRecoveryAcceptsPreTrustedAttachmentTemplates(t *testing.T) {
+	options := validInitOptions(t)
+	options.MemoryAPIEnabled = true
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(EnvFile(installation.Directory), []byte(preTrustedAttachmentsDaemonEnv(installation)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(OverrideFile(installation.Directory), []byte(preTrustedAttachmentsComposeOverride()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := installation
+	candidate.RelayMachinesJSON = testRelayMachinesJSON
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected post-environment crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected publication crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-machines.json")
+	if err := os.WriteFile(path, []byte(testRelayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := ConfigureMailCutoverRelayMachines(installation.Directory, path); err != nil || recovered.RelayMachinesJSON != testRelayMachinesJSON || len(CheckPaths(recovered)) != 0 {
+		t.Fatalf("recovered=%#v err=%v failures=%v", recovered, err, CheckPaths(recovered))
 	}
 }
 

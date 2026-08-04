@@ -1321,6 +1321,18 @@ upgrade-required, newer, dirty, and incompatible states before service start,
 waits boundedly for readiness, then runs doctor. Initial pristine migration is
 part of `init`; raw daemon and Compose startup remain non-migrating.
 
+The unified fresh-server declaration includes public relay-machine authority,
+device authentication, ingress, memory read/mutation opt-ins, and trusted
+attachment storage. Relay authority is read only from a protected bounded file
+and canonicalized before the owner bootstrap; trusted attachments require an
+existing private blob directory beneath daemon data. A new declaration with
+relay authority enables PostgreSQL relay storage immediately, while the
+separate mail-cutover preparatory enrollment remains dark until its
+owner-controlled cutover marker. Invalid, incomplete, or contradictory inputs
+fail before any listener or database mutation. Older published templates remain
+valid only as matched generations during explicit lifecycle recovery; the
+operator never hand-edits generated runtime files to upgrade a server.
+
 Internet and existing-proxy profiles require a canonical HTTPS public URL and
 a loopback origin. Trusted-LAN plaintext is an explicit exception requiring a
 concrete private or link-local bind, a containing private/link-local CIDR, and

@@ -71,8 +71,18 @@ Set `PUNARO_COMPOSE_PROJECT_NAME` once to a unique, lowercase installation ID
 explicitly to Docker Compose, preventing another checkout or an ambient
 `COMPOSE_PROJECT_NAME` from sharing or deleting this installation's volumes.
 
-Create private, non-overlapping daemon data, backup, and installation
-directories outside the repository, then initialize and start the daemon:
+Create private, non-overlapping daemon data, backup, attachment-blob, and
+installation directories outside the repository. Collect the public relay
+machine records into one owner-only JSON file. This file is declarative input,
+not a secret: it contains public keys and exclusive endpoint prefixes only.
+The initial `punaro init` is the one supported server configuration boundary;
+do not hand-edit the generated environment or Compose files.
+
+To enable every currently supported surface on a fresh installation, initialize
+and start the daemon with the explicit opt-ins below. Omit either optional flag
+to keep that surface dark. The attachment blob directory must already exist,
+be private, and be beneath `DATA_DIR`; credentials and operator state must
+remain outside `DATA_DIR`.
 
 ```sh
 scripts/production-compose up -d postgres-bootstrap
@@ -86,14 +96,31 @@ punaro init \
   --app-dsn-file APP_DSN_FILE \
   --owner-name 'Production operator' \
   --mode proxy \
-  --public-url "$PUNARO_PUBLIC_URL"
+  --public-url "$PUNARO_PUBLIC_URL" \
+  --relay-machines-file RELAY_MACHINES_FILE \
+  --trusted-attachments \
+  --trusted-attachment-blob-dir DATA_DIR/attachments
 punaro up --directory INSTALLATION_DIR
 ```
+
+`--relay-machines-file` is read only after protected-file checks and is
+canonicalized before any database mutation. `--trusted-attachments` requires
+its blob-directory argument; a stray blob-directory argument, unsafe path, or
+contradictory opt-in fails before listeners start. The generated runtime uses
+PostgreSQL relay authority and device authentication, while its daemon,
+database, health endpoint, and Compose credentials remain host-local.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the
 same durable update journal and recovery path as the initial installation; do
 not replace `PUNARO_IMAGE` and restart the reference bundle directly.
+
+Existing installations retain their published configuration through upgrade and
+recovery. Re-run `punaro init --resume --directory INSTALLATION_DIR` only after
+an interrupted first initialization; it never reinterprets new optional inputs
+or opens a listener before the durable marker is complete. Backup and restore
+continue to use their explicit lifecycle commands and a new target staging
+directory rather than overwriting a live installation.
 
 The application and PostgreSQL bind only to `127.0.0.1` for a separately
 configured local tunnel or reverse proxy. The bundle defines no published ports;
