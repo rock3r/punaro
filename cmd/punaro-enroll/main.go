@@ -75,6 +75,13 @@ type redemptionJournal struct {
 	Credential     string `json:"credential,omitempty"`
 }
 
+type redemptionRequest struct {
+	EnrollmentID   string `json:"enrollment_id"`
+	ClientBinding  string `json:"client_binding"`
+	Code           string `json:"code"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
 type redemptionResponse struct {
 	PrincipalID string    `json:"principal_id"`
 	LookupID    string    `json:"lookup_id"`
@@ -478,7 +485,7 @@ const (
 )
 
 func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken) (redemptionResponse, redemptionResult) {
-	body, err := json.Marshal(journal)
+	body, err := json.Marshal(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}

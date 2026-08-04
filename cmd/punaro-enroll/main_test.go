@@ -156,7 +156,11 @@ func TestRedeemRejectsRecoveryJournalAsCredentialDestinationBeforeContactingOrig
 
 func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testing.T) {
 	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil || strings.Contains(string(body), `"credential"`) {
+			t.Fatalf("recovery body=%q err=%v", body, err)
+		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusCreated)
 		_, _ = io.WriteString(w, `{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"`+credential+`","generation":1}`)
