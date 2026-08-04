@@ -140,6 +140,7 @@ func canonicalOrigin(raw string) (string, bool) {
 		parsed.Host = canonicalHost(hostname)
 	}
 	parsed.Path = ""
+	parsed.ForceQuery = false
 	return parsed.String(), true
 }
 
