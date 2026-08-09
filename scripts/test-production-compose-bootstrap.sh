@@ -33,14 +33,41 @@ data_dir="$temporary/data"
 backup_dir="$temporary/backup"
 installation_dir="$temporary/installation"
 relay_machines="$temporary/relay-machines.json"
+client_home="$temporary/client-home"
+client_mailbox="$temporary/agent-mailbox"
+client_mailbox_state="$temporary/client-mailbox"
 printf '%s\n' 'production-owner-password' >"$owner_password"
 printf '%s\n' 'initial-incorrect-app-password' >"$app_password"
 printf '%s\n' 'postgres://punaro_owner:production-owner-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
 printf '%s\n' 'postgres://punaro_app:production-app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
 chmod 600 "$owner_password" "$app_password" "$owner_dsn" "$app_dsn"
 mkdir -m 700 "$data_dir" "$data_dir/attachments" "$backup_dir"
-printf '%s\n' '[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]' >"$relay_machines"
+mkdir -m 700 "$client_home" "$client_mailbox_state"
+cat >"$client_mailbox" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *' group create '*) exit 0 ;;
+  *' group list '*) printf '%s\n' '[{"address":"group/punaro-attached"}]'; exit 0 ;;
+esac
+exit 1
+EOF
+chmod 700 "$client_mailbox"
+HOME="$client_home" GOTOOLCHAIN=local \
+    GOCACHE="${GOCACHE:-/tmp/punaro-go-cache}" \
+    GOMODCACHE="${GOMODCACHE:-/tmp/punaro-go-mod-cache}" \
+	sh "$root/scripts/install-client.sh" \
+		--relay-url https://punaro.example \
+		--machine-id fresh-client \
+		--agent-mailbox-bin "$client_mailbox" \
+		--mailbox-state-dir "$client_mailbox_state" >"$temporary/client-install.out"
+client_enrollment="$client_home/.config/punaro/enrollment.json"
+test -f "$client_enrollment"
+printf '[' >"$relay_machines"
+cat "$client_enrollment" >>"$relay_machines"
+printf ']\n' >>"$relay_machines"
 chmod 600 "$relay_machines"
+grep -Fq '"id":"fresh-client"' "$relay_machines"
+grep -Fq '"endpoint_prefixes":["agent/fresh-client/"]' "$relay_machines"
 
 export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 export PUNARO_RUNTIME_UID="$(id -u)"
@@ -217,6 +244,8 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--trusted-attachment-blob-dir "$data_dir/attachments")
 test -f "$installation_dir/installation.json"
 grep -Fxq 'PUNARO_RELAY_ENABLED=true' "$installation_dir/punarod.env"
+generated_relay_machines=$(tr -d '\n' <"$relay_machines")
+grep -Fqx "PUNARO_RELAY_MACHINES_JSON='$generated_relay_machines'" "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_RELAY_STORE=postgres' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=/var/lib/punaro/attachments' "$installation_dir/punarod.env"
@@ -226,7 +255,7 @@ printf '%s\n' '[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 	--relay-machines-file "$relay_machines" \
 	--yes)
 grep -Fqx "PUNARO_RELAY_MACHINES_JSON='[{\"id\":\"machine-b\",\"public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"endpoint_prefixes\":[\"agent/b/\"],\"endpoints\":[],\"attachment_device_id\":\"\"}]'" "$installation_dir/punarod.env"
-if grep -F 'agent/a/' "$installation_dir/punarod.env" >/dev/null; then
+if grep -F 'agent/fresh-client/' "$installation_dir/punarod.env" >/dev/null; then
 	echo 'relay configuration retained a removed enrollment' >&2
 	exit 1
 fi
