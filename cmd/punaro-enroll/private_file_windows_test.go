@@ -62,6 +62,13 @@ func TestReservedStateFileNameRejectsWindowsAliases(t *testing.T) {
 	}
 }
 
+func TestSafeStateChildRejectsAlternateDataStreams(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if safeStateChild(directory, filepath.Join(directory, "credential:stream")) {
+		t.Fatal("alternate-data-stream credential path was accepted")
+	}
+}
+
 func TestEnsurePrivateDirRejectsExistingUnsafeDirectoryWithoutChangingIt(t *testing.T) {
 	directory := t.TempDir()
 	if privateWindowsACL(directory) {

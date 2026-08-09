@@ -15,7 +15,8 @@ import (
 
 func safeStateDir(path string) bool { return filepath.IsAbs(path) && filepath.Clean(path) == path }
 func safeStateChild(directory, path string) bool {
-	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
+	base := filepath.Base(path)
+	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && base != "." && base != ".." && !strings.Contains(base, ":")
 }
 
 // Win32 normalizes trailing dots and spaces in ordinary file paths, so those
