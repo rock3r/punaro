@@ -378,6 +378,11 @@ func TestInstalledCompleteProductE2E(t *testing.T) {
 	if err := os.Mkdir(downloads, 0o700); err != nil {
 		t.Fatal("safe download root setup failed")
 	}
+	beforeDeliveryDownloads := filepath.Join(clientHome, "before-delivery-downloads")
+	if err := os.Mkdir(beforeDeliveryDownloads, 0o700); err != nil {
+		t.Fatal("pre-delivery download root setup failed")
+	}
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", beforeDeliveryDownloads)
 	credentialRaw, err := os.ReadFile(credentialFile)
 	if err != nil {
 		t.Fatal("read installed product credential")
