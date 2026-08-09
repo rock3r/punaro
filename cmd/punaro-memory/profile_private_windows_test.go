@@ -11,7 +11,11 @@ import (
 )
 
 func TestWindowsProfileRequiresExclusiveDACL(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memory-profile.json")
+	directory := t.TempDir()
+	if err := protectWindowsPath(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "memory-profile.json")
 	if err := os.WriteFile(path, []byte(`{"version":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +32,11 @@ func TestWindowsProfileRequiresExclusiveDACL(t *testing.T) {
 }
 
 func TestWindowsProfileWriteAndRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "memory-profile.json")
+	directory := t.TempDir()
+	if err := protectWindowsPath(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "memory-profile.json")
 	value := profile{Origin: "https://memory.example.test", CredentialFile: filepath.Join(filepath.Dir(path), "device.credential")}
 	if err := saveProfile(path, value); err != nil {
 		t.Fatal(err)
@@ -36,6 +44,14 @@ func TestWindowsProfileWriteAndRead(t *testing.T) {
 	loaded, err := loadProfile(path)
 	if err != nil || loaded.Origin != value.Origin || loaded.CredentialFile != value.CredentialFile {
 		t.Fatalf("profile=%#v err=%v", loaded, err)
+	}
+}
+
+func TestWindowsProfileRequiresExclusiveParentDirectory(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "memory-profile.json")
+	if privateProfilePath(path) {
+		t.Fatal("shared profile parent directory was accepted")
 	}
 }
 

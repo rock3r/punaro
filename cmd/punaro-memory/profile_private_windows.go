@@ -13,7 +13,7 @@ import (
 )
 
 func privateProfilePath(path string) bool {
-	return filepath.IsAbs(path) && filepath.Clean(path) == path && !hasWindowsUnsafePathComponent(path) && noWindowsReparseParent(path)
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && !hasWindowsUnsafePathComponent(path) && noWindowsReparseParent(path) && privateWindowsACL(filepath.Dir(path))
 }
 
 func privateProfileFile(info os.FileInfo) bool {
@@ -21,6 +21,11 @@ func privateProfileFile(info os.FileInfo) bool {
 }
 func privateProfileFilePath(path string) bool { return privateWindowsACL(path) }
 func sameCleanProfilePath(left, right string) bool {
+	leftInfo, leftErr := os.Stat(left)    // #nosec G703 -- both absolute local paths are validated by the caller before a profile write.
+	rightInfo, rightErr := os.Stat(right) // #nosec G703 -- both absolute local paths are validated by the caller before a profile write.
+	if leftErr == nil && rightErr == nil && os.SameFile(leftInfo, rightInfo) {
+		return true
+	}
 	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
 }
 
