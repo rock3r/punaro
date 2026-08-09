@@ -80,6 +80,7 @@ type redemptionJournal struct {
 	ClientBinding  string `json:"client_binding"`
 	Code           string `json:"code"`
 	IdempotencyKey string `json:"idempotency_key"`
+	CredentialPath string `json:"credential_path"`
 	Credential     string `json:"credential,omitempty"`
 }
 
@@ -174,6 +175,9 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		if journalErr != nil {
 			return enrollmentError(stderr, "no recoverable enrollment was found", 2)
 		}
+		if journal.CredentialPath != *credentialPath {
+			return enrollmentError(stderr, "existing enrollment recovery is bound to a different credential destination", 2)
+		}
 		if err := preflightCredentialDestination(*credentialPath, journal.Credential); err != nil {
 			return enrollmentError(stderr, "private credential destination is unavailable", 2)
 		}
@@ -190,6 +194,9 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if journal.EnrollmentID != material.EnrollmentID || journal.ClientBinding != material.ClientBinding || journal.Code != material.Code {
 				return enrollmentError(stderr, "existing enrollment recovery does not match material", 2)
 			}
+			if journal.CredentialPath != *credentialPath {
+				return enrollmentError(stderr, "existing enrollment recovery is bound to a different credential destination", 2)
+			}
 			if err := preflightCredentialDestination(*credentialPath, journal.Credential); err != nil {
 				return enrollmentError(stderr, "private credential destination is unavailable", 2)
 			}
@@ -203,7 +210,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 			if err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
-			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String()}
+			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath}
 			if err := writePrivateNew(journalPath, mustJSON(journal)); err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
@@ -427,7 +434,7 @@ func loadJournal(path string) (redemptionJournal, error) {
 		return redemptionJournal{}, err
 	}
 	var value redemptionJournal
-	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key"}, []string{"credential"}); err != nil || !validJournal(value) {
+	if err := decodeFields(raw, &value, []string{"enrollment_id", "client_binding", "code", "idempotency_key", "credential_path"}, []string{"credential"}); err != nil || !validJournal(value) {
 		return redemptionJournal{}, errors.New("invalid recovery journal")
 	}
 	return value, nil
@@ -437,7 +444,7 @@ func validMaterial(value enrollmentMaterial) bool {
 	return validUUID(value.EnrollmentID) && validUUID(value.ClientBinding) && validCode(value.Code)
 }
 func validJournal(value redemptionJournal) bool {
-	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && (value.Credential == "" || validStoredCredential(value.Credential))
+	return validMaterial(enrollmentMaterial{EnrollmentID: value.EnrollmentID, ClientBinding: value.ClientBinding, Code: value.Code}) && validUUID(value.IdempotencyKey) && safeStateDir(value.CredentialPath) && (value.Credential == "" || validStoredCredential(value.Credential))
 }
 func validUUID(value string) bool {
 	parsed, err := uuid.Parse(value)

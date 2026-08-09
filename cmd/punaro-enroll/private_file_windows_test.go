@@ -76,6 +76,16 @@ func TestEnsurePrivateDirProtectsOnlyNewNestedDirectories(t *testing.T) {
 	}
 }
 
+func TestSyncPrivateDirectoryFlushesMetadata(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := syncPrivateDirectory(directory); err != nil {
+		t.Fatalf("flush private directory metadata: %v", err)
+	}
+}
+
 func TestEnsurePrivateDirRemovesNewDirectoryWhenACLProtectionFails(t *testing.T) {
 	original := protectWindowsPath
 	protectWindowsPath = func(string) error { return errors.New("ACL failure") }

@@ -24,7 +24,10 @@ func ensurePrivateDir(path string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe private directory")
 		}
-		return privateDir(path)
+		if err := privateDir(path); err != nil {
+			return err
+		}
+		return syncPrivateDirectory(filepath.Dir(path))
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -41,6 +44,11 @@ func ensurePrivateDir(path string) error {
 			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 				return errors.New("unsafe private directory")
 			}
+			if grandparent := filepath.Dir(parent); grandparent != parent {
+				if err := syncPrivateDirectory(grandparent); err != nil {
+					return err
+				}
+			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) || parent == filepath.Dir(parent) {
@@ -55,6 +63,9 @@ func ensurePrivateDir(path string) error {
 			if !errors.Is(err, os.ErrExist) {
 				return err
 			}
+			if err := syncPrivateDirectory(filepath.Dir(directory)); err != nil {
+				return err
+			}
 		} else {
 			created = true
 		}
@@ -65,6 +76,9 @@ func ensurePrivateDir(path string) error {
 			}
 			if err := privateDir(directory); err != nil {
 				_ = os.Remove(directory) // #nosec G703 -- exact new directory failed post-protection verification.
+				return err
+			}
+			if err := syncPrivateDirectory(filepath.Dir(directory)); err != nil {
 				return err
 			}
 			continue
@@ -147,7 +161,7 @@ func writePrivateNew(path string, raw []byte) error {
 		return err
 	}
 	removeOnFailure = false
-	return nil
+	return syncPrivateDirectory(filepath.Dir(path))
 }
 
 func writePrivateAtomic(path string, raw []byte) error {
@@ -187,7 +201,7 @@ func writePrivateAtomic(path string, raw []byte) error {
 		return err
 	}
 	removeOnFailure = false
-	return nil
+	return syncPrivateDirectory(filepath.Dir(path))
 }
 
 func writePrivateAtomicNew(path string, raw []byte) error {
@@ -230,7 +244,7 @@ func writePrivateAtomicNew(path string, raw []byte) error {
 		return err
 	}
 	removeTemporary = false
-	return nil
+	return syncPrivateDirectory(filepath.Dir(path))
 }
 func writeCredential(path, credential string) error {
 	if credential == "" || strings.ContainsAny(credential, " \t\r\n") {
@@ -247,9 +261,27 @@ func writeCredential(path, credential string) error {
 	return writePrivateAtomicNew(path, []byte(credential+"\n"))
 }
 
-var syncPrivateDirectory = func(string) error { return nil }
+var syncPrivateDirectory = syncPrivateDirectoryImpl
 
-func removePrivate(path string) error { return os.Remove(path) }
+func syncPrivateDirectoryImpl(path string) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	return windows.FlushFileBuffers(handle)
+}
+
+func removePrivate(path string) error {
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	return syncPrivateDirectory(filepath.Dir(path))
+}
 
 func privateWindowsACL(path string) bool {
 	token := windows.GetCurrentProcessToken()

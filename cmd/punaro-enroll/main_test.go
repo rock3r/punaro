@@ -246,11 +246,11 @@ func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444", Credential: credential}
+	credentialPath := filepath.Join(stateDir, "credential")
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444", CredentialPath: credentialPath, Credential: credential}
 	if err := writePrivateNew(filepath.Join(stateDir, redemptionJournalName), mustJSON(journal)); err != nil {
 		t.Fatal(err)
 	}
-	credentialPath := filepath.Join(stateDir, "credential")
 	if err := writePrivateNew(credentialPath, []byte(credential+"\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -260,6 +260,42 @@ func TestRecoverCompletesWhenCredentialWasPersistedBeforeJournalCleanup(t *testi
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
 		t.Fatalf("recovery journal remains: %v", err)
+	}
+}
+
+func TestRecoverRejectsADifferentCredentialDestination(t *testing.T) {
+	calls := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	credentialA := filepath.Join(stateDir, "credential-a")
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", credentialA}, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("initial redeem code=%d", code)
+	}
+	credentialB := filepath.Join(stateDir, "credential-b")
+	var stderr bytes.Buffer
+	if code := run([]string{"recover", "--state-dir", stateDir, "--credential-file", credentialB}, io.Discard, &stderr); code != 2 || !strings.Contains(stderr.String(), "bound to a different credential destination") {
+		t.Fatalf("recover code=%d stderr=%q", code, stderr.String())
+	}
+	if calls != 1 {
+		t.Fatalf("recovery contacted origin after destination mismatch: %d calls", calls)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); err != nil {
+		t.Fatalf("recovery journal was removed: %v", err)
 	}
 }
 
@@ -488,7 +524,7 @@ func TestRecoverRejectsUnrelatedExistingCredentialBeforeContactingOrigin(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444"}
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: identity.ClientBinding, Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444", CredentialPath: filepath.Join(stateDir, identityFileName)}
 	if err := writePrivateNew(filepath.Join(stateDir, redemptionJournalName), mustJSON(journal)); err != nil {
 		t.Fatal(err)
 	}
