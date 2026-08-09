@@ -158,7 +158,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
-	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || strings.EqualFold(filepath.Base(*credentialPath), redemptionJournalName) || privateDir(*stateDir) != nil {
+	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || reservedStateFileName(filepath.Base(*credentialPath)) || privateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -16,6 +17,8 @@ func safeStateDir(path string) bool { return filepath.IsAbs(path) && filepath.Cl
 func safeStateChild(directory, path string) bool {
 	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
 }
+
+func reservedStateFileName(name string) bool { return strings.EqualFold(name, redemptionJournalName) }
 
 func ensurePrivateDir(path string) error {
 	info, err := os.Lstat(path)

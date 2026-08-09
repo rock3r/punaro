@@ -18,6 +18,12 @@ func safeStateChild(directory, path string) bool {
 	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
 }
 
+// Win32 normalizes trailing dots and spaces in ordinary file paths, so those
+// spellings must remain reserved alongside the journal's canonical name.
+func reservedStateFileName(name string) bool {
+	return strings.EqualFold(strings.TrimRight(name, ". "), redemptionJournalName)
+}
+
 func ensurePrivateDir(path string) error {
 	info, err := os.Lstat(path)
 	if err == nil {

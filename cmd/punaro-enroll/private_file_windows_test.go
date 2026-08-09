@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -50,6 +51,14 @@ func TestWindowsPrivateDACL(t *testing.T) {
 	raw, err := readPrivate(file, 64)
 	if err != nil || string(raw) != "private\n" {
 		t.Fatalf("private file round trip failed: %v %q", err, raw)
+	}
+}
+
+func TestReservedStateFileNameRejectsWindowsAliases(t *testing.T) {
+	for _, name := range []string{redemptionJournalName, strings.ToUpper(redemptionJournalName), redemptionJournalName + ".", redemptionJournalName + " "} {
+		if !reservedStateFileName(name) {
+			t.Fatalf("reserved journal alias was accepted: %q", name)
+		}
 	}
 }
 
