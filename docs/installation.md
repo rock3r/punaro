@@ -286,7 +286,9 @@ the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths. The retry has the same idempotency
 key, so it cannot mint a second device credential. The server retains that
 recovery record for 24 hours after redemption; after that, request a new
-enrollment instead. A rejected (including
+enrollment unless the private recovery journal already contains its credential
+checkpoint, in which case `recover` completes the local write without another
+server request. A rejected (including
 expired, already-used, or revoked) enrollment fails closed and tells the user
 to request a new enrollment; its private recovery journal is removed so the
 replacement material is not blocked. After success, remove the transferred material
