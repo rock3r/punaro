@@ -75,6 +75,19 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 	}
 }
 
+func TestRedeemRejectsCredentialPathsThatCannotFitRecoveryJournal(t *testing.T) {
+	journal := redemptionJournal{
+		EnrollmentID:   "33333333-3333-4333-8333-333333333333",
+		ClientBinding:  "11111111-1111-4111-8111-111111111111",
+		Code:           strings.Repeat("A", 43),
+		IdempotencyKey: "44444444-4444-4444-8444-444444444444",
+		CredentialPath: "/state/" + strings.Repeat("a", maxEnrollmentFile),
+	}
+	if journalCanPersistCredential(journal) {
+		t.Fatal("credential path that exceeds the recovery-journal limit was accepted")
+	}
+}
+
 func TestPrepareRetriesIdentityDirectorySyncBeforePublishingBinding(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX directory-sync durability contract")

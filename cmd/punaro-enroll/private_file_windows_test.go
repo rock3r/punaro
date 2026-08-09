@@ -70,6 +70,13 @@ func TestSafeStateChildRejectsAlternateDataStreams(t *testing.T) {
 	}
 }
 
+func TestSafeStateChildRejectsPotentialShortNameAliases(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if safeStateChild(directory, filepath.Join(directory, "REDEMP~1.JSO")) {
+		t.Fatal("potential 8.3 recovery-file alias was accepted")
+	}
+}
+
 func TestEnsurePrivateDirRejectsExistingUnsafeDirectoryWithoutChangingIt(t *testing.T) {
 	directory := t.TempDir()
 	if privateWindowsACL(directory) {

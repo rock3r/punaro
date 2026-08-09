@@ -16,7 +16,11 @@ import (
 func safeStateDir(path string) bool { return filepath.IsAbs(path) && filepath.Clean(path) == path }
 func safeStateChild(directory, path string) bool {
 	base := filepath.Base(path)
-	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && base != "." && base != ".." && !strings.Contains(base, ":")
+	// A tilde is legal in a Win32 filename, but it can also be an NTFS 8.3
+	// short-name alias for the recovery journal or lock. Credentials are named
+	// by this local CLI, so reserve it rather than letting an alias redirect a
+	// later recovery-file operation.
+	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && base != "." && base != ".." && !strings.ContainsAny(base, ":~")
 }
 
 // Win32 normalizes trailing dots and spaces in ordinary file paths, so those

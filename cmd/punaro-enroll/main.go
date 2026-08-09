@@ -217,7 +217,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath}
-			if err := writePrivateAtomicNew(journalPath, mustJSON(journal)); err != nil {
+			if !journalCanPersistCredential(journal) || writePrivateAtomicNew(journalPath, mustJSON(journal)) != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 		}
@@ -242,7 +242,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 		return enrollmentError(stderr, "enrollment is temporarily unavailable; retry this command", 1)
 	}
 	journal.Credential = response.Credential
-	if err := writePrivateAtomic(journalPath, mustJSON(journal)); err != nil {
+	if !journalFits(journal) || writePrivateAtomic(journalPath, mustJSON(journal)) != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
 	if err := writeCredential(*credentialPath, response.Credential); err != nil {
@@ -310,6 +310,19 @@ func mustJSON(value any) []byte {
 		return nil
 	}
 	return append(raw, '\n')
+}
+
+// journalCanPersistCredential reserves room for the server credential before
+// the first request. That way every accepted destination has a recovery
+// journal that remains readable after redemption has committed remotely.
+func journalCanPersistCredential(value redemptionJournal) bool {
+	value.Credential = "00000000-0000-4000-8000-000000000000." + strings.Repeat("A", 43)
+	return journalFits(value)
+}
+
+func journalFits(value redemptionJournal) bool {
+	raw := mustJSON(value)
+	return len(raw) > 0 && len(raw) <= maxEnrollmentFile
 }
 
 func loadIdentity(path string) (clientidentity.State, error) {
