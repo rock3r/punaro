@@ -87,6 +87,30 @@ func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Instal
 	return publishMailCutoverInstallation(directory, installation, nil)
 }
 
+// ConfigureRelayMachines replaces the complete public relay enrollment set.
+// It is the supported authority for adding or revoking a client from a unified
+// installation; callers provide a protected declarative file rather than
+// editing generated runtime configuration.
+func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, error) {
+	canonical, err := ReadRelayMachinesFile(enrollmentFile)
+	if err != nil {
+		return Installation{}, err
+	}
+	installation, err := LoadMailCutoverRecovery(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.RelayEnabled && installation.RelayMachinesJSON == canonical {
+		return installation, nil
+	}
+	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: true, RelayMachinesJSON: canonical}); err != nil {
+		return Installation{}, errors.New("relay enrollment is incompatible with the installation")
+	}
+	installation.RelayEnabled = true
+	installation.RelayMachinesJSON = canonical
+	return publishMailCutoverInstallation(directory, installation, nil)
+}
+
 // ReadRelayMachinesFile loads a protected, bounded relay enrollment file for
 // either initial installation or an explicit mail-cutover transition.
 func ReadRelayMachinesFile(enrollmentFile string) (string, error) {
@@ -234,8 +258,12 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 		return Installation{}, errors.New("mail cutover recovery marker does not match the installation")
 	}
 	cutoverAdvance := base.MailCutover == nil && candidate.MailCutover != nil && base.RelayMachinesJSON == candidate.RelayMachinesJSON
-	enrollmentAdvance := base.MailCutover == nil && candidate.MailCutover == nil && base.RelayMachinesJSON == "" && candidate.RelayMachinesJSON != ""
-	if !cutoverAdvance && !enrollmentAdvance {
+	initialEnrollmentAdvance := base.MailCutover == nil && candidate.MailCutover == nil && base.RelayMachinesJSON == "" && candidate.RelayMachinesJSON != ""
+	// A live unified relay may change only its complete public enrollment set
+	// before mail cutover. The staged candidate still has to match every other
+	// installation invariant, so a crash can recover only this exact update.
+	relayEnrollmentAdvance := base.RelayEnabled && candidate.RelayEnabled && base.RelayMachinesJSON != candidate.RelayMachinesJSON && sameMailCutoverPublication(base.MailCutover, candidate.MailCutover)
+	if !cutoverAdvance && !initialEnrollmentAdvance && !relayEnrollmentAdvance {
 		return Installation{}, errors.New("mail cutover recovery marker transition is invalid")
 	}
 	for _, file := range []struct {
@@ -283,4 +311,11 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 		}
 	}
 	return base, nil
+}
+
+func sameMailCutoverPublication(left, right *MailCutoverPublication) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }

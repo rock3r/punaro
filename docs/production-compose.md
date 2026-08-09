@@ -110,6 +110,28 @@ contradictory opt-in fails before listeners start. The generated runtime uses
 PostgreSQL relay authority and device authentication, while its daemon,
 database, health endpoint, and Compose credentials remain host-local.
 
+## Add or revoke a mailbox client
+
+After initialization, replace the complete public enrollment set through the
+same host-local lifecycle rather than editing generated files. Keep the JSON
+file owner-only and include every client that should remain authorized:
+
+```sh
+punaro relay configure \
+  --directory INSTALLATION_DIR \
+  --relay-machines-file RELAY_MACHINES_FILE \
+  --yes
+punaro up --directory INSTALLATION_DIR
+```
+
+The command validates the exact non-secret set, atomically publishes the
+daemon environment and Compose inputs, and preserves an interrupted update for
+an exact retry. It is valid both before and after mail cutover; the cutover
+marker itself cannot change. Removing a machine from the complete set prevents
+new signed requests after the next `punaro up`; also stop its local adapter and
+revoke its distinct Access token. Never edit `punarod.env`, the Compose
+override, or `installation.json` directly.
+
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the
 same durable update journal and recovery path as the initial installation; do

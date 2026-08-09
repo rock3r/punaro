@@ -1131,6 +1131,120 @@ func TestMailCutoverRelayConfigurationQuotesDotenvMetacharacters(t *testing.T) {
 	}
 }
 
+func TestConfigureRelayMachinesReplacesPreCutoverEnrollment(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	path := filepath.Join(filepath.Dir(installation.Directory), "replacement-relay-machines.json")
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || configured.RelayMachinesJSON != replacement || !configured.RelayEnabled || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
+func TestRelayEnrollmentReplacementRecoversAfterRuntimePublication(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	candidate := installation
+	candidate.RelayMachinesJSON = replacement
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected publication crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected relay enrollment publication crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "replacement-relay-machines.json")
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || configured.RelayMachinesJSON != replacement || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
+func TestConfigureRelayMachinesReplacesPostCutoverEnrollment(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+	installation, err = PublishMailCutover(installation.Directory, publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	path := filepath.Join(filepath.Dir(installation.Directory), "post-cutover-relay-machines.json")
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || configured.RelayMachinesJSON != replacement || configured.MailCutover == nil || *configured.MailCutover != publication || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
+func TestPostCutoverRelayEnrollmentReplacementRecoversAfterRuntimePublication(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+	installation, err = PublishMailCutover(installation.Directory, publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	candidate := installation
+	candidate.RelayMachinesJSON = replacement
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected publication crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected post-cutover relay enrollment publication crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "post-cutover-replacement-relay-machines.json")
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || configured.RelayMachinesJSON != replacement || configured.MailCutover == nil || *configured.MailCutover != publication || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
 func TestInitRejectsInvalidOrAliasingHealthListener(t *testing.T) {
 	for _, address := range []string{"127.0.0.1:0", "127.0.0.1:", "127.0.0.1:http", "127.0.0.1:65536", "127.0.0.1:08080"} {
 		t.Run(address, func(t *testing.T) {
