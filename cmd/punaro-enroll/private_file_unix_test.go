@@ -62,3 +62,32 @@ func TestWritePrivateAtomicNewDoesNotReplaceExistingDestination(t *testing.T) {
 		t.Fatalf("destination err=%v raw=%q", err, raw)
 	}
 }
+
+func TestEnsurePrivateDirSyncsParentWhenConcurrentCreatorWins(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	originalMkdir := mkdirPrivateDirectory
+	originalSync := syncPrivateDirectory
+	t.Cleanup(func() {
+		mkdirPrivateDirectory = originalMkdir
+		syncPrivateDirectory = originalSync
+	})
+	mkdirPrivateDirectory = func(path string, mode os.FileMode) error {
+		if err := os.Mkdir(path, mode); err != nil {
+			return err
+		}
+		return os.ErrExist
+	}
+	var syncedParent bool
+	syncPrivateDirectory = func(path string) error {
+		if path == filepath.Dir(directory) {
+			syncedParent = true
+		}
+		return nil
+	}
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	if !syncedParent {
+		t.Fatal("parent of concurrently created directory was not synced")
+	}
+}

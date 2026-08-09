@@ -61,8 +61,14 @@ func ensurePrivateDir(path string) error {
 	}
 	for index := len(missing) - 1; index >= 0; index-- {
 		directory := missing[index]
-		if err := os.Mkdir(directory, 0o700); err != nil {
+		if err := mkdirPrivateDirectory(directory, 0o700); err != nil {
 			if !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			// A concurrent creator may have published the entry but crashed
+			// before syncing its parent. Make that raced entry durable before
+			// accepting it and publishing anything beneath it.
+			if err := syncPrivateDirectory(filepath.Dir(directory)); err != nil {
 				return err
 			}
 		} else if err := syncPrivateDirectory(filepath.Dir(directory)); err != nil {
@@ -219,7 +225,10 @@ func writePrivateAtomicNew(path string, raw []byte) error {
 	return syncPrivateDirectory(filepath.Dir(path))
 }
 
-var syncPrivateDirectory = syncPrivateDirectoryImpl
+var (
+	mkdirPrivateDirectory = os.Mkdir
+	syncPrivateDirectory  = syncPrivateDirectoryImpl
+)
 
 func syncPrivateDirectoryImpl(path string) error {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
