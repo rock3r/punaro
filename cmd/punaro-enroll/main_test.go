@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -75,23 +76,86 @@ func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *test
 }
 
 func TestPrepareRetriesIdentityDirectorySyncBeforePublishingBinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory-sync durability contract")
+	}
+	stateDir := filepath.Join(t.TempDir(), "state")
+	parentDir := filepath.Dir(stateDir)
 	originalSync := syncPrivateDirectory
-	firstSync := true
-	syncPrivateDirectory = func(string) error {
-		if firstSync {
-			firstSync = false
-			return os.ErrInvalid
+	parentSyncs := 0
+	syncPrivateDirectory = func(path string) error {
+		if path == parentDir {
+			parentSyncs++
+			if parentSyncs == 1 {
+				return os.ErrInvalid
+			}
 		}
 		return nil
 	}
 	t.Cleanup(func() { syncPrivateDirectory = originalSync })
-	stateDir := filepath.Join(t.TempDir(), "state")
 	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("first prepare code=%d", code)
 	}
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"prepare", "--origin", "https://punaro.test", "--state-dir", stateDir}, &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), "client_binding") {
 		t.Fatalf("retry code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if parentSyncs != 2 {
+		t.Fatalf("state directory parent syncs=%d", parentSyncs)
+	}
+}
+
+func TestUnverifiedBadRequestRetainsRecoveryJournal(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"request is malformed"}`)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	var stderr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "retry") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); err != nil {
+		t.Fatalf("unverified bad request removed recovery journal: %v", err)
+	}
+}
+
+func TestVerifiedBadRequestClearsRecoveryJournal(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":"request is malformed"}`)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("code=%d", code)
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
+		t.Fatalf("verified bad request retained recovery journal: %v", err)
 	}
 }
 

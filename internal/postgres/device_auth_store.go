@@ -33,6 +33,9 @@ const (
 	enrollmentMutationLockKey int64 = 0x50756e61726f454e
 	maxPendingEnrollments           = 1000
 	lastUsedWriteInterval           = 5 * time.Minute
+	// enrollmentReplayRetention bounds the idempotent recovery record retained
+	// after a successful redemption whose response was lost by the client.
+	enrollmentReplayRetention = 24 * time.Hour
 )
 
 // Administration is a direct, host-local schema-owner connection. It is never
@@ -736,14 +739,15 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
     SELECT id FROM auth.pending_enrollments
-	WHERE invalidated_at IS NOT NULL
-	   OR (redeemed_at IS NULL AND expires_at <= statement_timestamp())
-    ORDER BY expires_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
+    WHERE invalidated_at IS NOT NULL
+       OR (redeemed_at IS NULL AND expires_at <= statement_timestamp())
+       OR (redeemed_at IS NOT NULL AND redeemed_at <= statement_timestamp() - make_interval(secs => $2))
+    ORDER BY COALESCE(redeemed_at, expires_at), id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates
     WHERE enrollment.id = candidates.id RETURNING enrollment.id
 )
-SELECT count(*) FROM deleted_enrollments`, limit).Scan(&pruned)
+SELECT count(*) FROM deleted_enrollments`, limit, int64(enrollmentReplayRetention/time.Second)).Scan(&pruned)
 	if err != nil {
 		return errors.New("expired enrollments could not be pruned")
 	}

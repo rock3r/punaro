@@ -23,7 +23,13 @@ func ensurePrivateDir(path string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("unsafe private directory")
 		}
-		return privateDir(path)
+		if err := privateDir(path); err != nil {
+			return err
+		}
+		// A previous attempt may have created this state directory but failed
+		// before its parent directory entry was durable. Re-sync that parent
+		// before an existing state directory can be reused to publish a binding.
+		return syncPrivateDirectory(filepath.Dir(path))
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -180,7 +186,7 @@ func syncPrivateDirectoryImpl(path string) error {
 		// invariant without allowing an already-written journal to poison all
 		// later recovery attempts.
 		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) {
-			unix.Sync()
+			unix.Sync() // #nosec G104 -- unix.Sync has no return value to check. //nolint:errcheck
 			return nil
 		}
 		return err
@@ -197,7 +203,7 @@ func removePrivate(path string) error {
 		// journal that survives a crash is harmless: recovering it replays the
 		// same idempotency key. Do not convert a successful enrollment into a
 		// failure merely because its best-effort cleanup could not be synced.
-		unix.Sync()
+		unix.Sync() // #nosec G104 -- unix.Sync has no return value to check. //nolint:errcheck
 	}
 	return nil
 }

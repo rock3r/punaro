@@ -561,7 +561,7 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode == http.StatusBadRequest || (response.StatusCode == http.StatusUnauthorized && response.Header.Get("WWW-Authenticate") == "Bearer" && responseDeclaresUnauthenticated(response.Body)) {
+	if (response.StatusCode == http.StatusBadRequest && response.Header.Get("Cache-Control") == "no-store" && responseDeclaresMalformed(response.Body)) || (response.StatusCode == http.StatusUnauthorized && response.Header.Get("WWW-Authenticate") == "Bearer" && responseDeclaresUnauthenticated(response.Body)) {
 		return redemptionResponse{}, redemptionRejected
 	}
 	if response.StatusCode != http.StatusCreated || response.Header.Get("Cache-Control") != "no-store" {
@@ -579,6 +579,14 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 }
 
 func responseDeclaresUnauthenticated(body io.Reader) bool {
+	return responseDeclaresError(body, "unauthenticated")
+}
+
+func responseDeclaresMalformed(body io.Reader) bool {
+	return responseDeclaresError(body, "request is malformed")
+}
+
+func responseDeclaresError(body io.Reader, expected string) bool {
 	raw, err := io.ReadAll(io.LimitReader(body, 1025))
 	if err != nil || len(raw) > 1024 {
 		return false
@@ -586,5 +594,5 @@ func responseDeclaresUnauthenticated(body io.Reader) bool {
 	var value struct {
 		Error string `json:"error"`
 	}
-	return decodeExact(raw, &value, "error") == nil && value.Error == "unauthenticated"
+	return decodeExact(raw, &value, "error") == nil && value.Error == expected
 }
