@@ -181,7 +181,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 
 	conversationID := e2eCreateConversation(t, senderAdapter, senderProfile, senderEndpoint, receiverEndpoint)
 	e2eSend(t, senderAdapter, senderProfile, conversationID, senderEndpoint)
-	e2eStopProcess(relay)
+	e2eKillProcess(t, relay)
 	relay = e2eStartRelay(t, relayBinary, relayEnvironment)
 	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "restarted central relay did not become ready")
 	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
@@ -612,6 +612,19 @@ func e2eStopProcess(command *exec.Cmd) {
 	case <-time.After(5 * time.Second):
 		_ = command.Process.Kill()
 		<-done
+	}
+}
+
+func e2eKillProcess(t *testing.T, command *exec.Cmd) {
+	t.Helper()
+	if command == nil || command.Process == nil {
+		t.Fatal("kill disposable relay without a process")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatalf("kill disposable relay: %v", err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("killed disposable relay exited cleanly")
 	}
 }
 
