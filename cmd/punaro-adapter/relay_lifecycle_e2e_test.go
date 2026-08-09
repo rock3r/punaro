@@ -147,8 +147,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	relayBinary := filepath.Join(fixture, "punarod")
 	e2eRun(t, root, e2eGoEnvironment(), "go", "build", "-trimpath", "-o", relayBinary, "./cmd/punarod")
 	machines := e2eEnrollmentSet(t, senderHome, receiverHome)
-	relay := exec.Command(relayBinary)
-	relay.Env = e2eEnvironment(e2eGoEnvironment(), map[string]string{
+	relayEnvironment := e2eEnvironment(e2eGoEnvironment(), map[string]string{
 		"PUNARO_DATA_DIR":            filepath.Join(fixture, "relay-state"),
 		"PUNARO_RELAY_ENABLED":       "true",
 		"PUNARO_RELAY_MACHINES_JSON": machines,
@@ -161,16 +160,15 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		"PUNARO_ACCESS_JWKS_FILE":    "",
 		"PUNARO_ENV_FILE":            "",
 	})
-	relay.Stdout = io.Discard
-	relay.Stderr = io.Discard
-	if err := relay.Start(); err != nil {
-		t.Fatal("start disposable central relay")
-	}
+	relay := e2eStartRelay(t, relayBinary, relayEnvironment)
 	t.Cleanup(func() { e2eStopProcess(relay) })
 	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "disposable central relay did not become ready")
 	proxyURL := "http://" + proxy.listener.Addr().String()
 	e2eAdvertiseEndpoint(t, proxyURL, senderHome, senderEndpoint)
 	e2eAdvertiseEndpoint(t, proxyURL, receiverHome, receiverEndpoint)
+	e2eStopProcess(relay)
+	relay = e2eStartRelay(t, relayBinary, relayEnvironment)
+	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "restarted central relay did not become ready")
 
 	senderAdapter := filepath.Join(senderHome, ".local", "bin", "punaro-adapter")
 	sender := exec.Command(senderAdapter)
@@ -316,6 +314,18 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string, listener net.Listener
 		_ = state.server.Shutdown(shutdown)
 	})
 	return state
+}
+
+func e2eStartRelay(t *testing.T, binary string, environment []string) *exec.Cmd {
+	t.Helper()
+	relay := exec.Command(binary)
+	relay.Env = environment
+	relay.Stdout = io.Discard
+	relay.Stderr = io.Discard
+	if err := relay.Start(); err != nil {
+		t.Fatal("start disposable central relay")
+	}
+	return relay
 }
 
 func e2eInstallClient(t *testing.T, root, home, relayURL, machineID, mailbox, mailboxState string, enable bool) {
