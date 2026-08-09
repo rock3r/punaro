@@ -19,7 +19,8 @@ func privateProfilePath(path string) bool {
 func privateProfileFile(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0
 }
-func privateProfileFilePath(path string) bool { return privateWindowsACL(path) }
+func privateProfileFilePath(path string) bool    { return privateWindowsACL(path) }
+func safeProfileCredentialPath(path string) bool { return noWindowsReparseParent(path) }
 func sameCleanProfilePath(left, right string) bool {
 	leftInfo, leftErr := os.Stat(left)    // #nosec G703 -- both absolute local paths are validated by the caller before a profile write.
 	rightInfo, rightErr := os.Stat(right) // #nosec G703 -- both absolute local paths are validated by the caller before a profile write.

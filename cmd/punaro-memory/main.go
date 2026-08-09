@@ -294,7 +294,7 @@ func saveProfile(path string, value profile) error {
 	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanProfilePath(path, value.CredentialFile) {
 		return errors.New("profile is invalid")
 	}
-	if !noSymlinkPath(filepath.Dir(path)) || !noSymlinkPath(filepath.Dir(value.CredentialFile)) {
+	if !privateProfilePath(path) || !safeProfileCredentialPath(value.CredentialFile) {
 		return errors.New("profile path is unsafe")
 	}
 	value.Version = profileVersion
@@ -336,7 +336,7 @@ func saveProfile(path string, value profile) error {
 	if err := protectProfileFile(tempPath); err != nil || !privateProfileFilePath(tempPath) {
 		return errors.New("could not protect profile")
 	}
-	if !noSymlinkPath(directory) {
+	if !privateProfilePath(path) {
 		return errors.New("profile directory changed while writing")
 	}
 	if err := os.Rename(tempPath, path); err != nil { // #nosec G703 -- source and target are validated absolute profile paths in the same checked directory.
@@ -351,7 +351,7 @@ func saveProfile(path string, value profile) error {
 
 func loadProfile(path string) (profile, error) {
 	var value profile
-	if !safeProfilePath(path) || !privateProfilePath(path) || !noSymlinkPath(path) {
+	if !safeProfilePath(path) || !privateProfilePath(path) {
 		return value, errors.New("profile path is unsafe")
 	}
 	before, err := os.Lstat(path) // #nosec G703 -- explicit absolute CLI profile path checked component-by-component.
@@ -364,7 +364,7 @@ func loadProfile(path string) (profile, error) {
 	}
 	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
-	if err != nil || !after.Mode().IsRegular() || !privateProfileFile(after) || !privateProfileFilePath(path) || !os.SameFile(before, after) || !noSymlinkPath(path) {
+	if err != nil || !after.Mode().IsRegular() || !privateProfileFile(after) || !privateProfileFilePath(path) || !os.SameFile(before, after) || !privateProfilePath(path) {
 		return value, errors.New("profile changed while opening")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxProfileSize+1))
