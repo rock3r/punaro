@@ -45,6 +45,13 @@ func ensurePrivateDir(path string) error {
 			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 				return errors.New("unsafe private directory")
 			}
+			// A reused intermediate directory may have been created by an earlier
+			// failed attempt. Re-sync its own parent before publishing children.
+			if grandparent := filepath.Dir(parent); grandparent != parent {
+				if err := syncPrivateDirectory(grandparent); err != nil {
+					return err
+				}
+			}
 			break
 		}
 		if !errors.Is(err, os.ErrNotExist) || parent == filepath.Dir(parent) {
@@ -172,6 +179,46 @@ func writePrivateAtomic(path string, raw []byte) error {
 	return syncPrivateDirectory(filepath.Dir(path))
 }
 
+// writePrivateAtomicNew publishes a complete private file without replacing a
+// destination created after the caller's preflight. Hard-link publication is
+// atomic on the same filesystem and fails when the destination already exists.
+func writePrivateAtomicNew(path string, raw []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	removeTemporary := true
+	defer func() {
+		if removeTemporary {
+			_ = os.Remove(temporary)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Link(temporary, path); err != nil {
+		return err
+	}
+	if err := os.Remove(temporary); err != nil {
+		return err
+	}
+	removeTemporary = false
+	return syncPrivateDirectory(filepath.Dir(path))
+}
+
 var syncPrivateDirectory = syncPrivateDirectoryImpl
 
 func syncPrivateDirectoryImpl(path string) error {
@@ -219,7 +266,7 @@ func writeCredential(path, credential string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return writePrivateAtomic(path, []byte(credential+"\n"))
+	return writePrivateAtomicNew(path, []byte(credential+"\n"))
 }
 func privateFile(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0 && ownedByCurrentUser(info)

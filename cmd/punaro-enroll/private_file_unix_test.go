@@ -44,3 +44,21 @@ func TestRemovePrivateDoesNotPoisonACompletedEnrollmentWhenDirectorySyncFails(t 
 		t.Fatalf("recovery file remains after unlink: %v", err)
 	}
 }
+
+func TestWritePrivateAtomicNewDoesNotReplaceExistingDestination(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "credential")
+	if err := writePrivateNew(path, []byte("original\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivateAtomicNew(path, []byte("replacement\n")); err == nil {
+		t.Fatal("atomic new publication replaced an existing destination")
+	}
+	raw, err := readPrivate(path, 64)
+	if err != nil || string(raw) != "original\n" {
+		t.Fatalf("destination err=%v raw=%q", err, raw)
+	}
+}

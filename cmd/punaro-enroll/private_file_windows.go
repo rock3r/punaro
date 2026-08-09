@@ -189,6 +189,8 @@ func writePrivateAtomic(path string, raw []byte) error {
 	removeOnFailure = false
 	return nil
 }
+
+func writePrivateAtomicNew(path string, raw []byte) error { return writePrivateAtomic(path, raw) }
 func writeCredential(path, credential string) error {
 	if credential == "" || strings.ContainsAny(credential, " \t\r\n") {
 		return errors.New("invalid credential")
@@ -201,7 +203,7 @@ func writeCredential(path, credential string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return writePrivateAtomic(path, []byte(credential+"\n"))
+	return writePrivateAtomicNew(path, []byte(credential+"\n"))
 }
 
 var syncPrivateDirectory = func(string) error { return nil }
