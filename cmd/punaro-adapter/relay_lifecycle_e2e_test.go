@@ -147,8 +147,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	relayBinary := filepath.Join(fixture, "punarod")
 	e2eRun(t, root, e2eGoEnvironment(), "go", "build", "-trimpath", "-o", relayBinary, "./cmd/punarod")
 	machines := e2eEnrollmentSet(t, senderHome, receiverHome)
-	relay := exec.Command(relayBinary)
-	relay.Env = e2eEnvironment(e2eGoEnvironment(), map[string]string{
+	relayEnvironment := e2eEnvironment(e2eGoEnvironment(), map[string]string{
 		"PUNARO_DATA_DIR":            filepath.Join(fixture, "relay-state"),
 		"PUNARO_RELAY_ENABLED":       "true",
 		"PUNARO_RELAY_MACHINES_JSON": machines,
@@ -161,11 +160,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		"PUNARO_ACCESS_JWKS_FILE":    "",
 		"PUNARO_ENV_FILE":            "",
 	})
-	relay.Stdout = io.Discard
-	relay.Stderr = io.Discard
-	if err := relay.Start(); err != nil {
-		t.Fatal("start disposable central relay")
-	}
+	relay := e2eStartRelay(t, relayBinary, relayEnvironment)
 	t.Cleanup(func() { e2eStopProcess(relay) })
 	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "disposable central relay did not become ready")
 	proxyURL := "http://" + proxy.listener.Addr().String()
@@ -183,13 +178,16 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		t.Fatal("start installed sender adapter")
 	}
 	t.Cleanup(func() { e2eStopProcess(sender) })
-	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
-		t.Fatal("start installed receiver service")
-	}
 
 	conversationID := e2eCreateConversation(t, senderAdapter, senderProfile, senderEndpoint, receiverEndpoint)
-	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
 	e2eSend(t, senderAdapter, senderProfile, conversationID, senderEndpoint)
+	e2eKillProcess(t, relay)
+	relay = e2eStartRelay(t, relayBinary, relayEnvironment)
+	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "restarted central relay did not become ready")
+	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
+	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
+		t.Fatal("start installed receiver service after relay restart")
+	}
 
 	e2eMailbox(t, receiverMailboxState, "wait", "--for", receiverEndpoint, "--timeout", "60s", "--json")
 	claim := e2eClaim(t, mailbox, receiverMailboxState, receiverEndpoint)
@@ -316,6 +314,18 @@ func e2eStartRelayProxy(t *testing.T, relayAddress string, listener net.Listener
 		_ = state.server.Shutdown(shutdown)
 	})
 	return state
+}
+
+func e2eStartRelay(t *testing.T, binary string, environment []string) *exec.Cmd {
+	t.Helper()
+	relay := exec.Command(binary)
+	relay.Env = environment
+	relay.Stdout = io.Discard
+	relay.Stderr = io.Discard
+	if err := relay.Start(); err != nil {
+		t.Fatal("start disposable central relay")
+	}
+	return relay
 }
 
 func e2eInstallClient(t *testing.T, root, home, relayURL, machineID, mailbox, mailboxState string, enable bool) {
@@ -602,6 +612,19 @@ func e2eStopProcess(command *exec.Cmd) {
 	case <-time.After(5 * time.Second):
 		_ = command.Process.Kill()
 		<-done
+	}
+}
+
+func e2eKillProcess(t *testing.T, command *exec.Cmd) {
+	t.Helper()
+	if command == nil || command.Process == nil {
+		t.Fatal("kill disposable relay without a process")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatalf("kill disposable relay: %v", err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("killed disposable relay exited cleanly")
 	}
 }
 
