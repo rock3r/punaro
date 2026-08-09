@@ -139,6 +139,14 @@ if you decline it during client setup.
 
 1. For a new unified server, add the printed JSON record to the protected
    relay-machine file before the initial `punaro init --relay-machines-file`.
+   Before mail cutover, to add or revoke a client later, replace that complete protected file and
+   run `punaro relay configure --directory INSTALLATION_DIR
+   --relay-machines-file RELAY_MACHINES_FILE --yes`, followed by `punaro up`.
+   Use the explicit JSON value `[]` to revoke the final client; the restarted
+   relay then accepts no signed machine requests.
+   After mail cutover, this command can only retain or remove already registered
+   keys. New mailbox clients are currently unavailable until a durable
+   post-cutover authority-registration workflow is delivered.
    Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
    `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this

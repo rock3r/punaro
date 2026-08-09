@@ -42,10 +42,14 @@ func machineEnrollmentAuthenticator(raw string) (*Authenticator, []Machine, erro
 	return authenticator, machines, nil
 }
 
-// ParseMachineEnrollments parses the non-secret daemon enrollment setting. It
-// deliberately accepts public keys only; an adapter's private key must never
-// be supplied to or persisted by the relay.
+// ParseMachineEnrollments parses the non-secret daemon enrollment setting. An
+// explicit empty array revokes all machines. It deliberately accepts public
+// keys only; an adapter's private key must never be supplied to or persisted by
+// the relay.
 func ParseMachineEnrollments(raw string) ([]Machine, error) {
+	if !strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		return nil, fmt.Errorf("parse machine enrollment: expected array")
+	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var records []struct {
@@ -60,9 +64,6 @@ func ParseMachineEnrollments(raw string) ([]Machine, error) {
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("parse machine enrollment: trailing JSON")
-	}
-	if len(records) == 0 {
-		return nil, fmt.Errorf("machine enrollment is empty")
 	}
 	machines := make([]Machine, 0, len(records))
 	for _, record := range records {

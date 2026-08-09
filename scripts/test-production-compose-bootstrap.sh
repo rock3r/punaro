@@ -195,6 +195,13 @@ if docker compose --project-name "$project" --file "$root/deploy/compose/product
 	exit 1
 fi
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname postgres --command 'DROP DATABASE punaro_bootstrap_other WITH (FORCE)'
+# The preceding bootstrap hardening probes deliberately mutate the production
+# database. Recreate it before the independent fresh-init phase: `punaro init`
+# must prove that it can migrate a genuinely pristine target, not a selectively
+# cleaned test fixture.
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname postgres --command 'DROP DATABASE punaro WITH (FORCE)'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname postgres --command 'CREATE DATABASE punaro OWNER punaro_owner'
+docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps postgres-bootstrap
 (cd "$root" && go run ./cmd/punaro init \
 	--directory "$installation_dir" \
 	--data-dir "$data_dir" \
@@ -213,6 +220,22 @@ grep -Fxq 'PUNARO_RELAY_ENABLED=true' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_RELAY_STORE=postgres' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=/var/lib/punaro/attachments' "$installation_dir/punarod.env"
+printf '%s\n' '[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]' >"$relay_machines"
+(cd "$root" && go run ./cmd/punaro relay configure \
+	--directory "$installation_dir" \
+	--relay-machines-file "$relay_machines" \
+	--yes)
+grep -Fqx "PUNARO_RELAY_MACHINES_JSON='[{\"id\":\"machine-b\",\"public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"endpoint_prefixes\":[\"agent/b/\"],\"endpoints\":[],\"attachment_device_id\":\"\"}]'" "$installation_dir/punarod.env"
+if grep -F 'agent/a/' "$installation_dir/punarod.env" >/dev/null; then
+	echo 'relay configuration retained a removed enrollment' >&2
+	exit 1
+fi
+printf '%s\n' '[]' >"$relay_machines"
+(cd "$root" && go run ./cmd/punaro relay configure \
+	--directory "$installation_dir" \
+	--relay-machines-file "$relay_machines" \
+	--yes)
+grep -Fxq "PUNARO_RELAY_MACHINES_JSON='[]'" "$installation_dir/punarod.env"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT 1 FROM relay.projects LIMIT 1'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TRUNCATE ON relay.projects TO punaro_app'

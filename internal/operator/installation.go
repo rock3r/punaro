@@ -97,6 +97,7 @@ type Installation struct {
 	TrustedAttachmentBlobDir  string                  `json:"trusted_attachment_blob_dir,omitempty"`
 	RelayEnabled              bool                    `json:"relay_enabled"`
 	RelayMachinesJSON         string                  `json:"relay_machines_json,omitempty"`
+	RelayKnownMachineKeysJSON string                  `json:"relay_known_machine_keys_json,omitempty"`
 	MailCutover               *MailCutoverPublication `json:"mail_cutover,omitempty"`
 }
 
@@ -400,6 +401,12 @@ func Load(directory string) (Installation, error) {
 		if err := validateRelayMachinesJSON(installation.RelayMachinesJSON); err != nil {
 			return Installation{}, errors.New("published installation relay enrollment is invalid")
 		}
+	}
+	if installation.RelayKnownMachineKeysJSON != "" && !validRelayMachineKeysJSON(installation.RelayKnownMachineKeysJSON) {
+		return Installation{}, errors.New("published installation relay key history is invalid")
+	}
+	if installation.MailCutover != nil && installation.RelayKnownMachineKeysJSON != "" && !relayMachineKeysContain(installation.RelayKnownMachineKeysJSON, installation.RelayMachinesJSON) {
+		return Installation{}, errors.New("published installation relay key history is incomplete")
 	}
 	if installation.RelayEnabled && installation.RelayMachinesJSON == "" {
 		return Installation{}, errors.New("published installation relay configuration is invalid")

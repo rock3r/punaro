@@ -17,6 +17,19 @@ func TestParseMachineEnrollmentsAcceptsPublicKeysOnly(t *testing.T) {
 	}
 }
 
+func TestParseMachineEnrollmentsAcceptsEmptySetForExplicitRevocation(t *testing.T) {
+	machines, err := ParseMachineEnrollments(`[]`)
+	if err != nil || len(machines) != 0 {
+		t.Fatalf("machines=%#v err=%v", machines, err)
+	}
+}
+
+func TestParseMachineEnrollmentsRejectsNullInsteadOfRevoking(t *testing.T) {
+	if _, err := ParseMachineEnrollments(`null`); err == nil {
+		t.Fatal("null enrollment was accepted as a revocation")
+	}
+}
+
 func TestParseMachineEnrollmentsAcceptsExactEndpoints(t *testing.T) {
 	publicKey := make([]byte, 32)
 	publicKey[0] = 1

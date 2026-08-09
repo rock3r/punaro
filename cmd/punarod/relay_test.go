@@ -67,6 +67,52 @@ func TestBuildRelayHandlerRejectsInvalidEnrollment(t *testing.T) {
 	}
 }
 
+func TestBuildRelayHandlerRevokedEnrollmentFailsClosedAfterRestart(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(public) + `","endpoint_prefixes":["agent/a/"]}]`
+	dataDir := t.TempDir()
+	first, firstStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: machines})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := signedRelayRequest(t, private, "machine-a", "first-request")
+	response := httptest.NewRecorder()
+	first.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("initial status=%d body=%s", response.Code, response.Body.String())
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, restartedStore, err := buildRelayHandler(config.Config{DataDir: dataDir, RelayEnabled: true, RelayMachinesJSON: `[]`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restartedStore.Close() })
+	request = signedRelayRequest(t, private, "machine-a", "revoked-request")
+	response = httptest.NewRecorder()
+	restarted.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func signedRelayRequest(t *testing.T, private ed25519.PrivateKey, machineID, nonce string) *http.Request {
+	t.Helper()
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPut, "/v1/machines/me/endpoints", bytes.NewBufferString(`{"endpoints":["agent/a/session"]}`))
+	signed := relay.SignedRequest{MachineID: machineID, Method: request.Method, Path: request.URL.Path, Body: []byte(`{"endpoints":["agent/a/session"]}`), Timestamp: time.Now().UTC(), Nonce: nonce}
+	signed.Signature = ed25519.Sign(private, relay.CanonicalRequest(signed))
+	request.Header.Set("X-Punaro-Machine", signed.MachineID)
+	request.Header.Set("X-Punaro-Timestamp", signed.Timestamp.Format(time.RFC3339Nano))
+	request.Header.Set("X-Punaro-Nonce", signed.Nonce)
+	request.Header.Set("X-Punaro-Signature", base64.RawURLEncoding.EncodeToString(signed.Signature))
+	return request
+}
+
 func TestBuildRelayCanSelectPostgresBackendWithoutOpeningSQLite(t *testing.T) {
 	backend, err := relay.Open(filepath.Join(t.TempDir(), "postgres-backend-double.db"))
 	if err != nil {

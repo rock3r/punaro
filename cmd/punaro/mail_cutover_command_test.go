@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,42 @@ func TestMailCutoverCommandPassesExactIrreversibleAuthorization(t *testing.T) {
 	args := []string{"--directory", directory, "--relay-machines-file", relayMachines, "--epoch-id", epoch, "--expected-source-fingerprint", fingerprint, "--yes"}
 	if code := runMailCutover(args, &stdout, &stderr, execute); code != 0 || !strings.Contains(stdout.String(), `"phase": "active"`) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestMailCutoverCommandRecoversStagedInitialRelayEnrollment(t *testing.T) {
+	directory := testInstallation(t)
+	relayMachines := filepath.Join(filepath.Dir(directory), "relay-machines.json")
+	const relayMachinesJSON = `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]`
+	if err := os.WriteFile(relayMachines, []byte(relayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	installation, err := operator.Load(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation.RelayMachinesJSON = relayMachinesJSON
+	staged, err := json.Marshal(installation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, ".installation.mail-cutover.json"), staged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	epoch := "019f7f07-8b88-7c12-a394-b663274a6555"
+	fingerprint := strings.Repeat("a", 64)
+	called := false
+	execute := func(_ context.Context, installation operator.Installation, dryRun, abort bool, request cutover.Request) (any, error) {
+		called = true
+		if dryRun || abort || installation.RelayMachinesJSON != relayMachinesJSON || request.EpochID != epoch || request.ExpectedSourceFingerprint != fingerprint {
+			t.Fatalf("installation=%#v request=%#v dry=%t abort=%t", installation, request, dryRun, abort)
+		}
+		return cutover.Result{EpochID: epoch, SourceFingerprint: fingerprint, SourcePhase: relay.MigrationSourceRetired, Phase: postgres.MailCutoverActive}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	args := []string{"--directory", directory, "--relay-machines-file", relayMachines, "--epoch-id", epoch, "--expected-source-fingerprint", fingerprint, "--yes"}
+	if code := runMailCutover(args, &stdout, &stderr, execute); code != 0 || !called {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
 	}
 }
 

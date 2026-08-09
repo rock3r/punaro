@@ -319,7 +319,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|mail|backup|restore|update")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|relay|mail|backup|restore|update")
 		return 2
 	}
 	switch args[0] {
@@ -338,6 +338,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "mail":
 		if len(args) > 1 && args[1] == "cutover" {
 			return runMailCutover(args[2:], stdout, stderr, executeMailCutover)
+		}
+	case "relay":
+		if len(args) > 1 && args[1] == "configure" {
+			return runRelayConfigure(args[2:], stdout, stderr, operator.ConfigureRelayMachines)
 		}
 	case "backup":
 		return runBackup(args[1:], stdout, stderr)

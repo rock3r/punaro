@@ -44,7 +44,16 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 	var installation operator.Installation
 	var err error
 	if !*dryRun && !*abort {
-		installation, err = operator.LoadMailCutoverRecovery(*directory)
+		// A supplied enrollment is also the exact authority needed to finish an
+		// interrupted initial enrollment publication. Recover it before checking
+		// whether any remaining staged update may enter irreversible cutover.
+		if *relayMachinesFile != "" {
+			if _, err := operator.ConfigureMailCutoverRelayMachines(*directory, *relayMachinesFile); err != nil {
+				_, _ = fmt.Fprintln(stderr, "mail cutover relay enrollment is unavailable")
+				return 1
+			}
+		}
+		installation, err = operator.LoadMailCutoverExecution(*directory)
 	} else {
 		installation, err = operator.Load(*directory)
 	}
@@ -53,13 +62,6 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 		return 1
 	}
 	if !*dryRun && !*abort {
-		if *relayMachinesFile != "" {
-			installation, err = operator.ConfigureMailCutoverRelayMachines(*directory, *relayMachinesFile)
-			if err != nil {
-				_, _ = fmt.Fprintln(stderr, "mail cutover relay enrollment is unavailable")
-				return 1
-			}
-		}
 		if installation.RelayMachinesJSON == "" {
 			_, _ = fmt.Fprintln(stderr, "mail cutover execution requires --relay-machines-file")
 			return 2
