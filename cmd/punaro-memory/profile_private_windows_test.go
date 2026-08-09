@@ -39,6 +39,14 @@ func TestWindowsProfileWriteAndRead(t *testing.T) {
 	}
 }
 
+func TestWindowsProfileRejectsCaseInsensitiveCredentialAlias(t *testing.T) {
+	profile := `C:\Punaro\DEVICE.CREDENTIAL`
+	credential := `c:\punaro\device.credential`
+	if !sameCleanProfilePath(profile, credential) {
+		t.Fatal("Windows case-insensitive credential alias was not detected")
+	}
+}
+
 func setMemoryProfileACL(t *testing.T, path, additionalACE string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

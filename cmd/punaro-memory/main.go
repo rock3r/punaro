@@ -83,7 +83,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	flags.Visit(func(parsed *flag.Flag) { explicit[parsed.Name] = true })
 	if command == "profile-write" {
 		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project}
-		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanPath(*profilePath, candidate.CredentialFile) {
+		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanProfilePath(*profilePath, candidate.CredentialFile) {
 			return 2
 		}
 		if err := saveProfile(*profilePath, candidate); err != nil {
@@ -291,7 +291,7 @@ func commandFlags(command string) []string {
 }
 
 func saveProfile(path string, value profile) error {
-	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanPath(path, value.CredentialFile) {
+	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanProfilePath(path, value.CredentialFile) {
 		return errors.New("profile is invalid")
 	}
 	if !noSymlinkPath(filepath.Dir(path)) || !noSymlinkPath(filepath.Dir(value.CredentialFile)) {
@@ -390,10 +390,6 @@ func loadProfile(path string) (profile, error) {
 
 func safeProfilePath(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path
-}
-
-func sameCleanPath(left, right string) bool {
-	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func validProfile(value profile) bool {

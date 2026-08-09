@@ -40,6 +40,9 @@ func privateProfileFile(info os.FileInfo) bool {
 
 func privateProfileFilePath(string) bool { return true }
 func protectProfileFile(string) error    { return nil }
+func sameCleanProfilePath(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
 
 func syncProfileDirectory(path string) error {
 	directory, err := os.Open(path) // #nosec G304,G703 -- directory path is explicit and checked before use.

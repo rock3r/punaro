@@ -20,6 +20,9 @@ func privateProfileFile(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0
 }
 func privateProfileFilePath(path string) bool { return privateWindowsACL(path) }
+func sameCleanProfilePath(left, right string) bool {
+	return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+}
 
 func protectProfileFile(path string) error {
 	if err := protectWindowsPath(path); err != nil || !privateWindowsACL(path) {
