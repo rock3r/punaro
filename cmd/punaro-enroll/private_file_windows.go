@@ -32,41 +32,23 @@ func reservedStateFileName(name string) bool {
 
 func lockEnrollmentState(stateDir string) (func(), error) {
 	path := filepath.Join(stateDir, redemptionLockName)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- fixed private state child.
-	created := err == nil
-	if errors.Is(err, os.ErrExist) {
-		file, err = os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
+	// Publish a fully protected file atomically. Creating the final lock path
+	// first would expose a crash window where its inherited DACL permanently
+	// poisons all later redemptions.
+	if err := writePrivateAtomicNew(path, []byte("lock\n")); err != nil && !errors.Is(err, os.ErrExist) {
+		return nil, err
 	}
+	file, err := os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
 	if err != nil {
 		return nil, err
 	}
-	cleanupCreated := func() {
-		if created {
-			_ = os.Remove(path) // #nosec G703 -- exact lock file created by this invocation.
-		}
-	}
-	if created {
-		if err := file.Close(); err != nil {
-			cleanupCreated()
-			return nil, err
-		}
-		if err := protectWindowsPath(path); err != nil || !privateWindowsACL(path) {
-			cleanupCreated()
-			return nil, errors.New("could not protect enrollment lock")
-		}
-		file, err = os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
-		if err != nil {
-			cleanupCreated()
-			return nil, err
-		}
-	} else if !privateWindowsACL(path) {
+	if !privateWindowsACL(path) {
 		_ = file.Close()
 		return nil, errors.New("unsafe enrollment lock")
 	}
 	overlapped := windows.Overlapped{}
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped); err != nil {
 		_ = file.Close()
-		cleanupCreated()
 		return nil, err
 	}
 	return func() {
