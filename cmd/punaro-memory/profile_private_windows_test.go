@@ -29,7 +29,7 @@ func TestWindowsProfileRequiresExclusiveDACL(t *testing.T) {
 
 func TestWindowsProfileWriteAndRead(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memory-profile.json")
-	value := profile{Origin: "https://memory.example.test", CredentialFile: `C:\Punaro\device.credential`}
+	value := profile{Origin: "https://memory.example.test", CredentialFile: filepath.Join(filepath.Dir(path), "device.credential")}
 	if err := saveProfile(path, value); err != nil {
 		t.Fatal(err)
 	}
