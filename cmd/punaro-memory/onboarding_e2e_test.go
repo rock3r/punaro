@@ -131,7 +131,7 @@ func TestMemoryOnboardingE2EComposeRunsAllOnboardingChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal("E2E Compose manifest is unavailable")
 	}
-	if !strings.Contains(string(compose), "-run") || !strings.Contains(string(compose), "MemoryOnboarding") || !strings.Contains(string(compose), "InstalledMemoryClientOnboardingE2E") {
+	if !strings.Contains(string(compose), "-run") || !strings.Contains(string(compose), "MemoryOnboarding") || !strings.Contains(string(compose), "InstalledMemoryClientOnboardingE2E") || !strings.Contains(string(compose), "InstalledCompleteProductE2E") {
 		t.Fatal("E2E Compose manifest excludes onboarding guard tests")
 	}
 }
@@ -414,11 +414,17 @@ func TestInstalledCompleteProductE2E(t *testing.T) {
 	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "delete", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--idempotency-key", uuid.NewString())
 
 	lookupID, _, validCredential := strings.Cut(strings.TrimSpace(string(credentialRaw)), ".")
-	if err != nil || !validCredential || admin.RevokeDeviceCredential(ctx, owner.ID, lookupID) != nil {
+	revokeCtx, revokeCancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer revokeCancel()
+	if err != nil || !validCredential || admin.RevokeDeviceCredential(revokeCtx, owner.ID, lookupID) != nil {
 		t.Fatal("product credential revocation setup failed")
 	}
 	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), memory, "get", "--profile", profile, "--item", itemID)
-	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", downloads)
+	revokedDownloads := filepath.Join(clientHome, "revoked-downloads")
+	if err := os.Mkdir(revokedDownloads, 0o700); err != nil {
+		t.Fatal("revoked download root setup failed")
+	}
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", revokedDownloads)
 }
 
 type e2eRelay struct {
