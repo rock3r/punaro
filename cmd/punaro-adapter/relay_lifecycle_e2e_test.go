@@ -166,9 +166,6 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	proxyURL := "http://" + proxy.listener.Addr().String()
 	e2eAdvertiseEndpoint(t, proxyURL, senderHome, senderEndpoint)
 	e2eAdvertiseEndpoint(t, proxyURL, receiverHome, receiverEndpoint)
-	e2eStopProcess(relay)
-	relay = e2eStartRelay(t, relayBinary, relayEnvironment)
-	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "restarted central relay did not become ready")
 
 	senderAdapter := filepath.Join(senderHome, ".local", "bin", "punaro-adapter")
 	sender := exec.Command(senderAdapter)
@@ -181,13 +178,16 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		t.Fatal("start installed sender adapter")
 	}
 	t.Cleanup(func() { e2eStopProcess(sender) })
-	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
-		t.Fatal("start installed receiver service")
-	}
 
 	conversationID := e2eCreateConversation(t, senderAdapter, senderProfile, senderEndpoint, receiverEndpoint)
-	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
 	e2eSend(t, senderAdapter, senderProfile, conversationID, senderEndpoint)
+	e2eStopProcess(relay)
+	relay = e2eStartRelay(t, relayBinary, relayEnvironment)
+	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "restarted central relay did not become ready")
+	e2eRejectUnauthorizedLease(t, proxyURL, senderHome, receiverEndpoint)
+	if err := e2eLaunchctl("bootstrap", launchDomain, servicePath); err != nil {
+		t.Fatal("start installed receiver service after relay restart")
+	}
 
 	e2eMailbox(t, receiverMailboxState, "wait", "--for", receiverEndpoint, "--timeout", "60s", "--json")
 	claim := e2eClaim(t, mailbox, receiverMailboxState, receiverEndpoint)
