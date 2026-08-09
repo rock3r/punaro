@@ -331,17 +331,17 @@ an existing private download root. Follow the
 send, receive, and delete safety boundaries. No production installer accepts
 legacy v2/v3 authority, role, directory, wrapping-key, or permit options.
 
-On macOS and Linux the same installer also builds `punaro-memory`, the native
+The same installer on macOS, Linux, and Windows also builds `punaro-memory`, the native
 client for an already enabled M-17 memory API. Supply the fixed HTTPS origin,
 an absolute owner-only device credential file, and explicit project/key/ETag
 coordinates, or write a protected non-secret profile containing only the
 origin, credential-file path, and optional default project; see the
 [operator guide](operator-guide.md#native-memory-client). The same binary can
 run as a local stdio MCP server with `punaro-memory mcp --profile ...`; this is
-local profile-backed MCP, not the later remote OAuth MCP gateway. Windows memory
-credential loading remains fail-closed until a later slice adds paired ACL and
-reparse-point provisioning and verification, so the Windows installer does not
-install this binary yet.
+local profile-backed MCP, not the later remote OAuth MCP gateway. On Windows,
+store both the profile and credential in files protected by the current-user-only
+ACL that the installer uses below `%LOCALAPPDATA%\Punaro`; reparse points,
+shared ACLs, and replacement races fail closed.
 
 ## Agent mailbox behavior
 

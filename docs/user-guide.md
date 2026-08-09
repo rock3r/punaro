@@ -33,7 +33,7 @@ then have the operator provision its protected credential file, fixed trusted
 origin, project UUID, and safe download root. The installer never reads or
 prints the credential.
 
-On macOS and Linux the installer also provides `punaro-memory` for an already
+On macOS, Linux, and Windows the installer also provides `punaro-memory` for an already
 enabled native memory API. Every command either names the fixed HTTPS origin,
 protected credential file, project or resolver input, and any required
 idempotency key and strong ETag, or uses an explicit protected profile that

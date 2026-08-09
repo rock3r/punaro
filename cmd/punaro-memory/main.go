@@ -83,7 +83,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	flags.Visit(func(parsed *flag.Flag) { explicit[parsed.Name] = true })
 	if command == "profile-write" {
 		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project}
-		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanPath(*profilePath, candidate.CredentialFile) {
+		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanProfilePath(*profilePath, candidate.CredentialFile) {
 			return 2
 		}
 		if err := saveProfile(*profilePath, candidate); err != nil {
@@ -291,10 +291,10 @@ func commandFlags(command string) []string {
 }
 
 func saveProfile(path string, value profile) error {
-	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanPath(path, value.CredentialFile) {
+	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanProfilePath(path, value.CredentialFile) {
 		return errors.New("profile is invalid")
 	}
-	if !noSymlinkPath(filepath.Dir(path)) || !noSymlinkPath(filepath.Dir(value.CredentialFile)) {
+	if !privateProfilePath(path) || !safeProfileCredentialPath(value.CredentialFile) {
 		return errors.New("profile path is unsafe")
 	}
 	value.Version = profileVersion
@@ -322,6 +322,10 @@ func saveProfile(path string, value profile) error {
 		_ = temp.Close()
 		return err
 	}
+	if err := protectProfileFile(tempPath); err != nil || !privateProfileFilePath(tempPath) {
+		_ = temp.Close()
+		return errors.New("could not protect profile")
+	}
 	if _, err := temp.Write(raw); err != nil {
 		_ = temp.Close()
 		return err
@@ -333,14 +337,17 @@ func saveProfile(path string, value profile) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if !noSymlinkPath(directory) {
+	if !privateProfileFilePath(tempPath) {
+		return errors.New("could not protect profile")
+	}
+	if !privateProfilePath(path) {
 		return errors.New("profile directory changed while writing")
 	}
 	if err := os.Rename(tempPath, path); err != nil { // #nosec G703 -- source and target are validated absolute profile paths in the same checked directory.
 		return err
 	}
 	removeTemp = false
-	if err := syncDirectory(directory); err != nil {
+	if err := syncProfileDirectory(directory); err != nil {
 		return err
 	}
 	return nil
@@ -348,11 +355,11 @@ func saveProfile(path string, value profile) error {
 
 func loadProfile(path string) (profile, error) {
 	var value profile
-	if !safeProfilePath(path) || !privateProfilePath(path) || !noSymlinkPath(path) {
+	if !safeProfilePath(path) || !privateProfilePath(path) {
 		return value, errors.New("profile path is unsafe")
 	}
 	before, err := os.Lstat(path) // #nosec G703 -- explicit absolute CLI profile path checked component-by-component.
-	if err != nil || !before.Mode().IsRegular() || !privateProfileFile(before) {
+	if err != nil || !before.Mode().IsRegular() || !privateProfileFile(before) || !privateProfileFilePath(path) {
 		return value, errors.New("profile is unavailable")
 	}
 	file, err := os.Open(path) // #nosec G304,G703 -- explicit absolute CLI profile path checked before and after opening.
@@ -361,7 +368,7 @@ func loadProfile(path string) (profile, error) {
 	}
 	defer func() { _ = file.Close() }()
 	after, err := file.Stat()
-	if err != nil || !after.Mode().IsRegular() || !privateProfileFile(after) || !os.SameFile(before, after) || !noSymlinkPath(path) {
+	if err != nil || !after.Mode().IsRegular() || !privateProfileFile(after) || !privateProfileFilePath(path) || !os.SameFile(before, after) || !privateProfilePath(path) {
 		return value, errors.New("profile changed while opening")
 	}
 	raw, err := io.ReadAll(io.LimitReader(file, maxProfileSize+1))
@@ -387,10 +394,6 @@ func loadProfile(path string) (profile, error) {
 
 func safeProfilePath(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path
-}
-
-func sameCleanPath(left, right string) bool {
-	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 func validProfile(value profile) bool {
@@ -458,15 +461,6 @@ func rejectDuplicateTopLevelJSONFields(raw []byte) error {
 		return errors.New("profile has trailing data")
 	}
 	return nil
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path) // #nosec G304,G703 -- directory path is explicit and checked before use.
-	if err != nil {
-		return err
-	}
-	defer func() { _ = directory.Close() }()
-	return directory.Sync()
 }
 
 func validCommand(command, project, item, proposal, key, etag, input, query, kind, locator, cursorFile string, limit int) bool {

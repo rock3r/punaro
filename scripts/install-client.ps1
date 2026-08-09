@@ -135,6 +135,7 @@ $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-keygen') -Output (Join-Path $binDir 'punaro-keygen.exe')
 foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {

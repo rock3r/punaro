@@ -668,13 +668,16 @@ adapter, semantic retrieval, offline queue, or Compose Pi integration.
 ### Native memory client
 
 M-17C1 adds `punaro-memory` without changing the server activation flags. Build
-it with `make memory-client`; the macOS/Linux client installer also places it
-in `~/.local/bin`. The operator must separately provision an absolute regular
-credential file below non-writable, non-symlink parent directories. The file
-must be owned by the current user, have no group/other permissions, and have
-exactly one hard link. The CLI accepts an explicit HTTPS `--origin` and
-`--credential-file`, and the bearer credential value is never stored by the
-client.
+it with `make memory-client`; the macOS/Linux installer places it in
+`~/.local/bin` and the Windows installer places `punaro-memory.exe` below
+`%LOCALAPPDATA%\Punaro\bin`. The operator must separately provision an absolute
+regular credential file. On macOS/Linux it must be below non-writable,
+non-symlink parent directories, owned by the current user, have no group/other
+permissions, and have exactly one hard link. On Windows it must have one
+protected FullControl ACE for the current user and no shared ACEs, and neither
+the credential nor any parent may be a reparse point. The CLI accepts an
+explicit HTTPS `--origin` and `--credential-file`, and the bearer credential
+value is never stored by the client.
 
 M-17C2 adds a protected local profile for convenience. Create it only with an
 absolute target path:
@@ -689,7 +692,9 @@ punaro-memory profile-write \
 
 The profile is an atomically replaced `0600` JSON file containing only
 non-secret defaults: origin, credential-file path, and optional project UUID.
-Normal commands may pass `--profile`; explicit `--origin`, `--credential-file`,
+On Windows the binary writes and verifies the equivalent exclusive current-user
+DACL before reading it; reparse points, shared ACLs, and replacement races are
+rejected. Normal commands may pass `--profile`; explicit `--origin`, `--credential-file`,
 and `--project` flags override the profile defaults for that invocation.
 
 Pass an explicit `--project` UUID to project-scoped commands. `resolve` accepts
@@ -705,9 +710,7 @@ The client makes one request and exits. It has no implicit retry, writable
 cache, queue, Git configuration lookup, project registry, stdin body, or
 fallback memory. A retry is an explicit caller decision using the same body,
 key, and ETag. Errors are deliberately generic; use server-side content-free
-audit metadata for diagnosis. Windows credential loading is intentionally
-unavailable until a later slice pairs protected credential/profile creation
-with verified DACL and reparse-point handling.
+audit metadata for diagnosis.
 
 M-17D adds local stdio MCP mode to the same binary:
 

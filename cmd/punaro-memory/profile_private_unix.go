@@ -37,3 +37,19 @@ func privateProfileFile(info os.FileInfo) bool {
 	uid := os.Getuid()
 	return ok && uid >= 0 && stat.Uid == uint32(uid) && stat.Nlink == 1 && info.Mode().Perm()&0o077 == 0 // #nosec G115 -- nonnegative OS UID fits the platform field.
 }
+
+func privateProfileFilePath(string) bool { return true }
+func protectProfileFile(string) error    { return nil }
+func sameCleanProfilePath(left, right string) bool {
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+func safeProfileCredentialPath(path string) bool { return noSymlinkPath(filepath.Dir(path)) }
+
+func syncProfileDirectory(path string) error {
+	directory, err := os.Open(path) // #nosec G304,G703 -- directory path is explicit and checked before use.
+	if err != nil {
+		return err
+	}
+	defer func() { _ = directory.Close() }()
+	return directory.Sync()
+}
