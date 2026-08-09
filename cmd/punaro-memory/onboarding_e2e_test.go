@@ -32,6 +32,7 @@ import (
 
 	"github.com/google/uuid"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const (
@@ -264,6 +265,162 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	}
 }
 
+// TestInstalledCompleteProductE2E exercises the two native surfaces that share
+// the supported enrolled-device installation: memory (including stdio MCP) and
+// trusted attachments.  It deliberately uses a disposable real relay behind
+// HTTPS rather than an in-process handler, so the release gate covers the
+// installed binaries' transport, credential, restart, and storage boundaries.
+func TestInstalledCompleteProductE2E(t *testing.T) {
+	ownerDSN, appDSN := os.Getenv(e2eOwnerDSNEnv), os.Getenv(e2eAppDSNEnv)
+	if ownerDSN == "" || appDSN == "" {
+		t.Skip("requires disposable PostgreSQL Compose service")
+	}
+
+	fixture := t.TempDir()
+	ownerDSNFile := writePrivateFile(t, fixture, "owner.dsn", ownerDSN)
+	appDSNFile := writePrivateFile(t, fixture, "app.dsn", appDSN)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	if _, err := punaropostgres.Migrate(ctx, punaropostgres.Config{DSNFile: ownerDSNFile}); err != nil {
+		t.Fatal("disposable product relay migration failed")
+	}
+	admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: ownerDSNFile})
+	if err != nil {
+		t.Fatal("disposable product relay administration failed")
+	}
+	defer func() { _ = admin.Close() }()
+	owner, err := admin.BootstrapOwner(ctx, "complete product E2E owner")
+	if errors.Is(err, punaropostgres.ErrAlreadyInitialized) {
+		owner, err = admin.InstallationOwner(ctx)
+	}
+	if err != nil {
+		t.Fatal("disposable product relay owner setup failed")
+	}
+	application, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: appDSNFile})
+	if err != nil {
+		t.Fatal("disposable product relay application setup failed")
+	}
+	defer func() { _ = application.Close() }()
+	project, err := application.CreateProject(ctx, punaropostgres.ProjectCreate{PrincipalID: owner.ID, IdempotencyKey: uuid.NewString(), DisplayName: "complete product authorized project"})
+	if err != nil {
+		t.Fatal("authorized product project setup failed")
+	}
+	otherProject, err := application.CreateProject(ctx, punaropostgres.ProjectCreate{PrincipalID: owner.ID, IdempotencyKey: uuid.NewString(), DisplayName: "complete product isolated project"})
+	if err != nil {
+		t.Fatal("isolated product project setup failed")
+	}
+	productRelay := startE2ERelay(t, fixture, appDSNFile)
+	defer productRelay.stop(t)
+	proxy := startE2ETLSProxy(t, productRelay.address)
+	defer proxy.close(t)
+
+	clientHome := filepath.Join(fixture, "client-home")
+	mailbox := writeE2EMailbox(t, fixture)
+	runE2ECommand(t, e2eEnv(clientHome, ""), "sh", filepath.Join(e2eRepositoryRoot(t), "scripts", "install-client.sh"), "--relay-url", proxy.origin(), "--machine-id", "complete-product-e2e", "--agent-mailbox-bin", mailbox)
+	enroller := filepath.Join(clientHome, ".local", "bin", "punaro-enroll")
+	memory := filepath.Join(clientHome, ".local", "bin", "punaro-memory")
+	attachment := filepath.Join(clientHome, ".local", "bin", "punaro-trusted-attachment")
+	enrollmentState := filepath.Join(clientHome, ".config", "punaro", "device-enrollment")
+	preparedRaw := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "prepare", "--origin", proxy.origin(), "--state-dir", enrollmentState)
+	var prepared struct {
+		ClientBinding string `json:"client_binding"`
+	}
+	if json.Unmarshal(preparedRaw, &prepared) != nil || prepared.ClientBinding == "" {
+		t.Fatal("installed product client did not create an enrollment binding")
+	}
+	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment([]string{project.ProjectID}, false)
+	if err != nil {
+		t.Fatal("product enrollment preview setup failed")
+	}
+	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, Label: "complete product E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
+	if err != nil {
+		t.Fatal("product enrollment setup failed")
+	}
+	previewRaw, err := json.MarshalIndent(struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "trusted-agent", PreviewHash: previewHash, Grants: grants}, "", "  ")
+	if err != nil {
+		t.Fatal("encode product enrollment preview")
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal("encode product enrollment material")
+	}
+	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", string(previewRaw)+"\n"+string(pendingRaw)+"\n")
+	credentialFile := filepath.Join(enrollmentState, "device.credential")
+	runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "redeem", "--state-dir", enrollmentState, "--enrollment-file", material, "--credential-file", credentialFile)
+
+	profile := filepath.Join(clientHome, ".config", "punaro", "memory-profile.json")
+	runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "profile-write", "--profile", profile, "--origin", proxy.origin(), "--credential-file", credentialFile, "--project", project.ProjectID)
+	input := writePrivateFile(t, fixture, "product-memory-input.json", `{"logical_key":"e2e.product","kind":"decision","trust":"curated","document":{"title":"complete-product-e2e"}}`)
+	itemID := e2EMutationID(t, runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "create", "--profile", profile, "--idempotency-key", uuid.NewString(), "--input", input))
+	assertE2EItemTitle(t, runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "get", "--profile", profile, "--item", itemID), itemID, "complete-product-e2e")
+	mcp := startE2EMCP(t, e2eEnv(clientHome, proxy.caFile), memory, profile)
+	mcp.request(t, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"complete-product-e2e","version":"0"}}}`)
+	mcp.expectResult(t)
+	mcp.request(t, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"punaro_memory_get","arguments":{"item":"`+itemID+`"}}}`)
+	mcp.expectTool(t, false)
+	mcp.close(t)
+
+	source := writePrivateFile(t, fixture, "complete-product.txt", "complete product attachment body\n")
+	sent := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), attachment, "send", "--origin", proxy.origin(), "--credential-file", credentialFile, "--project", project.ProjectID, "--idempotency-key", uuid.NewString(), "--file", source, "--name", "complete-product.txt", "--media-type", "text/plain")
+	var artifact struct {
+		ArtifactID string `json:"artifact_id"`
+		SHA256     string `json:"sha256"`
+		State      string `json:"state"`
+	}
+	if json.Unmarshal(sent, &artifact) != nil || artifact.ArtifactID == "" || artifact.State != "ready" || artifact.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte("complete product attachment body\n"))) {
+		t.Fatal("installed trusted attachment sender did not publish an immutable artifact")
+	}
+	downloads := filepath.Join(clientHome, "downloads")
+	if err := os.Mkdir(downloads, 0o700); err != nil {
+		t.Fatal("safe download root setup failed")
+	}
+	credentialRaw, err := os.ReadFile(credentialFile)
+	if err != nil {
+		t.Fatal("read installed product credential")
+	}
+	authority, err := application.AuthenticateDevice(ctx, strings.TrimSpace(string(credentialRaw)))
+	if err != nil {
+		t.Fatal("authenticate installed product credential")
+	}
+	const senderEndpoint = "agent/complete-product/sender"
+	const receiverEndpoint = "agent/complete-product/receiver"
+	machineID := "complete-product-e2e"
+	now := time.Now().UTC()
+	principalAuthority := relay.PrincipalAuthority{PrincipalID: authority.PrincipalID, CredentialLookupID: authority.LookupID, CredentialGeneration: authority.Generation}
+	if err := application.AdvertiseEndpointsForPrincipal(machineID, principalAuthority, []string{senderEndpoint, receiverEndpoint}, now, time.Hour); err != nil {
+		t.Fatal("advertise complete-product receiver endpoint")
+	}
+	conversation, err := application.CreateConversationIdempotent(relay.CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.LookupID, CredentialGeneration: authority.Generation, ProjectID: project.ProjectID, IdempotencyKey: uuid.NewString(), CreatorEndpoint: senderEndpoint, Members: []relay.Member{{Endpoint: senderEndpoint, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}, {Endpoint: receiverEndpoint, Capabilities: relay.CapReceive}}, Now: now})
+	if err != nil {
+		t.Fatal("bind trusted attachment to complete-product conversation")
+	}
+	if _, _, err := application.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.LookupID, CredentialGeneration: authority.Generation, FromEndpoint: senderEndpoint, Body: "trusted attachment", ArtifactIDs: []string{artifact.ArtifactID}, IdempotencyKey: uuid.NewString(), Now: now}); err != nil {
+		t.Fatal("deliver trusted attachment reference to complete-product receiver")
+	}
+	runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", downloads)
+	downloaded, err := os.ReadFile(filepath.Join(downloads, "complete-product.txt"))
+	if err != nil || !bytes.Equal(downloaded, []byte("complete product attachment body\n")) {
+		t.Fatal("installed trusted attachment receiver did not preserve content integrity")
+	}
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "send", "--origin", proxy.origin(), "--credential-file", credentialFile, "--project", otherProject.ProjectID, "--idempotency-key", uuid.NewString(), "--file", source, "--name", "complete-product.txt", "--media-type", "text/plain")
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "send", "--origin", proxy.origin(), "--credential-file", credentialFile, "--project", project.ProjectID, "--idempotency-key", uuid.NewString(), "--file", filepath.Join(fixture, "missing-file"), "--name", "complete-product.txt", "--media-type", "text/plain")
+
+	productRelay.restart(t)
+	assertE2EItemTitle(t, runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "get", "--profile", profile, "--item", itemID), itemID, "complete-product-e2e")
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "delete", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--idempotency-key", uuid.NewString())
+
+	lookupID, _, validCredential := strings.Cut(strings.TrimSpace(string(credentialRaw)), ".")
+	if err != nil || !validCredential || admin.RevokeDeviceCredential(ctx, owner.ID, lookupID) != nil {
+		t.Fatal("product credential revocation setup failed")
+	}
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), memory, "get", "--profile", profile, "--item", itemID)
+	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", downloads)
+}
+
 type e2eRelay struct {
 	address string
 	binary  string
@@ -277,9 +434,14 @@ func startE2ERelay(t *testing.T, fixture, appDSNFile string) *e2eRelay {
 	runE2ECommand(t, nil, "go", "build", "-trimpath", "-o", binary, filepath.Join(e2eRepositoryRoot(t), "cmd", "punarod"))
 	address := e2eFreeAddress(t)
 	healthAddress := e2eFreeAddress(t)
+	blobDir := filepath.Join(fixture, "trusted-attachments")
+	if err := os.Mkdir(blobDir, 0o700); err != nil {
+		t.Fatal("trusted attachment blob directory setup failed")
+	}
 	relay := &e2eRelay{address: address, binary: binary, env: append(os.Environ(),
 		"PUNARO_POSTGRES_ENABLED=true", "PUNARO_POSTGRES_DSN_FILE="+appDSNFile,
 		"PUNARO_DEVICE_AUTH_ENABLED=true", "PUNARO_MEMORY_API_ENABLED=true", "PUNARO_MEMORY_MUTATIONS_ENABLED=true",
+		"PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true", "PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR="+blobDir,
 		"PUNARO_INGRESS_MODE=internet", "PUNARO_PUBLIC_URL=https://memory-e2e.invalid",
 		"PUNARO_LISTEN_ADDR="+address, "PUNARO_HEALTH_LISTEN_ADDR="+healthAddress,
 	)}
@@ -497,9 +659,9 @@ func runE2ECommand(t *testing.T, env []string, name string, args ...string) []by
 	if env != nil {
 		command.Env = env
 	}
-	stdout, err := command.Output()
+	stdout, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatal("E2E command failed")
+		t.Fatalf("E2E command failed: %s", strings.TrimSpace(string(stdout)))
 	}
 	return stdout
 }
@@ -515,6 +677,16 @@ func assertE2EFailure(t *testing.T, env []string, want string, name string, args
 	}
 }
 
+func assertE2ECommandFailure(t *testing.T, env []string, name string, args ...string) {
+	t.Helper()
+	command := exec.Command(name, args...) // #nosec G204 -- E2E test commands are fixed checkout tools and generated fixture paths.
+	command.Env = env
+	output, err := command.CombinedOutput()
+	if err == nil || len(output) == 0 || bytes.Contains(output, []byte("complete product attachment body")) {
+		t.Fatal("native complete-product failure was not safely classified")
+	}
+}
+
 func e2EMutationID(t *testing.T, raw []byte) string {
 	t.Helper()
 	var result struct {
@@ -527,6 +699,10 @@ func e2EMutationID(t *testing.T, raw []byte) string {
 }
 
 func assertE2EItem(t *testing.T, raw []byte, itemID string) {
+	assertE2EItemTitle(t, raw, itemID, "onboarding-memory-e2e")
+}
+
+func assertE2EItemTitle(t *testing.T, raw []byte, itemID, title string) {
 	t.Helper()
 	var result struct {
 		ItemID   string `json:"item_id"`
@@ -534,7 +710,7 @@ func assertE2EItem(t *testing.T, raw []byte, itemID string) {
 			Title string `json:"title"`
 		} `json:"document"`
 	}
-	if json.Unmarshal(raw, &result) != nil || result.ItemID != itemID || result.Document.Title != "onboarding-memory-e2e" {
+	if json.Unmarshal(raw, &result) != nil || result.ItemID != itemID || result.Document.Title != title {
 		t.Fatal("memory get did not observe the created relay state")
 	}
 }
