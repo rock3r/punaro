@@ -244,6 +244,8 @@ docker compose --project-name "$project" --file "$root/deploy/compose/production
 	--trusted-attachment-blob-dir "$data_dir/attachments")
 test -f "$installation_dir/installation.json"
 grep -Fxq 'PUNARO_RELAY_ENABLED=true' "$installation_dir/punarod.env"
+generated_relay_machines=$(tr -d '\n' <"$relay_machines")
+grep -Fqx "PUNARO_RELAY_MACHINES_JSON='$generated_relay_machines'" "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_RELAY_STORE=postgres' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENTS_ENABLED=true' "$installation_dir/punarod.env"
 grep -Fxq 'PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR=/var/lib/punaro/attachments' "$installation_dir/punarod.env"
