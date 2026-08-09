@@ -215,23 +215,6 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
-	if journal.Credential != "" {
-		// The credential checkpoint is written before its destination is
-		// published. Complete that local operation without asking the server to
-		// replay an enrollment that may already have aged out of its bounded
-		// replay window.
-		if err := writeCredential(*credentialPath, journal.Credential); err != nil {
-			return enrollmentError(stderr, "credential persistence failed; retry this command", 1)
-		}
-		if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return enrollmentError(stderr, "credential persisted; remove the private recovery file before continuing", 1)
-		}
-		lookupID, _, _ := strings.Cut(journal.Credential, ".")
-		return writeJSON(stdout, struct {
-			Origin   string `json:"origin"`
-			LookupID string `json:"lookup_id"`
-		}{Origin: state.Origin, LookupID: lookupID})
-	}
 	response, result := postRedemption(state.Origin, journal, accessToken)
 	if result == redemptionRejected {
 		if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {

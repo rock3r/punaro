@@ -181,6 +181,47 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 		t.Fatalf("revoked credential error=%v", err)
 	}
 
+	recoveryRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "recoverable client", AllProjects: true, TTL: time.Minute, CredentialTTL: time.Minute}
+	recoveryPending, err := admin.CreateEnrollment(ctx, owner.ID, recoveryRequest, pruneHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryKey := uuid.NewString()
+	recoveryCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: recoveryPending.ID, ClientBinding: recoveryRequest.ClientBinding, Code: recoveryPending.Code, IdempotencyKey: recoveryKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, recoveryPending.ID); err != nil {
+		t.Fatal(err)
+	}
+	activePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "active credential prune trigger", AllProjects: true, TTL: time.Minute}
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, activePruneTrigger, pruneHash); err != nil {
+		t.Fatalf("create enrollment after expired recovery enrollment: %v", err)
+	}
+	var redeemedRows, redeemedGrantRows int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM auth.pending_enrollments WHERE id = $1),
+		(SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, recoveryPending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 1 || redeemedGrantRows == 0 {
+		t.Fatalf("expired redeemed enrollment rows=%d grants=%d err=%v, want retained recovery", redeemedRows, redeemedGrantRows, err)
+	}
+	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: recoveryPending.ID, ClientBinding: recoveryRequest.ClientBinding, Code: recoveryPending.Code, IdempotencyKey: recoveryKey}); err != nil {
+		t.Fatalf("active credential replay: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE lookup_id = $1`, recoveryCredential.LookupID); err != nil {
+		t.Fatal(err)
+	}
+	latePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "expired credential prune trigger", AllProjects: true, TTL: time.Minute}
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, latePruneTrigger, pruneHash); err != nil {
+		t.Fatalf("create enrollment after credential expiry: %v", err)
+	}
+	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: recoveryPending.ID, ClientBinding: recoveryRequest.ClientBinding, Code: recoveryPending.Code, IdempotencyKey: recoveryKey}); !errors.Is(err, ErrInvalidEnrollment) {
+		t.Fatalf("expired credential replay error=%v", err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM auth.pending_enrollments WHERE id = $1),
+        (SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, recoveryPending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 0 || redeemedGrantRows != 0 {
+		t.Fatalf("expired credential recovery rows=%d grants=%d err=%v, want pruned", redeemedRows, redeemedGrantRows, err)
+	}
 	expiredRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "expired client", AllProjects: true, TTL: time.Minute}
 	_, expiredHash, err := PreviewTrustedAgentEnrollment(nil, true)
 	if err != nil {
@@ -189,22 +230,6 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	expiredPending, err := admin.CreateEnrollment(ctx, owner.ID, expiredRequest, expiredHash)
 	if err != nil {
 		t.Fatal(err)
-	}
-	var redeemedRows, redeemedGrantRows int
-	if err := ownerDB.QueryRowContext(ctx, `SELECT
-        (SELECT count(*) FROM auth.pending_enrollments WHERE id = $1),
-		(SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, pending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 1 || redeemedGrantRows == 0 {
-		t.Fatalf("expired redeemed enrollment rows=%d grants=%d err=%v, want retained recovery", redeemedRows, redeemedGrantRows, err)
-	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET redeemed_at = statement_timestamp() - make_interval(secs => $2) WHERE id = $1`, pending.ID, int64(enrollmentReplayRetention/time.Second)+1); err != nil {
-		t.Fatal(err)
-	}
-	latePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "late prune trigger", AllProjects: true, TTL: time.Minute}
-	if _, err := admin.CreateEnrollment(ctx, owner.ID, latePruneTrigger, pruneHash); err != nil {
-		t.Fatalf("create enrollment after replay retention: %v", err)
-	}
-	if _, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey}); !errors.Is(err, ErrInvalidEnrollment) {
-		t.Fatalf("expired replay retention error=%v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, expiredPending.ID); err != nil {
 		t.Fatal(err)

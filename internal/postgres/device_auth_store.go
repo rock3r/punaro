@@ -33,9 +33,6 @@ const (
 	enrollmentMutationLockKey int64 = 0x50756e61726f454e
 	maxPendingEnrollments           = 1000
 	lastUsedWriteInterval           = 5 * time.Minute
-	// enrollmentReplayRetention bounds the idempotent recovery record retained
-	// after a successful redemption whose response was lost by the client.
-	enrollmentReplayRetention = 24 * time.Hour
 )
 
 // Administration is a direct, host-local schema-owner connection. It is never
@@ -410,7 +407,13 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var storedDigest []byte
 		var generation int64
 		var expiresAt sql.NullTime
-		if err := tx.QueryRowContext(ctx, `SELECT secret_digest, generation, expires_at FROM auth.device_credentials WHERE lookup_id = $1 AND principal_id = $2`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
+		if err := tx.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.generation, credential.expires_at
+FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+WHERE credential.lookup_id = $1 AND credential.principal_id = $2
+AND credential.revoked_at IS NULL
+AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+AND principal.disabled_at IS NULL`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 		return DeviceCredential{PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
@@ -738,16 +741,25 @@ FOR SHARE OF principal`, principalID).Scan(&locked)
 func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
-    SELECT id FROM auth.pending_enrollments
-    WHERE invalidated_at IS NOT NULL
-       OR (redeemed_at IS NULL AND expires_at <= statement_timestamp())
-       OR (redeemed_at IS NOT NULL AND redeemed_at <= statement_timestamp() - make_interval(secs => $2))
-    ORDER BY COALESCE(redeemed_at, expires_at), id LIMIT $1 FOR UPDATE SKIP LOCKED
+	SELECT enrollment.id FROM auth.pending_enrollments AS enrollment
+    WHERE enrollment.invalidated_at IS NOT NULL
+       OR (enrollment.redeemed_at IS NULL AND enrollment.expires_at <= statement_timestamp())
+       OR (enrollment.redeemed_at IS NOT NULL AND NOT EXISTS (
+           SELECT 1
+           FROM auth.device_credentials AS credential
+           JOIN auth.principals AS principal ON principal.id = credential.principal_id
+           WHERE credential.lookup_id = enrollment.credential_lookup_id
+           AND credential.principal_id = enrollment.redeemed_principal_id
+           AND credential.revoked_at IS NULL
+           AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+           AND principal.disabled_at IS NULL
+       ))
+    ORDER BY COALESCE(enrollment.redeemed_at, enrollment.expires_at), enrollment.id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates
     WHERE enrollment.id = candidates.id RETURNING enrollment.id
 )
-SELECT count(*) FROM deleted_enrollments`, limit, int64(enrollmentReplayRetention/time.Second)).Scan(&pruned)
+SELECT count(*) FROM deleted_enrollments`, limit).Scan(&pruned)
 	if err != nil {
 		return errors.New("expired enrollments could not be pruned")
 	}
