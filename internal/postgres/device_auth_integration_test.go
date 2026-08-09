@@ -180,11 +180,16 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := app.AuthenticateDevice(ctx, rotated.Encoded); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("revoked credential error=%v", err)
 	}
-
 	recoveryRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "recoverable client", AllProjects: true, TTL: time.Minute, CredentialTTL: time.Minute}
 	recoveryPending, err := admin.CreateEnrollment(ctx, owner.ID, recoveryRequest, pruneHash)
 	if err != nil {
 		t.Fatal(err)
+	}
+	var rotatedRows, rotatedGrantRows int
+	if err := ownerDB.QueryRowContext(ctx, `SELECT
+        (SELECT count(*) FROM auth.pending_enrollments WHERE id = $1),
+        (SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, pending.ID).Scan(&rotatedRows, &rotatedGrantRows); err != nil || rotatedRows != 0 || rotatedGrantRows != 0 {
+		t.Fatalf("rotated credential recovery rows=%d grants=%d err=%v, want pruned", rotatedRows, rotatedGrantRows, err)
 	}
 	recoveryKey := uuid.NewString()
 	recoveryCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: recoveryPending.ID, ClientBinding: recoveryRequest.ClientBinding, Code: recoveryPending.Code, IdempotencyKey: recoveryKey})

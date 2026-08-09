@@ -283,8 +283,9 @@ for the installed relay adapter; do not reuse it on another device.
 only the canonical HTTPS origin selected during `prepare`, and writes a private
 recovery journal before redemption. If a network interruption occurs, rerun
 the same `redeem` command; if the transfer file is gone, use `punaro-enroll
-recover` with the state and credential paths. The retry has the same idempotency
-key, so it cannot mint a second device credential. The server retains that
+recover` with the state and credential paths, and include the same
+`--access-file` when the origin is Access-protected. The retry has the same
+idempotency key, so it cannot mint a second device credential. The server retains that
 recovery record while its credential and principal remain active; after either
 expires, is revoked, or is disabled, request a new enrollment. A rejected
 (including

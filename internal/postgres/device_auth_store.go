@@ -412,6 +412,7 @@ FROM auth.device_credentials AS credential
 JOIN auth.principals AS principal ON principal.id = credential.principal_id
 WHERE credential.lookup_id = $1 AND credential.principal_id = $2
 AND credential.revoked_at IS NULL
+AND credential.rotated_at IS NULL
 AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
 AND principal.disabled_at IS NULL`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
 			return DeviceCredential{}, ErrInvalidEnrollment
@@ -751,6 +752,7 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
            WHERE credential.lookup_id = enrollment.credential_lookup_id
            AND credential.principal_id = enrollment.redeemed_principal_id
            AND credential.revoked_at IS NULL
+           AND credential.rotated_at IS NULL
            AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
            AND principal.disabled_at IS NULL
        ))
