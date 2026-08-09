@@ -171,7 +171,7 @@ func (transport handlerTransport) RoundTrip(request *http.Request) (*http.Respon
 	return recorder.Result(), nil
 }
 
-func TestNativeClientAndHandlerShareOneStrictStreamingContract(t *testing.T) {
+func TestNativeClientAndHandlerShareStreamingContractAcrossClientRestart(t *testing.T) {
 	handler, _, _ := newHTTPTestHandler(t)
 	client, err := trustedattachmentclient.New("https://punaro.test", "device-credential", &http.Client{Transport: handlerTransport{handler: handler}})
 	if err != nil {
@@ -185,6 +185,12 @@ func TestNativeClientAndHandlerShareOneStrictStreamingContract(t *testing.T) {
 	artifact, err := client.Send(context.Background(), trustedattachmentclient.SendRequest{ProjectID: httpProjectID, IdempotencyKey: httpIdempotency, Path: source, DisplayName: "report.txt", MediaType: "text/plain"})
 	if err != nil || artifact.ArtifactID != httpArtifactID || artifact.State != "ready" {
 		t.Fatalf("artifact=%#v err=%v", artifact, err)
+	}
+	// Recreate the native client before receipt: its durable authenticated
+	// protocol state must be entirely server-authoritative across a restart.
+	client, err = trustedattachmentclient.New("https://punaro.test", "device-credential", &http.Client{Transport: handlerTransport{handler: handler}})
+	if err != nil {
+		t.Fatal(err)
 	}
 	downloadRoot := filepath.Join(root, "downloads")
 	if err := os.Mkdir(downloadRoot, 0o700); err != nil {
