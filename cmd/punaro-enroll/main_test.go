@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
 func TestPrepareThenRedeemKeepsSecretsOutOfOutputAndRecoversIdempotently(t *testing.T) {
@@ -146,7 +150,8 @@ func TestRedeemRejectsRecoveryJournalAsCredentialDestinationBeforeContactingOrig
 		t.Fatalf("prepare code=%d output=%q", code, preparedOut.String())
 	}
 	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+prepared.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
-	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, redemptionJournalName)}, io.Discard, io.Discard); code != 2 {
+	caseVariant := strings.ToUpper(redemptionJournalName)
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, caseVariant)}, io.Discard, io.Discard); code != 2 {
 		t.Fatalf("code=%d", code)
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
@@ -272,6 +277,39 @@ func TestEnrollmentMaterialAcceptsStrictAdminEnvelope(t *testing.T) {
 	}
 	if _, err := loadMaterial(writeTestMaterial(t, longEnvelope)); err != nil {
 		t.Fatalf("large admin envelope rejected: %v", err)
+	}
+}
+
+func TestEnrollmentMaterialAcceptsExactAdminOutputAtProjectLimit(t *testing.T) {
+	projectIDs := make([]string, 100)
+	for i := range projectIDs {
+		projectIDs[i] = fmt.Sprintf("%08d-0000-4000-8000-000000000000", i+1)
+	}
+	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(projectIDs, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview := struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "trusted-agent", PreviewHash: previewHash, Grants: grants}
+	pending := punaropostgres.PendingEnrollment{ID: "33333333-3333-4333-8333-333333333333", ClientBinding: "44444444-4444-4444-8444-444444444444", Code: strings.Repeat("A", 43), ExpiresAt: time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC), PreviewHash: previewHash, Grants: grants}
+	previewRaw, err := json.MarshalIndent(preview, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := append(append(previewRaw, '\n'), append(pendingRaw, '\n')...)
+	if len(output) <= 64*1024 || len(output) > maxEnrollmentMaterial {
+		t.Fatalf("bounded admin output has unexpected size: %d", len(output))
+	}
+	material, err := loadMaterial(writeTestMaterial(t, string(output)))
+	if err != nil || material.EnrollmentID != pending.ID {
+		t.Fatalf("exact admin output material=%#v err=%v", material, err)
 	}
 }
 

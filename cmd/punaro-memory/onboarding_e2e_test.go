@@ -191,7 +191,7 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	if json.Unmarshal(preparedRaw, &prepared) != nil || prepared.Origin != proxy.origin() || prepared.ClientBinding == "" {
 		t.Fatal("installed enrollment client did not create a public binding")
 	}
-	_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment([]string{project.ProjectID}, false)
+	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment([]string{project.ProjectID}, false)
 	if err != nil {
 		t.Fatal("enrollment preview setup failed")
 	}
@@ -199,11 +199,19 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("disposable enrollment setup failed")
 	}
-	pendingRaw, err := json.Marshal(pending)
+	previewRaw, err := json.MarshalIndent(struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "trusted-agent", PreviewHash: previewHash, Grants: grants}, "", "  ")
+	if err != nil {
+		t.Fatal("encode enrollment preview")
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
 	if err != nil {
 		t.Fatal("encode enrollment material")
 	}
-	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", string(pendingRaw))
+	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", string(previewRaw)+"\n"+string(pendingRaw)+"\n")
 	credentialFile := filepath.Join(enrollmentState, "device.credential")
 	redeemed := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "redeem", "--state-dir", enrollmentState, "--enrollment-file", material, "--credential-file", credentialFile)
 	if bytes.Contains(redeemed, []byte(pending.Code)) || bytes.Contains(redeemed, []byte(`"credential"`)) {

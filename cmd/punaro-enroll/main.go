@@ -27,7 +27,9 @@ const (
 	identityFileName      = "client-identity.json"
 	redemptionJournalName = "redemption-recovery.json"
 	maxEnrollmentFile     = 4096
-	maxEnrollmentMaterial = 64 * 1024
+	// maxEnrollmentMaterial bounds the two JSON records emitted by
+	// `punaro-admin client add --yes` at its 100-project limit.
+	maxEnrollmentMaterial = 512 * 1024
 )
 
 var newEnrollmentHTTPClient = func() *http.Client {
@@ -54,6 +56,12 @@ type enrollmentEnvelope struct {
 	ExpiresAt     time.Time         `json:"expires_at"`
 	PreviewHash   string            `json:"preview_hash"`
 	Grants        []json.RawMessage `json:"grants"`
+}
+
+type enrollmentPreview struct {
+	Template    string            `json:"template"`
+	PreviewHash string            `json:"preview_hash"`
+	Grants      []json.RawMessage `json:"grants"`
 }
 
 type enrollmentGrantPreview struct {
@@ -149,7 +157,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" || *credentialPath == "" || (!recoveryOnly && *materialPath == "") || (recoveryOnly && *materialPath != "") {
 		return invalid(stderr)
 	}
-	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || filepath.Base(*credentialPath) == redemptionJournalName || privateDir(*stateDir) != nil {
+	if !safeStateDir(*stateDir) || !safeStateChild(*stateDir, *credentialPath) || strings.EqualFold(filepath.Base(*credentialPath), redemptionJournalName) || privateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
 	state, err := loadIdentity(filepath.Join(*stateDir, identityFileName))
@@ -308,11 +316,55 @@ func loadMaterial(path string) (enrollmentMaterial, error) {
 	if err := decodeExact(raw, &value, "enrollment_id", "client_binding", "code"); err == nil && validMaterial(value) {
 		return value, nil
 	}
-	var envelope enrollmentEnvelope
-	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
+	if envelope, err := decodeEnrollmentEnvelope(raw); err == nil {
+		return materialFromEnvelope(envelope), nil
+	}
+	records, err := decodeJSONRecords(raw)
+	if err != nil || len(records) != 2 {
 		return enrollmentMaterial{}, errors.New("invalid enrollment material")
 	}
-	return enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}, nil
+	var preview enrollmentPreview
+	if err := decodeExact(records[0], &preview, "template", "preview_hash", "grants"); err != nil || preview.Template != "trusted-agent" || !validPreviewHash(preview.PreviewHash) || !validGrantPreview(preview.Grants) {
+		return enrollmentMaterial{}, errors.New("invalid enrollment material")
+	}
+	envelope, err := decodeEnrollmentEnvelope(records[1])
+	if err != nil || preview.PreviewHash != envelope.PreviewHash || !sameGrantPreview(preview.Grants, envelope.Grants) {
+		return enrollmentMaterial{}, errors.New("invalid enrollment material")
+	}
+	return materialFromEnvelope(envelope), nil
+}
+
+func decodeEnrollmentEnvelope(raw []byte) (enrollmentEnvelope, error) {
+	var envelope enrollmentEnvelope
+	if err := decodeExact(raw, &envelope, "enrollment_id", "client_binding", "code", "expires_at", "preview_hash", "grants"); err != nil || !validMaterial(enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}) || envelope.ExpiresAt.IsZero() || !validPreviewHash(envelope.PreviewHash) || !validGrantPreview(envelope.Grants) {
+		return enrollmentEnvelope{}, errors.New("invalid enrollment material")
+	}
+	return envelope, nil
+}
+
+func materialFromEnvelope(envelope enrollmentEnvelope) enrollmentMaterial {
+	return enrollmentMaterial{EnrollmentID: envelope.EnrollmentID, ClientBinding: envelope.ClientBinding, Code: envelope.Code}
+}
+
+func decodeJSONRecords(raw []byte) ([]json.RawMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	var records []json.RawMessage
+	for {
+		var record json.RawMessage
+		if err := decoder.Decode(&record); err != nil {
+			if errors.Is(err, io.EOF) {
+				return records, nil
+			}
+			return nil, errors.New("invalid JSON records")
+		}
+		records = append(records, record)
+	}
+}
+
+func sameGrantPreview(preview, envelope []json.RawMessage) bool {
+	left, leftErr := json.Marshal(preview)
+	right, rightErr := json.Marshal(envelope)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
 func validPreviewHash(value string) bool {

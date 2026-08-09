@@ -204,8 +204,9 @@ func writeCredential(path, credential string) error {
 	return writePrivateNew(path, []byte(credential+"\n"))
 }
 
-func syncPrivateDirectory(string) error { return nil }
-func removePrivate(path string) error   { return os.Remove(path) }
+var syncPrivateDirectory = func(string) error { return nil }
+
+func removePrivate(path string) error { return os.Remove(path) }
 
 func privateWindowsACL(path string) bool {
 	token := windows.GetCurrentProcessToken()

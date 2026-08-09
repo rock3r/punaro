@@ -238,9 +238,11 @@ punaro-enroll prepare \
 The command prints only the canonical origin and an opaque `client_binding`.
 Give that public value to the server owner. The owner previews and creates the
 least-privilege grant with `punaro-admin client add`; the owner chooses the
-projects and cannot be overridden by the client. Treat its exact resulting JSON
-as short-lived enrollment material: transfer it unchanged through an approved protected
-channel into a current-user-only regular file on that client. Do not paste it
+projects and cannot be overridden by the client. With `--yes`, that command
+prints the confirmed preview followed by the pending enrollment object. Treat
+the complete exact output as short-lived enrollment material: transfer it
+unchanged through an approved protected channel into a current-user-only regular
+file on that client. Do not paste it
 into terminal commands, shell history, environment variables, diagnostic
 bundles, or source-controlled configuration.
 
