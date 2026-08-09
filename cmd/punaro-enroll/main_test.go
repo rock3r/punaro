@@ -324,6 +324,24 @@ func TestRemoveJournalIfCurrentPreservesAReplacementJournal(t *testing.T) {
 	}
 }
 
+func TestRemoveJournalIfCurrentToleratesConcurrentRemoval(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(stateDir); err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(stateDir, redemptionJournalName)
+	journal := redemptionJournal{EnrollmentID: "33333333-3333-4333-8333-333333333333", ClientBinding: "11111111-1111-4111-8111-111111111111", Code: strings.Repeat("A", 43), IdempotencyKey: "44444444-4444-4444-8444-444444444444", CredentialPath: filepath.Join(stateDir, "credential")}
+	if err := writePrivateNew(journalPath, mustJSON(journal)); err != nil {
+		t.Fatal(err)
+	}
+	original := removeJournalFile
+	removeJournalFile = func(string) error { return os.ErrNotExist }
+	t.Cleanup(func() { removeJournalFile = original })
+	if err := removeJournalIfCurrent(journalPath, journal); err != nil {
+		t.Fatalf("concurrent journal removal reported as failure: %v", err)
+	}
+}
+
 func TestRedeemSendsProtectedAccessServiceToken(t *testing.T) {
 	credential := "22222222-2222-4222-8222-222222222222." + strings.Repeat("A", 43)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

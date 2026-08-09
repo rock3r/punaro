@@ -453,8 +453,13 @@ func removeJournalIfCurrent(path string, expected redemptionJournal) error {
 	if current != expected {
 		return nil
 	}
-	return removePrivate(path)
+	if err := removeJournalFile(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
+
+var removeJournalFile = removePrivate
 
 func validMaterial(value enrollmentMaterial) bool {
 	return validUUID(value.EnrollmentID) && validUUID(value.ClientBinding) && validCode(value.Code)
