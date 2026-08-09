@@ -43,7 +43,7 @@ func hasUnsafeComponent(path string) bool {
 	rest := path[len(filepath.VolumeName(path)):]
 	for {
 		part, next, found := strings.Cut(rest, string(filepath.Separator))
-		if strings.ContainsAny(part, ":~") || strings.TrimRight(part, ". ") != part {
+		if strings.Contains(part, ":") || strings.TrimRight(part, ". ") != part {
 			return true
 		}
 		if !found {
