@@ -86,6 +86,26 @@ func TestSyncPrivateDirectoryFlushesMetadata(t *testing.T) {
 	}
 }
 
+func TestRemovePrivateDoesNotReportFailureAfterSuccessfulUnlink(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "recovery")
+	if err := writePrivateNew(path, []byte("journal")); err != nil {
+		t.Fatal(err)
+	}
+	original := syncPrivateDirectory
+	syncPrivateDirectory = func(string) error { return errors.New("directory sync failed") }
+	t.Cleanup(func() { syncPrivateDirectory = original })
+	if err := removePrivate(path); err != nil {
+		t.Fatalf("successful unlink reported as failure: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery file remains after unlink: %v", err)
+	}
+}
+
 func TestEnsurePrivateDirRemovesNewDirectoryWhenACLProtectionFails(t *testing.T) {
 	original := protectWindowsPath
 	protectWindowsPath = func(string) error { return errors.New("ACL failure") }

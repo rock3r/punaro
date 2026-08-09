@@ -280,7 +280,11 @@ func removePrivate(path string) error {
 	if err := os.Remove(path); err != nil {
 		return err
 	}
-	return syncPrivateDirectory(filepath.Dir(path))
+	// The caller's durable credential is already published. Attempt to flush
+	// the unlink, but do not turn that completed enrollment into a false
+	// failure when the directory metadata barrier is unavailable.
+	_ = syncPrivateDirectory(filepath.Dir(path))
+	return nil
 }
 
 func privateWindowsACL(path string) bool {
