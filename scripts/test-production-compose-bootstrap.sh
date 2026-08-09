@@ -33,14 +33,41 @@ data_dir="$temporary/data"
 backup_dir="$temporary/backup"
 installation_dir="$temporary/installation"
 relay_machines="$temporary/relay-machines.json"
+client_home="$temporary/client-home"
+client_mailbox="$temporary/agent-mailbox"
+client_mailbox_state="$temporary/client-mailbox"
 printf '%s\n' 'production-owner-password' >"$owner_password"
 printf '%s\n' 'initial-incorrect-app-password' >"$app_password"
 printf '%s\n' 'postgres://punaro_owner:production-owner-password@127.0.0.1:5432/punaro?sslmode=disable' >"$owner_dsn"
 printf '%s\n' 'postgres://punaro_app:production-app-password@127.0.0.1:5432/punaro?sslmode=disable' >"$app_dsn"
 chmod 600 "$owner_password" "$app_password" "$owner_dsn" "$app_dsn"
 mkdir -m 700 "$data_dir" "$data_dir/attachments" "$backup_dir"
-printf '%s\n' '[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"],"endpoints":[],"attachment_device_id":""}]' >"$relay_machines"
+mkdir -m 700 "$client_home" "$client_mailbox_state"
+cat >"$client_mailbox" <<'EOF'
+#!/bin/sh
+case " $* " in
+  *' group create '*) exit 0 ;;
+  *' group list '*) printf '%s\n' '[{"address":"group/punaro-attached"}]'; exit 0 ;;
+esac
+exit 1
+EOF
+chmod 700 "$client_mailbox"
+HOME="$client_home" GOTOOLCHAIN=local \
+    GOCACHE="${GOCACHE:-/tmp/punaro-go-cache}" \
+    GOMODCACHE="${GOMODCACHE:-/tmp/punaro-go-mod-cache}" \
+	sh "$root/scripts/install-client.sh" \
+		--relay-url https://punaro.example \
+		--machine-id fresh-client \
+		--agent-mailbox-bin "$client_mailbox" \
+		--mailbox-state-dir "$client_mailbox_state" >"$temporary/client-install.out"
+client_enrollment="$client_home/.config/punaro/enrollment.json"
+test -f "$client_enrollment"
+printf '[' >"$relay_machines"
+cat "$client_enrollment" >>"$relay_machines"
+printf ']\n' >>"$relay_machines"
 chmod 600 "$relay_machines"
+grep -Fq '"id":"fresh-client"' "$relay_machines"
+grep -Fq '"endpoint_prefixes":["agent/fresh-client/"]' "$relay_machines"
 
 export PUNARO_IMAGE='example.invalid/punaro@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 export PUNARO_RUNTIME_UID="$(id -u)"
