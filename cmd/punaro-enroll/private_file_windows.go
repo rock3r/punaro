@@ -22,7 +22,44 @@ func safeStateChild(directory, path string) bool {
 // Win32 normalizes trailing dots and spaces in ordinary file paths, so those
 // spellings must remain reserved alongside the journal's canonical name.
 func reservedStateFileName(name string) bool {
-	return strings.EqualFold(strings.TrimRight(name, ". "), redemptionJournalName)
+	name = strings.TrimRight(name, ". ")
+	return strings.EqualFold(name, redemptionJournalName) || strings.EqualFold(name, redemptionLockName)
+}
+
+func lockEnrollmentState(stateDir string) (func(), error) {
+	path := filepath.Join(stateDir, redemptionLockName)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- fixed private state child.
+	created := err == nil
+	if errors.Is(err, os.ErrExist) {
+		file, err = os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
+	}
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		if err := protectWindowsPath(path); err != nil || !privateWindowsACL(path) {
+			return nil, errors.New("could not protect enrollment lock")
+		}
+		file, err = os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
+		if err != nil {
+			return nil, err
+		}
+	} else if !privateWindowsACL(path) {
+		_ = file.Close()
+		return nil, errors.New("unsafe enrollment lock")
+	}
+	overlapped := windows.Overlapped{}
+	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return func() {
+		_ = windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
+		_ = file.Close()
+	}, nil
 }
 
 func ensurePrivateDir(path string) error {

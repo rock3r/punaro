@@ -36,7 +36,7 @@ type AccessServiceToken struct {
 // cookie jar; callers must still attach the service-token headers to their
 // protected request. It is deliberately usable by bootstrap clients, which
 // cannot sign an adapter request before device enrollment completes.
-func OpenAccessSession(ctx context.Context, rawURL string, client *http.Client, token AccessServiceToken) (*http.Client, error) {
+func OpenAccessSession(_ context.Context, rawURL string, client *http.Client, token AccessServiceToken) (*http.Client, error) {
 	baseURL, err := url.Parse(rawURL)
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		return nil, fmt.Errorf("invalid relay URL")
@@ -51,17 +51,10 @@ func OpenAccessSession(ctx context.Context, rawURL string, client *http.Client, 
 		client = http.DefaultClient
 	}
 	clientCopy := *client
-	if token.ClientID == "" || loopbackHost(baseURL.Hostname()) {
-		return &clientCopy, nil
-	}
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create Cloudflare Access cookie jar: %w", err)
-	}
-	clientCopy.Jar = jar
-	if err := (&accessSession{baseURL: baseURL, client: &clientCopy, token: token}).ensure(ctx); err != nil {
-		return nil, err
-	}
+	// Service-token policies authenticate each protected request from its
+	// headers. They do not necessarily mint a browser cookie, so probing a
+	// relay-only path for CF_Authorization would reject valid admission before
+	// the caller can make its authenticated request.
 	return &clientCopy, nil
 }
 

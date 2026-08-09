@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -477,40 +476,17 @@ func TestHTTPRelayClientEstablishesAccessSessionWithoutReplayingSignedRequest(t 
 	}
 }
 
-func TestOpenAccessSessionEstablishesBootstrapSession(t *testing.T) {
-	step := 0
-	client, err := OpenAccessSession(context.Background(), "https://relay.example", &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		step++
-		if request.Header.Get("CF-Access-Client-Id") != "access-id" || request.Header.Get("CF-Access-Client-Secret") != "access-secret" {
-			t.Fatalf("request %d omitted Access headers", step)
-		}
-		switch step {
-		case 1:
-			if request.URL.Host != "relay.example" || request.URL.Path != "/.well-known/punaro-access-session" {
-				t.Fatalf("unexpected first session request: %s", request.URL)
-			}
-			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://team.cloudflareaccess.com/session"}}), nil
-		case 2:
-			if request.URL.Host != "team.cloudflareaccess.com" {
-				t.Fatalf("unexpected Access request: %s", request.URL)
-			}
-			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://relay.example/.well-known/punaro-access-session"}}), nil
-		case 3:
-			if request.URL.Host != "relay.example" {
-				t.Fatalf("unexpected returning session request: %s", request.URL)
-			}
-			return testHTTPResponse(request, http.StatusNotFound, http.Header{"Set-Cookie": []string{"CF_Authorization=session; Path=/; Secure"}}), nil
-		default:
-			t.Fatalf("unexpected request %d: %s", step, request.URL)
-			return nil, nil
-		}
+func TestOpenAccessSessionSkipsCookiePreflightForServiceTokens(t *testing.T) {
+	requests := 0
+	client, err := OpenAccessSession(context.Background(), "https://relay.example", &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("service-token bootstrap should not preflight")
 	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	origin, err := url.Parse("https://relay.example")
-	if err != nil || !hasAccessAuthorizationCookie(client.Jar, origin) {
-		t.Fatal("bootstrap Access session cookie was not retained")
+	if requests != 0 || client.Jar != nil {
+		t.Fatalf("requests=%d jar=%v", requests, client.Jar)
 	}
 }
 

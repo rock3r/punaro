@@ -18,7 +18,31 @@ func safeStateChild(directory, path string) bool {
 	return safeStateDir(directory) && filepath.IsAbs(path) && filepath.Clean(path) == path && filepath.Dir(path) == directory && filepath.Base(path) != "." && filepath.Base(path) != ".."
 }
 
-func reservedStateFileName(name string) bool { return strings.EqualFold(name, redemptionJournalName) }
+func reservedStateFileName(name string) bool {
+	return strings.EqualFold(name, redemptionJournalName) || strings.EqualFold(name, redemptionLockName)
+}
+
+func lockEnrollmentState(stateDir string) (func(), error) {
+	path := filepath.Join(stateDir, redemptionLockName)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), path) // #nosec G115 -- unix.Open returns a non-negative descriptor for os.NewFile.
+	info, err := file.Stat()
+	if err != nil || !privateFile(info) {
+		_ = file.Close()
+		return nil, errors.New("unsafe enrollment lock")
+	}
+	if err := unix.Flock(fd, unix.LOCK_EX); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return func() {
+		_ = unix.Flock(fd, unix.LOCK_UN)
+		_ = file.Close()
+	}, nil
+}
 
 func ensurePrivateDir(path string) error {
 	info, err := os.Lstat(path)

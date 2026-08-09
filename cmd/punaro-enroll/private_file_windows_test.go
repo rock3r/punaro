@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -119,6 +120,44 @@ func TestRemovePrivateDoesNotReportFailureAfterSuccessfulUnlink(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("recovery file remains after unlink: %v", err)
+	}
+}
+
+func TestLockEnrollmentStateSerializesConcurrentRedeems(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockEnrollmentState(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		unlock func()
+		err    error
+	}
+	second := make(chan result, 1)
+	go func() {
+		release, err := lockEnrollmentState(directory)
+		second <- result{unlock: release, err: err}
+	}()
+	select {
+	case got := <-second:
+		if got.unlock != nil {
+			got.unlock()
+		}
+		t.Fatalf("second redemption acquired lock early: %v", got.err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case got := <-second:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		got.unlock()
+	case <-time.After(time.Second):
+		t.Fatal("second redemption did not acquire lock after release")
 	}
 }
 

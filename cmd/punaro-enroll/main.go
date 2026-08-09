@@ -26,6 +26,7 @@ import (
 const (
 	identityFileName      = "client-identity.json"
 	redemptionJournalName = "redemption-recovery.json"
+	redemptionLockName    = "redemption-recovery.lock"
 	maxEnrollmentFile     = 4096
 	// maxEnrollmentMaterial bounds the two JSON records emitted by
 	// `punaro-admin client add --yes` at its 100-project limit.
@@ -165,6 +166,11 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err != nil || state.LegacyMachineID != "" {
 		return enrollmentError(stderr, "private enrollment state is unsafe", 2)
 	}
+	unlock, err := lockEnrollmentState(*stateDir)
+	if err != nil {
+		return enrollmentError(stderr, "private enrollment state is unavailable; retry this command", 1)
+	}
+	defer unlock()
 	accessToken, err := loadAccessToken(*accessPath)
 	if err != nil {
 		return enrollmentError(stderr, "Access admission material is invalid", 2)
@@ -211,7 +217,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 			journal = redemptionJournal{EnrollmentID: material.EnrollmentID, ClientBinding: material.ClientBinding, Code: material.Code, IdempotencyKey: key.String(), CredentialPath: *credentialPath}
-			if err := writePrivateNew(journalPath, mustJSON(journal)); err != nil {
+			if err := writePrivateAtomicNew(journalPath, mustJSON(journal)); err != nil {
 				return enrollmentError(stderr, "enrollment recovery could not be created", 1)
 			}
 		}
