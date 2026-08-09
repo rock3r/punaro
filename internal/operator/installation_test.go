@@ -1242,6 +1242,35 @@ func TestRelayEnrollmentRecoveryRejectsDifferentRetry(t *testing.T) {
 	}
 }
 
+func TestRelayEnrollmentRecoveryRejectsStagedMailCutover(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := installation
+	candidate.MailCutover = &MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "candidate" {
+			return errors.New("injected mail cutover staging crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected mail cutover staging crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-machines.json")
+	if err := os.WriteFile(path, []byte(testRelayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConfigureRelayMachines(installation.Directory, path); err == nil {
+		t.Fatal("relay enrollment resumed a staged mail cutover")
+	}
+}
+
 func TestConfigureRelayMachinesReplacesPostCutoverEnrollment(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true
