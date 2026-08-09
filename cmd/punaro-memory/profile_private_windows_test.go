@@ -12,7 +12,7 @@ import (
 
 func TestWindowsProfileRequiresExclusiveDACL(t *testing.T) {
 	directory := t.TempDir()
-	if err := protectWindowsPath(directory); err != nil {
+	if err := protectWindowsDirectory(directory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "memory-profile.json")
@@ -33,7 +33,7 @@ func TestWindowsProfileRequiresExclusiveDACL(t *testing.T) {
 
 func TestWindowsProfileWriteAndRead(t *testing.T) {
 	directory := t.TempDir()
-	if err := protectWindowsPath(directory); err != nil {
+	if err := protectWindowsDirectory(directory); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "memory-profile.json")

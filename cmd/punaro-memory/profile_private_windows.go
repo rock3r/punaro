@@ -13,7 +13,7 @@ import (
 )
 
 func privateProfilePath(path string) bool {
-	return filepath.IsAbs(path) && filepath.Clean(path) == path && !hasWindowsUnsafePathComponent(path) && noWindowsReparseParent(path) && privateWindowsACL(filepath.Dir(path))
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && !hasWindowsUnsafePathComponent(path) && noWindowsReparseParent(path) && privateWindowsDirectoryACL(filepath.Dir(path))
 }
 
 func privateProfileFile(info os.FileInfo) bool {
@@ -68,6 +68,18 @@ func noWindowsReparseParent(path string) bool {
 // privateWindowsACL accepts precisely the installer-owned protected DACL:
 // one FullControl ACE for the current user and no inherited or shared access.
 func privateWindowsACL(path string) bool {
+	return privateWindowsACLWithFlags(path, 0)
+}
+
+// privateWindowsDirectoryACL accepts the installer-owned protected DACL for a
+// directory: one current-user FullControl ACE which propagates only to its
+// children. Profile files themselves remain non-inheriting and are checked by
+// privateWindowsACL.
+func privateWindowsDirectoryACL(path string) bool {
+	return privateWindowsACLWithFlags(path, windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE)
+}
+
+func privateWindowsACLWithFlags(path string, flags uint8) bool {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil || user.User.Sid == nil {
@@ -90,7 +102,7 @@ func privateWindowsACL(path string) bool {
 		return false
 	}
 	var ace *windows.ACCESS_ALLOWED_ACE
-	if windows.GetAce(dacl, 0, &ace) != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != 0 || ace.Mask != windows.ACCESS_MASK(0x1f01ff) {
+	if windows.GetAce(dacl, 0, &ace) != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Header.AceFlags != flags || ace.Mask != windows.ACCESS_MASK(0x1f01ff) {
 		return false
 	}
 	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart)) // #nosec G103 -- documented flexible-array start of this ACE SID.
@@ -98,6 +110,14 @@ func privateWindowsACL(path string) bool {
 }
 
 func protectWindowsPath(path string) error {
+	return protectWindowsPathWithFlags(path, 0)
+}
+
+func protectWindowsDirectory(path string) error {
+	return protectWindowsPathWithFlags(path, windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE)
+}
+
+func protectWindowsPathWithFlags(path string, inheritance uint32) error {
 	token := windows.GetCurrentProcessToken()
 	user, err := token.GetTokenUser()
 	if err != nil || user.User.Sid == nil {
@@ -106,6 +126,7 @@ func protectWindowsPath(path string) error {
 	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.ACCESS_MASK(0x1f01ff),
 		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       inheritance,
 		Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid)},
 	}}, nil)
 	if err != nil {
