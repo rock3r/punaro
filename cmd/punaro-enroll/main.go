@@ -137,7 +137,7 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	if errors.Is(err, os.ErrNotExist) {
 		binding := uuid.NewString()
 		state = clientidentity.State{Version: clientidentity.Version, Origin: canonical, ClientBinding: binding}
-		if err := writePrivateNew(identityPath, mustEncodeIdentity(state)); err != nil {
+		if err := writePrivateAtomicNew(identityPath, mustEncodeIdentity(state)); err != nil {
 			return enrollmentError(stderr, "state preparation failed", 2)
 		}
 	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" {
