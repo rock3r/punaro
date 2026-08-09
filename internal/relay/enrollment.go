@@ -47,6 +47,9 @@ func machineEnrollmentAuthenticator(raw string) (*Authenticator, []Machine, erro
 // keys only; an adapter's private key must never be supplied to or persisted by
 // the relay.
 func ParseMachineEnrollments(raw string) ([]Machine, error) {
+	if !strings.HasPrefix(strings.TrimSpace(raw), "[") {
+		return nil, fmt.Errorf("parse machine enrollment: expected array")
+	}
 	decoder := json.NewDecoder(strings.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	var records []struct {

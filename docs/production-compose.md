@@ -112,9 +112,10 @@ database, health endpoint, and Compose credentials remain host-local.
 
 ## Add or revoke a mailbox client
 
-After initialization, replace the complete public enrollment set through the
-same host-local lifecycle rather than editing generated files. Keep the JSON
-file owner-only and include every client that should remain authorized:
+After initialization and before mail cutover, replace the complete public
+enrollment set through the same host-local lifecycle rather than editing
+generated files. Keep the JSON file owner-only and include every client that
+should remain authorized:
 
 ```sh
 punaro relay configure \
@@ -129,8 +130,11 @@ daemon environment and Compose inputs, and preserves an interrupted update for
 an exact retry. It is valid both before and after mail cutover; the cutover
 marker itself cannot change. Removing a machine from the complete set prevents
 new signed requests after the next `punaro up`; use `[]` to revoke the final
-client. Also stop its local adapter and revoke its distinct Access token. Never
-edit `punarod.env`, the Compose override, or `installation.json` directly.
+client. After mail cutover, additions with a new public key are rejected because
+the active transition authority cannot authenticate them; use the supported
+client-enrollment workflow instead. Also stop its local adapter and revoke its
+distinct Access token. Never edit `punarod.env`, the Compose override, or
+`installation.json` directly.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the

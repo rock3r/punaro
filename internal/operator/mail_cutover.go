@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 var mailCutoverPublicationDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -117,12 +118,38 @@ func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, err
 		}
 		return installation, nil
 	}
+	if installation.MailCutover != nil && !relayEnrollmentUsesKnownKeys(installation.RelayMachinesJSON, canonical) {
+		return Installation{}, errors.New("post-cutover relay enrollment cannot add an unregistered machine key")
+	}
 	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: true, RelayMachinesJSON: canonical}); err != nil {
 		return Installation{}, errors.New("relay enrollment is incompatible with the installation")
 	}
 	installation.RelayEnabled = true
 	installation.RelayMachinesJSON = canonical
 	return publishMailCutoverInstallation(directory, installation, nil)
+}
+
+// relayEnrollmentUsesKnownKeys permits post-cutover authority narrowing or
+// metadata changes only for keys the active transition runtime can resolve.
+func relayEnrollmentUsesKnownKeys(current, replacement string) bool {
+	currentMachines, err := relay.ParseMachineEnrollments(current)
+	if err != nil {
+		return false
+	}
+	known := make(map[string]struct{}, len(currentMachines))
+	for _, machine := range currentMachines {
+		known[string(machine.PublicKey)] = struct{}{}
+	}
+	replacementMachines, err := relay.ParseMachineEnrollments(replacement)
+	if err != nil {
+		return false
+	}
+	for _, machine := range replacementMachines {
+		if _, found := known[string(machine.PublicKey)]; !found {
+			return false
+		}
+	}
+	return true
 }
 
 // ReadRelayMachinesFile loads a protected, bounded relay enrollment file for

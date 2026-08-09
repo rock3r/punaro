@@ -24,6 +24,12 @@ func TestParseMachineEnrollmentsAcceptsEmptySetForExplicitRevocation(t *testing.
 	}
 }
 
+func TestParseMachineEnrollmentsRejectsNullInsteadOfRevoking(t *testing.T) {
+	if _, err := ParseMachineEnrollments(`null`); err == nil {
+		t.Fatal("null enrollment was accepted as a revocation")
+	}
+}
+
 func TestParseMachineEnrollmentsAcceptsExactEndpoints(t *testing.T) {
 	publicKey := make([]byte, 32)
 	publicKey[0] = 1
