@@ -847,14 +847,14 @@ func TestInitMigratesPristineBeforeCreatingOwner(t *testing.T) {
 		sequence = append(sequence, "owner")
 		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
 	}
-	args := []string{"init", "--directory", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "backup"), "--image", cliTestImage, "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator", "--mode", "internet", "--public-url", "https://punaro.example", "--relay-machines-file", relayMachines, "--trusted-attachments", "--trusted-attachment-blob-dir", filepath.Join(root, "data", "attachments")}
+	args := []string{"init", "--directory", filepath.Join(root, "install"), "--data-dir", filepath.Join(root, "data"), "--backup-dir", filepath.Join(root, "backup"), "--image", cliTestImage, "--owner-dsn-file", filepath.Join(root, "owner.dsn"), "--app-dsn-file", filepath.Join(root, "app.dsn"), "--owner-name", "operator", "--mode", "internet", "--public-url", "https://punaro.example", "--memory-api", "--memory-mutations", "--relay-machines-file", relayMachines, "--trusted-attachments", "--trusted-attachment-blob-dir", filepath.Join(root, "data", "attachments")}
 	var stdout, stderr bytes.Buffer
 	if code := run(args, &stdout, &stderr); code != 0 || strings.Join(sequence, ",") != "inspect,migrate,inspect,owner" {
 		t.Fatalf("code=%d sequence=%v stdout=%q stderr=%q", code, sequence, stdout.String(), stderr.String())
 	}
 	installation, err := operator.Load(filepath.Join(root, "install"))
 	wantBlobDir, canonicalErr := filepath.EvalSymlinks(filepath.Join(root, "data", "attachments"))
-	if err != nil || canonicalErr != nil || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != wantBlobDir {
+	if err != nil || canonicalErr != nil || !installation.MemoryAPIEnabled || !installation.MemoryMutationsEnabled || !installation.RelayEnabled || !installation.TrustedAttachmentsEnabled || installation.TrustedAttachmentBlobDir != wantBlobDir {
 		t.Fatalf("installation=%#v err=%v", installation, err)
 	}
 }

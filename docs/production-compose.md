@@ -79,8 +79,9 @@ The initial `punaro init` is the one supported server configuration boundary;
 do not hand-edit the generated environment or Compose files.
 
 To enable every currently supported surface on a fresh installation, initialize
-and start the daemon with the explicit opt-ins below. Omit either optional flag
-to keep that surface dark. The attachment blob directory must already exist,
+and start the daemon with the explicit opt-ins below. Omit both memory flags to
+keep native memory dark, or omit the trusted-attachment flag and blob directory
+to keep trusted attachments dark. The attachment blob directory must already exist,
 be private, and be beneath `DATA_DIR`; credentials and operator state must
 remain outside `DATA_DIR`.
 
@@ -97,6 +98,8 @@ punaro init \
   --owner-name 'Production operator' \
   --mode proxy \
   --public-url "$PUNARO_PUBLIC_URL" \
+  --memory-api \
+  --memory-mutations \
   --relay-machines-file RELAY_MACHINES_FILE \
   --trusted-attachments \
   --trusted-attachment-blob-dir DATA_DIR/attachments
