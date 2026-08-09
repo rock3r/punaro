@@ -145,7 +145,8 @@ if you decline it during client setup.
    Use the explicit JSON value `[]` to revoke the final client; the restarted
    relay then accepts no signed machine requests.
    After mail cutover, this command can only retain or remove already registered
-   keys; use the supported client-enrollment workflow for any new client.
+   keys. New mailbox clients are currently unavailable until a durable
+   post-cutover authority-registration workflow is delivered.
    Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
    `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this

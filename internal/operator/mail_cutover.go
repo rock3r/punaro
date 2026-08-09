@@ -305,7 +305,7 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 	}
 	cutoverAdvance := base.MailCutover == nil && candidate.MailCutover != nil && base.RelayMachinesJSON == candidate.RelayMachinesJSON
 	initialEnrollmentAdvance := base.MailCutover == nil && candidate.MailCutover == nil && base.RelayMachinesJSON == "" && candidate.RelayMachinesJSON != ""
-	relayEnableAdvance := !base.RelayEnabled && candidate.RelayEnabled && base.RelayMachinesJSON == "" && candidate.RelayMachinesJSON != "" && sameMailCutoverPublication(base.MailCutover, candidate.MailCutover)
+	relayEnableAdvance := !base.RelayEnabled && candidate.RelayEnabled && candidate.RelayMachinesJSON != "" && sameMailCutoverPublication(base.MailCutover, candidate.MailCutover)
 	// A live unified relay may change only its complete public enrollment set
 	// before mail cutover. The staged candidate still has to match every other
 	// installation invariant, so a crash can recover only this exact update.

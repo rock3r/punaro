@@ -1237,6 +1237,34 @@ func TestRelayEnableRecoversAfterRuntimePublication(t *testing.T) {
 	}
 }
 
+func TestRelayEnableRecoversExistingDarkEnrollmentAfterRuntimePublication(t *testing.T) {
+	installation, err := Init(context.Background(), validInitOptions(t), func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation = configureTestRelayMachines(t, installation)
+	candidate := installation
+	candidate.RelayEnabled = true
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected dark relay enable publication crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected dark relay enable publication crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "dark-relay-enable-machines.json")
+	if err := os.WriteFile(path, []byte(testRelayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || !configured.RelayEnabled || configured.RelayMachinesJSON != testRelayMachinesJSON || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
 func TestRelayEnrollmentRecoveryRejectsDifferentRetry(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true
