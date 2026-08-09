@@ -33,4 +33,7 @@ func TestRelayConfigurePublishesOnlyThroughOperator(t *testing.T) {
 	}); code != 1 {
 		t.Fatalf("code=%d", code)
 	}
+	if !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
 }

@@ -21,7 +21,7 @@ func runRelayConfigure(args []string, stdout, stderr io.Writer, configure relayC
 	}
 	installation, err := configure(*directory, *machinesFile)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "relay configuration failed; generated configuration was not changed")
+		_, _ = fmt.Fprintln(stderr, "relay configuration did not complete; rerun the exact command to recover safely")
 		return 1
 	}
 	return writeJSON(stdout, stderr, map[string]any{"status": "relay_configured", "directory": installation.Directory})

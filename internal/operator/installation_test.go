@@ -1183,6 +1183,65 @@ func TestRelayEnrollmentReplacementRecoversAfterRuntimePublication(t *testing.T)
 	}
 }
 
+func TestRelayEnableRecoversAfterRuntimePublication(t *testing.T) {
+	installation, err := Init(context.Background(), validInitOptions(t), func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	candidate := installation
+	candidate.RelayEnabled = true
+	candidate.RelayMachinesJSON = replacement
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected relay enable publication crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected relay enable publication crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-enable-machines.json")
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || !configured.RelayEnabled || configured.RelayMachinesJSON != replacement || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
+func TestRelayEnrollmentRecoveryRejectsDifferentRetry(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := `[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/b/"],"endpoints":[],"attachment_device_id":""}]`
+	candidate := installation
+	candidate.RelayMachinesJSON = replacement
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "candidate" {
+			return errors.New("injected relay enrollment staging crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected relay enrollment staging crash was accepted")
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "old-relay-machines.json")
+	if err := os.WriteFile(path, []byte(testRelayMachinesJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConfigureRelayMachines(installation.Directory, path); err == nil {
+		t.Fatal("conflicting relay enrollment retry was accepted")
+	}
+}
+
 func TestConfigureRelayMachinesReplacesPostCutoverEnrollment(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true
