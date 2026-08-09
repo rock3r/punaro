@@ -224,7 +224,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	}
 	response, result := postRedemption(state.Origin, journal, accessToken)
 	if result == redemptionRejected {
-		if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeJournalIfCurrent(journalPath, journal); err != nil {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
 		}
 		return enrollmentError(stderr, "enrollment was rejected; request a new enrollment", 1)
@@ -242,7 +242,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := writeCredential(*credentialPath, response.Credential); err != nil {
 		return enrollmentError(stderr, "credential persistence failed; retry this command", 1)
 	}
-	if err := removePrivate(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeJournalIfCurrent(journalPath, journal); err != nil {
 		return enrollmentError(stderr, "credential persisted; remove the private recovery file before continuing", 1)
 	}
 	return writeJSON(stdout, struct {
@@ -438,6 +438,22 @@ func loadJournal(path string) (redemptionJournal, error) {
 		return redemptionJournal{}, errors.New("invalid recovery journal")
 	}
 	return value, nil
+}
+
+// removeJournalIfCurrent prevents a delayed redemption response from deleting
+// recovery state created by a later enrollment attempt in the same state dir.
+func removeJournalIfCurrent(path string, expected redemptionJournal) error {
+	current, err := loadJournal(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current != expected {
+		return nil
+	}
+	return removePrivate(path)
 }
 
 func validMaterial(value enrollmentMaterial) bool {
