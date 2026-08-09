@@ -172,26 +172,51 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("isolated E2E project setup failed")
 	}
-	_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment([]string{project.ProjectID}, false)
-	if err != nil {
-		t.Fatal("enrollment preview setup failed")
-	}
-	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "memory E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
-	if err != nil {
-		t.Fatal("disposable enrollment setup failed")
-	}
-
 	relay := startE2ERelay(t, fixture, appDSNFile)
 	defer relay.stop(t)
 	proxy := startE2ETLSProxy(t, relay.address)
 	defer proxy.close(t)
-	credential := redeemE2EEnrollment(t, proxy.client(), proxy.origin(), pending)
 
 	clientHome := filepath.Join(fixture, "client-home")
 	mailbox := writeE2EMailbox(t, fixture)
 	runE2ECommand(t, e2eEnv(clientHome, ""), "sh", filepath.Join(e2eRepositoryRoot(t), "scripts", "install-client.sh"), "--relay-url", proxy.origin(), "--machine-id", "memory-e2e", "--agent-mailbox-bin", mailbox)
 	memory := filepath.Join(clientHome, ".local", "bin", "punaro-memory")
-	credentialFile := writePrivateFile(t, filepath.Join(clientHome, ".config", "punaro"), "memory-device-credential", credential)
+	enroller := filepath.Join(clientHome, ".local", "bin", "punaro-enroll")
+	enrollmentState := filepath.Join(clientHome, ".config", "punaro", "device-enrollment")
+	preparedRaw := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "prepare", "--origin", proxy.origin(), "--state-dir", enrollmentState)
+	var prepared struct {
+		Origin        string `json:"origin"`
+		ClientBinding string `json:"client_binding"`
+	}
+	if json.Unmarshal(preparedRaw, &prepared) != nil || prepared.Origin != proxy.origin() || prepared.ClientBinding == "" {
+		t.Fatal("installed enrollment client did not create a public binding")
+	}
+	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment([]string{project.ProjectID}, false)
+	if err != nil {
+		t.Fatal("enrollment preview setup failed")
+	}
+	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, Label: "memory E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
+	if err != nil {
+		t.Fatal("disposable enrollment setup failed")
+	}
+	previewRaw, err := json.MarshalIndent(struct {
+		Template    string                     `json:"template"`
+		PreviewHash string                     `json:"preview_hash"`
+		Grants      []punaropostgres.GrantSpec `json:"grants"`
+	}{Template: "trusted-agent", PreviewHash: previewHash, Grants: grants}, "", "  ")
+	if err != nil {
+		t.Fatal("encode enrollment preview")
+	}
+	pendingRaw, err := json.MarshalIndent(pending, "", "  ")
+	if err != nil {
+		t.Fatal("encode enrollment material")
+	}
+	material := writePrivateFile(t, enrollmentState, "enrollment-material.json", string(previewRaw)+"\n"+string(pendingRaw)+"\n")
+	credentialFile := filepath.Join(enrollmentState, "device.credential")
+	redeemed := runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), enroller, "redeem", "--state-dir", enrollmentState, "--enrollment-file", material, "--credential-file", credentialFile)
+	if bytes.Contains(redeemed, []byte(pending.Code)) || bytes.Contains(redeemed, []byte(`"credential"`)) {
+		t.Fatal("installed enrollment client leaked secret material")
+	}
 	profile := filepath.Join(clientHome, ".config", "punaro", "memory-profile.json")
 	runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "profile-write", "--profile", profile, "--origin", proxy.origin(), "--credential-file", credentialFile, "--project", project.ProjectID)
 

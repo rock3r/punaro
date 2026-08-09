@@ -366,17 +366,20 @@ func (d *Database) redeemEnrollment(ctx context.Context, redeem RedeemEnrollment
 	}
 	var storedCode []byte
 	var storedBinding, label, issuer string
-	var usable bool
+	var unexpired, active bool
 	var redemptionKey, principalID, lookupID, requiredLegacy sql.NullString
 	var credentialTTL sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT code_digest, client_binding::text, label, issuer_principal_id::text,
-expires_at > statement_timestamp() AND invalidated_at IS NULL,
+expires_at > statement_timestamp(), invalidated_at IS NULL,
 redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, credential_ttl_seconds, legacy_principal_id::text
-FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &usable, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
+FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &unexpired, &active, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
 	if err != nil || storedBinding != redeem.ClientBinding || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 || requiredLegacy.Valid != (legacyProof != nil) {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
-	if !usable {
+	// Expiry prevents the first redemption, but a row already bound to this
+	// idempotency key must remain recoverable after a lost response. An
+	// invalidated enrollment remains unavailable in either state.
+	if !active || (!unexpired && !redemptionKey.Valid) {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
 	if requiredLegacy.Valid {
@@ -404,7 +407,14 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var storedDigest []byte
 		var generation int64
 		var expiresAt sql.NullTime
-		if err := tx.QueryRowContext(ctx, `SELECT secret_digest, generation, expires_at FROM auth.device_credentials WHERE lookup_id = $1 AND principal_id = $2`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
+		if err := tx.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.generation, credential.expires_at
+FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+WHERE credential.lookup_id = $1 AND credential.principal_id = $2
+AND credential.revoked_at IS NULL
+AND credential.rotated_at IS NULL
+AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+AND principal.disabled_at IS NULL`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
 		return DeviceCredential{PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
@@ -732,9 +742,21 @@ FOR SHARE OF principal`, principalID).Scan(&locked)
 func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 	var pruned int64
 	err := tx.QueryRowContext(ctx, `WITH candidates AS (
-    SELECT id FROM auth.pending_enrollments
-	WHERE expires_at <= statement_timestamp() OR invalidated_at IS NOT NULL
-    ORDER BY expires_at, id LIMIT $1 FOR UPDATE SKIP LOCKED
+	SELECT enrollment.id FROM auth.pending_enrollments AS enrollment
+    WHERE enrollment.invalidated_at IS NOT NULL
+       OR (enrollment.redeemed_at IS NULL AND enrollment.expires_at <= statement_timestamp())
+       OR (enrollment.redeemed_at IS NOT NULL AND NOT EXISTS (
+           SELECT 1
+           FROM auth.device_credentials AS credential
+           JOIN auth.principals AS principal ON principal.id = credential.principal_id
+           WHERE credential.lookup_id = enrollment.credential_lookup_id
+           AND credential.principal_id = enrollment.redeemed_principal_id
+           AND credential.revoked_at IS NULL
+           AND credential.rotated_at IS NULL
+           AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+           AND principal.disabled_at IS NULL
+       ))
+    ORDER BY COALESCE(enrollment.redeemed_at, enrollment.expires_at), enrollment.id LIMIT $1 FOR UPDATE SKIP LOCKED
 ), deleted_enrollments AS (
     DELETE FROM auth.pending_enrollments AS enrollment USING candidates
     WHERE enrollment.id = candidates.id RETURNING enrollment.id

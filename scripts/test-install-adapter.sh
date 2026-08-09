@@ -48,6 +48,7 @@ run_install >"$fixture_dir/first.out"
 adapter="$home/.local/bin/punaro-adapter"
 attachment="$home/.local/bin/punaro-trusted-attachment"
 memory="$home/.local/bin/punaro-memory"
+enroll="$home/.local/bin/punaro-enroll"
 config="$home/.config/punaro/adapter.env"
 key="$home/.config/punaro/machine.key"
 enrollment="$home/.config/punaro/enrollment.json"
@@ -64,6 +65,7 @@ file_mode() {
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
+[ -x "$enroll" ] || { printf '%s\n' 'enrollment binary was not installed' >&2; exit 1; }
 [ -f "$config" ] || { printf '%s\n' 'adapter environment was not installed' >&2; exit 1; }
 [ -f "$key" ] || { printf '%s\n' 'machine key was not installed' >&2; exit 1; }
 [ -f "$enrollment" ] || { printf '%s\n' 'public enrollment record was not retained' >&2; exit 1; }

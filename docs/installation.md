@@ -217,6 +217,89 @@ the local sidecar cannot repair, bypass, or broaden those decisions. After
 SQLite retirement, rollback is restore or forward repair, not a client profile
 edit.
 
+### Supported device-credential enrollment
+
+Installers now include `punaro-enroll` (`punaro-enroll.exe` on Windows). It is
+the supported way to make the public per-device enrollment binding and persist
+the returned bearer credential. It never accepts an enrollment code, bearer
+credential, private key, or Access secret in an argument or environment
+variable.
+
+On the client, create state for the fixed origin. The directory must be new or
+private and owned by the current user. On macOS/Linux use a directory below
+`~/.config/punaro`; on Windows use one below `%LOCALAPPDATA%\Punaro`:
+
+```sh
+punaro-enroll prepare \
+  --origin https://punaro.example \
+  --state-dir "$HOME/.config/punaro/device-enrollment"
+```
+
+The command prints only the canonical origin and an opaque `client_binding`.
+Give that public value to the server owner. The owner previews and creates the
+least-privilege grant with `punaro-admin client add`; the owner chooses the
+projects and cannot be overridden by the client. With `--yes`, that command
+prints the confirmed preview followed by the pending enrollment object. Treat
+the complete exact output as short-lived enrollment material: transfer it
+unchanged through an approved protected channel into a current-user-only regular
+file on that client. Do not paste it
+into terminal commands, shell history, environment variables, diagnostic
+bundles, or source-controlled configuration.
+
+Redeem that protected file on the client:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential"
+```
+
+If the public origin is protected by Cloudflare Access, create a distinct
+service token for this device and have its secret manager write the paired
+values into a current-user-only, non-symlinked JSON file such as:
+
+```json
+{"client_id":"...","client_secret":"..."}
+```
+
+Pass only that protected file path to the same command:
+
+```sh
+punaro-enroll redeem \
+  --state-dir "$HOME/.config/punaro/device-enrollment" \
+  --enrollment-file /absolute/private/enrollment-material.json \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --access-file /absolute/private/cloudflare-access.json
+```
+
+The command uses the service token only to establish an origin-scoped Access
+session and send the admission headers; it never accepts, prints, or stores
+either value in arguments, environment variables, generated profile defaults,
+or diagnostics. Continue to keep the token in the owner-only adapter profile
+for the installed relay adapter; do not reuse it on another device.
+
+`punaro-enroll` checks the exact binding before any network request, contacts
+only the canonical HTTPS origin selected during `prepare`, and writes a private
+recovery journal before redemption. If a network interruption occurs, rerun
+the same `redeem` command; if the transfer file is gone, use `punaro-enroll
+recover` with the state and credential paths, and include the same
+`--access-file` when the origin is Access-protected. The retry has the same
+idempotency key, so it cannot mint a second device credential. The server retains that
+recovery record while its credential and principal remain active; after either
+expires, is revoked, or is disabled, request a new enrollment. A rejected
+(including
+expired, already-used, or revoked) enrollment fails closed and tells the user
+to request a new enrollment; its private recovery journal is removed so the
+replacement material is not blocked. After success, remove the transferred material
+through its approved secret-handling process; the identity sidecar remains
+non-secret and the recovery journal is removed.
+
+The server owner rotates or revokes a device with `punaro-admin credential
+rotate` or `punaro-admin credential revoke`, using the content-free credential
+inventory. Rotation and revocation are server-controlled: a local identity
+sidecar or copied credential cannot restore access.
+
 ## 4. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree

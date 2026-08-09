@@ -476,6 +476,20 @@ func TestHTTPRelayClientEstablishesAccessSessionWithoutReplayingSignedRequest(t 
 	}
 }
 
+func TestOpenAccessSessionSkipsCookiePreflightForServiceTokens(t *testing.T) {
+	requests := 0
+	client, err := OpenAccessSession(context.Background(), "https://relay.example", &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		return nil, errors.New("service-token bootstrap should not preflight")
+	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 0 || client.Jar != nil {
+		t.Fatalf("requests=%d jar=%v", requests, client.Jar)
+	}
+}
+
 func TestHTTPRelayClientAcceptsAccessCookieFromUnauthorizedPreflight(t *testing.T) {
 	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

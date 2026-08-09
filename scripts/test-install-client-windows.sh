@@ -17,6 +17,7 @@ for expected in \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
 	'SetAccessRuleProtection($true, $false)' \
 	'punaro-trusted-attachment.exe' \
+	'punaro-enroll.exe' \
 	'retired attachment artifact exists at' \
 	'agent-mailbox' \
 	'AgentGuidanceDir'; do

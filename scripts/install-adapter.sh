@@ -143,11 +143,13 @@ trap cleanup EXIT HUP INT TERM
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
 install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
 install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
+install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"
 
 if [ -e "$key_file" ] || [ -L "$key_file" ]; then
 	regular_private_file "$key_file" || fail 'existing machine key must be a non-symlink regular 0600 file'
@@ -251,6 +253,7 @@ cat "$enrollment_file"
 printf '%s\n' '' \
 	'Next: approve that record on the relay; create a distinct Cloudflare Access service token for this machine; add it to the owner-only adapter.env; bind and attach the desired agent aliases; then rerun this command with --enable.' \
 	'Trusted attachments: after device-credential enrollment, use punaro-trusted-attachment with an owner-protected credential file and configured safe download root.' \
+	'Device enrollment: run punaro-enroll prepare, have the server owner issue a grant for its printed public binding, then redeem a protected transfer file with punaro-enroll. It never accepts the code as an argument.' \
 	'Memory: after device-credential enrollment, use punaro-memory with the same fixed HTTPS origin and an owner-protected credential file; every project, idempotency key, and ETag remains explicit.' \
 	"Verify with: $service_hint"
 if [ -z "$agent_guidance_dir" ]; then
