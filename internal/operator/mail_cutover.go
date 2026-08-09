@@ -103,7 +103,7 @@ func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, err
 	markerStage := filepath.Join(directory, ".installation.mail-cutover.json")
 	if _, err := os.Lstat(markerStage); err == nil {
 		candidate, err := readInstallation(markerStage)
-		if err != nil || !candidate.RelayEnabled || candidate.RelayMachinesJSON != canonical {
+		if err != nil || !candidate.RelayEnabled || candidate.RelayMachinesJSON != canonical || !sameMailCutoverPublication(candidate.MailCutover, installation.MailCutover) {
 			return Installation{}, errors.New("relay enrollment recovery requires the exact requested enrollment")
 		}
 		candidate.Directory = directory
@@ -112,6 +112,9 @@ func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, err
 		return Installation{}, errors.New("relay enrollment recovery is unavailable")
 	}
 	if installation.RelayEnabled && installation.RelayMachinesJSON == canonical {
+		if len(CheckPaths(installation)) != 0 || syncDirectory(directory) != nil {
+			return Installation{}, errors.New("relay enrollment recovery is unavailable")
+		}
 		return installation, nil
 	}
 	if _, err := validateStatic(InitOptions{Directory: directory, DataDir: installation.DataDir, BackupDir: installation.BackupDir, Image: installation.Image, OwnerDSNFile: installation.OwnerDSNFile, AppDSNFile: installation.AppDSNFile, OwnerName: installation.OwnerName, Ingress: installation.Ingress, HealthListenAddr: installation.HealthListenAddr, MemoryAPIEnabled: installation.MemoryAPIEnabled, MemoryMutationsEnabled: installation.MemoryMutationsEnabled, TrustedAttachmentsEnabled: installation.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: installation.TrustedAttachmentBlobDir, RelayEnabled: true, RelayMachinesJSON: canonical}); err != nil {
