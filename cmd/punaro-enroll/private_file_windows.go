@@ -36,15 +36,23 @@ func lockEnrollmentState(stateDir string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	cleanupCreated := func() {
+		if created {
+			_ = os.Remove(path) // #nosec G703 -- exact lock file created by this invocation.
+		}
+	}
 	if created {
 		if err := file.Close(); err != nil {
+			cleanupCreated()
 			return nil, err
 		}
 		if err := protectWindowsPath(path); err != nil || !privateWindowsACL(path) {
+			cleanupCreated()
 			return nil, errors.New("could not protect enrollment lock")
 		}
 		file, err = os.OpenFile(path, os.O_RDWR, 0) // #nosec G304 -- fixed private state child.
 		if err != nil {
+			cleanupCreated()
 			return nil, err
 		}
 	} else if !privateWindowsACL(path) {
@@ -54,6 +62,7 @@ func lockEnrollmentState(stateDir string) (func(), error) {
 	overlapped := windows.Overlapped{}
 	if err := windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped); err != nil {
 		_ = file.Close()
+		cleanupCreated()
 		return nil, err
 	}
 	return func() {

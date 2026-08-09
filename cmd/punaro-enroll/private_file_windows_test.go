@@ -161,6 +161,22 @@ func TestLockEnrollmentStateSerializesConcurrentRedeems(t *testing.T) {
 	}
 }
 
+func TestLockEnrollmentStateRemovesNewLockWhenProtectionFails(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := ensurePrivateDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	original := protectWindowsPath
+	protectWindowsPath = func(string) error { return errors.New("ACL failure") }
+	t.Cleanup(func() { protectWindowsPath = original })
+	if _, err := lockEnrollmentState(directory); err == nil {
+		t.Fatal("lock protection failure was accepted")
+	}
+	if _, err := os.Lstat(filepath.Join(directory, redemptionLockName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed lock remains: %v", err)
+	}
+}
+
 func TestEnsurePrivateDirRemovesNewDirectoryWhenACLProtectionFails(t *testing.T) {
 	original := protectWindowsPath
 	protectWindowsPath = func(string) error { return errors.New("ACL failure") }
