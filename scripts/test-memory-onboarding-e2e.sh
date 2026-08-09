@@ -1,5 +1,6 @@
 #!/bin/sh
-# Exercise the installed native memory CLI and stdio MCP against one disposable enrolled relay.
+# Exercise installed native clients against one disposable enrolled relay: memory
+# CLI/MCP plus trusted-attachment transfer, authorization, restart, and revoke.
 set -eu
 
 if ! docker compose version >/dev/null 2>&1; then

@@ -20,7 +20,7 @@ services:
     build:
       context: .
       target: build
-    command: ["go", "test", "-p", "1", "-count=1", "-timeout", "3m", "-tags=memory_onboarding_e2e", "./cmd/punaro-memory", "-run", "^Test(MemoryOnboarding.*|InstalledMemoryClientOnboardingE2E)$"]
+    command: ["go", "test", "-p", "1", "-count=1", "-timeout", "3m", "-tags=memory_onboarding_e2e", "./cmd/punaro-memory", "-run", "^Test(MemoryOnboarding.*|InstalledMemoryClientOnboardingE2E|InstalledCompleteProductE2E)$"]
     user: "65532:65532"
     environment:
       HOME: /home/punaro
