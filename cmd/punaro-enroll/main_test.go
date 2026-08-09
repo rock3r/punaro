@@ -108,7 +108,7 @@ func TestRedeemFailsClosedForBindingMismatchWithoutContactingOrigin(t *testing.T
 }
 
 func TestRedeemPreflightsCredentialDestinationBeforeContactingOrigin(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("redemption contacted the origin before preflighting credential destination")
 	}))
 	defer server.Close()
@@ -136,7 +136,7 @@ func TestRedeemPreflightsCredentialDestinationBeforeContactingOrigin(t *testing.
 }
 
 func TestRedeemRejectsRecoveryJournalAsCredentialDestinationBeforeContactingOrigin(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("redemption contacted the origin before rejecting the reserved credential path")
 	}))
 	defer server.Close()
@@ -380,7 +380,7 @@ func TestAccessDenialRetainsRecoveryJournal(t *testing.T) {
 }
 
 func TestRecoverRejectsUnrelatedExistingCredentialBeforeContactingOrigin(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		t.Fatal("recovery contacted the origin before rejecting an unrelated credential file")
 	}))
 	defer server.Close()
