@@ -255,7 +255,7 @@ printf '%s\n' '[{"id":"machine-b","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 	--relay-machines-file "$relay_machines" \
 	--yes)
 grep -Fqx "PUNARO_RELAY_MACHINES_JSON='[{\"id\":\"machine-b\",\"public_key\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"endpoint_prefixes\":[\"agent/b/\"],\"endpoints\":[],\"attachment_device_id\":\"\"}]'" "$installation_dir/punarod.env"
-if grep -F 'agent/a/' "$installation_dir/punarod.env" >/dev/null; then
+if grep -F 'agent/fresh-client/' "$installation_dir/punarod.env" >/dev/null; then
 	echo 'relay configuration retained a removed enrollment' >&2
 	exit 1
 fi
