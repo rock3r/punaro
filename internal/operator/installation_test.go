@@ -1152,6 +1152,30 @@ func TestConfigureRelayMachinesReplacesPreCutoverEnrollment(t *testing.T) {
 	}
 }
 
+func TestConfigureRelayMachinesRevokesFinalEnrollment(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	options.RelayMachinesJSON = testRelayMachinesJSON
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(installation.Directory), "relay-machines.json")
+	if err := os.WriteFile(path, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, path)
+	if err != nil || !configured.RelayEnabled || configured.RelayMachinesJSON != "[]" || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+	loaded, err := Load(installation.Directory)
+	if err != nil || !loaded.RelayEnabled || loaded.RelayMachinesJSON != "[]" {
+		t.Fatalf("loaded=%#v err=%v", loaded, err)
+	}
+}
+
 func TestRelayEnrollmentReplacementRecoversAfterRuntimePublication(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true

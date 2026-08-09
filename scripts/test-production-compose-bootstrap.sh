@@ -230,6 +230,12 @@ if grep -F 'agent/a/' "$installation_dir/punarod.env" >/dev/null; then
 	echo 'relay configuration retained a removed enrollment' >&2
 	exit 1
 fi
+printf '%s\n' '[]' >"$relay_machines"
+(cd "$root" && go run ./cmd/punaro relay configure \
+	--directory "$installation_dir" \
+	--relay-machines-file "$relay_machines" \
+	--yes)
+grep -Fxq "PUNARO_RELAY_MACHINES_JSON='[]'" "$installation_dir/punarod.env"
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --tuples-only --no-align --command 'SELECT 1 FROM auth.installation_owner LIMIT 1' | grep -Fxq 1
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-app-password' postgres-bootstrap --host 127.0.0.1 --username punaro_app --dbname punaro --command 'SELECT 1 FROM relay.projects LIMIT 1'
 docker compose --project-name "$project" --file "$root/deploy/compose/production.yaml" run --rm --no-deps --entrypoint psql -e PGPASSWORD='production-owner-password' postgres-bootstrap --host 127.0.0.1 --username punaro_owner --dbname punaro --command 'GRANT TRUNCATE ON relay.projects TO punaro_app'

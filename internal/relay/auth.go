@@ -136,8 +136,8 @@ func NewTransitionAuthenticator(store NonceStore, machines []Machine, transition
 }
 
 func newAuthenticator(store NonceStore, machines []Machine, transition TransitionAuthority) (*Authenticator, error) {
-	if store == nil || len(machines) == 0 {
-		return nil, fmt.Errorf("relay authenticator requires enrolled machines")
+	if store == nil {
+		return nil, fmt.Errorf("relay authenticator requires a nonce store")
 	}
 	configured := make(map[string]Machine, len(machines))
 	attachmentDevices := make(map[[16]byte]string, len(machines))

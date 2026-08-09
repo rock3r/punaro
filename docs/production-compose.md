@@ -128,9 +128,9 @@ The command validates the exact non-secret set, atomically publishes the
 daemon environment and Compose inputs, and preserves an interrupted update for
 an exact retry. It is valid both before and after mail cutover; the cutover
 marker itself cannot change. Removing a machine from the complete set prevents
-new signed requests after the next `punaro up`; also stop its local adapter and
-revoke its distinct Access token. Never edit `punarod.env`, the Compose
-override, or `installation.json` directly.
+new signed requests after the next `punaro up`; use `[]` to revoke the final
+client. Also stop its local adapter and revoke its distinct Access token. Never
+edit `punarod.env`, the Compose override, or `installation.json` directly.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the
