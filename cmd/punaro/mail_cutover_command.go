@@ -44,7 +44,7 @@ func runMailCutover(args []string, stdout, stderr io.Writer, execute mailCutover
 	var installation operator.Installation
 	var err error
 	if !*dryRun && !*abort {
-		installation, err = operator.LoadMailCutoverRecovery(*directory)
+		installation, err = operator.LoadMailCutoverExecution(*directory)
 	} else {
 		installation, err = operator.Load(*directory)
 	}

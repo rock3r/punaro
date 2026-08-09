@@ -1265,6 +1265,29 @@ func TestRelayEnableRecoversExistingDarkEnrollmentAfterRuntimePublication(t *tes
 	}
 }
 
+func TestMailCutoverExecutionRejectsStagedDarkRelayEnable(t *testing.T) {
+	installation, err := Init(context.Background(), validInitOptions(t), func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installation = configureTestRelayMachines(t, installation)
+	candidate := installation
+	candidate.RelayEnabled = true
+	if _, err := publishMailCutoverInstallation(installation.Directory, candidate, func(step string) error {
+		if step == "environment" {
+			return errors.New("injected dark relay enable publication crash")
+		}
+		return nil
+	}); err == nil {
+		t.Fatal("injected dark relay enable publication crash was accepted")
+	}
+	if _, err := LoadMailCutoverExecution(installation.Directory); err == nil {
+		t.Fatal("mail cutover execution accepted staged relay enablement")
+	}
+}
+
 func TestRelayEnrollmentRecoveryRejectsDifferentRetry(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true

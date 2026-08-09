@@ -360,6 +360,28 @@ func LoadMailCutoverRecovery(directory string) (Installation, error) {
 	return base, nil
 }
 
+// LoadMailCutoverExecution accepts only a completed installation or an
+// interrupted execution of the same mail-cutover publication. It deliberately
+// refuses a staged relay-only change: that change must be recovered through its
+// own explicit lifecycle before an irreversible source transition can begin.
+func LoadMailCutoverExecution(directory string) (Installation, error) {
+	installation, err := LoadMailCutoverRecovery(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	markerStage := filepath.Join(directory, ".installation.mail-cutover.json")
+	if _, err := os.Lstat(markerStage); errors.Is(err, os.ErrNotExist) {
+		return installation, nil
+	} else if err != nil {
+		return Installation{}, errors.New("mail cutover recovery marker is unavailable")
+	}
+	candidate, err := readInstallation(markerStage)
+	if err != nil || candidate.MailCutover == nil {
+		return Installation{}, errors.New("mail cutover execution conflicts with a staged relay update")
+	}
+	return installation, nil
+}
+
 func sameMailCutoverPublication(left, right *MailCutoverPublication) bool {
 	if left == nil || right == nil {
 		return left == right
