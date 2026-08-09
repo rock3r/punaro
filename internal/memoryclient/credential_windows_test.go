@@ -4,6 +4,7 @@ package memoryclient
 
 import (
 	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +27,36 @@ func TestWindowsLoadCredentialRequiresExclusiveDACL(t *testing.T) {
 	setMemoryCredentialACL(t, path, "(A;;FR;;;WD)")
 	if _, err := LoadCredential(path); err == nil {
 		t.Fatal("shared credential ACL was accepted")
+	}
+}
+
+func TestWindowsLoadCredentialRejectsFileAndParentReparsePoints(t *testing.T) {
+	credential := uuid.NewString() + "." + base64.RawURLEncoding.EncodeToString(make([]byte, 32))
+	targetDirectory := t.TempDir()
+	target := filepath.Join(targetDirectory, "device.credential")
+	if err := os.WriteFile(target, []byte(credential+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setMemoryCredentialACL(t, target, "")
+	fileLink := filepath.Join(t.TempDir(), "device-link")
+	if err := os.Symlink(target, fileLink); err != nil {
+		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) {
+			t.Skip("Windows symbolic-link privilege is unavailable")
+		}
+		t.Fatal(err)
+	}
+	if _, err := LoadCredential(fileLink); err == nil {
+		t.Fatal("credential file reparse point was accepted")
+	}
+	parentLink := filepath.Join(t.TempDir(), "credential-parent")
+	if err := os.Symlink(targetDirectory, parentLink); err != nil {
+		if errors.Is(err, windows.ERROR_PRIVILEGE_NOT_HELD) {
+			t.Skip("Windows symbolic-link privilege is unavailable")
+		}
+		t.Fatal(err)
+	}
+	if _, err := LoadCredential(filepath.Join(parentLink, "device.credential")); err == nil {
+		t.Fatal("credential below reparse-point parent was accepted")
 	}
 }
 
