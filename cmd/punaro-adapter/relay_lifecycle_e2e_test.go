@@ -147,7 +147,7 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	relayBinary := filepath.Join(fixture, "punarod")
 	e2eRun(t, root, e2eGoEnvironment(), "go", "build", "-trimpath", "-o", relayBinary, "./cmd/punarod")
 	machines := e2eEnrollmentSet(t, senderHome, receiverHome)
-	relayEnvironment := e2eEnvironment(e2eGoEnvironment(), map[string]string{
+	relaySettings := map[string]string{
 		"PUNARO_DATA_DIR":            filepath.Join(fixture, "relay-state"),
 		"PUNARO_RELAY_ENABLED":       "true",
 		"PUNARO_RELAY_MACHINES_JSON": machines,
@@ -159,7 +159,8 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 		"PUNARO_ACCESS_JWKS_URL":     "",
 		"PUNARO_ACCESS_JWKS_FILE":    "",
 		"PUNARO_ENV_FILE":            "",
-	})
+	}
+	relayEnvironment := e2eEnvironment(e2eGoEnvironment(), relaySettings)
 	relay := e2eStartRelay(t, relayBinary, relayEnvironment)
 	t.Cleanup(func() { e2eStopProcess(relay) })
 	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "disposable central relay did not become ready")
@@ -208,6 +209,14 @@ func TestE2ERealTwoClientRelayLifecycle(t *testing.T) {
 	e2eEventually(t, 75*time.Second, func() bool { return proxy.retryAcknowledged.Load() }, "restarted receiver did not retry its relay acknowledgement")
 
 	e2eExpectMailboxTimeout(t, receiverMailboxState, receiverEndpoint)
+	e2eStopProcess(relay)
+	relaySettings["PUNARO_RELAY_MACHINES_JSON"] = e2eEnrollmentSet(t, receiverHome)
+	relay = e2eStartRelay(t, relayBinary, e2eEnvironment(e2eGoEnvironment(), relaySettings))
+	e2eEventually(t, 20*time.Second, func() bool { return e2eReady(healthAddress) }, "revocation relay did not become ready")
+	revokedOutput, revokedErr := e2eTryAdapterCommand(senderAdapter, senderProfile, "create", "--creator", senderEndpoint, "--member", senderEndpoint+":send,receive,admin", "--idempotency-key", "e2e-revoked-"+uuid.NewString())
+	if revokedErr == nil || !strings.Contains(string(revokedOutput), "relay rejected request with HTTP 401") {
+		t.Fatalf("revoked installed sender result error=%v output=%q, want actionable HTTP 401 rejection", revokedErr, revokedOutput)
+	}
 }
 
 type e2eClaimResult struct {
@@ -492,7 +501,7 @@ func e2eAdapterCommand(t *testing.T, binary, profile string, arguments ...string
 func e2eTryAdapterCommand(binary, profile string, arguments ...string) ([]byte, error) {
 	command := exec.Command(binary, arguments...)
 	command.Env = e2eEnvironment(e2eGoEnvironment(), map[string]string{adapterProfileFileEnv: profile})
-	return command.Output()
+	return command.CombinedOutput()
 }
 
 func e2eMailbox(t *testing.T, state string, arguments ...string) {
