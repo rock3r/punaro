@@ -87,7 +87,7 @@ func privateWindowsACL(path string) bool {
 // children. Profile files themselves remain non-inheriting and are checked by
 // privateWindowsACL.
 func privateWindowsDirectoryACL(path string) bool {
-	return privateWindowsACLWithFlags(path, windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE)
+	return privateWindowsACLWithFlags(path, 0) || privateWindowsACLWithFlags(path, windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE)
 }
 
 func privateWindowsACLWithFlags(path string, flags uint8) bool {

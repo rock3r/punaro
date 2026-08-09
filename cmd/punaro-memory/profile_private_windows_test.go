@@ -55,6 +55,16 @@ func TestWindowsProfileRequiresExclusiveParentDirectory(t *testing.T) {
 	}
 }
 
+func TestWindowsProfileAllowsEnrollmentStylePrivateParentDirectory(t *testing.T) {
+	directory := t.TempDir()
+	if err := protectWindowsPath(directory); err != nil {
+		t.Fatal(err)
+	}
+	if !privateProfilePath(filepath.Join(directory, "memory-profile.json")) {
+		t.Fatal("exclusive non-inheriting profile parent was rejected")
+	}
+}
+
 func TestWindowsProfileRejectsCaseInsensitiveCredentialAlias(t *testing.T) {
 	profile := `C:\Punaro\DEVICE.CREDENTIAL`
 	credential := `c:\punaro\device.credential`

@@ -322,6 +322,10 @@ func saveProfile(path string, value profile) error {
 		_ = temp.Close()
 		return err
 	}
+	if err := protectProfileFile(tempPath); err != nil || !privateProfileFilePath(tempPath) {
+		_ = temp.Close()
+		return errors.New("could not protect profile")
+	}
 	if _, err := temp.Write(raw); err != nil {
 		_ = temp.Close()
 		return err
@@ -333,7 +337,7 @@ func saveProfile(path string, value profile) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if err := protectProfileFile(tempPath); err != nil || !privateProfileFilePath(tempPath) {
+	if !privateProfileFilePath(tempPath) {
 		return errors.New("could not protect profile")
 	}
 	if !privateProfilePath(path) {
