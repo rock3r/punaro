@@ -411,6 +411,15 @@ func TestInstalledCompleteProductE2E(t *testing.T) {
 
 	productRelay.restart(t)
 	assertE2EItemTitle(t, runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), memory, "get", "--profile", profile, "--item", itemID), itemID, "complete-product-e2e")
+	restartedDownloads := filepath.Join(clientHome, "restarted-downloads")
+	if err := os.Mkdir(restartedDownloads, 0o700); err != nil {
+		t.Fatal("restarted download root setup failed")
+	}
+	runE2ECommand(t, e2eEnv(clientHome, proxy.caFile), attachment, "receive", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--download-root", restartedDownloads)
+	restarted, err := os.ReadFile(filepath.Join(restartedDownloads, "complete-product.txt"))
+	if err != nil || !bytes.Equal(restarted, []byte("complete product attachment body\n")) {
+		t.Fatal("trusted attachment receiver did not recover persisted bytes after relay restart")
+	}
 	assertE2ECommandFailure(t, e2eEnv(clientHome, proxy.caFile), attachment, "delete", "--origin", proxy.origin(), "--credential-file", credentialFile, "--artifact", artifact.ArtifactID, "--idempotency-key", uuid.NewString())
 
 	lookupID, _, validCredential := strings.Cut(strings.TrimSpace(string(credentialRaw)), ".")
