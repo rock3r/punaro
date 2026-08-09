@@ -201,7 +201,7 @@ func writeCredential(path, credential string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return writePrivateNew(path, []byte(credential+"\n"))
+	return writePrivateAtomic(path, []byte(credential+"\n"))
 }
 
 var syncPrivateDirectory = func(string) error { return nil }

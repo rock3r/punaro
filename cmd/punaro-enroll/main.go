@@ -561,7 +561,7 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	defer func() { _ = response.Body.Close() }()
-	if (response.StatusCode == http.StatusBadRequest && response.Header.Get("Cache-Control") == "no-store" && responseDeclaresMalformed(response.Body)) || (response.StatusCode == http.StatusUnauthorized && response.Header.Get("WWW-Authenticate") == "Bearer" && responseDeclaresUnauthenticated(response.Body)) {
+	if (response.StatusCode == http.StatusBadRequest && response.Header.Get("Cache-Control") == "no-store" && responseDeclaresMalformed(response.Body)) || (response.StatusCode == http.StatusUnauthorized && response.Header.Get("Cache-Control") == "no-store" && response.Header.Get("WWW-Authenticate") == "Bearer" && responseDeclaresUnauthenticated(response.Body)) {
 		return redemptionResponse{}, redemptionRejected
 	}
 	if response.StatusCode != http.StatusCreated || response.Header.Get("Cache-Control") != "no-store" {

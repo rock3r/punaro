@@ -219,7 +219,7 @@ func writeCredential(path, credential string) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return writePrivateNew(path, []byte(credential+"\n"))
+	return writePrivateAtomic(path, []byte(credential+"\n"))
 }
 func privateFile(info os.FileInfo) bool {
 	return info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0 && ownedByCurrentUser(info)

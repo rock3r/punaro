@@ -389,6 +389,7 @@ func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *test
 
 func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("WWW-Authenticate", "Bearer")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"error":"unauthenticated"}`)
@@ -412,6 +413,34 @@ func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); !os.IsNotExist(err) {
 		t.Fatalf("rejected enrollment recovery was retained: %v", err)
+	}
+}
+
+func TestUnverifiedUnauthorizedRetainsRecoveryJournal(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":"unauthenticated"}`)
+	}))
+	defer server.Close()
+	original := newEnrollmentHTTPClient
+	newEnrollmentHTTPClient = func() *http.Client { return server.Client() }
+	t.Cleanup(func() { newEnrollmentHTTPClient = original })
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", server.URL, "--state-dir", stateDir}, io.Discard, io.Discard); code != 0 {
+		t.Fatal("prepare failed")
+	}
+	identity, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := writeTestMaterial(t, `{"enrollment_id":"33333333-3333-4333-8333-333333333333","client_binding":"`+identity.ClientBinding+`","code":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}`)
+	var stderr bytes.Buffer
+	if code := run([]string{"redeem", "--state-dir", stateDir, "--enrollment-file", material, "--credential-file", filepath.Join(stateDir, "credential")}, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "retry") {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+	if _, err := os.Lstat(filepath.Join(stateDir, redemptionJournalName)); err != nil {
+		t.Fatalf("unverified unauthorized response removed recovery journal: %v", err)
 	}
 }
 
