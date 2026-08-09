@@ -1397,6 +1397,39 @@ func TestConfigureRelayMachinesRejectsNewKeyAfterMailCutover(t *testing.T) {
 	}
 }
 
+func TestConfigureRelayMachinesRestoresKnownKeyAfterPostCutoverRevocation(t *testing.T) {
+	options := validInitOptions(t)
+	options.RelayEnabled = true
+	secondKey := base64.RawURLEncoding.EncodeToString(append([]byte{1}, make([]byte, 31)...))
+	options.RelayMachinesJSON = `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]},{"id":"machine-b","public_key":"` + secondKey + `","endpoint_prefixes":["agent/b/"]}]`
+	installation, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := MailCutoverPublication{Version: 1, EpochID: "019f7f07-8b88-7c12-a394-b663274a6555", TargetIdentity: strings.Repeat("a", 64), SourceFingerprint: strings.Repeat("b", 64)}
+	if _, err := PublishMailCutover(installation.Directory, publication); err != nil {
+		t.Fatal(err)
+	}
+	revoked := filepath.Join(filepath.Dir(installation.Directory), "revoked-relay-machines.json")
+	if err := os.WriteFile(revoked, []byte(`[]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ConfigureRelayMachines(installation.Directory, revoked); err != nil {
+		t.Fatal(err)
+	}
+	restored := filepath.Join(filepath.Dir(installation.Directory), "restored-relay-machines.json")
+	restoredJSON := `[{"id":"machine-b","public_key":"` + secondKey + `","endpoint_prefixes":["agent/b/"]}]`
+	if err := os.WriteFile(restored, []byte(restoredJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := ConfigureRelayMachines(installation.Directory, restored)
+	if err != nil || configured.RelayMachinesJSON != restoredJSON || len(CheckPaths(configured)) != 0 {
+		t.Fatalf("configured=%#v err=%v failures=%v", configured, err, CheckPaths(configured))
+	}
+}
+
 func TestPostCutoverRelayEnrollmentReplacementRecoversAfterRuntimePublication(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true

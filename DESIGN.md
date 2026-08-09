@@ -1297,7 +1297,12 @@ mutation. Execution accepts no arbitrary source path and requires a caller
 chosen epoch UUID, the dry-run fingerprint, `--yes`, and a complete validated
 public static relay enrollment on first execution. That enrollment is published
 marker-last before SQLite prepare, remains the canonical endpoint authority
-after cutover, and cannot be changed by a recovery retry. SQLite prepare fences
+after cutover, and cannot be changed by a recovery retry. The complete static
+set can subsequently revoke any machine, including every machine via explicit
+`[]`; that restart-safe revocation fails closed. A later replacement may restore
+only a public key recorded in the durable cutover enrollment history, never a
+new key, so a temporary revocation does not strand a previously migrated
+machine. SQLite prepare fences
 old daemons and clears every lease holder while advancing fences. Staging is
 bounded to 128 rows per page and resumes from durable PostgreSQL checkpoints.
 Verification rejects any missing, extra, reordered, malformed, or changed row.
