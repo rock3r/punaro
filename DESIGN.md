@@ -1300,9 +1300,20 @@ marker-last before SQLite prepare, remains the canonical endpoint authority
 after cutover, and cannot be changed by a recovery retry. The complete static
 set can subsequently revoke any machine, including every machine via explicit
 `[]`; that restart-safe revocation fails closed. A later replacement may restore
-only a public key recorded in the durable cutover enrollment history, never a
-new key, so a temporary revocation does not strand a previously migrated
-machine. SQLite prepare fences
+only a public key recorded in the durable cutover enrollment history, so a
+temporary revocation does not strand a previously migrated machine. A new
+post-cutover machine uses the separate owner-only `punaro relay register`
+workflow. It accepts one protected installer-produced public enrollment object,
+serializes with the active cutover and legacy gate, and commits an idempotent
+content-free PostgreSQL legacy-machine registration before extending the local
+known-key history and static relay enrollment marker-last. A crash can therefore
+leave only a registered but unauthenticated key; the exact command safely
+retries, while a changed label, key, endpoint authority, non-owner caller,
+inactive cutover, disabled legacy gate, or conflicting recovery fails closed.
+The new key remains pending for an eventual proof-bound device-credential
+exchange and prevents premature legacy-gate closure. This workflow neither
+copies another machine's authority nor treats the public record, machine name,
+or device credential as authorization by itself. SQLite prepare fences
 old daemons and clears every lease holder while advancing fences. Staging is
 bounded to 128 rows per page and resumes from durable PostgreSQL checkpoints.
 Verification rejects any missing, extra, reordered, malformed, or changed row.

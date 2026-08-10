@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/relay"
@@ -145,6 +146,133 @@ func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, err
 	installation.RelayEnabled = true
 	installation.RelayMachinesJSON = canonical
 	return publishMailCutoverInstallation(directory, installation, nil)
+}
+
+// PostCutoverMachineRegistrar durably records one public Ed25519 identity in
+// the active PostgreSQL transition authority. The callback must be
+// idempotent for the exact name and key.
+type PostCutoverMachineRegistrar func(string, ed25519.PublicKey) error
+
+// RegisterPostCutoverRelayMachine merges one installer-produced public
+// enrollment record into an already cut-over installation. PostgreSQL
+// registration completes before marker-last runtime publication, so a crash
+// can leave only a harmless registered-but-unconfigured key and the exact
+// command is always safe to retry.
+func RegisterPostCutoverRelayMachine(directory, enrollmentFile string, register PostCutoverMachineRegistrar) (Installation, error) {
+	return registerPostCutoverRelayMachine(directory, enrollmentFile, register, nil)
+}
+
+func registerPostCutoverRelayMachine(directory, enrollmentFile string, register PostCutoverMachineRegistrar, afterStep func(string) error) (Installation, error) {
+	if register == nil {
+		return Installation{}, errors.New("post-cutover relay registrar is unavailable")
+	}
+	record, machine, err := readRelayMachineFile(enrollmentFile)
+	if err != nil {
+		return Installation{}, err
+	}
+	installation, err := LoadMailCutoverRecovery(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	if installation.MailCutover == nil || installation.RelayMachinesJSON == "" || installation.RelayKnownMachineKeysJSON == "" {
+		return Installation{}, errors.New("post-cutover relay registration requires active mail cutover")
+	}
+	candidate, err := mergePostCutoverRelayMachine(installation, record, machine)
+	if err != nil {
+		return Installation{}, err
+	}
+	markerStage := filepath.Join(directory, ".installation.mail-cutover.json")
+	_, stageErr := os.Lstat(markerStage)
+	if stageErr == nil {
+		staged, readErr := readInstallation(markerStage)
+		if readErr != nil || staged.RelayMachinesJSON != candidate.RelayMachinesJSON || staged.RelayKnownMachineKeysJSON != candidate.RelayKnownMachineKeysJSON || !staged.RelayEnabled || !sameMailCutoverPublication(staged.MailCutover, candidate.MailCutover) {
+			return Installation{}, errors.New("post-cutover relay registration recovery requires the exact machine enrollment")
+		}
+	} else if !errors.Is(stageErr, os.ErrNotExist) {
+		return Installation{}, errors.New("post-cutover relay registration recovery is unavailable")
+	}
+	if err := register(machine.ID, append(ed25519.PublicKey(nil), machine.PublicKey...)); err != nil {
+		return Installation{}, errors.New("post-cutover relay database registration failed")
+	}
+	if stageErr != nil && candidate.RelayMachinesJSON == installation.RelayMachinesJSON && candidate.RelayKnownMachineKeysJSON == installation.RelayKnownMachineKeysJSON {
+		if len(CheckPaths(installation)) != 0 || syncDirectory(directory) != nil {
+			return Installation{}, errors.New("post-cutover relay registration recovery is unavailable")
+		}
+		return installation, nil
+	}
+	return publishMailCutoverInstallation(directory, candidate, afterStep)
+}
+
+func readRelayMachineFile(path string) (string, relay.Machine, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || requireTrustedProtectedFile(path, maxRelayMachinesBytes) != nil {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment file is unavailable")
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- explicit protected operator input.
+	if err != nil || len(body) == 0 || len(body) > maxRelayMachinesBytes {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment file is unavailable")
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment must be one JSON object")
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, trimmed) != nil {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment is invalid")
+	}
+	canonical, err := canonicalRelayMachinesJSON("[" + compact.String() + "]")
+	if err != nil {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment is invalid")
+	}
+	machines, err := relay.ParseMachineEnrollments(canonical)
+	if err != nil || len(machines) != 1 {
+		return "", relay.Machine{}, errors.New("post-cutover machine enrollment is invalid")
+	}
+	return canonical[1 : len(canonical)-1], machines[0], nil
+}
+
+func mergePostCutoverRelayMachine(installation Installation, record string, machine relay.Machine) (Installation, error) {
+	current, err := relay.ParseMachineEnrollments(installation.RelayMachinesJSON)
+	if err != nil {
+		return Installation{}, errors.New("post-cutover relay enrollment is unavailable")
+	}
+	found := false
+	for _, existing := range current {
+		if !slices.Equal(existing.PublicKey, machine.PublicKey) {
+			continue
+		}
+		if existing.ID != machine.ID || !slices.Equal(existing.EndpointPrefixes, machine.EndpointPrefixes) || !slices.Equal(existing.Endpoints, machine.Endpoints) || existing.AttachmentDeviceID != machine.AttachmentDeviceID {
+			return Installation{}, errors.New("post-cutover machine enrollment conflicts with the configured key")
+		}
+		found = true
+		break
+	}
+	if !found {
+		if installation.RelayMachinesJSON == "[]" {
+			installation.RelayMachinesJSON = "[" + record + "]"
+		} else {
+			installation.RelayMachinesJSON = strings.TrimSuffix(installation.RelayMachinesJSON, "]") + "," + record + "]"
+		}
+		canonical, err := canonicalRelayMachinesJSON(installation.RelayMachinesJSON)
+		if err != nil {
+			return Installation{}, errors.New("post-cutover machine enrollment conflicts with existing relay authority")
+		}
+		installation.RelayMachinesJSON = canonical
+	}
+	var known []string
+	if json.Unmarshal([]byte(installation.RelayKnownMachineKeysJSON), &known) != nil || !validRelayMachineKeys(known) {
+		return Installation{}, errors.New("post-cutover known relay authority is unavailable")
+	}
+	encodedKey := base64.RawURLEncoding.EncodeToString(machine.PublicKey)
+	if !slices.Contains(known, encodedKey) {
+		known = append(known, encodedKey)
+		encoded, err := json.Marshal(known)
+		if err != nil {
+			return Installation{}, errors.New("post-cutover known relay authority cannot be encoded")
+		}
+		installation.RelayKnownMachineKeysJSON = string(encoded)
+	}
+	installation.RelayEnabled = true
+	return installation, nil
 }
 
 // relayEnrollmentUsesKnownKeys permits post-cutover authority narrowing or

@@ -145,8 +145,22 @@ if you decline it during client setup.
    Use the explicit JSON value `[]` to revoke the final client; the restarted
    relay then accepts no signed machine requests.
    After mail cutover, this command can only retain or remove already registered
-   keys. New mailbox clients are currently unavailable until a durable
-   post-cutover authority-registration workflow is delivered.
+   keys. Register one genuinely new installer-produced public record through
+   the owner-controlled workflow instead:
+
+   ```sh
+   punaro relay register \
+     --directory INSTALLATION_DIR \
+     --machine-enrollment-file /absolute/private/new-machine.json \
+     --yes
+   punaro up --directory INSTALLATION_DIR
+   ```
+
+   The input is the single JSON object printed by that machine's installer,
+   protected as an owner-only regular file. The command first records its exact
+   public key in the active PostgreSQL transition authority, then marker-last
+   publishes the merged static enrollment. Exact retries recover safely; a
+   changed retry or conflicting machine/key/namespace fails closed.
    Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
    `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this
@@ -222,16 +236,14 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    service token for the machine, install it only in that machine's owner-only
    profile, bind and attach its aliases, and enable the adapter.
 
-   After mail cutover, stop here: the active transition authority accepts only
-   keys that were registered before cutover, and `punaro relay configure`
-   rejects a newly generated key. Device-credential enrollment does not make a
-   new mailbox Ed25519 key eligible. Do not copy another machine's key, edit
-   `punarod.env`, alter the installation marker, or write authority rows by
-   hand. Until a durable post-cutover registration workflow is delivered, the
-   supported choices are to keep the new adapter disabled or provision it on a
-   fresh installation before that installation's cutover. Therefore inventory
-   and enroll every intended macOS, Linux, and Windows adapter before executing
-   mail cutover.
+   After mail cutover, use `punaro relay register` with that single public
+   enrollment object, followed by `punaro up`; ordinary `relay configure`
+   deliberately rejects the unknown key. Device-credential enrollment remains
+   separate and does not make a mailbox Ed25519 key eligible. Do not copy
+   another machine's key, edit `punarod.env`, alter the installation marker, or
+   write authority rows by hand. Keep the adapter disabled until registration,
+   relay readiness, its distinct Access Service Auth probe, and endpoint
+   attachment all succeed.
 3. For an **existing** machine, rerun the same installer from the clean
    checkout using the original relay URL and machine ID. The installer proves
    that the existing key, enrollment record, and profile still belong to those

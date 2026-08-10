@@ -223,6 +223,27 @@ the daemon from the published PostgreSQL and credential-transition settings.
 Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
 mail, recovery uses a PostgreSQL backup or forward repair.
 
+To add a new mailbox adapter after that activation, keep the adapter disabled
+and use the owner-only post-cutover registration path with the single public
+JSON object emitted by its installer:
+
+```sh
+punaro relay register \
+  --directory /absolute/private/punaro \
+  --machine-enrollment-file /absolute/private/new-machine.json \
+  --yes
+punaro up --directory /absolute/private/punaro
+```
+
+The command verifies the installation owner and database pair, registers the
+exact Ed25519 public key under the active cutover and legacy-gate locks, and
+then extends the known-key history plus static runtime authority marker-last.
+The database mutation is idempotent for the exact machine name and key. A
+publication failure is recovered by rerunning the exact command; never change
+the enrollment file during recovery. The adapter remains unauthorized until
+both phases and `punaro up` complete. Device enrollment, Cloudflare Access, and
+endpoint attachment are still separate least-privilege steps.
+
 Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
 migration, update, restore, or audit rows to bypass a failure.

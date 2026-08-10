@@ -134,11 +134,25 @@ an exact retry. It is valid both before and after mail cutover; the cutover
 marker itself cannot change. Removing a machine from the complete set prevents
 new signed requests after the next `punaro up`; use `[]` to revoke the final
 client. After mail cutover, additions with a new public key are rejected because
-the active transition authority cannot authenticate them. New mailbox clients
-are currently unavailable until a durable post-cutover authority-registration
-workflow is delivered. Also stop its local adapter and revoke its distinct
-Access token. Never edit `punarod.env`, the Compose override, or
-`installation.json` directly.
+the active transition authority cannot authenticate them until the owner
+registers that one key explicitly. For a new machine, keep its adapter disabled
+and use the single protected JSON object printed by its installer:
+
+```sh
+punaro relay register \
+  --directory INSTALLATION_DIR \
+  --machine-enrollment-file /absolute/private/new-machine.json \
+  --yes
+punaro up --directory INSTALLATION_DIR
+```
+
+The registration transaction is owner-only and commits before marker-last
+runtime publication. An interruption can leave a registered key absent from
+the runtime, never the reverse; rerun the exact command to recover. Changed
+retries and overlapping IDs, keys, endpoints, or prefixes fail closed. To
+revoke a client, remove it with `relay configure`, stop its local adapter, and
+revoke its distinct Access token. Never edit `punarod.env`, the Compose
+override, `installation.json`, or PostgreSQL authority rows directly.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the
