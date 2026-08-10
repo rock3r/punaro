@@ -18,7 +18,13 @@
 
 ## Exact candidate
 
-- Source commit: `ba633f0d20a5e3c0b0711b2893521c9f59a2530e`.
+- Integrated source commit: `011b5b7c3df9c880cadf41c13e47b53c34865f60`.
+- Artifact-producing runtime commit:
+  `ba633f0d20a5e3c0b0711b2893521c9f59a2530e`. Rebuilding all three
+  platform artifacts from the integrated source commit reproduced the exact
+  deployed hashes below; the intervening merge changed tests, installers,
+  service definitions, and documentation but not relay or adapter runtime
+  source.
 - Review reference: PR #131, branch
   `agent/issue-55-durable-role-e2e`.
 - Signed/tagged release reference: none; official release remains withheld.
@@ -35,11 +41,13 @@
 The Linux server is byte-identical to the earlier role-routing build because
 the final runtime fix changes only the adapter client. All four installed
 artifacts were hashed after the final scenario and matched the values above.
+The three platform artifacts were then rebuilt from the integrated source
+commit and reproduced those hashes exactly.
 
 ## Verification gates
 
-The following command passed from a clean protected-path worktree at the exact
-source commit:
+The following command passed from a clean protected-path worktree at the
+integrated source commit:
 
 ```sh
 env GOCACHE=/tmp/punaro-go-cache \
@@ -49,7 +57,8 @@ env GOCACHE=/tmp/punaro-go-cache \
 Results included unit coverage, race tests, Staticcheck, `govulncheck` with no
 called vulnerabilities, `gosec` with zero issues, Gitleaks with no leaks, Go
 vet, lint, Windows compilation, deployment and installer verification, and the
-real two-client relay lifecycle E2E. The latter passed in 78.759 seconds.
+real two-client relay lifecycle E2E. The final integrated-head run's latter
+test passed in 78.295 seconds.
 
 GitHub Actions candidate run: pending final evidence-only synchronization.
 The earlier complete role-routing candidate run is retained at
@@ -120,8 +129,8 @@ identifier, delivery identifier, lease token, or body was recorded here.
   storage directly was rejected as unsafe and outside the supported control
   plane.
 - Final health: relay `active` and ready; both macOS launchd adapters running;
-  Mattone scheduled task running with exactly one process at the candidate
-  path.
+  Mattone scheduled task hidden and running a hidden-window action with
+  exactly one process at the candidate path.
 - Owner-managed pre-candidate rollback copies with suffix `.pre-ba633f0` were
   retained beside each installed binary. Rollback requires the documented
   service stop, atomic binary replacement, restart, hash check, and readiness
