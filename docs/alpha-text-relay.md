@@ -186,6 +186,24 @@ non-empty adapter environment setting overrides its matching profile value;
 use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute, owner-only
 profile.
 
+To address exactly one durable role, add `--target-role`. The relay derives
+the recipient from the conversation's role membership; it does not trust an
+endpoint label or message body as routing authority:
+
+```sh
+punaro-adapter send \
+  --conversation CONVERSATION_ID \
+  --from agent/workstation-review/session-name \
+  --target-role role/plan-reviewer \
+  --body-file review-request.txt \
+  --idempotency-key stable-targeted-retry-key
+```
+
+The selected role must be a receiving member of that conversation. Unknown or
+non-receiving roles fail without creating message state. Reusing the same key
+with another target is a conflict. Omitting `--target-role` retains the
+compatible broadcast behavior for all receiving endpoint and role members.
+
 ## Durable conversation roles
 
 Endpoint members keep the existing behavior: membership follows that exact

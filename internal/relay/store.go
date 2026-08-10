@@ -148,6 +148,7 @@ type AppendInput struct {
 	CredentialLookupID   string
 	CredentialGeneration int64
 	FromEndpoint         string
+	TargetRole           string
 	Body                 string
 	ArtifactIDs          []string
 	IdempotencyKey       string
@@ -1059,7 +1060,7 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || (input.TargetRole != "" && !ValidRole(input.TargetRole)) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
 	}
 	if len(input.Body) > maxMessageBodyBytes {
@@ -1080,6 +1081,15 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	if capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
+	}
+	if input.TargetRole != "" {
+		var allowed bool
+		if err := tx.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM role_memberships WHERE conversation_id = ? AND role = ? AND (capabilities & ?) != 0)", input.ConversationID, input.TargetRole, CapReceive).Scan(&allowed); err != nil {
+			return Message{}, false, fmt.Errorf("authorize target role: %w", err)
+		}
+		if !allowed {
+			return Message{}, false, ErrForbidden
+		}
 	}
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT message_id, request_hash FROM idempotency WHERE machine_id = ? AND key = ?", input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -1108,7 +1118,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("append message: %w", err)
 	}
-	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
+	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE ? = '' AND conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.TargetRole, input.ConversationID, CapReceive, input.FromEndpoint)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find recipients: %w", err)
 	}
@@ -1129,7 +1139,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 			return Message{}, false, fmt.Errorf("create delivery: %w", err)
 		}
 	}
-	roleRows, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id = ? AND (capabilities & ?) != 0", input.ConversationID, CapReceive)
+	roleRows, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND (? = '' OR role = ?)", input.ConversationID, CapReceive, input.TargetRole, input.TargetRole)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
 	}
@@ -1683,6 +1693,11 @@ func memberIdentity(member Member) string {
 
 func appendHash(input AppendInput) string {
 	parts := []string{input.ConversationID, input.FromEndpoint, input.Body}
+	// Preserve the exact pre-targeting hash for broadcasts so an accepted
+	// request can be retried safely across an in-place upgrade.
+	if input.TargetRole != "" {
+		parts = append(parts, "target-role:"+input.TargetRole)
+	}
 	if len(input.ArtifactIDs) != 0 {
 		parts = append(parts, input.PrincipalID)
 		parts = append(parts, input.ArtifactIDs...)

@@ -318,11 +318,29 @@ func capabilityNames(capabilities relay.Capability) []string {
 // idempotency key belongs to the caller's retry domain and is never derived
 // from the body or a machine credential.
 func (c *HTTPRelayClient) Send(ctx context.Context, conversationID, fromEndpoint, body, idempotencyKey string) (relay.Message, error) {
+	return c.send(ctx, conversationID, fromEndpoint, "", body, idempotencyKey)
+}
+
+// SendToRole appends a message whose durable delivery is restricted to one
+// receiving role membership. An empty role is never accepted here; callers
+// that need the compatible broadcast behavior must use Send.
+func (c *HTTPRelayClient) SendToRole(ctx context.Context, conversationID, fromEndpoint, targetRole, body, idempotencyKey string) (relay.Message, error) {
+	if !relay.ValidRole(targetRole) {
+		return relay.Message{}, fmt.Errorf("target role is required")
+	}
+	return c.send(ctx, conversationID, fromEndpoint, targetRole, body, idempotencyKey)
+}
+
+func (c *HTTPRelayClient) send(ctx context.Context, conversationID, fromEndpoint, targetRole, body, idempotencyKey string) (relay.Message, error) {
 	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" || strings.TrimSpace(idempotencyKey) == "" {
 		return relay.Message{}, fmt.Errorf("conversation, sender endpoint, and idempotency key are required")
 	}
 	var message relay.Message
-	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", map[string]any{"from_endpoint": fromEndpoint, "body": body}, idempotencyKey, &message)
+	request := map[string]any{"from_endpoint": fromEndpoint, "body": body}
+	if targetRole != "" {
+		request["target_role"] = targetRole
+	}
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", request, idempotencyKey, &message)
 	if err != nil {
 		return message, &relayHTTPStatusError{status: status, err: err}
 	}

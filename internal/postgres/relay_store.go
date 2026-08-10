@@ -664,6 +664,18 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
+	if input.TargetRole != "" {
+		if !relay.ValidRole(input.TargetRole) || !rolesAvailable {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+		var allowed bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND role=$2 AND (capabilities & $3) <> 0)`, input.ConversationID, input.TargetRole, relay.CapReceive).Scan(&allowed); err != nil {
+			return relay.Message{}, false, errors.New("target role authorization is unavailable")
+		}
+		if !allowed {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+	}
 	hash := relay.AppendRequestHash(input)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT message_id::text,request_hash FROM relay.mail_message_idempotency WHERE machine_id=$1 AND key=$2`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -703,14 +715,14 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "append message")
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
+		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE $5='' AND conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, input.TargetRole); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
 	if rolesAvailable {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
-		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0`, message.ID, message.ConversationID, relay.CapReceive); err != nil {
+		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0 AND ($4='' OR membership.role=$4)`, message.ID, message.ConversationID, relay.CapReceive, input.TargetRole); err != nil {
 			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
 		}
 	}

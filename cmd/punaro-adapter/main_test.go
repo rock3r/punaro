@@ -26,6 +26,16 @@ func TestParseSendArgsRequiresExplicitIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestParseSendArgsAcceptsOneOptionalTargetRole(t *testing.T) {
+	request, err := parseSendArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--body-file", "-", "--idempotency-key", "reply-1", "--target-role", "role/reviewer"})
+	if err != nil || request.targetRole != "role/reviewer" {
+		t.Fatalf("targeted send request=%#v err=%v", request, err)
+	}
+	if _, err := parseSendArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--body-file", "-", "--idempotency-key", "reply-1", "--target-role", " role/reviewer"}); err == nil {
+		t.Fatal("non-canonical target role was accepted")
+	}
+}
+
 func TestParseAttachmentNotifyArgsRequiresStableOfferHandoff(t *testing.T) {
 	if _, err := parseAttachmentNotifyArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--offer-file", "offer.cbor"}); err == nil {
 		t.Fatal("attachment notify without idempotency key was accepted")

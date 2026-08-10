@@ -27,6 +27,18 @@ func TestStoreRejectsNonPortableRequestAndMessageText(t *testing.T) {
 	}
 }
 
+func TestAppendRequestHashPreservesBroadcastUpgradeCompatibility(t *testing.T) {
+	input := AppendInput{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "broadcast"}
+	legacy := stableHash(input.ConversationID, input.FromEndpoint, input.Body)
+	if got := AppendRequestHash(input); got != legacy {
+		t.Fatalf("broadcast request hash changed across targeting upgrade: got %s want %s", got, legacy)
+	}
+	input.TargetRole = "role/reviewer"
+	if got := AppendRequestHash(input); got == legacy {
+		t.Fatal("targeted request did not bind its target role into idempotency")
+	}
+}
+
 func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")
@@ -643,6 +655,74 @@ func TestStoreKeepsRoleDeliveryKeysDistinctFromEndpointNames(t *testing.T) {
 	}
 	if cursor, err := store.RecipientCursor("machine-reviewer", "role:reviewer", conversation.ID, now); err != nil || cursor != 0 {
 		t.Fatalf("shared session cursor=%d err=%v, want pending-role zero", cursor, err)
+	}
+}
+
+func TestStoreTargetedRoleDeliveryExcludesOtherMembersAndBindsRetry(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-sender", []string{"agent/sender"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-observer", []string{"agent/observer"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/sender", []Member{
+		{Endpoint: "agent/sender", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/observer", Capabilities: CapReceive},
+		{Role: "role/reviewer", RoleMachineID: "machine-reviewer", Capabilities: CapReceive},
+		{Role: "role/implementer", RoleMachineID: "machine-implementer", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-sender", FromEndpoint: "agent/sender", TargetRole: "role/reviewer", Body: "targeted", IdempotencyKey: "targeted-1", Now: now}
+	message, duplicate, err := store.AppendMessage(input)
+	if err != nil || duplicate {
+		t.Fatalf("targeted append message=%#v duplicate=%t err=%v", message, duplicate, err)
+	}
+	var recipients []string
+	rows, err := store.db.QueryContext(context.Background(), "SELECT recipient_endpoint FROM deliveries WHERE message_id = ? ORDER BY recipient_endpoint", message.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var recipient string
+		if err := rows.Scan(&recipient); err != nil {
+			t.Fatal(err)
+		}
+		recipients = append(recipients, recipient)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 1 || recipients[0] != roleRecipient("role/reviewer") {
+		t.Fatalf("targeted recipients=%q", recipients)
+	}
+	changed := input
+	changed.TargetRole = "role/implementer"
+	if _, _, err := store.AppendMessage(changed); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed target retry err=%v", err)
+	}
+	unknown := input
+	unknown.IdempotencyKey = "targeted-unknown"
+	unknown.TargetRole = "role/missing"
+	if _, _, err := store.AppendMessage(unknown); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("unknown target role err=%v", err)
+	}
+	var messageCount, idempotencyCount int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages").Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM idempotency").Scan(&idempotencyCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 1 || idempotencyCount != 1 {
+		t.Fatalf("unknown target mutated state: messages=%d idempotency=%d", messageCount, idempotencyCount)
 	}
 }
 

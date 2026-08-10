@@ -70,7 +70,7 @@ exercise one harmless bidirectional message for each host pair. Verify the
 normal endpoint-member path remains unchanged, acknowledgement is durable, a
 same-key retry is deduplicated, and a short supported adapter stop/start causes
 eventual delivery without a duplicate mailbox injection. Targeted role
-delivery, if enabled for the candidate, must reach only its selected role;
+delivery must reach only its selected role;
 untargeted broadcast must still reach compatible endpoint members.
 
 Exercise retired attachment controls only as a fail-closed boundary unless the

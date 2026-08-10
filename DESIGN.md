@@ -299,6 +299,15 @@ listing, and wake routing authorize an active role binding as well as an
 existing endpoint member, while legacy endpoint membership retains its current
 behavior unchanged.
 
+Message routing is explicit and server-authorized. Omitting `target_role`
+preserves broadcast delivery to every receiving endpoint and role member other
+than the sending endpoint. Supplying a non-empty `target_role` creates a
+delivery only for that receiving role membership; endpoint members and other
+roles receive nothing. The relay rejects an unknown or non-receiving role
+before allocating a message sequence or idempotency row. The target role is
+part of the sender's idempotency request hash, while an untargeted request keeps
+the pre-targeting broadcast hash so retries remain valid across upgrades.
+
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. Roles may use only those three capabilities;
 `invoke` is endpoint-only because a role has no stable process target. The
@@ -802,7 +811,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
-| `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
+| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |

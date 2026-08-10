@@ -119,6 +119,36 @@ func TestHTTPRelayClientValidatesSenderWithoutMessageMutation(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientSendsToOneDurableRole(t *testing.T) {
+	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/messages" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		var request struct {
+			FromEndpoint string `json:"from_endpoint"`
+			Body         string `json:"body"`
+			TargetRole   string `json:"target_role"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.FromEndpoint != "agent/a" || request.Body != "review this" || request.TargetRole != "role/reviewer" {
+			t.Fatalf("request=%#v err=%v", request, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"review this","created_at":"2026-08-10T12:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", machinePrivate, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SendToRole(context.Background(), "conversation-1", "agent/a", "role/reviewer", "review this", "send-1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHTTPRelayClientLeasesOneInvocationPerSync(t *testing.T) {
 	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
