@@ -153,19 +153,21 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 8. Versions 1 through 7 are reported
-as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
-additive and creates the host-local ownership, pending enrollment, device
-credential, cache/session generation, and Ed25519 migration-inventory records.
-Migration 6 adds the durable update coordinator, exact recovery evidence, and
-the mutation fence. Migration 7 adds the PostgreSQL mail store, durable
-recipient cursors, replay protection, and relay-table mutation guards.
-Migration 8 adds the M-9 cutover substrate: owner-only migration epochs,
-bounded staging rows and checkpoints, and an application-role mail-write fence
-for an importing or verified epoch. The host wrapper's one-shot executor is the
-only supported authority transition. It always reads `relay.db` from Punaro's
-validated private service data directory; there is no caller-selected source
-path.
+The current binary requires schema version 44 and supports an intact schema
+from version 10 through 44 as an update boundary. Versions 10 through 43 are
+reported as `upgrade_required`; versions below the compatibility floor, newer
+versions, and damaged objects are `incompatible`. The embedded manifest and
+target release metadata are authoritative; check them instead of assuming a
+version from this guide when preparing a future release. Migration 40 adds
+durable conversation roles, migration 41 adds relay membership controls,
+migration 42 applies those controls to mail cutover, migration 43 adds the
+relay invocation capability, and migration 44 adds client lifecycle authority.
+Migration 44 invalidates unredeemed legacy enrollment invitations while
+converting existing device credentials into lifecycle-managed client records,
+so it must not be applied as an ad hoc repair. The host wrapper's one-shot
+executor is the only supported authority transition. It always reads `relay.db`
+from Punaro's validated private service data directory; there is no
+caller-selected source path.
 PostgreSQL mail work uses a reserved four-connection application-role pool;
 each operation and lock wait is bounded to five seconds so platform work cannot
 consume the mail budget indefinitely.

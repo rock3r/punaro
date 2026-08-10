@@ -47,6 +47,18 @@ Cloudflare Access application, or copy any client secret.
 On a later `--enable` run, the installer restarts the relay after updating the
 configuration so the requested enrollment and Access settings take effect.
 
+That restart is safe only when the installed database already matches the
+replacement binary. The historical installer replaces `punarod`; it does not
+install the unified `punaro` lifecycle wrapper, create an update journal or
+backup, or migrate PostgreSQL. Before rebuilding an existing PostgreSQL-backed
+alpha relay from a newer checkout, compare the installed schema with the target
+release metadata. If the target requires a newer schema, leave the last
+compatible binary running and adopt the supported production Compose lifecycle;
+then perform the upgrade with `punaro update`. Do not run `punaro-migrate`
+directly, grant schema ownership to `punaro_app`, or repeatedly restart a new
+binary that reports `upgrade_required`. A direct binary replacement may be
+rolled back only while no schema migration has started.
+
 `--access-*` is strongly recommended for an internet-reachable deployment.
 All three Access options are required together; they are public identifiers and
 URLs. The installer writes the JWKS URL only to root-owned
