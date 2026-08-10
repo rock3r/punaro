@@ -269,7 +269,9 @@ func syncPrivateDirectoryImpl(path string) error {
 		// invariant without allowing an already-written journal to poison all
 		// later recovery attempts.
 		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTSUP) {
-			unix.Sync() // #nosec G104 -- unix.Sync has no return value to check. //nolint:errcheck
+			if err := syncAllFilesystems(); err != nil {
+				return err
+			}
 			return nil
 		}
 		return err
@@ -286,7 +288,7 @@ func removePrivate(path string) error {
 		// journal that survives a crash is harmless: recovering it replays the
 		// same idempotency key. Do not convert a successful enrollment into a
 		// failure merely because its best-effort cleanup could not be synced.
-		unix.Sync() // #nosec G104 -- unix.Sync has no return value to check. //nolint:errcheck
+		_ = syncAllFilesystems() // Best-effort cleanup must not turn a completed enrollment into a failure.
 	}
 	return nil
 }
