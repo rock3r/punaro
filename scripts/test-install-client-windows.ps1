@@ -16,7 +16,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
@@ -44,7 +44,7 @@ try {
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
     function New-ScheduledTaskTrigger { param([switch]$AtLogOn, [string]$User) return [pscustomobject]@{ User = $User } }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
-    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit } }
+    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$Hidden, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit; Hidden = $Hidden } }
     function Register-ScheduledTask {
         param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [string]$Description, [switch]$Force)
         $global:punaroRegisteredTask = $TaskName
@@ -69,7 +69,9 @@ try {
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
     if ($global:punaroRegisteredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
+    if (-not $global:punaroRegisteredSettings.Hidden) { throw 'Windows client adapter task must be hidden from the task scheduler UI' }
     if (-not ([string]$global:punaroRegisteredAction.Argument -match '(^|\s)-ExecutionPolicy\s+Bypass(\s|$)')) { throw 'Windows client adapter task must use only process-scoped ExecutionPolicy Bypass' }
+    if (-not ([string]$global:punaroRegisteredAction.Argument -match '(^|\s)-WindowStyle\s+Hidden(\s|$)')) { throw 'Windows client adapter task must hide its PowerShell console window' }
     $existingGroupMailbox = @'
 @echo off
 echo %* | findstr /C:"group create" >nul

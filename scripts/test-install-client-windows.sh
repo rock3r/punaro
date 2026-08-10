@@ -15,6 +15,8 @@ done
 for expected in \
 	'LogonType Interactive' \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
+	'-WindowStyle Hidden' \
+	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \
 	'punaro-trusted-attachment.exe' \
 	'punaro-enroll.exe' \
@@ -22,7 +24,7 @@ for expected in \
 	'agent-mailbox' \
 	'AgentGuidanceDir' \
 	'Push-Location -LiteralPath $repoDir'; do
-	grep -Fq "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
+	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
 done
 
 for retired_package in 'cmd\punaro-dpapi' 'cmd\punaro-directory' 'cmd\punaro-attachment' 'cmd\punaro-keychain'; do
