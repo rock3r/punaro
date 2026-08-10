@@ -204,8 +204,11 @@ conversation. Reuse of the same key is idempotent only when `to_role` is also
 unchanged; omitting it retains broadcast compatibility.
 
 The recipient's inert `application/vnd.punaro.message+json` mailbox envelope
-preserves `to_role` when a message was targeted, so local consumers can audit
-the relay-selected durable recipient without interpreting the message body.
+uses schema version 1 for broadcasts and schema version 2 for targeted
+messages. Version 2 preserves `to_role`, so local consumers can audit the
+relay-selected durable recipient without interpreting the message body. A
+consumer that supports both versions must reject a `to_role` field in version
+1 and treat it as optional only in version 2.
 
 ## Durable conversation roles
 
