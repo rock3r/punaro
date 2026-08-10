@@ -88,8 +88,16 @@ function Assert-Configuration([string]$Path, [hashtable]$Expected) {
 }
 
 function Build-PunaroBinary([string]$Package, [string]$Output) {
-    & go build -trimpath -buildvcs=true -o $Output $Package
-    if ($LASTEXITCODE -ne 0) { Stop-Install "could not build $Package" }
+    # `go build` discovers go.mod from the working directory, not from the
+    # package argument. Keep the installer usable when invoked by an absolute
+    # path from PowerShell's default directory.
+    Push-Location -LiteralPath $repoDir
+    try {
+        & go build -trimpath -buildvcs=true -o $Output $Package
+        if ($LASTEXITCODE -ne 0) { Stop-Install "could not build $Package" }
+    } finally {
+        Pop-Location
+    }
     Protect-PunaroPath -Path $Output
 }
 
