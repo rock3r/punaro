@@ -1119,7 +1119,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt.UnixMilli()); err != nil {
 		return Message{}, false, fmt.Errorf("append message: %w", err)
 	}
-	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE ? = '' AND conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.TargetRole, input.ConversationID, CapReceive, input.FromEndpoint)
+	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND endpoint != ?", input.ConversationID, CapReceive, input.FromEndpoint)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find recipients: %w", err)
 	}
@@ -1136,27 +1136,39 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	for _, endpoint := range recipients {
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
-			return Message{}, false, fmt.Errorf("create delivery: %w", err)
+		if input.TargetRole == "" {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
+				return Message{}, false, fmt.Errorf("create delivery: %w", err)
+			}
+		} else if err := advanceRecipientCursor(tx, endpoint, input.ConversationID); err != nil {
+			return Message{}, false, err
 		}
 	}
-	roleRows, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id = ? AND (capabilities & ?) != 0 AND (? = '' OR role = ?)", input.ConversationID, CapReceive, input.TargetRole, input.TargetRole)
+	roleRows, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id = ? AND (capabilities & ?) != 0", input.ConversationID, CapReceive)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
 	}
+	var roles []string
 	for roleRows.Next() {
 		var role string
 		if err := roleRows.Scan(&role); err != nil {
 			_ = roleRows.Close()
 			return Message{}, false, err
 		}
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, roleRecipient(role)); err != nil {
-			_ = roleRows.Close()
-			return Message{}, false, fmt.Errorf("create durable role delivery: %w", err)
-		}
+		roles = append(roles, role)
 	}
 	if err := roleRows.Close(); err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
+	}
+	for _, role := range roles {
+		recipient := roleRecipient(role)
+		if input.TargetRole == "" || role == input.TargetRole {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, recipient); err != nil {
+				return Message{}, false, fmt.Errorf("create durable role delivery: %w", err)
+			}
+		} else if err := advanceRecipientCursor(tx, recipient, input.ConversationID); err != nil {
+			return Message{}, false, err
+		}
 	}
 	if err := advanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
 		return Message{}, false, err

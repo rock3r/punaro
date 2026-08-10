@@ -726,6 +726,11 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
 		}
 	}
+	if input.TargetRole != "" {
+		if err := postgresAdvanceSkippedTargetCursors(tx, input.ConversationID, input.FromEndpoint, input.TargetRole); err != nil {
+			return relay.Message{}, false, err
+		}
+	}
 	if len(input.ArtifactIDs) != 0 {
 		encodedArtifacts, err := json.Marshal(input.ArtifactIDs)
 		if err != nil {
@@ -1222,6 +1227,39 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 	if target > cursor {
 		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_recipient_cursors SET sequence=$1 WHERE recipient_endpoint=$2 AND conversation_id=$3::uuid AND sequence=$4`, target, endpoint, conversationID, cursor); err != nil {
 			return relayDatabaseError(err, "advance recipient cursor")
+		}
+	}
+	return nil
+}
+
+func postgresAdvanceSkippedTargetCursors(tx *sql.Tx, conversationID, senderEndpoint, targetRole string) error {
+	rows, err := tx.QueryContext(context.Background(), `
+		SELECT endpoint FROM relay.mail_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND endpoint<>$3
+		UNION ALL
+		SELECT chr(30)||'role:'||role FROM relay.mail_role_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND role<>$4`, conversationID, relay.CapReceive, senderEndpoint, targetRole)
+	if err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	var recipients []string
+	for rows.Next() {
+		var recipient string
+		if err := rows.Scan(&recipient); err != nil {
+			_ = rows.Close()
+			return errors.New("skipped target recipient is malformed")
+		}
+		recipients = append(recipients, recipient)
+	}
+	if err := rows.Close(); err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	for _, recipient := range recipients {
+		if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
+			return err
 		}
 	}
 	return nil

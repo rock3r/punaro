@@ -298,6 +298,9 @@ func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
 	if err := backend.AckDelivery(recipientMachine, recipientEndpoint, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
 		t.Fatal(err)
 	}
+	if cursor, err := backend.RecipientCursor(recipientMachine, recipientEndpoint, conversation.ID, now); err != nil || cursor != targeted.Sequence {
+		t.Fatalf("targeted recipient cursor=%d want=%d err=%v", cursor, targeted.Sequence, err)
+	}
 	changed := targetedInput
 	changed.TargetRole = implementerRole
 	if _, _, err := backend.AppendMessage(changed); !errors.Is(err, relay.ErrConflict) {
