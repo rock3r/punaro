@@ -169,6 +169,15 @@ the old origin as the rollback target until all adapters pass. Do not publish
 the device listener on the LAN or preserve an old manual environment overlay;
 `punaro up` and current daemon configuration fail closed for that state.
 
+Cloudflare Access admission is a separate boundary from tunnel routing. For
+each machine-scoped service token, require a **Service Auth** policy that
+includes that exact token. With redirects disabled, a request carrying only
+the token headers to the protected `/v1/conversations` route must reach Punaro
+and return its JSON `401`; a `3xx` or HTML login response is a policy failure.
+Do not use `/readyz` as this proof, because health and device paths may have
+different routes or policies. Only after this check should a harmless signed
+request be used to prove relay enrollment and the final device origin.
+
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the
 same durable update journal and recovery path as the initial installation; do

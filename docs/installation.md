@@ -177,8 +177,20 @@ if you decline it during client setup.
    the user-token endpoint. The per-machine Access service-token pair is the
    `CF-Access-Client-Id` and `CF-Access-Client-Secret` admitted by a Service
    Auth (`non_identity`) policy on the relay application; it is not the
-   account API key and must never be reused as one. Confirm an authenticated
-   `/readyz` request through the public hostname before enabling the adapter.
+   account API key and must never be reused as one. The Access application
+   policy action must be **Service Auth** and its include rule must name this
+   exact service token; an ordinary Allow policy sends the adapter to an
+   interactive identity-provider login.
+
+   Test the device application, not only `/readyz`. Make a header-authenticated
+   request to `/v1/conversations` without a Punaro machine signature and with
+   redirects disabled. The expected result is Punaro's application-level JSON
+   `401`: that proves Access admitted the service token and the device route
+   reached Punaro, while Punaro still rejected the unsigned caller. A `3xx`,
+   HTML response, identity-provider page, or Cloudflare policy error means the
+   Service Auth rule is missing or does not include that token. Never print the
+   two headers while testing. `/readyz` may use a separate route or bypass
+   policy and is only a health check; it cannot prove device admission.
 3. Bind each reachable agent to an explicit address under that machine's
    namespace, then attach it to the local group. For example:
 
@@ -243,7 +255,9 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    complete relay enrollment set, apply it through `punaro relay configure`
    and `punaro up`, and verify relay readiness. Then create a new Access
    service token for the machine, install it only in that machine's owner-only
-   profile, bind and attach its aliases, and enable the adapter.
+   profile, bind and attach its aliases, and enable the adapter. Verify the
+   Service Auth rule with the unsigned-API `401` check above before interpreting
+   adapter failures as machine-enrollment failures.
 
    After mail cutover, use `punaro relay register` with that single public
    enrollment object, followed by `punaro up`; ordinary `relay configure`
