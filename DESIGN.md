@@ -1242,8 +1242,10 @@ behind its explicit ingress transport policy. Credential caches
 and long-lived sessions revalidate within two seconds. The existing Ed25519
 relay remains active while its intended machines are durably inventoried as
 pending, migrated, or retired; the global legacy gate cannot close while any
-machine is pending. PostgreSQL remains dark for mail and SQLite routing is
-unchanged.
+machine is pending before cutover. After mail cutover is active, an
+owner-registered new machine is deliberately pending but is admitted by that
+active-cutover record rather than by reopening the migration-wide gate.
+PostgreSQL remains dark for mail and SQLite routing is unchanged.
 
 The dormant M-9 credential-transition bridge does not duplicate relay
 authority in PostgreSQL. A successful proof-bound exchange already records the
@@ -1255,11 +1257,14 @@ exactly the existing endpoint prefixes, exact endpoints, and attachment-device
 binding. Duplicate configured public keys fail startup. Ordinary device
 credentials, stale generations, retired mappings, and unavailable database
 state fail authentication without revealing which check failed. In the same
-mode every Ed25519 relay request consults the durable legacy gate after
-signature verification and before consuming its nonce; closing the gate blocks
-new legacy requests while migrated credentials remain usable. The switch is
-off by default and requires device auth plus the PostgreSQL relay, so this
-slice does not activate PostgreSQL mail authority or change the SQLite default.
+mode every Ed25519 relay request consults durable transition authority after
+signature verification and before consuming its nonce. The open legacy gate
+admits the pre-cutover migration inventory. Once mail cutover is active and
+that gate is closed, only a pending key added by the owner-only post-cutover
+registration transaction is admitted; migrated and retired legacy keys remain
+blocked while migrated credentials remain usable. The switch is off by default
+and requires device auth plus the PostgreSQL relay, so this slice does not
+activate PostgreSQL mail authority or change the SQLite default.
 Long-lived notification sockets retain only a non-secret generation/gate fence,
 not the bearer credential. A check starts every second with a one-second
 deadline in a dedicated loop; wake writes cannot delay it, and fence failure
@@ -1319,9 +1324,11 @@ content-free PostgreSQL legacy-machine registration before extending the local
 known-key history and static relay enrollment marker-last. A crash can therefore
 leave only a registered but unauthenticated key; the exact command safely
 retries, while a changed label, key, endpoint authority, non-owner caller,
-inactive cutover, disabled legacy gate, or conflicting recovery fails closed.
-The new key remains pending for an eventual proof-bound device-credential
-exchange and prevents premature legacy-gate closure. This workflow neither
+inactive cutover, or conflicting recovery fails closed. The transaction does
+not reopen the migration-wide legacy gate: under an active cutover, only its
+new pending key becomes eligible for Ed25519 request resolution. Migrated and
+retired keys stay blocked. The new key remains pending for an eventual
+proof-bound device-credential exchange. This workflow neither
 copies another machine's authority nor treats the public record, machine name,
 or device credential as authorization by itself. SQLite prepare fences
 old daemons and clears every lease holder while advancing fences. Staging is

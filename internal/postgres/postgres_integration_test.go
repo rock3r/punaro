@@ -1385,16 +1385,11 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if repeated, err := admin.ActivateMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, retiredManifest); err != nil || repeated.Phase != MailCutoverActive {
 		t.Fatalf("idempotent activation=%#v err=%v", repeated, err)
 	}
-	// This post-cutover onboarding fixture models an installation that still
-	// admits its Ed25519 adapters. Registration must never reopen a gate that an
-	// owner has deliberately closed.
-	closedGateKey := make([]byte, ed25519.PublicKeySize)
-	closedGateKey[0] = 90
-	if _, err := admin.RegisterPostCutoverLegacyMachine(ctx, actor, "closed-gate machine", closedGateKey); err == nil {
-		t.Fatal("post-cutover registration reopened the disabled legacy gate")
-	}
-	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.legacy_auth_state SET enabled=true,changed_at=statement_timestamp() WHERE singleton`); err != nil {
-		t.Fatal(err)
+	// Activation closes the migration-wide legacy gate. Owner-authorized
+	// post-cutover registration must not reopen it or make a migrated key valid
+	// again; only the newly registered pending key is admitted.
+	if resolved, err := app.ResolveLegacyMachine(ctx, migratedKey); err == nil || resolved != "" {
+		t.Fatalf("disabled migrated legacy key resolved principal=%q err=%v", resolved, err)
 	}
 	postCutoverKey := make([]byte, ed25519.PublicKeySize)
 	postCutoverKey[0] = 91
@@ -1417,6 +1412,9 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	}
 	if resolved, err := app.ResolveLegacyMachine(ctx, postCutoverKey); err != nil || resolved != postCutoverMachine.PrincipalID {
 		t.Fatalf("resolved post-cutover principal=%q err=%v", resolved, err)
+	}
+	if resolved, err := app.ResolveLegacyMachine(ctx, migratedKey); err == nil || resolved != "" {
+		t.Fatalf("post-cutover registration reopened migrated key principal=%q err=%v", resolved, err)
 	}
 	if err := admin.AbortMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
 		t.Fatal("active mail cutover was abortable")

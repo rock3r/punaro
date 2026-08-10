@@ -88,8 +88,10 @@ func (a *Administration) RegisterLegacyMachine(ctx context.Context, actorPrincip
 // RegisterPostCutoverLegacyMachine adds one Ed25519 machine only after the
 // mail authority is durably active in PostgreSQL. Exact retries return the
 // existing content-free inventory row; a changed label or retired key fails
-// closed. The caller must separately publish the same public key into the
-// static relay enrollment before the daemon can authenticate it.
+// closed. The global migration gate stays disabled: ResolveLegacyMachine
+// admits only a pending key registered under the active-cutover lock. The
+// caller must separately publish the same public key into the static relay
+// enrollment before the daemon can authenticate it.
 func (a *Administration) RegisterPostCutoverLegacyMachine(ctx context.Context, actorPrincipalID, label string, publicKey ed25519.PublicKey) (LegacyMachine, error) {
 	if !validOpaqueID(actorPrincipalID) || !validDisplayName(label) || len(publicKey) != ed25519.PublicKeySize {
 		return LegacyMachine{}, errors.New("invalid post-cutover legacy machine")
@@ -112,10 +114,6 @@ func (a *Administration) RegisterPostCutoverLegacyMachine(ctx context.Context, a
 	}
 	if err := lockLegacyMutations(ctx, tx); err != nil {
 		return LegacyMachine{}, err
-	}
-	var enabled bool
-	if err := tx.QueryRowContext(ctx, `SELECT enabled FROM auth.legacy_auth_state WHERE singleton FOR UPDATE`).Scan(&enabled); err != nil || !enabled {
-		return LegacyMachine{}, errors.New("legacy authentication is disabled")
 	}
 	var existing LegacyMachine
 	err = tx.QueryRowContext(ctx, `SELECT machine.principal_id::text, principal.display_name, machine.state
@@ -162,13 +160,16 @@ func (d *Database) ResolveLegacyMachine(ctx context.Context, publicKey ed25519.P
 	}
 	digest := sha256.Sum256(publicKey)
 	var principalID string
-	var enabled bool
-	err := d.db.QueryRowContext(ctx, `SELECT machine.principal_id::text, state.enabled
+	var admitted bool
+	err := d.db.QueryRowContext(ctx, `SELECT machine.principal_id::text,
+state.enabled OR (machine.state = 'pending' AND EXISTS (
+    SELECT 1 FROM relay.mail_cutover_epochs WHERE phase = 'active'
+))
 FROM auth.legacy_machines AS machine
 JOIN auth.principals AS principal ON principal.id = machine.principal_id
 CROSS JOIN auth.legacy_auth_state AS state
-WHERE machine.public_key_digest = $1 AND machine.public_key = $2 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:], []byte(publicKey)).Scan(&principalID, &enabled)
-	if err != nil || !enabled {
+WHERE machine.public_key_digest = $1 AND machine.public_key = $2 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:], []byte(publicKey)).Scan(&principalID, &admitted)
+	if err != nil || !admitted {
 		return "", ErrUnauthenticated
 	}
 	return principalID, nil
