@@ -29,10 +29,11 @@ var (
 )
 
 const (
-	bootstrapLockKey          int64 = 0x50756e61726f4f57
-	enrollmentMutationLockKey int64 = 0x50756e61726f454e
-	maxPendingEnrollments           = 1000
-	lastUsedWriteInterval           = 5 * time.Minute
+	bootstrapLockKey             int64 = 0x50756e61726f4f57
+	enrollmentMutationLockKey    int64 = 0x50756e61726f454e
+	maxPendingEnrollments              = 1000
+	lastUsedWriteInterval              = 5 * time.Minute
+	clientLifecycleSchemaVersion       = 44
 )
 
 // Administration is a direct, host-local schema-owner connection. It is never
@@ -88,6 +89,28 @@ func OpenAdministration(ctx context.Context, cfg Config) (*Administration, error
 // Close releases the host-local owner connection pool.
 func (a *Administration) Close() error { return a.db.Close() }
 
+// ClientLifecycleRuntimeReady rejects compatible historical schemas before a
+// daemon exposes lifecycle-dependent authentication or enrollment routes.
+func (d *Database) ClientLifecycleRuntimeReady(ctx context.Context) error {
+	state, err := d.SchemaState(ctx)
+	if err != nil || state.Classification != Compatible || state.Version < clientLifecycleSchemaVersion {
+		return errors.New("PostgreSQL client lifecycle schema is unavailable")
+	}
+	return nil
+}
+
+func (a *Administration) requireClientLifecycleSchema(ctx context.Context) error {
+	var version int64
+	if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(max(version), 0) FROM jobs.schema_migrations WHERE status = 'applied'`).Scan(&version); err != nil || version < clientLifecycleSchemaVersion {
+		return errors.New("client lifecycle schema is unavailable")
+	}
+	available, err := clientLifecycleObjectsAvailable(ctx, a.db)
+	if err != nil || !available {
+		return errors.New("client lifecycle schema is unavailable")
+	}
+	return nil
+}
+
 // InstallationOwner returns the existing singleton owner for host-local
 // initialization recovery. It exposes no network route and no secret material.
 func (a *Administration) InstallationOwner(ctx context.Context) (Principal, error) {
@@ -130,11 +153,19 @@ type PendingEnrollment struct {
 // DeviceCredential is returned once at redemption/rotation. Encoded is the
 // canonical lookup-id plus caller-retained 256-bit secret.
 type DeviceCredential struct {
-	PrincipalID string    `json:"principal_id"`
-	LookupID    string    `json:"lookup_id"`
-	Encoded     string    `json:"credential"`
-	Generation  int64     `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at,omitzero"`
+	ClientID       string    `json:"client_id,omitempty"`
+	MachineID      string    `json:"machine_id,omitempty"`
+	EndpointPrefix string    `json:"endpoint_prefix,omitempty"`
+	PrincipalID    string    `json:"principal_id"`
+	LookupID       string    `json:"lookup_id"`
+	Encoded        string    `json:"credential"`
+	Generation     int64     `json:"generation"`
+	ExpiresAt      time.Time `json:"expires_at,omitzero"`
+}
+
+// DeviceRevocation is the fixed content-free result of a successful self-revocation.
+type DeviceRevocation struct {
+	Status string `json:"status"`
 }
 
 // AuthenticatedDevice is the generation fence carried by caches and sessions.
@@ -155,6 +186,22 @@ type DeviceCredentialMetadata struct {
 	ExpiresAt   time.Time `json:"expires_at,omitzero"`
 	RotatedAt   time.Time `json:"rotated_at,omitzero"`
 	RevokedAt   time.Time `json:"revoked_at,omitzero"`
+}
+
+// ClientMetadata is the bounded content-free owner inventory for one installed client.
+type ClientMetadata struct {
+	ClientID           string    `json:"client_id"`
+	MachineID          string    `json:"machine_id"`
+	EndpointPrefix     string    `json:"endpoint_prefix"`
+	PrincipalID        string    `json:"principal_id"`
+	CredentialLookupID string    `json:"credential_lookup_id"`
+	Label              string    `json:"label"`
+	Generation         int64     `json:"generation"`
+	LifecycleState     string    `json:"lifecycle_state"`
+	CreatedAt          time.Time `json:"created_at"`
+	LastUsedAt         time.Time `json:"last_used_at,omitzero"`
+	RevokedAt          time.Time `json:"revoked_at,omitzero"`
+	RevocationReason   string    `json:"revocation_reason,omitempty"`
 }
 
 // RedeemEnrollment binds a one-time code to the exact approved client.
@@ -245,6 +292,9 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	if !validOpaqueID(actorPrincipalID) || request.Validate() != nil {
 		return PendingEnrollment{}, errors.New("invalid enrollment")
 	}
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return PendingEnrollment{}, err
+	}
 	grants, previewHash, err := PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
 	if err != nil || subtle.ConstantTimeCompare([]byte(previewHash), []byte(confirmedPreviewHash)) != 1 {
 		return PendingEnrollment{}, errors.New("enrollment preview was not confirmed")
@@ -281,6 +331,12 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE client_binding = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp())`, request.ClientBinding).Scan(&bindingExists); err != nil || bindingExists {
 		return PendingEnrollment{}, errors.New("client already has a pending enrollment")
 	}
+	var machineExists bool
+	if err := tx.QueryRowContext(ctx, `SELECT
+EXISTS (SELECT 1 FROM auth.client_installations WHERE machine_id = $1)
+OR EXISTS (SELECT 1 FROM auth.pending_enrollments WHERE machine_id = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL AND expires_at > statement_timestamp())`, request.MachineID).Scan(&machineExists); err != nil || machineExists {
+		return PendingEnrollment{}, errors.New("machine already has an enrollment")
+	}
 	projectIDs := append([]string(nil), request.ProjectIDs...)
 	sort.Strings(projectIDs)
 	for _, projectID := range projectIDs {
@@ -302,15 +358,11 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 			return PendingEnrollment{}, errors.New("legacy machine is not eligible for exchange")
 		}
 	}
-	var credentialTTL any
-	if request.CredentialTTL > 0 {
-		credentialTTL = int64(request.CredentialTTL / time.Second)
-	}
 	if err := tx.QueryRowContext(ctx, `INSERT INTO auth.pending_enrollments
-(issuer_principal_id, client_binding, label, code_digest, preview_hash, expires_at, credential_ttl_seconds, legacy_principal_id)
-VALUES ($1, $2, $3, $4, $5, statement_timestamp() + make_interval(secs => $6),
-$7, $8)
-RETURNING id::text, expires_at`, actorPrincipalID, request.ClientBinding, request.Label, codeDigest[:], previewDigest, int64(request.TTL/time.Second), credentialTTL, nullableID(request.LegacyPrincipalID)).Scan(&pending.ID, &pending.ExpiresAt); err != nil {
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, expires_at, credential_ttl_seconds, legacy_principal_id)
+VALUES ($1, $2, $3, $4, $5, $6, statement_timestamp() + make_interval(secs => $7),
+NULL, $8)
+RETURNING id::text, expires_at`, actorPrincipalID, request.ClientBinding, request.MachineID, request.Label, codeDigest[:], previewDigest, int64(request.TTL/time.Second), nullableID(request.LegacyPrincipalID)).Scan(&pending.ID, &pending.ExpiresAt); err != nil {
 		return PendingEnrollment{}, errors.New("pending enrollment could not be created")
 	}
 	for ordinal, grant := range grants {
@@ -365,14 +417,13 @@ func (d *Database) redeemEnrollment(ctx context.Context, redeem RedeemEnrollment
 		return DeviceCredential{}, err
 	}
 	var storedCode []byte
-	var storedBinding, label, issuer string
+	var storedBinding, machineID, label, issuer string
 	var unexpired, active bool
 	var redemptionKey, principalID, lookupID, requiredLegacy sql.NullString
-	var credentialTTL sql.NullInt64
 	err = tx.QueryRowContext(ctx, `SELECT code_digest, client_binding::text, label, issuer_principal_id::text,
 expires_at > statement_timestamp(), invalidated_at IS NULL,
-redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, credential_ttl_seconds, legacy_principal_id::text
-FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &unexpired, &active, &redemptionKey, &principalID, &lookupID, &credentialTTL, &requiredLegacy)
+redemption_key::text, redeemed_principal_id::text, credential_lookup_id::text, legacy_principal_id::text, machine_id
+FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Scan(&storedCode, &storedBinding, &label, &issuer, &unexpired, &active, &redemptionKey, &principalID, &lookupID, &requiredLegacy, &machineID)
 	if err != nil || storedBinding != redeem.ClientBinding || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 || requiredLegacy.Valid != (legacyProof != nil) {
 		return DeviceCredential{}, ErrInvalidEnrollment
 	}
@@ -407,17 +458,20 @@ FROM auth.pending_enrollments WHERE id = $1 FOR UPDATE`, redeem.EnrollmentID).Sc
 		var storedDigest []byte
 		var generation int64
 		var expiresAt sql.NullTime
-		if err := tx.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.generation, credential.expires_at
+		var clientID, installedMachineID, endpointPrefix string
+		if err := tx.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.generation, credential.expires_at,
+client.id::text, client.machine_id, authority.endpoint_prefix
 FROM auth.device_credentials AS credential
 JOIN auth.principals AS principal ON principal.id = credential.principal_id
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
 WHERE credential.lookup_id = $1 AND credential.principal_id = $2
 AND credential.revoked_at IS NULL
-AND credential.rotated_at IS NULL
 AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
-AND principal.disabled_at IS NULL`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
+AND principal.disabled_at IS NULL AND client.lifecycle_state = 'active'`, lookupID.String, principalID.String).Scan(&storedDigest, &generation, &expiresAt, &clientID, &installedMachineID, &endpointPrefix); err != nil || subtle.ConstantTimeCompare(storedDigest, secretDigest[:]) != 1 {
 			return DeviceCredential{}, ErrInvalidEnrollment
 		}
-		return DeviceCredential{PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
+		return DeviceCredential{ClientID: clientID, MachineID: installedMachineID, EndpointPrefix: endpointPrefix, PrincipalID: principalID.String, LookupID: lookupID.String, Encoded: encodeDeviceCredential(lookupID.String, credentialSecret[:]), Generation: generation, ExpiresAt: expiresAt.Time}, nil
 	}
 	projectIDs, allProjects, err := lockPendingEnrollmentGrantTargets(ctx, tx, redeem.EnrollmentID)
 	if err != nil {
@@ -436,11 +490,18 @@ AND principal.disabled_at IS NULL`, lookupID.String, principalID.String).Scan(&s
 		return DeviceCredential{}, errors.New("device principal could not be created")
 	}
 	principalID.Valid = true
-	var credentialExpiresAt sql.NullTime
-	if err := tx.QueryRowContext(ctx, `INSERT INTO auth.device_credentials (lookup_id, principal_id, label, secret_digest, expires_at)
-VALUES ($1, $2, $3, $4, CASE WHEN $5::bigint IS NULL THEN NULL ELSE statement_timestamp() + make_interval(secs => $5) END)
-RETURNING expires_at`, lookup, principalID.String, label, secretDigest[:], nullableInt64(credentialTTL)).Scan(&credentialExpiresAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.device_credentials (lookup_id, principal_id, label, secret_digest)
+VALUES ($1, $2, $3, $4)`, lookup, principalID.String, label, secretDigest[:]); err != nil {
 		return DeviceCredential{}, errors.New("device credential could not be created")
+	}
+	var clientID string
+	if err := tx.QueryRowContext(ctx, `INSERT INTO auth.client_installations (machine_id, label, principal_id, credential_lookup_id)
+VALUES ($1, $2, $3, $4) RETURNING id::text`, machineID, label, principalID.String, lookup).Scan(&clientID); err != nil {
+		return DeviceCredential{}, errors.New("client installation could not be created")
+	}
+	endpointPrefix := "agent/" + machineID + "/"
+	if _, err := tx.ExecContext(ctx, `INSERT INTO relay.client_endpoint_authority (client_id, endpoint_prefix) VALUES ($1, $2)`, clientID, endpointPrefix); err != nil {
+		return DeviceCredential{}, errors.New("client endpoint authority could not be created")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.capability_grants (principal_id, scope, project_id, capability)
 SELECT $2, scope, project_id, capability FROM auth.pending_enrollment_grants WHERE enrollment_id = $1 ORDER BY ordinal`, redeem.EnrollmentID, principalID.String); err != nil {
@@ -484,7 +545,7 @@ SELECT $2, scope, project_id, capability FROM auth.pending_enrollment_grants WHE
 	if err := tx.Commit(); err != nil {
 		return DeviceCredential{}, errors.New("enrollment redemption could not commit")
 	}
-	return DeviceCredential{PrincipalID: principalID.String, LookupID: lookup, Encoded: encodedCredential, Generation: 1, ExpiresAt: credentialExpiresAt.Time}, nil
+	return DeviceCredential{ClientID: clientID, MachineID: machineID, EndpointPrefix: endpointPrefix, PrincipalID: principalID.String, LookupID: lookup, Encoded: encodedCredential, Generation: 1}, nil
 }
 
 // AuthenticateDevice validates one bearer credential without distinguishing failure causes.
@@ -499,8 +560,13 @@ func (d *Database) AuthenticateDevice(ctx context.Context, encoded string) (Auth
 	var generation int64
 	var active bool
 	err = d.db.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.principal_id::text, credential.generation,
-credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp()) AND principal.disabled_at IS NULL
-FROM auth.device_credentials AS credential JOIN auth.principals AS principal ON principal.id = credential.principal_id
+credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+AND principal.disabled_at IS NULL AND client.lifecycle_state = 'active'
+AND client.generation = credential.generation AND authority.generation = credential.generation
+FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
 WHERE credential.lookup_id = $1`, lookupID).Scan(&stored, &principalID, &generation, &active)
 	if err != nil || !active || subtle.ConstantTimeCompare(stored, digest[:]) != 1 {
 		return AuthenticatedDevice{}, ErrUnauthenticated
@@ -517,13 +583,108 @@ func (d *Database) DeviceSessionCurrent(ctx context.Context, authenticated Authe
 	}
 	var current bool
 	err := d.db.QueryRowContext(ctx, `SELECT EXISTS (
-SELECT 1 FROM auth.device_credentials AS credential JOIN auth.principals AS principal ON principal.id = credential.principal_id
+SELECT 1 FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
 WHERE credential.lookup_id = $1 AND credential.principal_id = $2 AND credential.generation = $3
-AND credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp()) AND principal.disabled_at IS NULL)`, authenticated.LookupID, authenticated.PrincipalID, authenticated.Generation).Scan(&current)
+AND credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credential.expires_at > statement_timestamp())
+AND principal.disabled_at IS NULL AND client.lifecycle_state = 'active'
+AND client.generation = credential.generation AND authority.generation = credential.generation)`, authenticated.LookupID, authenticated.PrincipalID, authenticated.Generation).Scan(&current)
 	if err != nil {
 		return false, errors.New("device session could not be revalidated")
 	}
 	return current, nil
+}
+
+// SelfRevokeDevice permanently revokes only the client authenticated by the
+// supplied bearer credential. An already-revoked credential is accepted only
+// for an exact retry of a self-revocation that previously committed.
+func (d *Database) SelfRevokeDevice(ctx context.Context, encoded, idempotencyKey string) (DeviceRevocation, error) {
+	lookupID, secret, err := parseDeviceCredential(encoded)
+	if err != nil || !validOpaqueID(idempotencyKey) {
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	digest := sha256.Sum256(secret)
+	tx, err := beginMutation(ctx, d.db)
+	if err != nil {
+		return DeviceRevocation{}, mutationStartError(err, "self-revocation cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockEnrollmentMutations(ctx, tx); err != nil {
+		return DeviceRevocation{}, err
+	}
+	var storedDigest []byte
+	var principalID, clientID, lifecycleState string
+	var credentialRevoked, principalDisabled bool
+	var credentialUnexpired bool
+	var credentialGeneration, clientGeneration, authorityGeneration int64
+	var priorKey sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT credential.secret_digest, credential.principal_id::text,
+credential.revoked_at IS NOT NULL, principal.disabled_at IS NOT NULL,
+credential.expires_at IS NULL OR credential.expires_at > statement_timestamp(),
+credential.generation, client.generation, authority.generation,
+client.id::text, client.lifecycle_state, client.self_revoke_idempotency::text
+FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
+WHERE credential.lookup_id = $1
+FOR UPDATE OF credential, principal, client, authority`, lookupID).Scan(&storedDigest, &principalID, &credentialRevoked, &principalDisabled, &credentialUnexpired, &credentialGeneration, &clientGeneration, &authorityGeneration, &clientID, &lifecycleState, &priorKey)
+	if err != nil || subtle.ConstantTimeCompare(storedDigest, digest[:]) != 1 {
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	generationCurrent := credentialGeneration == clientGeneration && clientGeneration == authorityGeneration
+	if credentialRevoked || lifecycleState == "revoked" || principalDisabled {
+		if credentialRevoked && lifecycleState == "revoked" && generationCurrent && priorKey.Valid && priorKey.String == idempotencyKey {
+			if err := tx.Commit(); err != nil {
+				return DeviceRevocation{}, errors.New("self-revocation replay cannot commit")
+			}
+			return DeviceRevocation{Status: "revoked"}, nil
+		}
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	if !credentialUnexpired || !generationCurrent {
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE auth.device_credentials
+SET revoked_at = statement_timestamp(), generation = generation + 1
+WHERE lookup_id = $1 AND revoked_at IS NULL`, lookupID)
+	if err != nil {
+		return DeviceRevocation{}, errors.New("credential could not be self-revoked")
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth.principals SET auth_generation = auth_generation + 1 WHERE id = $1`, principalID); err != nil {
+		return DeviceRevocation{}, errors.New("self-revocation principal fence could not be advanced")
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE auth.client_installations
+SET lifecycle_state = 'revoked', revoked_at = statement_timestamp(), revocation_reason = 'self',
+    self_revoke_idempotency = $2, generation = generation + 1
+WHERE id = $1 AND lifecycle_state = 'active'`, clientID, idempotencyKey)
+	if err != nil {
+		return DeviceRevocation{}, errors.New("client could not be self-revoked")
+	}
+	if count, err := result.RowsAffected(); err != nil || count != 1 {
+		return DeviceRevocation{}, ErrUnauthenticated
+	}
+	if update, err := tx.ExecContext(ctx, `UPDATE relay.client_endpoint_authority SET generation = generation + 1 WHERE client_id = $1`, clientID); err != nil {
+		return DeviceRevocation{}, errors.New("self-revocation endpoint fence could not be advanced")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return DeviceRevocation{}, errors.New("self-revocation endpoint authority is unavailable")
+	}
+	control := &ControlTx{tx: tx}
+	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: principalID, Action: AuditCredentialRevoke, Outcome: AuditSucceeded, TargetKind: AuditTargetCredential, TargetID: lookupID}); err != nil {
+		return DeviceRevocation{}, err
+	}
+	if _, err := control.AdvanceChange(ctx); err != nil {
+		return DeviceRevocation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeviceRevocation{}, errors.New("self-revocation could not commit")
+	}
+	return DeviceRevocation{Status: "revoked"}, nil
 }
 
 // BeginDeviceCredentialRotation creates or replaces a pending rotation while
@@ -531,6 +692,9 @@ AND credential.revoked_at IS NULL AND (credential.expires_at IS NULL OR credenti
 func (a *Administration) BeginDeviceCredentialRotation(ctx context.Context, actorPrincipalID, lookupID string, expectedGeneration int64) (PendingCredentialRotation, error) {
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(lookupID) || expectedGeneration < 1 {
 		return PendingCredentialRotation{}, errors.New("invalid credential rotation")
+	}
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return PendingCredentialRotation{}, err
 	}
 	codeBytes := make([]byte, 32)
 	if _, err := rand.Read(codeBytes); err != nil {
@@ -574,6 +738,9 @@ func (a *Administration) RotateDeviceCredential(ctx context.Context, actorPrinci
 	if err != nil || len(codeBytes) != 32 || base64.RawURLEncoding.EncodeToString(codeBytes) != rotate.Code {
 		return DeviceCredential{}, errors.New("invalid credential rotation")
 	}
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return DeviceCredential{}, err
+	}
 	codeDigest := sha256.Sum256(codeBytes)
 	secret := deriveRotationCredentialSecret(rotate, codeBytes)
 	digest := sha256.Sum256(secret[:])
@@ -585,6 +752,9 @@ func (a *Administration) RotateDeviceCredential(ctx context.Context, actorPrinci
 	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
 		return DeviceCredential{}, ErrForbidden
 	}
+	if err := lockEnrollmentMutations(ctx, tx); err != nil {
+		return DeviceCredential{}, err
+	}
 	var result DeviceCredential
 	result.LookupID = rotate.LookupID
 	var expiry sql.NullTime
@@ -594,9 +764,15 @@ func (a *Administration) RotateDeviceCredential(ctx context.Context, actorPrinci
 	var rotationUsable bool
 	var completed bool
 	var revoked bool
-	err = tx.QueryRowContext(ctx, `SELECT principal_id::text, generation, rotation_code_digest, rotation_expected_generation,
-COALESCE(rotation_expires_at > statement_timestamp(), false), rotation_completed_at IS NOT NULL, revoked_at IS NOT NULL, expires_at
-FROM auth.device_credentials WHERE lookup_id = $1 FOR UPDATE`, rotate.LookupID).Scan(&result.PrincipalID, &currentGeneration, &storedCode, &storedExpected, &rotationUsable, &completed, &revoked, &expiry)
+	var clientGeneration, authorityGeneration int64
+	err = tx.QueryRowContext(ctx, `SELECT credential.principal_id::text, credential.generation, credential.rotation_code_digest, credential.rotation_expected_generation,
+COALESCE(rotation_expires_at > statement_timestamp(), false), rotation_completed_at IS NOT NULL, credential.revoked_at IS NOT NULL, credential.expires_at,
+client.id::text, client.machine_id, authority.endpoint_prefix, client.generation, authority.generation
+FROM auth.device_credentials AS credential
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
+WHERE credential.lookup_id = $1 AND client.lifecycle_state = 'active'
+FOR UPDATE OF credential, client, authority`, rotate.LookupID).Scan(&result.PrincipalID, &currentGeneration, &storedCode, &storedExpected, &rotationUsable, &completed, &revoked, &expiry, &result.ClientID, &result.MachineID, &result.EndpointPrefix, &clientGeneration, &authorityGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeviceCredential{}, ErrNotFound
 	}
@@ -604,7 +780,7 @@ FROM auth.device_credentials WHERE lookup_id = $1 FOR UPDATE`, rotate.LookupID).
 		return DeviceCredential{}, errors.New("credential could not be locked")
 	}
 	result.ExpiresAt = expiry.Time
-	if revoked || !storedExpected.Valid || storedExpected.Int64 != rotate.ExpectedGeneration || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 {
+	if revoked || clientGeneration != currentGeneration || authorityGeneration != currentGeneration || !storedExpected.Valid || storedExpected.Int64 != rotate.ExpectedGeneration || subtle.ConstantTimeCompare(storedCode, codeDigest[:]) != 1 {
 		return DeviceCredential{}, ErrCredentialChanged
 	}
 	if !rotationUsable {
@@ -635,6 +811,16 @@ RETURNING generation`, rotate.LookupID, digest[:], rotate.ExpectedGeneration).Sc
 	if _, err := tx.ExecContext(ctx, `UPDATE auth.principals SET auth_generation = auth_generation + 1 WHERE id = $1`, result.PrincipalID); err != nil {
 		return DeviceCredential{}, errors.New("credential fence could not be advanced")
 	}
+	if update, err := tx.ExecContext(ctx, `UPDATE auth.client_installations SET generation = $2 WHERE id = $1 AND generation = $3 AND lifecycle_state = 'active'`, result.ClientID, result.Generation, rotate.ExpectedGeneration); err != nil {
+		return DeviceCredential{}, errors.New("client fence could not be advanced")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return DeviceCredential{}, ErrCredentialChanged
+	}
+	if update, err := tx.ExecContext(ctx, `UPDATE relay.client_endpoint_authority SET generation = $2 WHERE client_id = $1 AND generation = $3`, result.ClientID, result.Generation, rotate.ExpectedGeneration); err != nil {
+		return DeviceCredential{}, errors.New("client endpoint fence could not be advanced")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return DeviceCredential{}, ErrCredentialChanged
+	}
 	control := &ControlTx{tx: tx}
 	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, Action: AuditCredentialRotate, Outcome: AuditSucceeded, TargetKind: AuditTargetCredential, TargetID: rotate.LookupID}); err != nil {
 		return DeviceCredential{}, err
@@ -653,37 +839,18 @@ func (a *Administration) RevokeDeviceCredential(ctx context.Context, actorPrinci
 	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(lookupID) {
 		return errors.New("invalid credential revocation")
 	}
-	tx, err := beginMutation(ctx, a.db)
-	if err != nil {
-		return mutationStartError(err, "credential revocation cannot start")
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
-		return ErrForbidden
-	}
-	var principalID string
-	err = tx.QueryRowContext(ctx, `UPDATE auth.device_credentials SET revoked_at = statement_timestamp(), generation = generation + 1
-WHERE lookup_id = $1 AND revoked_at IS NULL RETURNING principal_id::text`, lookupID).Scan(&principalID)
+	var clientID string
+	err := a.db.QueryRowContext(ctx, `SELECT id::text FROM auth.client_installations WHERE credential_lookup_id = $1`, lookupID).Scan(&clientID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
-		return errors.New("credential could not be revoked")
+		return errors.New("credential client could not be resolved")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE auth.principals SET auth_generation = auth_generation + 1 WHERE id = $1`, principalID); err != nil {
-		return errors.New("credential fence could not be advanced")
-	}
-	control := &ControlTx{tx: tx}
-	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, Action: AuditCredentialRevoke, Outcome: AuditSucceeded, TargetKind: AuditTargetCredential, TargetID: lookupID}); err != nil {
-		return err
-	}
-	if _, err := control.AdvanceChange(ctx); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return errors.New("credential revocation could not commit")
-	}
-	return nil
+	return a.RevokeClient(ctx, actorPrincipalID, clientID, "replaced")
 }
 
 // ListDeviceCredentials returns bounded metadata without secrets or digests.
@@ -722,6 +889,129 @@ FROM auth.device_credentials ORDER BY created_at, lookup_id LIMIT $1`, limit)
 		return nil, errors.New("credential inventory cannot commit")
 	}
 	return credentials, nil
+}
+
+// ListClients returns bounded server-authoritative client inventory without
+// endpoint discovery, credential digests, or other content.
+func (a *Administration) ListClients(ctx context.Context, actorPrincipalID string, limit int) ([]ClientMetadata, error) {
+	if !validOpaqueID(actorPrincipalID) || limit < 1 || limit > 1000 {
+		return nil, errors.New("invalid client inventory request")
+	}
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return nil, err
+	}
+	tx, err := a.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead})
+	if err != nil {
+		return nil, errors.New("client inventory cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
+		return nil, ErrForbidden
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT client.id::text, client.machine_id, authority.endpoint_prefix,
+client.principal_id::text, client.credential_lookup_id::text, client.label, client.generation,
+client.lifecycle_state, client.created_at, credential.last_used_at, client.revoked_at, client.revocation_reason
+FROM auth.client_installations AS client
+JOIN relay.client_endpoint_authority AS authority ON authority.client_id = client.id
+JOIN auth.device_credentials AS credential ON credential.lookup_id = client.credential_lookup_id
+ORDER BY client.created_at, client.id LIMIT $1`, limit)
+	if err != nil {
+		return nil, errors.New("client inventory is unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var clients []ClientMetadata
+	for rows.Next() {
+		var item ClientMetadata
+		var lastUsed, revoked sql.NullTime
+		var reason sql.NullString
+		if err := rows.Scan(&item.ClientID, &item.MachineID, &item.EndpointPrefix, &item.PrincipalID, &item.CredentialLookupID, &item.Label, &item.Generation, &item.LifecycleState, &item.CreatedAt, &lastUsed, &revoked, &reason); err != nil {
+			return nil, errors.New("client inventory is malformed")
+		}
+		item.LastUsedAt, item.RevokedAt, item.RevocationReason = lastUsed.Time, revoked.Time, reason.String
+		clients = append(clients, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("client inventory is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("client inventory cannot commit")
+	}
+	return clients, nil
+}
+
+// RevokeClient permanently revokes one exact client and all of its current
+// authority. Repeating an already-committed owner revocation is a no-op.
+func (a *Administration) RevokeClient(ctx context.Context, actorPrincipalID, clientID, reason string) error {
+	if !validOpaqueID(actorPrincipalID) || !validOpaqueID(clientID) || !validOwnerRevocationReason(reason) {
+		return errors.New("invalid client revocation")
+	}
+	if err := a.requireClientLifecycleSchema(ctx); err != nil {
+		return err
+	}
+	tx, err := beginMutation(ctx, a.db)
+	if err != nil {
+		return mutationStartError(err, "client revocation cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
+		return ErrForbidden
+	}
+	if err := lockEnrollmentMutations(ctx, tx); err != nil {
+		return err
+	}
+	var principalID, lookupID, state string
+	err = tx.QueryRowContext(ctx, `SELECT principal_id::text, credential_lookup_id::text, lifecycle_state
+FROM auth.client_installations WHERE id = $1 FOR UPDATE`, clientID).Scan(&principalID, &lookupID, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return errors.New("client could not be locked")
+	}
+	if state == "revoked" {
+		if err := tx.Commit(); err != nil {
+			return errors.New("client revocation replay cannot commit")
+		}
+		return nil
+	}
+	if update, err := tx.ExecContext(ctx, `UPDATE auth.device_credentials
+SET revoked_at = COALESCE(revoked_at, statement_timestamp()), generation = generation + CASE WHEN revoked_at IS NULL THEN 1 ELSE 0 END
+WHERE lookup_id = $1`, lookupID); err != nil {
+		return errors.New("client credential could not be revoked")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return errors.New("client credential is unavailable")
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth.principals SET auth_generation = auth_generation + 1 WHERE id = $1`, principalID); err != nil {
+		return errors.New("client principal fence could not be advanced")
+	}
+	if update, err := tx.ExecContext(ctx, `UPDATE auth.client_installations
+SET lifecycle_state = 'revoked', revoked_at = statement_timestamp(), revocation_reason = $2,
+    self_revoke_idempotency = NULL, generation = generation + 1
+WHERE id = $1 AND lifecycle_state = 'active'`, clientID, reason); err != nil {
+		return errors.New("client could not be revoked")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return errors.New("client state changed during revocation")
+	}
+	if update, err := tx.ExecContext(ctx, `UPDATE relay.client_endpoint_authority SET generation = generation + 1 WHERE client_id = $1`, clientID); err != nil {
+		return errors.New("client endpoint fence could not be advanced")
+	} else if count, countErr := update.RowsAffected(); countErr != nil || count != 1 {
+		return errors.New("client endpoint authority is unavailable")
+	}
+	control := &ControlTx{tx: tx}
+	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, Action: AuditCredentialRevoke, Outcome: AuditSucceeded, TargetKind: AuditTargetCredential, TargetID: lookupID}); err != nil {
+		return err
+	}
+	if _, err := control.AdvanceChange(ctx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return errors.New("client revocation could not commit")
+	}
+	return nil
+}
+
+func validOwnerRevocationReason(reason string) bool {
+	return reason == "lost" || reason == "retired" || reason == "compromised" || reason == "replaced"
 }
 
 func lockInstallationOwner(ctx context.Context, tx *sql.Tx, principalID string) (bool, error) {
@@ -777,13 +1067,6 @@ func lockEnrollmentMutations(ctx context.Context, tx *sql.Tx) error {
 
 func encodeDeviceCredential(lookupID string, secret []byte) string {
 	return lookupID + "." + base64.RawURLEncoding.EncodeToString(secret)
-}
-
-func nullableInt64(value sql.NullInt64) any {
-	if value.Valid {
-		return value.Int64
-	}
-	return nil
 }
 
 func legacyExchangeTranscript(redeem RedeemEnrollment, codeDigest [sha256.Size]byte) []byte {

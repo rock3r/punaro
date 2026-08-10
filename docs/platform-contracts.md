@@ -568,6 +568,14 @@ server-constrained defaults, and coalesce `last_used_at`; it cannot rotate or
 revoke credentials. Host-local administration uses a direct `punaro_owner`
 connection and is not exposed as an HTTP route.
 
+Version 44 adds one server-authoritative client installation and one derived
+endpoint-authority record per device credential. New credentials do not expire
+automatically. The application role has only the column grants needed to create
+those records, update their shared generation fences, and record permanent
+self-revocation; readiness verifies the tables, constraints, indexes, ownership,
+and exact grants. Static relay enrollment remains authoritative until the later
+explicit legacy migration.
+
 The M-9 credential transition is a separate, off-by-default relay mode. It
 does not copy endpoint scopes into the auth schema. A replacement credential
 must authenticate as current and resolve through
@@ -603,12 +611,15 @@ epochs and retired SQLite sources are permanently non-abortable. A begin that
 failed before epoch insertion is aborted by durably reserving the exact epoch
 as terminal before SQLite reopens, fencing every delayed retry of that begin.
 
-M-5 mounts only `POST /v1/enrollments/redeem` and authenticated
-`GET /v1/device/session`. Redemption requires exact `application/json`, a
+M-5 mounts `POST /v1/enrollments/redeem`, authenticated
+`GET /v1/device/session`, and targetless `POST /v1/device/session/revoke`.
+Redemption requires exact `application/json`, a
 bounded object with four unique string fields, and the store's exact enrollment
 binding. Device bearer failures are uniform and content-free. A fixed
 concurrency ceiling and per-operation database deadline bound public work.
-Both routes admit credentials only over TLS, same-host loopback, or the
+The self-revoke route requires an empty body and one canonical idempotency UUID;
+only an exact retry of a committed self-revocation can verify the revoked
+credential. All routes admit credentials only over TLS, same-host loopback, or the
 explicitly configured trusted-LAN HTTP exception. `X-Forwarded-For` and
 `X-Forwarded-Proto` are never transport evidence.
 

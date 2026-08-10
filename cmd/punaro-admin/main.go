@@ -22,6 +22,8 @@ type adminDatabase interface {
 	Close() error
 	BootstrapOwner(context.Context, string) (punaropostgres.Principal, error)
 	CreateEnrollment(context.Context, string, punaropostgres.EnrollmentRequest, string) (punaropostgres.PendingEnrollment, error)
+	ListClients(context.Context, string, int) ([]punaropostgres.ClientMetadata, error)
+	RevokeClient(context.Context, string, string, string) error
 	ListDeviceCredentials(context.Context, string, int) ([]punaropostgres.DeviceCredentialMetadata, error)
 	BeginDeviceCredentialRotation(context.Context, string, string, int64) (punaropostgres.PendingCredentialRotation, error)
 	RotateDeviceCredential(context.Context, string, punaropostgres.RotateCredential) (punaropostgres.DeviceCredential, error)
@@ -47,8 +49,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "init":
 		return runInit(args[1:], stdout, stderr)
 	case "client":
-		if len(args) > 1 && args[1] == "add" {
+		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return runClientList(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "revoke" {
+			return runClientRevoke(args[2:], stderr)
 		}
 	case "credential":
 		if len(args) > 1 && args[1] == "list" {
@@ -112,15 +120,15 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 	dsnFile := flags.String("owner-dsn-file", "", "protected schema-owner DSN file")
 	actor := flags.String("actor-principal-id", "", "installation owner principal ID")
 	name := flags.String("name", "", "client display name")
+	machineID := flags.String("machine-id", "", "unique lowercase client machine ID")
 	binding := flags.String("client-binding", "", "client-generated opaque binding UUID")
 	allProjects := flags.Bool("all-projects", false, "grant dynamic current and future project access")
 	ttl := flags.Duration("ttl", 10*time.Minute, "single-use enrollment lifetime")
-	credentialTTL := flags.Duration("credential-ttl", 0, "optional credential lifetime")
 	legacyPrincipal := flags.String("legacy-principal-id", "", "operator-approved legacy machine principal for exchange")
 	confirmed := flags.Bool("yes", false, "confirm the printed exact grant expansion")
 	var projects stringList
 	flags.Var(&projects, "project", "selected opaque project UUID (repeatable)")
-	if flags.Parse(args) != nil || *actor == "" || *name == "" || *binding == "" || flags.NArg() != 0 {
+	if flags.Parse(args) != nil || *actor == "" || *name == "" || *machineID == "" || *binding == "" || flags.NArg() != 0 {
 		return 2
 	}
 	grants, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(projects, *allProjects)
@@ -148,11 +156,53 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		return adminError(stderr, err)
 	}
 	defer func() { _ = admin.Close() }()
-	pending, err := admin.CreateEnrollment(context.Background(), *actor, punaropostgres.EnrollmentRequest{ClientBinding: *binding, Label: *name, ProjectIDs: projects, AllProjects: *allProjects, LegacyPrincipalID: *legacyPrincipal, TTL: *ttl, CredentialTTL: *credentialTTL}, previewHash)
+	pending, err := admin.CreateEnrollment(context.Background(), *actor, punaropostgres.EnrollmentRequest{ClientBinding: *binding, MachineID: *machineID, Label: *name, ProjectIDs: projects, AllProjects: *allProjects, LegacyPrincipalID: *legacyPrincipal, TTL: *ttl}, previewHash)
 	if err != nil {
 		return adminError(stderr, err)
 	}
 	return writeJSON(stdout, stderr, pending)
+}
+
+func runClientList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("client list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dsnFile := flags.String("owner-dsn-file", "", "protected schema-owner DSN file")
+	actor := flags.String("actor-principal-id", "", "installation owner principal ID")
+	limit := flags.Int("limit", 100, "maximum rows (1-1000)")
+	if flags.Parse(args) != nil || *dsnFile == "" || *actor == "" || *limit < 1 || *limit > 1000 || flags.NArg() != 0 {
+		return 2
+	}
+	admin, err := openAdminDatabase(context.Background(), punaropostgres.Config{DSNFile: *dsnFile})
+	if err != nil {
+		return adminError(stderr, err)
+	}
+	defer func() { _ = admin.Close() }()
+	clients, err := admin.ListClients(context.Background(), *actor, *limit)
+	if err != nil {
+		return adminError(stderr, err)
+	}
+	return writeJSON(stdout, stderr, map[string]any{"clients": clients})
+}
+
+func runClientRevoke(args []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("client revoke", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dsnFile := flags.String("owner-dsn-file", "", "protected schema-owner DSN file")
+	actor := flags.String("actor-principal-id", "", "installation owner principal ID")
+	clientID := flags.String("client", "", "opaque client UUID")
+	reason := flags.String("reason", "", "lost, retired, compromised, or replaced")
+	if flags.Parse(args) != nil || *dsnFile == "" || *actor == "" || *clientID == "" || *reason == "" || flags.NArg() != 0 {
+		return 2
+	}
+	admin, err := openAdminDatabase(context.Background(), punaropostgres.Config{DSNFile: *dsnFile})
+	if err != nil {
+		return adminError(stderr, err)
+	}
+	defer func() { _ = admin.Close() }()
+	if err := admin.RevokeClient(context.Background(), *actor, *clientID, *reason); err != nil {
+		return adminError(stderr, err)
+	}
+	return 0
 }
 
 func runCredentialList(args []string, stdout, stderr io.Writer) int {

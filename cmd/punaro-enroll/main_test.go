@@ -477,6 +477,18 @@ func TestRedemptionResponseAcceptsOptionalExpiryWithoutRelaxingItsSchema(t *test
 	if _, err := decodeRedemptionResponse([]byte(`{"principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-822222222222","credential":"punaro_device_credential","generation":1,"expires_at":"invalid"}`)); err == nil {
 		t.Fatal("invalid expiry was accepted")
 	}
+	response, err = decodeRedemptionResponse([]byte(`{"client_id":"33333333-3333-4333-8333-333333333333","machine_id":"laptop-a","endpoint_prefix":"agent/laptop-a/","principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"22222222-2222-4222-8222-222222222222.` + strings.Repeat("A", 43) + `","generation":1}`))
+	if err != nil || response.ClientID == "" || response.MachineID != "laptop-a" || response.EndpointPrefix != "agent/laptop-a/" {
+		t.Fatalf("lifecycle response err=%v response=%#v", err, response)
+	}
+	for _, malformed := range []string{
+		`{"client_id":"33333333-3333-4333-8333-333333333333","principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"22222222-2222-4222-8222-222222222222.` + strings.Repeat("A", 43) + `","generation":1}`,
+		`{"client_id":"33333333-3333-4333-8333-333333333333","machine_id":"Laptop","endpoint_prefix":"agent/Laptop/","principal_id":"11111111-1111-4111-8111-111111111111","lookup_id":"22222222-2222-4222-8222-222222222222","credential":"22222222-2222-4222-8222-222222222222.` + strings.Repeat("A", 43) + `","generation":1}`,
+	} {
+		if _, err := decodeRedemptionResponse([]byte(malformed)); err == nil {
+			t.Fatalf("malformed lifecycle response was accepted: %s", malformed)
+		}
+	}
 }
 
 func TestRejectedEnrollmentClearsRecoverySoReplacementCanProceed(t *testing.T) {

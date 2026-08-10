@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/ingress"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
@@ -26,6 +27,7 @@ const (
 type store interface {
 	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
 	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
+	SelfRevokeDevice(context.Context, string, string) (punaropostgres.DeviceRevocation, error)
 }
 
 type handler struct {
@@ -48,6 +50,7 @@ func newHandler(database store, policy *ingress.Policy, concurrency int, timeout
 	h := &handler{store: database, policy: policy, mux: http.NewServeMux(), slots: make(chan struct{}, concurrency), timeout: timeout}
 	h.mux.HandleFunc("POST /v1/enrollments/redeem", h.redeem)
 	h.mux.Handle("GET /v1/device/session", h.authenticate(http.HandlerFunc(h.session)))
+	h.mux.HandleFunc("POST /v1/device/session/revoke", h.selfRevoke)
 	return h
 }
 
@@ -188,6 +191,53 @@ func (h *handler) session(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "authenticated"})
+}
+
+func (h *handler) selfRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.ContentLength > 0 {
+		writeError(w, http.StatusBadRequest, "request is malformed")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1))
+	if err != nil || len(body) != 0 || len(r.Header.Values("Idempotency-Key")) != 1 {
+		writeError(w, http.StatusBadRequest, "request is malformed")
+		return
+	}
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	parsedKey, err := uuid.Parse(idempotencyKey)
+	if err != nil || parsedKey == uuid.Nil || parsedKey.String() != idempotencyKey {
+		writeError(w, http.StatusBadRequest, "request is malformed")
+		return
+	}
+	credential, ok := bearerCredential(r)
+	if !ok {
+		unauthenticated(w)
+		return
+	}
+	operationCtx, cancel := context.WithTimeout(r.Context(), h.timeout)
+	defer cancel()
+	result, err := h.store.SelfRevokeDevice(operationCtx, credential, idempotencyKey)
+	if err != nil {
+		if errors.Is(err, punaropostgres.ErrUnauthenticated) {
+			unauthenticated(w)
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "revocation service is unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func bearerCredential(r *http.Request) (string, bool) {
+	if len(r.Header.Values("Authorization")) != 1 {
+		return "", false
+	}
+	authorization := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authorization, "Bearer ") {
+		return "", false
+	}
+	credential := strings.TrimPrefix(authorization, "Bearer ")
+	return credential, credential != "" && !strings.ContainsAny(credential, " \t\r\n")
 }
 
 func unauthenticated(w http.ResponseWriter) {

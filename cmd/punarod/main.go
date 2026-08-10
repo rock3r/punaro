@@ -50,8 +50,10 @@ type platformDatabase interface {
 }
 
 type deviceDatabase interface {
+	ClientLifecycleRuntimeReady(context.Context) error
 	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
 	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
+	SelfRevokeDevice(context.Context, string, string) (punaropostgres.DeviceRevocation, error)
 }
 
 type trustedAttachmentDatabase interface {
@@ -243,6 +245,13 @@ func run(args []string, stderr io.Writer) int {
 		database, ok := platformDB.(deviceDatabase)
 		if !ok {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL device store is unavailable")
+			return 2
+		}
+		lifecycleCtx, lifecycleCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		lifecycleErr := database.ClientLifecycleRuntimeReady(lifecycleCtx)
+		lifecycleCancel()
+		if lifecycleErr != nil {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL client lifecycle schema is unavailable")
 			return 2
 		}
 		policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}

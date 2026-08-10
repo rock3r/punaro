@@ -452,6 +452,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 		t.Fatal("application role opened host-local administration")
 	}
 	testDeviceAuthIntegration(ctx, t, app, ownerDB)
+	testClientLifecycleSchemaDriftIntegration(ctx, t, app, ownerDB)
 	testTrustedAttachmentIntegration(ctx, t, app, ownerDB)
 	testProjectIdentityIntegration(ctx, t, app, ownerDB)
 	testCanonicalBrainSchemaDriftIntegration(ctx, t, app, ownerDB)
@@ -771,6 +772,31 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 	var trackerExists bool
 	if err := ownerDB.QueryRowContext(ctx, `SELECT to_regclass('jobs.schema_migrations') IS NOT NULL`).Scan(&trackerExists); err != nil || trackerExists {
 		t.Fatalf("missing-role refusal mutated schema: tracker_exists=%t err=%v", trackerExists, err)
+	}
+}
+
+func testClientLifecycleSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if err := app.ClientLifecycleRuntimeReady(ctx); err != nil {
+		t.Fatalf("current client lifecycle runtime is unavailable: %v", err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `GRANT UPDATE (machine_id) ON auth.client_installations TO punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive client lifecycle grant state=%#v err=%v", drifted, err)
+	}
+	if err := app.ClientLifecycleRuntimeReady(ctx); err == nil {
+		t.Fatal("client lifecycle runtime accepted schema drift")
+	}
+	if _, err := ownerDB.ExecContext(ctx, `REVOKE UPDATE (machine_id) ON auth.client_installations FROM punaro_app`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Ready(ctx); err != nil {
+		t.Fatalf("client lifecycle grant restoration did not recover readiness: %v", err)
+	}
+	if err := app.ClientLifecycleRuntimeReady(ctx); err != nil {
+		t.Fatalf("client lifecycle runtime did not recover readiness: %v", err)
 	}
 }
 

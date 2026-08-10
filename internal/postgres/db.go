@@ -690,23 +690,28 @@ SELECT
     AND has_column_privilege('punaro_app', credentials_oid, 'principal_id', 'INSERT')
     AND has_column_privilege('punaro_app', credentials_oid, 'label', 'INSERT')
     AND has_column_privilege('punaro_app', credentials_oid, 'secret_digest', 'INSERT')
-    AND has_column_privilege('punaro_app', credentials_oid, 'expires_at', 'INSERT')
+    AND (($1 < 44 AND has_column_privilege('punaro_app', credentials_oid, 'expires_at', 'INSERT'))
+         OR ($1 >= 44 AND NOT has_column_privilege('punaro_app', credentials_oid, 'expires_at', 'INSERT')))
     AND NOT has_column_privilege('punaro_app', credentials_oid, 'generation', 'INSERT')
     AND NOT has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'INSERT')
     AND has_column_privilege('punaro_app', credentials_oid, 'last_used_at', 'UPDATE')
     AND NOT has_column_privilege('punaro_app', credentials_oid, 'secret_digest', 'UPDATE')
-    AND NOT has_column_privilege('punaro_app', credentials_oid, 'generation', 'UPDATE')
-    AND NOT has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'UPDATE')
+    AND (($1 < 44 AND NOT has_column_privilege('punaro_app', credentials_oid, 'generation', 'UPDATE'))
+         OR ($1 >= 44 AND has_column_privilege('punaro_app', credentials_oid, 'generation', 'UPDATE')))
+    AND (($1 < 44 AND NOT has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'UPDATE'))
+         OR ($1 >= 44 AND has_column_privilege('punaro_app', credentials_oid, 'revoked_at', 'UPDATE')))
     AND NOT EXISTS (
         SELECT 1 FROM pg_attribute
         WHERE attrelid = credentials_oid AND attnum > 0 AND NOT attisdropped
-          AND attname <> ALL (ARRAY['lookup_id', 'principal_id', 'label', 'secret_digest', 'expires_at'])
+          AND (($1 < 44 AND attname <> ALL (ARRAY['lookup_id', 'principal_id', 'label', 'secret_digest', 'expires_at']))
+               OR ($1 >= 44 AND attname <> ALL (ARRAY['lookup_id', 'principal_id', 'label', 'secret_digest'])))
           AND has_column_privilege('punaro_app', credentials_oid, attname, 'INSERT')
     )
     AND NOT EXISTS (
         SELECT 1 FROM pg_attribute
         WHERE attrelid = credentials_oid AND attnum > 0 AND NOT attisdropped
-          AND attname <> 'last_used_at'
+          AND (($1 < 44 AND attname <> 'last_used_at')
+               OR ($1 >= 44 AND attname <> ALL (ARRAY['last_used_at', 'generation', 'revoked_at'])))
           AND has_column_privilege('punaro_app', credentials_oid, attname, 'UPDATE')
     )
     AND NOT has_any_column_privilege('punaro_app', credentials_oid, 'REFERENCES')
@@ -1235,7 +1240,112 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = controlObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 44 {
+		lifecycleObjectsPresent, err := clientLifecycleObjectsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL client lifecycle schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = lifecycleObjectsPresent
+	}
 	return snapshot, nil
+}
+
+func clientLifecycleObjectsAvailable(ctx context.Context, q queryer) (bool, error) {
+	var available bool
+	err := q.QueryRowContext(ctx, `
+WITH objects AS (
+    SELECT to_regclass('auth.pending_enrollments') AS enrollments_oid,
+           to_regclass('auth.pending_enrollments_active_machine') AS pending_machine_oid,
+           to_regclass('auth.client_installations') AS clients_oid,
+           to_regclass('relay.client_endpoint_authority') AS authority_oid
+), ownership AS (
+    SELECT count(*) = 3 AND bool_and(pg_get_userbyid(relowner) = 'punaro_owner') AS owned
+    FROM pg_class, objects
+    WHERE oid = ANY(ARRAY[pending_machine_oid, clients_oid, authority_oid])
+)
+SELECT enrollments_oid IS NOT NULL AND pending_machine_oid IS NOT NULL
+   AND clients_oid IS NOT NULL AND authority_oid IS NOT NULL AND ownership.owned
+   AND EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = enrollments_oid AND attname = 'machine_id' AND NOT attisdropped
+         AND atttypid = 'text'::regtype AND NOT attnotnull
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conrelid = enrollments_oid AND conname = 'pending_enrollments_machine_id_check'
+         AND contype = 'c' AND convalidated
+         AND pg_get_constraintdef(oid) = 'CHECK (((machine_id IS NULL) OR (machine_id ~ ''^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$''::text)))'
+   )
+   AND EXISTS (
+       SELECT 1 FROM pg_index
+       WHERE indexrelid = pending_machine_oid AND indrelid = enrollments_oid
+         AND indisunique AND indisvalid AND indisready AND indnkeyatts = 1
+         AND pg_get_expr(indpred, indrelid) = '((redeemed_at IS NULL) AND (invalidated_at IS NULL))'
+   )
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[4]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[5]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[11]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'f' AND conkey = ARRAY[5]::smallint[] AND confrelid = 'auth.device_credentials'::regclass AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = clients_oid AND convalidated)
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+   AND has_table_privilege('punaro_app', clients_oid, 'SELECT')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'INSERT')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'DELETE')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', clients_oid, 'TRIGGER')
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = clients_oid AND attnum > 0 AND NOT attisdropped
+         AND attname <> ALL (ARRAY['machine_id', 'label', 'principal_id', 'credential_lookup_id'])
+         AND has_column_privilege('punaro_app', clients_oid, attname, 'INSERT')
+   )
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = clients_oid AND attnum > 0 AND NOT attisdropped
+         AND attname <> ALL (ARRAY['generation', 'lifecycle_state', 'revoked_at', 'revocation_reason', 'self_revoke_idempotency'])
+         AND has_column_privilege('punaro_app', clients_oid, attname, 'UPDATE')
+   )
+   AND NOT has_any_column_privilege('punaro_app', clients_oid, 'REFERENCES')
+   AND has_column_privilege('punaro_app', clients_oid, 'machine_id', 'INSERT')
+   AND has_column_privilege('punaro_app', clients_oid, 'label', 'INSERT')
+   AND has_column_privilege('punaro_app', clients_oid, 'principal_id', 'INSERT')
+   AND has_column_privilege('punaro_app', clients_oid, 'credential_lookup_id', 'INSERT')
+   AND has_column_privilege('punaro_app', clients_oid, 'generation', 'UPDATE')
+   AND has_column_privilege('punaro_app', clients_oid, 'lifecycle_state', 'UPDATE')
+   AND has_column_privilege('punaro_app', clients_oid, 'revoked_at', 'UPDATE')
+   AND has_column_privilege('punaro_app', clients_oid, 'revocation_reason', 'UPDATE')
+   AND has_column_privilege('punaro_app', clients_oid, 'self_revoke_idempotency', 'UPDATE')
+   AND has_table_privilege('punaro_app', authority_oid, 'SELECT')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'INSERT')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'UPDATE')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'DELETE')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'TRUNCATE')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'REFERENCES')
+   AND NOT has_table_privilege('punaro_app', authority_oid, 'TRIGGER')
+   AND has_column_privilege('punaro_app', authority_oid, 'client_id', 'INSERT')
+   AND has_column_privilege('punaro_app', authority_oid, 'endpoint_prefix', 'INSERT')
+   AND has_column_privilege('punaro_app', authority_oid, 'generation', 'UPDATE')
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = authority_oid AND attnum > 0 AND NOT attisdropped
+         AND attname <> ALL (ARRAY['client_id', 'endpoint_prefix'])
+         AND has_column_privilege('punaro_app', authority_oid, attname, 'INSERT')
+   )
+   AND NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = authority_oid AND attnum > 0 AND NOT attisdropped
+         AND attname <> 'generation'
+         AND has_column_privilege('punaro_app', authority_oid, attname, 'UPDATE')
+   )
+   AND NOT has_any_column_privilege('punaro_app', authority_oid, 'REFERENCES')
+FROM objects, ownership`).Scan(&available)
+	return available, err
 }
 
 func verifyApplicationRole(ctx context.Context, db queryer) error {

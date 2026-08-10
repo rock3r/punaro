@@ -28,6 +28,8 @@ type transitionDatabaseDouble struct {
 	err        error
 }
 
+func (d *transitionDatabaseDouble) ClientLifecycleRuntimeReady(context.Context) error { return d.err }
+
 func (d *transitionDatabaseDouble) RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error) {
 	return punaropostgres.DeviceCredential{}, errors.New("not used")
 }
@@ -37,6 +39,10 @@ func (d *transitionDatabaseDouble) AuthenticateDevice(_ context.Context, credent
 		return punaropostgres.AuthenticatedDevice{}, punaropostgres.ErrUnauthenticated
 	}
 	return d.device, nil
+}
+
+func (d *transitionDatabaseDouble) SelfRevokeDevice(context.Context, string, string) (punaropostgres.DeviceRevocation, error) {
+	return punaropostgres.DeviceRevocation{}, errors.New("not used")
 }
 
 func (d *transitionDatabaseDouble) DeviceSessionCurrent(_ context.Context, authenticated punaropostgres.AuthenticatedDevice) (bool, error) {
