@@ -1164,6 +1164,11 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if err := roleRows.Close(); err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
 	}
+	if input.ToRole != "" {
+		if err := advanceConversationRecipientCursors(tx, input.ConversationID); err != nil {
+			return Message{}, false, err
+		}
+	}
 	if err := advanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
 		return Message{}, false, err
 	}
@@ -1174,6 +1179,42 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	return message, false, nil
+}
+
+func advanceConversationRecipientCursors(tx *sql.Tx, conversationID string) error {
+	rows, err := tx.QueryContext(context.Background(), "SELECT endpoint FROM memberships WHERE conversation_id=? AND (capabilities & ?) != 0", conversationID, CapReceive)
+	if err != nil {
+		return fmt.Errorf("find recipient cursors: %w", err)
+	}
+	for rows.Next() {
+		var endpoint string
+		if err := rows.Scan(&endpoint); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := advanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	roles, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id=? AND (capabilities & ?) != 0", conversationID, CapReceive)
+	if err != nil {
+		return fmt.Errorf("find durable role cursors: %w", err)
+	}
+	defer func() { _ = roles.Close() }()
+	for roles.Next() {
+		var role string
+		if err := roles.Scan(&role); err != nil {
+			return err
+		}
+		if err := advanceRecipientCursor(tx, roleRecipient(role), conversationID); err != nil {
+			return err
+		}
+	}
+	return roles.Err()
 }
 
 // LeaseDeliveries leases a bounded page of pending deliveries for one active

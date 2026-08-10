@@ -607,6 +607,9 @@ func TestStoreRoutesTargetedMessagesOnlyToTheirDurableRole(t *testing.T) {
 	if err != nil || duplicate || message.ToRole != secondRole {
 		t.Fatalf("targeted message=%#v duplicate=%v err=%v", message, duplicate, err)
 	}
+	if cursor, err := store.RecipientCursor(ordinaryMachine, ordinarySession, conversation.ID, now); err != nil || cursor != message.Sequence {
+		t.Fatalf("unselected endpoint cursor=%d err=%v, want %d", cursor, err, message.Sequence)
+	}
 	for _, recipient := range []struct {
 		machine  string
 		endpoint string

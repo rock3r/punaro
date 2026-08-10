@@ -734,6 +734,11 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 			return relay.Message{}, false, relayDatabaseError(err, "bind message attachments")
 		}
 	}
+	if input.ToRole != "" {
+		if err := postgresAdvanceConversationRecipientCursors(tx, input.ConversationID, rolesAvailable); err != nil {
+			return relay.Message{}, false, err
+		}
+	}
 	if err := postgresAdvanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
@@ -744,6 +749,48 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "commit message")
 	}
 	return message, false, nil
+}
+
+func postgresAdvanceConversationRecipientCursors(tx *sql.Tx, conversationID string, rolesAvailable bool) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive)
+	if err != nil {
+		return errors.New("recipient cursor recipients are unavailable")
+	}
+	for rows.Next() {
+		var endpoint string
+		if err := rows.Scan(&endpoint); err != nil {
+			_ = rows.Close()
+			return errors.New("recipient cursor recipient is unavailable")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return errors.New("recipient cursor recipients are unavailable")
+	}
+	if !rolesAvailable {
+		return nil
+	}
+	roles, err := tx.QueryContext(context.Background(), `SELECT role FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive)
+	if err != nil {
+		return errors.New("durable recipient cursors are unavailable")
+	}
+	defer func() { _ = roles.Close() }()
+	for roles.Next() {
+		var role string
+		if err := roles.Scan(&role); err != nil {
+			return errors.New("durable recipient cursor is unavailable")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, "\x1erole:"+role, conversationID); err != nil {
+			return err
+		}
+	}
+	if err := roles.Err(); err != nil {
+		return errors.New("durable recipient cursors are unavailable")
+	}
+	return nil
 }
 
 // LeaseDeliveries claims a bounded fenced PostgreSQL delivery page.
