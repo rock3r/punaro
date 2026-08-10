@@ -1279,7 +1279,12 @@ SELECT enrollments_oid IS NOT NULL AND pending_machine_oid IS NOT NULL
    AND EXISTS (
        SELECT 1 FROM pg_index
        WHERE indexrelid = pending_machine_oid AND indrelid = enrollments_oid
-         AND indisunique AND indisvalid AND indisready AND indnkeyatts = 1
+         AND indisunique AND indisvalid AND indisready AND indnkeyatts = 1 AND indnatts = 1
+         AND indkey[0] = (
+             SELECT attnum FROM pg_attribute
+             WHERE attrelid = enrollments_oid AND attname = 'machine_id' AND NOT attisdropped
+         )
+         AND indexprs IS NULL
          AND pg_get_expr(indpred, indrelid) = '((redeemed_at IS NULL) AND (invalidated_at IS NULL))'
    )
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)

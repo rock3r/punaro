@@ -808,6 +808,26 @@ func testClientLifecycleSchemaDriftIntegration(ctx context.Context, t *testing.T
 	if _, err := ownerDB.ExecContext(ctx, `REVOKE UPDATE (machine_id) ON auth.client_installations FROM punaro_app`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX auth.pending_enrollments_active_machine`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE UNIQUE INDEX pending_enrollments_active_machine ON auth.pending_enrollments (id) WHERE redeemed_at IS NULL AND invalidated_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	assertDrift("wrong pending machine index key")
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX auth.pending_enrollments_active_machine`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE UNIQUE INDEX pending_enrollments_active_machine ON auth.pending_enrollments ((lower(machine_id))) WHERE redeemed_at IS NULL AND invalidated_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
+	assertDrift("expression pending machine index")
+	if _, err := ownerDB.ExecContext(ctx, `DROP INDEX auth.pending_enrollments_active_machine`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `CREATE UNIQUE INDEX pending_enrollments_active_machine ON auth.pending_enrollments (machine_id) WHERE redeemed_at IS NULL AND invalidated_at IS NULL`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE auth.client_installations DROP CONSTRAINT client_installations_generation_check`); err != nil {
 		t.Fatal(err)
 	}
