@@ -174,6 +174,8 @@ each machine-scoped service token, require a **Service Auth** policy that
 includes that exact token. With redirects disabled, a request carrying only
 the token headers to the protected `/v1/conversations` route must reach Punaro
 and return its JSON `401`; a `3xx` or HTML login response is a policy failure.
+One policy may include several exact machine tokens, but never use
+`any_valid_service_token` and never reuse one token pair across machines.
 Do not use `/readyz` as this proof, because health and device paths may have
 different routes or policies. Only after this check should a harmless signed
 request be used to prove relay enrollment and the final device origin.

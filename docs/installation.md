@@ -180,7 +180,11 @@ if you decline it during client setup.
    account API key and must never be reused as one. The Access application
    policy action must be **Service Auth** and its include rule must name this
    exact service token; an ordinary Allow policy sends the adapter to an
-   interactive identity-provider login.
+   interactive identity-provider login. One Service Auth policy may contain
+   several exact service-token include rules, but every enrolled machine still
+   needs a different token pair. Never use `any_valid_service_token`: adding an
+   unrelated token to the account would then silently grant it admission to
+   Punaro.
 
    Test the device application, not only `/readyz`. Make a header-authenticated
    request to `/v1/conversations` without a Punaro machine signature and with
@@ -239,6 +243,12 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    `git status --porcelain` is required. Keep the previously installed commit
    available until post-upgrade verification succeeds; it is the rollback
    source, not a backup of credentials or mailbox state.
+   Build macOS clients natively on the target architecture by running the
+   installer there. Do not substitute a `CGO_ENABLED=0` cross-build: Punaro's
+   platform-specific private-file checks are part of the security boundary,
+   and a cross-built binary is not a valid deployment candidate merely because
+   its process starts. Windows releases must likewise use the repository's
+   Windows installer/build path and retain the current-user ACL checks.
    Before changing any service, map the public adapter URL to its exact daemon
    and listener. A tunnel may route `/readyz` to a separate health origin, so a
    successful readiness request alone does not prove which daemon handles
