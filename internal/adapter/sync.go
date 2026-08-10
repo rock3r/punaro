@@ -53,6 +53,7 @@ type InboundMessage struct {
 	ConversationID  string    `json:"conversation_id"`
 	Sequence        int64     `json:"sequence"`
 	FromEndpoint    string    `json:"from_endpoint"`
+	ToRole          string    `json:"to_role,omitempty"`
 	Body            string    `json:"body"`
 	CreatedAt       time.Time `json:"created_at"`
 }
@@ -208,7 +209,7 @@ func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, del
 	case deliveryAcknowledged:
 		return nil
 	case deliveryReceived:
-		message := InboundMessage{PunaroMessageID: delivery.Message.ID, ConversationID: delivery.Message.ConversationID, Sequence: delivery.Message.Sequence, FromEndpoint: delivery.Message.FromEndpoint, Body: delivery.Message.Body, CreatedAt: delivery.Message.CreatedAt}
+		message := InboundMessage{PunaroMessageID: delivery.Message.ID, ConversationID: delivery.Message.ConversationID, Sequence: delivery.Message.Sequence, FromEndpoint: delivery.Message.FromEndpoint, ToRole: delivery.Message.ToRole, Body: delivery.Message.Body, CreatedAt: delivery.Message.CreatedAt}
 		if err := s.Mailbox.Send(ctx, endpoint, message); err != nil {
 			return fmt.Errorf("inject delivery %q into local mailbox: %w", delivery.ID, err)
 		}

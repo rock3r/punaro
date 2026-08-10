@@ -274,6 +274,14 @@ two-second bound. Existing Ed25519 relay authentication remains active in this
 slice; its PostgreSQL inventory and disable gate stage the later explicit
 cutover and do not silently change current SQLite routing.
 
+For durable-role routing validation, `punaro-adapter send --to-role ROLE` must
+produce a delivery only for that exact receive-capable role. An unbound target
+keeps its durable delivery until the owning machine binds a live session;
+ordinary endpoint members and other roles must receive nothing. Unknown or
+non-receiving targets fail without message state, and changing the role under
+one idempotency key conflicts. Without `--to-role`, the compatible broadcast
+path remains in effect.
+
 Migration 4 adds project identities, aliases, generation-bound merge previews,
 and bounded reconciliation records. Migration 5 adds the backup GC-fence,
 READY-blob manifest, restore-history, and timeline-rotation substrate. It does

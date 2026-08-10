@@ -186,6 +186,27 @@ non-empty adapter environment setting overrides its matching profile value;
 use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute, owner-only
 profile.
 
+To address one durable conversation role rather than broadcast, add
+`--to-role`:
+
+```sh
+punaro-adapter send \
+  --conversation CONVERSATION_ID \
+  --from agent/workstation-review/session-name \
+  --to-role role/plan-reviewer \
+  --body-file review-request.txt \
+  --idempotency-key stable-targeted-retry-key
+```
+
+The wire field is `to_role`. It names exactly one durable role, never an
+endpoint or prefix. The role must be a receive-capable member of the specified
+conversation. Reuse of the same key is idempotent only when `to_role` is also
+unchanged; omitting it retains broadcast compatibility.
+
+The recipient's inert `application/vnd.punaro.message+json` mailbox envelope
+preserves `to_role` when a message was targeted, so local consumers can audit
+the relay-selected durable recipient without interpreting the message body.
+
 ## Durable conversation roles
 
 Endpoint members keep the existing behavior: membership follows that exact

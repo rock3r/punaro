@@ -34,13 +34,13 @@ func TestCLIMailboxSendsInertPunaroEnvelope(t *testing.T) {
 		stdin = input
 		return []byte(`{"message_id":"local-1"}`), nil
 	})
-	if err := mailbox.Send(context.Background(), "agent/active", InboundMessage{PunaroMessageID: "message-1", ConversationID: "conversation-1", Body: "untrusted body"}); err != nil {
+	if err := mailbox.Send(context.Background(), "agent/active", InboundMessage{PunaroMessageID: "message-1", ConversationID: "conversation-1", ToRole: "role/reviewer", Body: "untrusted body"}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Join(args, " ") != "agent-mailbox send --to agent/active --subject Punaro message --content-type application/vnd.punaro.message+json --schema-version 1 --body-file - --json" {
 		t.Fatalf("send command = %#v", args)
 	}
-	if !strings.Contains(string(stdin), `"punaro_message_id":"message-1"`) || !strings.Contains(string(stdin), `"body":"untrusted body"`) {
+	if !strings.Contains(string(stdin), `"punaro_message_id":"message-1"`) || !strings.Contains(string(stdin), `"to_role":"role/reviewer"`) || !strings.Contains(string(stdin), `"body":"untrusted body"`) {
 		t.Fatalf("send body = %s", stdin)
 	}
 }

@@ -444,6 +444,7 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 	}
 	var request struct {
 		FromEndpoint string   `json:"from_endpoint"`
+		ToRole       *string  `json:"to_role"`
 		Body         string   `json:"body"`
 		ArtifactIDs  []string `json:"artifact_ids"`
 	}
@@ -451,11 +452,19 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 		writeError(w, http.StatusBadRequest, "invalid message request")
 		return
 	}
+	if request.ToRole != nil && !ValidRole(*request.ToRole) {
+		writeError(w, http.StatusBadRequest, "invalid message target role")
+		return
+	}
 	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}
-	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
+	toRole := ""
+	if request.ToRole != nil {
+		toRole = *request.ToRole
+	}
+	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, ToRole: toRole, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return

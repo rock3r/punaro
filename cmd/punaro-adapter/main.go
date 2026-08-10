@@ -350,6 +350,7 @@ func runBindRole(args []string) error {
 type sendRequest struct {
 	conversationID string
 	fromEndpoint   string
+	toRole         string
 	bodyFile       string
 	idempotencyKey string
 }
@@ -360,12 +361,13 @@ func parseSendArgs(args []string) (sendRequest, error) {
 	var request sendRequest
 	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
 	flags.StringVar(&request.fromEndpoint, "from", "", "attached sender endpoint")
+	flags.StringVar(&request.toRole, "to-role", "", "exact durable role recipient (optional)")
 	flags.StringVar(&request.bodyFile, "body-file", "", "message body file or - for stdin")
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return sendRequest{}, fmt.Errorf("invalid send arguments")
 	}
-	if strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+	if strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" || (request.toRole != "" && !relay.ValidRole(request.toRole)) {
 		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
 	}
 	return request, nil
@@ -388,7 +390,7 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
-	message, err := client.Send(context.Background(), request.conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
+	message, err := client.SendToRole(context.Background(), request.conversationID, request.fromEndpoint, request.toRole, string(body), request.idempotencyKey)
 	if err != nil {
 		return err
 	}

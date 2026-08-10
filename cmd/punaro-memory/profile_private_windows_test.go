@@ -67,8 +67,8 @@ func TestWindowsProfileAllowsEnrollmentStylePrivateParentDirectory(t *testing.T)
 
 func TestWindowsProfileRejectsCaseInsensitiveCredentialAlias(t *testing.T) {
 	profile := `C:\Punaro\DEVICE.CREDENTIAL`
-	credential := `c:\punaro\device.credential`
-	if !sameCleanProfilePath(profile, credential) {
+	aliasPath := `c:\punaro\device.credential`
+	if !sameCleanProfilePath(profile, aliasPath) {
 		t.Fatal("Windows case-insensitive credential alias was not detected")
 	}
 }
