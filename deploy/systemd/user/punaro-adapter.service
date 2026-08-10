@@ -4,6 +4,9 @@ Description=Punaro machine mailbox adapter
 [Service]
 Type=exec
 ExecStart=%h/.local/bin/punaro-adapter
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=yes
