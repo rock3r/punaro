@@ -76,6 +76,32 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err != nil || len(preview) == 0 || previewHash == "" {
 		t.Fatalf("preview=%#v hash=%q err=%v", preview, previewHash, err)
 	}
+	const boundedPruneMachineID = "bounded-prune-reissue"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at)
+SELECT $1, gen_random_uuid(), 'older-stale-' || ordinal::text, 'older stale enrollment',
+       sha256(convert_to('older-code-' || ordinal::text, 'UTF8')),
+       sha256(convert_to('older-preview-' || ordinal::text, 'UTF8')),
+       statement_timestamp() - interval '4 hours', statement_timestamp() - interval '3 hours'
+FROM generate_series(1, 100) AS ordinal`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at)
+VALUES ($1, gen_random_uuid(), $2, 'bounded prune target',
+        sha256(convert_to('bounded-prune-code', 'UTF8')),
+        sha256(convert_to('bounded-prune-preview', 'UTF8')),
+        statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour')`, owner.ID, boundedPruneMachineID); err != nil {
+		t.Fatal(err)
+	}
+	reissueRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: boundedPruneMachineID, Label: "bounded prune reissue", AllProjects: true, TTL: time.Minute}
+	_, reissuePreviewHash, err := PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, reissueRequest, reissuePreviewHash); err != nil {
+		t.Fatalf("reissue after bounded stale prune: %v", err)
+	}
 	pending, err := admin.CreateEnrollment(ctx, owner.ID, request, previewHash)
 	if err != nil {
 		t.Fatal(err)

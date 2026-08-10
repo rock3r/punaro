@@ -320,6 +320,9 @@ func (a *Administration) CreateEnrollment(ctx context.Context, actorPrincipalID 
 	if err := lockEnrollmentMutations(ctx, tx); err != nil {
 		return PendingEnrollment{}, err
 	}
+	if err := pruneExpiredMachineEnrollment(ctx, tx, request.MachineID); err != nil {
+		return PendingEnrollment{}, err
+	}
 	if err := pruneExpiredEnrollments(ctx, tx, 100); err != nil {
 		return PendingEnrollment{}, err
 	}
@@ -1054,6 +1057,18 @@ func pruneExpiredEnrollments(ctx context.Context, tx *sql.Tx, limit int) error {
 SELECT count(*) FROM deleted_enrollments`, limit).Scan(&pruned)
 	if err != nil {
 		return errors.New("expired enrollments could not be pruned")
+	}
+	return nil
+}
+
+func pruneExpiredMachineEnrollment(ctx context.Context, tx *sql.Tx, machineID string) error {
+	result, err := tx.ExecContext(ctx, `DELETE FROM auth.pending_enrollments
+WHERE machine_id = $1 AND redeemed_at IS NULL AND expires_at <= statement_timestamp()`, machineID)
+	if err != nil {
+		return errors.New("expired machine enrollment could not be pruned")
+	}
+	if count, err := result.RowsAffected(); err != nil || count > 1 {
+		return errors.New("expired machine enrollment prune is inconsistent")
 	}
 	return nil
 }
