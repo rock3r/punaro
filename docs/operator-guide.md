@@ -243,8 +243,9 @@ both. The command exits with status 3 after printing the preview until `--yes`
 is supplied:
 
 ```sh
-punaro-admin client add -owner-dsn-file /absolute/private/owner.dsn \
-  -actor-principal-id OWNER_UUID -name laptop -client-binding CLIENT_UUID \
+punaro-admin client invite -owner-dsn-file /absolute/private/owner.dsn \
+  -actor-principal-id OWNER_UUID -name laptop -machine-id laptop \
+  -client-binding CLIENT_UUID \
   -project PROJECT_UUID
 ```
 
@@ -255,11 +256,15 @@ opaque client value, generates the 256-bit
 credential secret by domain-separated derivation from the internally generated
 256-bit code, and stores only an indexed SHA-256 digest. An exact retry with the
 same code, client binding, and idempotency UUID returns the same result without
-retaining plaintext while the original short enrollment lifetime remains
-unexpired; any changed, expired, or ordinary replay fails. Never put an
+retaining plaintext while the resulting credential and principal remain active,
+even after the invitation expires. A first attempt after expiry, any changed
+retry, or an ordinary replay fails. The resulting first-release credential does
+not expire automatically. Never put an
 enrollment code or device secret in
 logs, shell history, audit fields, or an environment variable.
 
+List client lifecycle metadata with `client list`; permanently revoke one exact
+client with `client revoke --client UUID --reason lost|retired|compromised|replaced`.
 List credential metadata with `credential list`. Rotation requires the current
 generation and two host-local steps. First run `credential rotate` with an
 absolute new `--code-output` path; the command stages a short-lived random code
@@ -273,6 +278,13 @@ and other processes/sessions force reauthentication within the documented
 two-second bound. Existing Ed25519 relay authentication remains active in this
 slice; its PostgreSQL inventory and disable gate stage the later explicit
 cutover and do not silently change current SQLite routing.
+
+Applying schema 44 invalidates every still-unredeemed older invitation because
+those rows have no owner-approved machine ID; issue a replacement invitation
+after migration. It also converts every active device credential to the
+first-release non-expiring policy. A credential already expired when the
+migration begins is permanently revoked and generation-fenced; previously
+revoked credentials and their history are unchanged.
 
 Migration 4 adds project identities, aliases, generation-bound merge previews,
 and bounded reconciliation records. Migration 5 adds the backup GC-fence,
@@ -456,19 +468,21 @@ preview hash without touching the database. The confirmed invocation must
 repeat the same grant flags and bind the prior hash:
 
 ```sh
-punaro client add --directory /absolute/private/punaro-installation \
-  --name laptop --project PROJECT_UUID
-punaro client add --directory /absolute/private/punaro-installation \
-  --name laptop --project PROJECT_UUID --yes \
+punaro client invite --directory /absolute/private/punaro-installation \
+  --name laptop --machine-id laptop --project PROJECT_UUID
+punaro client invite --directory /absolute/private/punaro-installation \
+  --name laptop --machine-id laptop --project PROJECT_UUID --yes \
   --confirm-preview-hash HASH_FROM_THE_PRIOR_OUTPUT
 ```
 
 The second response contains the generated client binding, enrollment ID, and
 single-use code. Send the exact four-field JSON object to
-`POST /v1/enrollments/redeem`; retain the returned bearer credential only in
-protected client storage. `GET /v1/device/session` is the bounded authentication
-check. Forwarded headers never qualify a direct request for TLS or trusted-LAN
-admission.
+`POST /v1/enrollments/redeem`; retain the returned non-expiring bearer
+credential only in protected client storage. `GET /v1/device/session` is the
+bounded authentication check. `POST /v1/device/session/revoke` permanently
+revokes only its authenticating client and accepts no target. Forwarded headers
+never qualify a direct request for TLS or trusted-LAN admission. The older
+`client add` spelling remains an alias during the transition.
 
 ### Consistent backup and clean-stack restore
 

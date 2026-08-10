@@ -15,10 +15,12 @@ import (
 )
 
 type fakeStore struct {
-	redeem     punaropostgres.RedeemEnrollment
-	credential punaropostgres.DeviceCredential
-	auth       punaropostgres.AuthenticatedDevice
-	err        error
+	redeem               punaropostgres.RedeemEnrollment
+	credential           punaropostgres.DeviceCredential
+	auth                 punaropostgres.AuthenticatedDevice
+	selfRevokeCredential string
+	selfRevokeKey        string
+	err                  error
 }
 
 type blockingStore struct{ started chan struct{} }
@@ -33,6 +35,12 @@ func (b *blockingStore) AuthenticateDevice(ctx context.Context, _ string) (punar
 	close(b.started)
 	<-ctx.Done()
 	return punaropostgres.AuthenticatedDevice{}, ctx.Err()
+}
+
+func (b *blockingStore) SelfRevokeDevice(ctx context.Context, _, _ string) (punaropostgres.DeviceRevocation, error) {
+	close(b.started)
+	<-ctx.Done()
+	return punaropostgres.DeviceRevocation{}, ctx.Err()
 }
 
 func (f *fakeStore) RedeemEnrollment(_ context.Context, redeem punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error) {
@@ -51,6 +59,15 @@ func (f *fakeStore) AuthenticateDevice(_ context.Context, _ string) (punaropostg
 		return punaropostgres.AuthenticatedDevice{}, f.err
 	}
 	return f.auth, nil
+}
+
+func (f *fakeStore) SelfRevokeDevice(_ context.Context, credential, idempotencyKey string) (punaropostgres.DeviceRevocation, error) {
+	f.selfRevokeCredential = credential
+	f.selfRevokeKey = idempotencyKey
+	if f.err != nil {
+		return punaropostgres.DeviceRevocation{}, f.err
+	}
+	return punaropostgres.DeviceRevocation{Status: "revoked"}, nil
 }
 
 func testPolicy(t *testing.T) *ingress.Policy {
@@ -150,6 +167,52 @@ func TestCredentialRoutesEnforceTransportAndUniformAuthentication(t *testing.T) 
 	handler.ServeHTTP(w, duplicate)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("duplicate Authorization status=%d", w.Code)
+	}
+}
+
+func TestSelfRevocationIsTargetlessStrictAndRetryBound(t *testing.T) {
+	store := &fakeStore{}
+	handler := New(store, testPolicy(t))
+	key := "33333333-3333-4333-8333-333333333333"
+	request := func(body string, authorization string, keys ...string) *httptest.ResponseRecorder {
+		r := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/device/session/revoke", strings.NewReader(body))
+		r.RemoteAddr = "192.168.1.20:1234"
+		if authorization != "" {
+			r.Header.Set("Authorization", authorization)
+		}
+		for _, value := range keys {
+			r.Header.Add("Idempotency-Key", value)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	response := request("", "Bearer opaque-device-credential", key)
+	if response.Code != http.StatusOK || response.Body.String() != "{\"status\":\"revoked\"}\n" || store.selfRevokeCredential != "opaque-device-credential" || store.selfRevokeKey != key {
+		t.Fatalf("status=%d body=%q credential=%q key=%q", response.Code, response.Body.String(), store.selfRevokeCredential, store.selfRevokeKey)
+	}
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"body":          request(`{"client_id":"11111111-1111-4111-8111-111111111111"}`, "Bearer opaque-device-credential", key),
+		"missing key":   request("", "Bearer opaque-device-credential"),
+		"duplicate key": request("", "Bearer opaque-device-credential", key, key),
+		"invalid key":   request("", "Bearer opaque-device-credential", "friendly-retry"),
+		"missing auth":  request("", "", key),
+	} {
+		wantStatus := http.StatusBadRequest
+		if name == "missing auth" {
+			wantStatus = http.StatusUnauthorized
+		}
+		if response.Code != wantStatus {
+			t.Fatalf("%s status=%d body=%q", name, response.Code, response.Body.String())
+		}
+	}
+	store.err = punaropostgres.ErrUnauthenticated
+	if got := request("", "Bearer revoked", key); got.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked unseen retry status=%d body=%q", got.Code, got.Body.String())
+	}
+	store.err = errors.New("database unavailable")
+	if got := request("", "Bearer opaque-device-credential", key); got.Code != http.StatusServiceUnavailable || strings.Contains(got.Body.String(), "database") {
+		t.Fatalf("store failure status=%d body=%q", got.Code, got.Body.String())
 	}
 }
 

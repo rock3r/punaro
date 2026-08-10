@@ -533,7 +533,7 @@ FROM generate_series(1, 101) AS value`, actor.ID, reenrollmentBinding); err != n
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&Administration{db: ownerDB}).CreateEnrollment(ctx, ownerPrincipalID, EnrollmentRequest{ClientBinding: reenrollmentBinding, Label: "replacement enrollment", AllProjects: true, TTL: time.Minute}, reenrollmentHash); err != nil {
+	if _, err := (&Administration{db: ownerDB}).CreateEnrollment(ctx, ownerPrincipalID, EnrollmentRequest{ClientBinding: reenrollmentBinding, MachineID: "replacement-enrollment", Label: "replacement enrollment", AllProjects: true, TTL: time.Minute}, reenrollmentHash); err != nil {
 		t.Fatalf("invalidated binding blocked replacement after bounded prune: %v", err)
 	}
 	if _, err := app.AttachProjectIdentity(ctx, ProjectIdentityAttachRequest{ActorPrincipalID: actor.ID, ProjectID: source.ProjectID, IdempotencyKey: "88888888-8888-4888-8888-888888888888", Kind: ProjectIdentityOperatorAlias, Locator: "stale source"}); !errors.Is(err, ErrMergedProject) {

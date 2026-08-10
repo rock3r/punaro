@@ -29,7 +29,7 @@ const (
 	redemptionLockName    = "redemption-recovery.lock"
 	maxEnrollmentFile     = 4096
 	// maxEnrollmentMaterial bounds the two JSON records emitted by
-	// `punaro-admin client add --yes` at its 100-project limit.
+	// `punaro-admin client invite --machine-id ID --yes` at its 100-project limit.
 	maxEnrollmentMaterial = 512 * 1024
 )
 
@@ -93,11 +93,14 @@ type redemptionRequest struct {
 }
 
 type redemptionResponse struct {
-	PrincipalID string    `json:"principal_id"`
-	LookupID    string    `json:"lookup_id"`
-	Credential  string    `json:"credential"`
-	Generation  int64     `json:"generation"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	ClientID       string    `json:"client_id"`
+	MachineID      string    `json:"machine_id"`
+	EndpointPrefix string    `json:"endpoint_prefix"`
+	PrincipalID    string    `json:"principal_id"`
+	LookupID       string    `json:"lookup_id"`
+	Credential     string    `json:"credential"`
+	Generation     int64     `json:"generation"`
+	ExpiresAt      time.Time `json:"expires_at"`
 }
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
@@ -569,10 +572,33 @@ func decodeFields(raw []byte, target any, required, optional []string) error {
 
 func decodeRedemptionResponse(raw []byte) (redemptionResponse, error) {
 	var value redemptionResponse
-	if err := decodeFields(raw, &value, []string{"principal_id", "lookup_id", "credential", "generation"}, []string{"expires_at"}); err != nil || !validUUID(value.PrincipalID) || !validUUID(value.LookupID) || !validCredential(value.Credential, value.LookupID) || value.Generation < 1 {
+	if err := decodeFields(raw, &value, []string{"principal_id", "lookup_id", "credential", "generation"}, []string{"client_id", "machine_id", "endpoint_prefix", "expires_at"}); err != nil || !validUUID(value.PrincipalID) || !validUUID(value.LookupID) || !validCredential(value.Credential, value.LookupID) || value.Generation < 1 || !validLifecycleResponse(value) {
 		return redemptionResponse{}, errors.New("invalid redemption response")
 	}
 	return value, nil
+}
+
+func validLifecycleResponse(value redemptionResponse) bool {
+	if value.ClientID == "" && value.MachineID == "" && value.EndpointPrefix == "" {
+		return true
+	}
+	return validUUID(value.ClientID) && validLifecycleMachineID(value.MachineID) && value.EndpointPrefix == "agent/"+value.MachineID+"/"
+}
+
+func validLifecycleMachineID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for index, character := range []byte(value) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			continue
+		}
+		if index > 0 && index < len(value)-1 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 type redemptionResult uint8

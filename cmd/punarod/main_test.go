@@ -61,6 +61,38 @@ func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
 	}
 }
 
+func TestDeviceSelfRevokeRouteWinsOverRelayCatchAll(t *testing.T) {
+	mux := http.NewServeMux()
+	device := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	relay := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusTeapot)
+	})
+	registerDeviceRoutes(mux, device)
+	registerProductionRoutes(mux, nil, nil, relay, nil)
+
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/device/session/revoke", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("self-revoke route status=%d, want device handler status", response.Code)
+	}
+}
+
+func TestRuntimeReadinessRechecksClientLifecycle(t *testing.T) {
+	database := &transitionDatabaseDouble{}
+	lifecycleReadiness := clientLifecycleReadiness(database)
+	alwaysReady := func() error { return nil }
+	if !runtimeReady(alwaysReady, lifecycleReadiness, alwaysReady, nil) {
+		t.Fatal("current lifecycle schema reported not ready")
+	}
+	database.err = errors.New("recovered database is schema 43")
+	if runtimeReady(alwaysReady, lifecycleReadiness, alwaysReady, nil) {
+		t.Fatal("recurring readiness accepted recovered historical lifecycle schema")
+	}
+}
+
 func TestBuildMemoryHandlerIsDarkByDefaultAndRequiresCompleteAuthority(t *testing.T) {
 	handler, err := buildMemoryHandler(config.Config{}, &refusingPlatformDatabase{})
 	if err != nil || handler != nil {

@@ -50,8 +50,10 @@ type platformDatabase interface {
 }
 
 type deviceDatabase interface {
+	ClientLifecycleRuntimeReady(context.Context) error
 	RedeemEnrollment(context.Context, punaropostgres.RedeemEnrollment) (punaropostgres.DeviceCredential, error)
 	AuthenticateDevice(context.Context, string) (punaropostgres.AuthenticatedDevice, error)
+	SelfRevokeDevice(context.Context, string, string) (punaropostgres.DeviceRevocation, error)
 }
 
 type trustedAttachmentDatabase interface {
@@ -181,6 +183,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	accessReadiness := func() error { return nil }
+	lifecycleReadiness := func() error { return nil }
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -232,7 +235,7 @@ func run(args []string, stderr io.Writer) int {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	healthMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if postgresReadiness() != nil || accessReadiness() != nil || (trustedAttachmentHandler != nil && trustedAttachmentHandler.Ready() != nil) {
+		if !runtimeReady(postgresReadiness, lifecycleReadiness, accessReadiness, trustedAttachmentHandler) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
@@ -245,14 +248,18 @@ func run(args []string, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL device store is unavailable")
 			return 2
 		}
+		lifecycleReadiness = clientLifecycleReadiness(database)
+		if err := lifecycleReadiness(); err != nil {
+			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL client lifecycle schema is unavailable")
+			return 2
+		}
 		policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
 		if err := policy.Validate(); err != nil {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: invalid transport policy")
 			return 2
 		}
 		deviceHandler := devicehttp.New(database, policy)
-		mux.Handle("/v1/enrollments/redeem", deviceHandler)
-		mux.Handle("/v1/device/session", deviceHandler)
+		registerDeviceRoutes(mux, deviceHandler)
 	}
 	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler, remoteMCPMetadataHandler)
 	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
@@ -308,6 +315,28 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func clientLifecycleReadiness(database deviceDatabase) func() error {
+	return func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return database.ClientLifecycleRuntimeReady(ctx)
+	}
+}
+
+func runtimeReady(postgresReadiness, lifecycleReadiness, accessReadiness func() error, trustedAttachmentHandler *trustedAttachmentRuntime) bool {
+	return postgresReadiness() == nil && lifecycleReadiness() == nil && accessReadiness() == nil &&
+		(trustedAttachmentHandler == nil || trustedAttachmentHandler.Ready() == nil)
+}
+
+func registerDeviceRoutes(mux *http.ServeMux, deviceHandler http.Handler) {
+	if deviceHandler == nil {
+		return
+	}
+	mux.Handle("/v1/enrollments/redeem", deviceHandler)
+	mux.Handle("/v1/device/session", deviceHandler)
+	mux.Handle("/v1/device/session/revoke", deviceHandler)
 }
 
 func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler, remoteMCPMetadataHandler http.Handler) {

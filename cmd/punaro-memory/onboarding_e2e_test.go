@@ -196,7 +196,7 @@ func TestInstalledMemoryClientOnboardingE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("enrollment preview setup failed")
 	}
-	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, Label: "memory E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
+	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, MachineID: "memory-e2e", Label: "memory E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
 	if err != nil {
 		t.Fatal("disposable enrollment setup failed")
 	}
@@ -332,7 +332,7 @@ func TestInstalledCompleteProductE2E(t *testing.T) {
 	if err != nil {
 		t.Fatal("product enrollment preview setup failed")
 	}
-	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, Label: "complete product E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
+	pending, err := admin.CreateEnrollment(ctx, owner.ID, punaropostgres.EnrollmentRequest{ClientBinding: prepared.ClientBinding, MachineID: "complete-product-e2e", Label: "complete product E2E client", ProjectIDs: []string{project.ProjectID}, TTL: time.Minute}, previewHash)
 	if err != nil {
 		t.Fatal("product enrollment setup failed")
 	}

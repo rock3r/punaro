@@ -228,8 +228,9 @@ happy paths:
   existing schema that needs migration and directs the operator to
   `punaro update`; raw `docker compose up` never migrates either, and
   `punarod` fails readiness on schema mismatch.
-- `punaro client add --name NAME`: show the proposed effective grants, then
-  issue one single-use enrollment code after confirmation.
+- `punaro client invite --name NAME --machine-id ID`: show the proposed
+  effective grants, then issue one single-use enrollment code after
+  confirmation. `client add` remains a transitional alias.
 - `punaro status` / `punaro doctor`: report core and optional capabilities.
 
 Internet mode fails closed without TLS at the ingress. LAN-only plaintext HTTP

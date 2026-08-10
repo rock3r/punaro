@@ -433,7 +433,7 @@ func preserveDependencies(t *testing.T) {
 	originalInspect, originalOwner, originalMigrate, originalMaintenance := inspectSchema, inspectOwner, migratePristinePair, maintenanceActive
 	originalCreate, originalRecover := createOwner, recoverInstallationOwner
 	originalVerify := verifyInstallationPair
-	originalStart, originalProbe, originalIssue := startServices, probe, issueEnrollment
+	originalStart, originalProbe, originalIssue, originalListClients, originalRevokeClient := startServices, probe, issueEnrollment, listClients, revokeClient
 	originalBackup, originalListBackups, originalVerifyBackup, originalRestore := createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup
 	t.Cleanup(func() {
 		inspectSchema, inspectOwner, migratePristinePair, maintenanceActive = originalInspect, originalOwner, originalMigrate, originalMaintenance
@@ -441,6 +441,7 @@ func preserveDependencies(t *testing.T) {
 		verifyInstallationPair = originalVerify
 		startServices, probe = originalStart, originalProbe
 		issueEnrollment = originalIssue
+		listClients, revokeClient = originalListClients, originalRevokeClient
 		createOperatorBackup, listOperatorBackups, verifyOperatorBackup, restoreOperatorBackup = originalBackup, originalListBackups, originalVerifyBackup, originalRestore
 	})
 	inspectOwner = func(context.Context, string) (punaropostgres.Principal, error) {
@@ -778,7 +779,7 @@ func TestUpRefusesMismatchedInstallationPairBeforeStart(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 	}
 	verifyInstallationPair = func(context.Context, string, string) error {
 		return errors.New("different installation")
@@ -986,15 +987,55 @@ func TestInitResumeRecoversUncertainOwnerOutcome(t *testing.T) {
 func TestClientAddPrintsPreviewWithoutDatabaseMutation(t *testing.T) {
 	directory := testInstallation(t)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects"}, &stdout, &stderr); code != 3 || !strings.Contains(stdout.String(), "trusted-agent") || !strings.Contains(stderr.String(), "rerun with --yes") {
+	if code := run([]string{"client", "add", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects"}, &stdout, &stderr); code != 3 || !strings.Contains(stdout.String(), "trusted-agent") || !strings.Contains(stderr.String(), "rerun with --yes") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestClientInviteAliasPrintsPreviewWithoutDatabaseMutation(t *testing.T) {
+	directory := testInstallation(t)
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"client", "invite", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects"}, &stdout, &stderr); code != 3 || !strings.Contains(stdout.String(), "trusted-agent") || !strings.Contains(stderr.String(), "rerun with --yes") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestClientInventoryAndRevocationUseHostLocalInstallationAuthority(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
+	}
+	clientID := "22222222-2222-4222-8222-222222222222"
+	listClients = func(_ context.Context, installation operator.Installation, limit int) ([]punaropostgres.ClientMetadata, error) {
+		if installation.Directory != directory || limit != 7 {
+			t.Fatalf("list installation=%#v limit=%d", installation, limit)
+		}
+		return []punaropostgres.ClientMetadata{{ClientID: clientID, MachineID: "laptop", EndpointPrefix: "agent/laptop/", LifecycleState: "active"}}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"client", "list", "--directory", directory, "--limit", "7"}, &stdout, &stderr); code != 0 || stderr.Len() != 0 || !strings.Contains(stdout.String(), clientID) || strings.Contains(stdout.String(), "credential\"") {
+		t.Fatalf("list code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	revoked := false
+	revokeClient = func(_ context.Context, installation operator.Installation, gotClientID, reason string) error {
+		if installation.Directory != directory || gotClientID != clientID || reason != "retired" {
+			t.Fatalf("revoke installation=%#v client=%q reason=%q", installation, gotClientID, reason)
+		}
+		revoked = true
+		return nil
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"client", "revoke", "--directory", directory, "--client", clientID, "--reason", "retired"}, &stdout, &stderr); code != 0 || stdout.Len() != 0 || stderr.Len() != 0 || !revoked {
+		t.Fatalf("revoke code=%d revoked=%t stdout=%q stderr=%q", code, revoked, stdout.String(), stderr.String())
 	}
 }
 
 func TestClientAddRefusesYesWithoutPriorExactPreviewHash(t *testing.T) {
 	directory := testInstallation(t)
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", "stale"}, &stdout, &stderr); code != 3 || !strings.Contains(stderr.String(), "does not match") {
+	if code := run([]string{"client", "add", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", "stale"}, &stdout, &stderr); code != 3 || !strings.Contains(stderr.String(), "does not match") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -1006,16 +1047,33 @@ func TestClientAddRefusesMutationWhenDatabaseRolesDiffer(t *testing.T) {
 		return errors.New("different installation")
 	}
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 	}
 	var stdout, stderr bytes.Buffer
 	_, previewHash, err := punaropostgres.PreviewTrustedAgentEnrollment(nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
+	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
 	if code := run(args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "database roles") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestClientLifecycleCommandsRefuseCompatibleHistoricalSchema(t *testing.T) {
+	preserveDependencies(t)
+	directory := testInstallation(t)
+	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 43}, nil
+	}
+	listed := false
+	listClients = func(context.Context, operator.Installation, int) ([]punaropostgres.ClientMetadata, error) {
+		listed = true
+		return nil, nil
+	}
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"client", "list", "--directory", directory}, &stdout, &stderr); code != 1 || listed || !strings.Contains(stderr.String(), "refused") {
+		t.Fatalf("code=%d listed=%t stdout=%q stderr=%q", code, listed, stdout.String(), stderr.String())
 	}
 }
 
@@ -1044,7 +1102,7 @@ func TestClientAddRevalidatesPathsAndOwnerBeforeMutation(t *testing.T) {
 			preserveDependencies(t)
 			directory := testInstallation(t)
 			inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-				return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+				return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 			}
 			test.mutate(t, directory)
 			issued := false
@@ -1057,7 +1115,7 @@ func TestClientAddRevalidatesPathsAndOwnerBeforeMutation(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stdout, stderr bytes.Buffer
-			args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
+			args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
 			if code := run(args, &stdout, &stderr); code != 1 || issued {
 				t.Fatalf("code=%d issued=%t stdout=%q stderr=%q", code, issued, stdout.String(), stderr.String())
 			}
@@ -1069,7 +1127,7 @@ func TestConfirmedClientAddEmitsOnlyEnrollmentJSON(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
 	inspectSchema = func(context.Context, string) (punaropostgres.SchemaState, error) {
-		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
+		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 44}, nil
 	}
 	issueEnrollment = func(_ context.Context, _ operator.Installation, request punaropostgres.EnrollmentRequest, previewHash string) (punaropostgres.PendingEnrollment, error) {
 		return punaropostgres.PendingEnrollment{ID: "22222222-2222-4222-8222-222222222222", ClientBinding: request.ClientBinding, Code: "one-time-code", PreviewHash: previewHash}, nil
@@ -1079,7 +1137,7 @@ func TestConfirmedClientAddEmitsOnlyEnrollmentJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
-	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
+	args := []string{"client", "add", "--directory", directory, "--name", "laptop", "--machine-id", "laptop", "--all-projects", "--yes", "--confirm-preview-hash", previewHash}
 	if code := run(args, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
