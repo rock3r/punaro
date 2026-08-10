@@ -464,19 +464,37 @@ func writeExclusiveJSON(path string, value any) error {
 }
 
 func writeExclusive(path string, body []byte) error {
+	return writeExclusiveWithPersist(path, body, func(file *os.File, body []byte) error {
+		if _, err := file.Write(body); err != nil {
+			return err
+		}
+		return file.Sync()
+	})
+}
+
+func writeExclusiveWithPersist(path string, body []byte, persist func(*os.File, []byte) error) (err error) {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- validated installation-local output.
 	if err != nil {
 		return err
 	}
-	if _, err := file.Write(body); err != nil {
+	complete := false
+	defer func() {
+		if complete {
+			return
+		}
 		_ = file.Close()
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove incomplete exclusive file: %w", removeErr))
+		}
+	}()
+	if err = persist(file, body); err != nil {
 		return err
 	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
+	if err = file.Close(); err != nil {
 		return err
 	}
-	return file.Close()
+	complete = true
+	return nil
 }
 
 func requirePrivateDirectory(path string) error {

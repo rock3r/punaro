@@ -43,6 +43,26 @@ func protectedFile(t *testing.T, path string) {
 	}
 }
 
+func TestWriteExclusiveRemovesPartialFileAfterPersistenceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "candidate.json")
+	injected := errors.New("injected persistence failure")
+	err := writeExclusiveWithPersist(path, []byte("complete candidate"), func(file *os.File, _ []byte) error {
+		if _, err := file.Write([]byte("partial")); err != nil {
+			t.Fatal(err)
+		}
+		return injected
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("persistence failure=%v, want %v", err, injected)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial exclusive file remains after failure: %v", err)
+	}
+	if err := writeExclusive(path, []byte("complete candidate")); err != nil {
+		t.Fatalf("exact retry after persistence failure: %v", err)
+	}
+}
+
 func validInitOptions(t *testing.T) InitOptions {
 	t.Helper()
 	root := t.TempDir()
