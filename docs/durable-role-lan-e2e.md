@@ -80,8 +80,13 @@ remote-MCP release-candidate E2E configuration against this same commit; if
 the candidate intentionally disables memory transport, record its fail-closed
 result rather than replacing it with an offline harness.
 
-After recording redacted outcomes, remove only the disposable conversation and
-test aliases through the supported control plane. Confirm all three adapter
-services and relay readiness remain healthy. Record the candidate commit/image,
-host roles, redacted commands, pass/fail outcomes, cleanup result, residual
-risk, and the owner-managed rollback reference in a release-evidence record.
+After recording redacted outcomes, remove every disposable endpoint member
+that the conversation control API supports and detach every test alias from
+the actual groups currently attached to the adapters. Verify those attached
+groups contain zero active disposable aliases. If the candidate has no
+supported conversation-delete or durable-role-member removal operation, do
+not edit relay storage directly; record the isolated final admin and role
+metadata as residual test state instead. Confirm all three adapter services
+and relay readiness remain healthy. Record the candidate commit/image, host
+roles, redacted commands, pass/fail outcomes, achieved cleanup, residual risk,
+and the owner-managed rollback reference in a release-evidence record.
