@@ -299,7 +299,10 @@ For durable-role mail validation, `punaro-adapter send --target-role ROLE`
 must create a delivery only for that receiving conversation role. An unknown
 role is denied without message state, and changing the role under the same
 idempotency key is a conflict. A send without `--target-role` is the compatible
-broadcast path. During deployment evidence, verify both paths and confirm that
+broadcast path. A leased role delivery and its local inert mailbox envelope
+carry the server-derived `recipient_role`; use that field—not the untrusted
+body—to distinguish multiple roles bound to one session. During deployment
+evidence, verify both paths and confirm that
 ordinary endpoint members receive the broadcast but not the targeted probe;
 follow [the isolated LAN runbook](durable-role-lan-e2e.md) and never record
 message bodies or production conversation identifiers.

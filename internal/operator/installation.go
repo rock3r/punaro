@@ -473,19 +473,15 @@ func writeExclusive(path string, body []byte) error {
 }
 
 func writeExclusiveWithPersist(path string, body []byte, persist func(*os.File, []byte) error) (err error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- validated installation-local output.
+	directory := filepath.Dir(path)
+	file, err := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-") // #nosec G304 -- validated installation-local output directory.
 	if err != nil {
 		return err
 	}
-	complete := false
+	temporary := file.Name()
 	defer func() {
-		if complete {
-			return
-		}
 		_ = file.Close()
-		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-			err = errors.Join(err, fmt.Errorf("remove incomplete exclusive file: %w", removeErr))
-		}
+		_ = os.Remove(temporary)
 	}()
 	if err = persist(file, body); err != nil {
 		return err
@@ -493,8 +489,10 @@ func writeExclusiveWithPersist(path string, body []byte, persist func(*os.File, 
 	if err = file.Close(); err != nil {
 		return err
 	}
-	complete = true
-	return nil
+	// A hard link publishes only the already-synced complete inode and fails if
+	// the caller's exclusive target exists. A crash can leave a private
+	// temporary link, but never a partial target that blocks exact recovery.
+	return os.Link(temporary, path)
 }
 
 func requirePrivateDirectory(path string) error {

@@ -1,11 +1,12 @@
-# Durable-role deployed-candidate evidence — 2026-08-10
+# Durable-role personal-deployment validation — 2026-08-10
 
 ## Decision and scope
 
 - Capability: durable conversation roles, session replacement fencing, and
   targeted role delivery from issues #55 and #58.
-- Personal deployment decision: **approved** for the owner-managed Punaro
-  deployment described in the installation guide.
+- Personal deployment result: **validated** for the owner-managed Punaro
+  deployment described in the installation guide. This is operational test
+  evidence, not release-gate approval or official release evidence.
 - Official Internet-facing release decision: **withheld**. This record does
   not check any box in
   [`security-release-gates.md`](../security-release-gates.md); no signed

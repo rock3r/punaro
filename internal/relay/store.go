@@ -126,6 +126,7 @@ type Message struct {
 type Delivery struct {
 	ID                string    `json:"id"`
 	RecipientEndpoint string    `json:"recipient_endpoint"`
+	RecipientRole     string    `json:"recipient_role,omitempty"`
 	Message           Message   `json:"message"`
 	LeaseToken        string    `json:"lease_token"`
 	LeaseGeneration   int64     `json:"lease_generation"`
@@ -1240,6 +1241,9 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 			return DeliveryLeasePage{}, err
 		}
 		delivery.RecipientEndpoint = endpoint
+		if role, isRole := parseRoleRecipient(recipientID); isRole {
+			delivery.RecipientRole = role
+		}
 		delivery.Message.CreatedAt = fromMillis(createdAt)
 		if leaseMachine.Valid && leaseMachine.String == machineID && leaseToken.Valid && leaseOwnership.Valid && leaseOwnership.Int64 == ownershipGeneration && leaseConsumer.Valid && leaseConsumer.Int64 == consumerGeneration && leaseUntil.Valid && leaseUntil.Int64 > now.UnixMilli() {
 			delivery.LeaseToken = leaseToken.String

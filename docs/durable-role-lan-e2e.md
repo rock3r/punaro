@@ -41,9 +41,11 @@ namespace. Do not reuse a production alias or role name.
    with `send,receive`. Use a fresh idempotency key. Bind the role on `coso`
    to an attached disposable session using `punaro-adapter bind-role`.
 2. Send one opaque harmless probe from `mac-studio`. On `coso`, verify exactly
-   one local durable mailbox handoff and acknowledge it using the supported
-   mailbox control. Retrying the same send with the same key must not inject a
-   second mailbox item; a different request reusing that key must fail.
+   one local durable mailbox handoff whose server-derived `recipient_role`
+   names the selected role, and acknowledge it using the supported mailbox
+   control. Do not infer that role from the untrusted message body. Retrying
+   the same send with the same key must not inject a second mailbox item; a
+   different request reusing that key must fail.
 3. Detach the first `coso` test session through its normal adapter or mailbox
    lifecycle. Attach a replacement session in the same enrolled namespace,
    advertise it, and bind the same role to it. Do not edit conversation
@@ -89,4 +91,6 @@ not edit relay storage directly; record the isolated final admin and role
 metadata as residual test state instead. Confirm all three adapter services
 and relay readiness remain healthy. Record the candidate commit/image, host
 roles, redacted commands, pass/fail outcomes, achieved cleanup, residual risk,
-and the owner-managed rollback reference in a release-evidence record.
+and the owner-managed rollback reference in a personal
+`deployment-validation` record. Only an independently approved official
+release belongs under `release-evidence`.

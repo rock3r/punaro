@@ -145,6 +145,9 @@ func TestHTTPTargetRoleRoutesExclusivelyAndBroadcastRemainsCompatible(t *testing
 	if lease.Code != http.StatusOK || json.NewDecoder(lease.Body).Decode(&targetedPage) != nil || len(targetedPage.Deliveries) != 1 {
 		t.Fatalf("targeted lease status=%d page=%#v body=%s", lease.Code, targetedPage, lease.Body.String())
 	}
+	if targetedPage.Deliveries[0].RecipientRole != "role/reviewer" {
+		t.Fatalf("targeted lease recipient role=%q", targetedPage.Deliveries[0].RecipientRole)
+	}
 	if err := store.AckDelivery("machine-b", "agent/b/session", targetedPage.Deliveries[0].ID, targetedPage.Deliveries[0].LeaseToken, targetedPage.Deliveries[0].LeaseGeneration, now); err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +159,13 @@ func TestHTTPTargetRoleRoutesExclusivelyAndBroadcastRemainsCompatible(t *testing
 	var broadcastPage DeliveryLeasePage
 	if broadcastLease.Code != http.StatusOK || json.NewDecoder(broadcastLease.Body).Decode(&broadcastPage) != nil || len(broadcastPage.Deliveries) != 3 {
 		t.Fatalf("broadcast lease status=%d page=%#v body=%s", broadcastLease.Code, broadcastPage, broadcastLease.Body.String())
+	}
+	roles := map[string]int{"": 0, "role/reviewer": 0, "role/implementer": 0}
+	for _, delivery := range broadcastPage.Deliveries {
+		roles[delivery.RecipientRole]++
+	}
+	if roles[""] != 1 || roles["role/reviewer"] != 1 || roles["role/implementer"] != 1 || len(roles) != 3 {
+		t.Fatalf("broadcast recipient roles=%v", roles)
 	}
 	missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"role/missing","body":"nobody"}`, "missing-target", "missing-target")
 	if missing.Code != http.StatusForbidden {

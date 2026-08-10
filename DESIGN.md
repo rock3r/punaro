@@ -307,6 +307,9 @@ roles receive nothing. The relay rejects an unknown or non-receiving role
 before allocating a message sequence or idempotency row. The target role is
 part of the sender's idempotency request hash, while an untargeted request keeps
 the pre-targeting broadcast hash so retries remain valid across upgrades.
+Every leased role delivery carries a server-derived `recipient_role`; the
+adapter preserves it in the inert mailbox envelope so two roles bound to one
+session remain distinguishable without interpreting the untrusted body.
 
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. Roles may use only those three capabilities;

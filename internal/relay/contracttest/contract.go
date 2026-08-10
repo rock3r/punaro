@@ -292,6 +292,9 @@ func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
 	if err != nil || len(page.Deliveries) != 1 {
 		t.Fatalf("targeted page=%#v err=%v", page, err)
 	}
+	if page.Deliveries[0].RecipientRole != reviewerRole {
+		t.Fatalf("targeted recipient role=%q want %q", page.Deliveries[0].RecipientRole, reviewerRole)
+	}
 	if err := backend.AckDelivery(recipientMachine, recipientEndpoint, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
 		t.Fatal(err)
 	}
@@ -313,6 +316,13 @@ func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
 	broadcastPage, err := backend.LeaseDeliveries(recipientMachine, namespace+"-consumer", recipientEndpoint, conversation.ID, now, time.Minute, 10)
 	if err != nil || len(broadcastPage.Deliveries) != 3 {
 		t.Fatalf("broadcast page=%#v err=%v", broadcastPage, err)
+	}
+	roles := map[string]int{"": 0, reviewerRole: 0, implementerRole: 0}
+	for _, delivery := range broadcastPage.Deliveries {
+		roles[delivery.RecipientRole]++
+	}
+	if roles[""] != 1 || roles[reviewerRole] != 1 || roles[implementerRole] != 1 || len(roles) != 3 {
+		t.Fatalf("broadcast recipient roles=%v", roles)
 	}
 }
 

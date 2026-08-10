@@ -18,7 +18,7 @@ func TestSyncOnceAdvertisesAttachmentsForwardsThenAcknowledges(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = journal.Close() })
 	mailbox := &fakeMailbox{attached: []string{"agent/reviewer"}}
-	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/reviewer": {{ID: "delivery-1", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", Sequence: 7, FromEndpoint: "agent/sender", Body: "ship it"}, LeaseToken: "lease", LeaseGeneration: 1}}}}
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/reviewer": {{ID: "delivery-1", RecipientRole: "role/reviewer", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", Sequence: 7, FromEndpoint: "agent/sender", Body: "ship it"}, LeaseToken: "lease", LeaseGeneration: 1}}}}
 	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Now: func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }}
 	if err := sync.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -26,7 +26,7 @@ func TestSyncOnceAdvertisesAttachmentsForwardsThenAcknowledges(t *testing.T) {
 	if len(relayClient.advertised) != 1 || relayClient.advertised[0] != "agent/reviewer" {
 		t.Fatalf("advertised = %#v", relayClient.advertised)
 	}
-	if len(mailbox.sent) != 1 || mailbox.sent[0].PunaroMessageID != "message-1" || mailbox.sent[0].Body != "ship it" {
+	if len(mailbox.sent) != 1 || mailbox.sent[0].PunaroMessageID != "message-1" || mailbox.sent[0].RecipientRole != "role/reviewer" || mailbox.sent[0].Body != "ship it" {
 		t.Fatalf("mailbox sent = %#v", mailbox.sent)
 	}
 	if len(relayClient.acknowledged) != 1 || relayClient.acknowledged[0] != "delivery-1" {

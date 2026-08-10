@@ -799,7 +799,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_endpoints SET consumer_id=$1,consumer_generation=$2,consumer_lease_until=$3 WHERE endpoint=$4 AND ownership_generation=$5`, consumerID, consumerGeneration, consumerLeaseUntil, endpoint, ownershipGeneration); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
-	query := `SELECT delivery.id::text,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
+	query := `SELECT delivery.id::text,delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
 		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
@@ -827,10 +827,14 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	var pending []leasedRow
 	for rows.Next() {
 		var row leasedRow
+		var recipientID string
 		row.delivery.RecipientEndpoint = endpoint
-		if err := rows.Scan(&row.delivery.ID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
+		if err := rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
 			_ = rows.Close()
 			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
+		}
+		if role, isRole := postgresParseRoleRecipient(recipientID); isRole {
+			row.delivery.RecipientRole = role
 		}
 		row.delivery.Message.CreatedAt = row.delivery.Message.CreatedAt.UTC()
 		pending = append(pending, row)
