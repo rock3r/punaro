@@ -87,6 +87,16 @@ FROM generate_series(1, 100) AS ordinal`, owner.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at, invalidated_at)
+SELECT $1, gen_random_uuid(), $2, 'invalidated same-machine enrollment',
+       sha256(convert_to('invalidated-code-' || ordinal::text, 'UTF8')),
+       sha256(convert_to('invalidated-preview-' || ordinal::text, 'UTF8')),
+       statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour',
+       statement_timestamp() - interval '30 minutes'
+FROM generate_series(1, 2) AS ordinal`, owner.ID, boundedPruneMachineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
 (issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at)
 VALUES ($1, gen_random_uuid(), $2, 'bounded prune target',
         sha256(convert_to('bounded-prune-code', 'UTF8')),

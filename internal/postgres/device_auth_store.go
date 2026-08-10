@@ -1063,7 +1063,8 @@ SELECT count(*) FROM deleted_enrollments`, limit).Scan(&pruned)
 
 func pruneExpiredMachineEnrollment(ctx context.Context, tx *sql.Tx, machineID string) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM auth.pending_enrollments
-WHERE machine_id = $1 AND redeemed_at IS NULL AND expires_at <= statement_timestamp()`, machineID)
+WHERE machine_id = $1 AND redeemed_at IS NULL AND invalidated_at IS NULL
+AND expires_at <= statement_timestamp()`, machineID)
 	if err != nil {
 		return errors.New("expired machine enrollment could not be pruned")
 	}
