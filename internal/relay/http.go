@@ -443,26 +443,25 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 		return
 	}
 	var request struct {
-		FromEndpoint string   `json:"from_endpoint"`
-		ToRole       *string  `json:"to_role"`
-		Body         string   `json:"body"`
-		ArtifactIDs  []string `json:"artifact_ids"`
+		FromEndpoint string          `json:"from_endpoint"`
+		ToRole       json.RawMessage `json:"to_role"`
+		Body         string          `json:"body"`
+		ArtifactIDs  []string        `json:"artifact_ids"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid message request")
 		return
 	}
-	if request.ToRole != nil && !ValidRole(*request.ToRole) {
-		writeError(w, http.StatusBadRequest, "invalid message target role")
-		return
+	toRole := ""
+	if request.ToRole != nil {
+		if bytes.Equal(bytes.TrimSpace(request.ToRole), []byte("null")) || json.Unmarshal(request.ToRole, &toRole) != nil || !ValidRole(toRole) {
+			writeError(w, http.StatusBadRequest, "invalid message target role")
+			return
+		}
 	}
 	if !h.auth.AllowsEndpoint(machineID, request.FromEndpoint) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
-	}
-	toRole := ""
-	if request.ToRole != nil {
-		toRole = *request.ToRole
 	}
 	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, ToRole: toRole, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {

@@ -655,6 +655,18 @@ func TestStoreRoutesTargetedMessagesOnlyToTheirDurableRole(t *testing.T) {
 	if messagesAfter != messagesBefore || deliveriesAfter != deliveriesBefore {
 		t.Fatalf("invalid target side effects messages=%d/%d deliveries=%d/%d", messagesAfter, messagesBefore, deliveriesAfter, deliveriesBefore)
 	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO roles(role, machine_id) VALUES (?, ?)", "role/corrupt", secondMachine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO role_memberships(conversation_id, role, capabilities) VALUES (?, ?, ?)", conversation.ID, "role/corrupt", "not-a-capability"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := targeted
+	corrupt.ToRole = "role/corrupt"
+	corrupt.IdempotencyKey = "target-corrupt"
+	if _, _, err := store.AppendMessage(corrupt); err == nil || errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "read message target role") {
+		t.Fatalf("corrupt target err=%v, want target role storage error", err)
+	}
 
 	unbound := targeted
 	unbound.ToRole = unboundRole

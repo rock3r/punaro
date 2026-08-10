@@ -126,6 +126,7 @@ func TestHTTPTargetedMessageRequiresOneValidDurableRole(t *testing.T) {
 		name string
 		body string
 	}{
+		{"null", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":null}`},
 		{"empty", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":""}`},
 		{"missing", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":"role/missing"}`},
 		{"malformed", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":" agent/a/session"}`},

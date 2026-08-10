@@ -1088,11 +1088,14 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if input.ToRole != "" {
 		var targetCapabilities Capability
 		err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM role_memberships WHERE conversation_id=? AND role=?", input.ConversationID, input.ToRole).Scan(&targetCapabilities)
-		if errors.Is(err, sql.ErrNoRows) || targetCapabilities&CapReceive == 0 {
+		if errors.Is(err, sql.ErrNoRows) {
 			return Message{}, false, ErrForbidden
 		}
 		if err != nil {
 			return Message{}, false, fmt.Errorf("read message target role: %w", err)
+		}
+		if targetCapabilities&CapReceive == 0 {
+			return Message{}, false, ErrForbidden
 		}
 	}
 	var existingID, existingHash string
