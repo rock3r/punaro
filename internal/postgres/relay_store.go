@@ -605,7 +605,7 @@ func (d *Database) AuthorizeSender(conversationID, machineID, endpoint string, n
 
 // AppendMessage transactionally appends one immutable PostgreSQL relay message.
 func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.SenderMachineID) || !relay.ValidEndpoint(input.FromEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.SenderMachineID) || !relay.ValidEndpoint(input.FromEndpoint) || (input.ToRole != "" && !relay.ValidRole(input.ToRole)) || !relay.ValidRequestToken(input.IdempotencyKey) {
 		return relay.Message{}, false, errors.New("invalid message request")
 	}
 	if len(input.Body) > postgresRelayMaxMessageBytes {
@@ -664,6 +664,16 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
+	if input.ToRole != "" {
+		var allowed bool
+		err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND role=$2 AND (capabilities & $3) <> 0)`, input.ConversationID, input.ToRole, relay.CapReceive).Scan(&allowed)
+		if err != nil {
+			return relay.Message{}, false, errors.New("message target role is unavailable")
+		}
+		if !allowed {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+	}
 	hash := relay.AppendRequestHash(input)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT message_id::text,request_hash FROM relay.mail_message_idempotency WHERE machine_id=$1 AND key=$2`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -693,24 +703,24 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, errors.New("message retry state is unavailable")
 	}
-	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
+	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, ToRole: input.ToRole, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
 	} else if err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "allocate message sequence")
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,to_role,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,NULLIF($5,''),$6,$7)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.ToRole, message.Body, message.CreatedAt); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "append message")
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
+		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4 AND $5=''`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, message.ToRole); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
 	if rolesAvailable {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
-		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0`, message.ID, message.ConversationID, relay.CapReceive); err != nil {
+		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0 AND ($4='' OR membership.role=$4)`, message.ID, message.ConversationID, relay.CapReceive, message.ToRole); err != nil {
 			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
 		}
 	}
@@ -724,6 +734,11 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 			return relay.Message{}, false, relayDatabaseError(err, "bind message attachments")
 		}
 	}
+	if input.ToRole != "" {
+		if err := postgresAdvanceConversationRecipientCursors(tx, input.ConversationID, rolesAvailable); err != nil {
+			return relay.Message{}, false, err
+		}
+	}
 	if err := postgresAdvanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
@@ -734,6 +749,48 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "commit message")
 	}
 	return message, false, nil
+}
+
+func postgresAdvanceConversationRecipientCursors(tx *sql.Tx, conversationID string, rolesAvailable bool) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive)
+	if err != nil {
+		return errors.New("recipient cursor recipients are unavailable")
+	}
+	for rows.Next() {
+		var endpoint string
+		if err := rows.Scan(&endpoint); err != nil {
+			_ = rows.Close()
+			return errors.New("recipient cursor recipient is unavailable")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
+			_ = rows.Close()
+			return err
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return errors.New("recipient cursor recipients are unavailable")
+	}
+	if !rolesAvailable {
+		return nil
+	}
+	roles, err := tx.QueryContext(context.Background(), `SELECT role FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive)
+	if err != nil {
+		return errors.New("durable recipient cursors are unavailable")
+	}
+	defer func() { _ = roles.Close() }()
+	for roles.Next() {
+		var role string
+		if err := roles.Scan(&role); err != nil {
+			return errors.New("durable recipient cursor is unavailable")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, "\x1erole:"+role, conversationID); err != nil {
+			return err
+		}
+	}
+	if err := roles.Err(); err != nil {
+		return errors.New("durable recipient cursors are unavailable")
+	}
+	return nil
 }
 
 // LeaseDeliveries claims a bounded fenced PostgreSQL delivery page.
@@ -788,7 +845,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
 	query := `SELECT delivery.id::text,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
-		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
+		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.to_role,message.body,message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
 		  AND (delivery.lease_until IS NULL OR delivery.lease_until<=$2 OR delivery.ownership_generation IS NULL OR delivery.ownership_generation<>$3 OR delivery.consumer_generation IS NULL OR delivery.consumer_generation<>$4 OR delivery.lease_machine_id=$5)`
@@ -816,10 +873,12 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	for rows.Next() {
 		var row leasedRow
 		row.delivery.RecipientEndpoint = endpoint
-		if err := rows.Scan(&row.delivery.ID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
+		var toRole sql.NullString
+		if err := rows.Scan(&row.delivery.ID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &toRole, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
 			_ = rows.Close()
 			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
 		}
+		row.delivery.Message.ToRole = toRole.String
 		row.delivery.Message.CreatedAt = row.delivery.Message.CreatedAt.UTC()
 		pending = append(pending, row)
 	}
@@ -1172,9 +1231,11 @@ func postgresEndpointOwnershipLocked(tx *sql.Tx, endpoint, machineID string, now
 
 func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 	var message relay.Message
-	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,sequence,from_endpoint,body,created_at FROM relay.mail_messages WHERE id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &message.CreatedAt); err != nil {
+	var toRole sql.NullString
+	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,sequence,from_endpoint,to_role,body,created_at FROM relay.mail_messages WHERE id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &toRole, &message.Body, &message.CreatedAt); err != nil {
 		return relay.Message{}, errors.New("idempotent message is unavailable")
 	}
+	message.ToRole = toRole.String
 	message.CreatedAt = message.CreatedAt.UTC()
 	return message, nil
 }
@@ -1427,7 +1488,7 @@ WITH objects AS (
 		(role_memberships_oid,'conversation_id','uuid'::regtype,true),(role_memberships_oid,'role','text'::regtype,true),(role_memberships_oid,'capabilities','smallint'::regtype,true),
 		(role_bindings_oid,'role','text'::regtype,true),(role_bindings_oid,'session_endpoint','text'::regtype,true),(role_bindings_oid,'machine_id','text'::regtype,true),(role_bindings_oid,'ownership_generation','bigint'::regtype,true),(role_bindings_oid,'lease_until','timestamptz'::regtype,true),
         (messages_oid,'id','uuid'::regtype,true),(messages_oid,'conversation_id','uuid'::regtype,true),(messages_oid,'sequence','bigint'::regtype,true),
-        (messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),
+		(messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'to_role','text'::regtype,false),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),
         (deliveries_oid,'id','uuid'::regtype,true),(deliveries_oid,'message_id','uuid'::regtype,true),(deliveries_oid,'recipient_endpoint','text'::regtype,true),
         (deliveries_oid,'lease_machine_id','text'::regtype,false),(deliveries_oid,'lease_token','uuid'::regtype,false),(deliveries_oid,'lease_generation','bigint'::regtype,true),
         (deliveries_oid,'ownership_generation','bigint'::regtype,false),(deliveries_oid,'consumer_generation','bigint'::regtype,false),
@@ -1439,7 +1500,8 @@ WITH objects AS (
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 44 OR NOT (expected.table_oid=messages_oid AND expected.column_name='to_role'))
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
@@ -1508,12 +1570,13 @@ WITH objects AS (
         (endpoints_oid,ARRAY[5]::smallint[]),(endpoints_oid,ARRAY[6]::smallint[]),(endpoints_oid,ARRAY[5,7]::smallint[]),
         (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
 		(roles_oid,ARRAY[1]::smallint[]),(roles_oid,ARRAY[2]::smallint[]),(role_memberships_oid,ARRAY[3]::smallint[]),(role_bindings_oid,ARRAY[4]::smallint[]),
-        (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
+		(messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),(messages_oid,ARRAY[7]::smallint[]),
         (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 44 OR NOT (expected.table_oid=messages_oid AND expected.column_keys=ARRAY[7]::smallint[]))
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
@@ -1536,7 +1599,8 @@ WITH objects AS (
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((capabilities >= 1) AND (capabilities <= 7))'))
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_bindings_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence > 0)')
-       AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
+		AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
+		AND ($1 < 44 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[7]::smallint[] AND pg_get_expr(conbin,conrelid)='((to_role IS NULL) OR ((char_length(to_role) >= 1) AND (char_length(to_role) <= 512) AND (octet_length(to_role) <= 2048) AND (to_role !~ ''[[:cntrl:]]''::text)))'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[4,5,7,8,9]::smallint[] AND conkey <@ ARRAY[4,5,7,8,9]::smallint[] AND pg_get_expr(conbin,conrelid)='(((lease_machine_id IS NULL) AND (lease_token IS NULL) AND (ownership_generation IS NULL) AND (consumer_generation IS NULL) AND (lease_until IS NULL)) OR ((lease_machine_id IS NOT NULL) AND (lease_token IS NOT NULL) AND (ownership_generation IS NOT NULL) AND (consumer_generation IS NOT NULL) AND (lease_until IS NOT NULL)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=cursors_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence >= 0)')
@@ -1550,7 +1614,7 @@ WITH objects AS (
     SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
 	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 40 THEN 12 ELSE 10 END
-	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 40 THEN 22 ELSE 18 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 44 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)

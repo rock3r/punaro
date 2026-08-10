@@ -27,6 +27,18 @@ func TestStoreRejectsNonPortableRequestAndMessageText(t *testing.T) {
 	}
 }
 
+func TestAppendRequestHashPreservesUntargetedRetryCompatibility(t *testing.T) {
+	input := AppendInput{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "broadcast"}
+	legacy := stableHash(input.ConversationID, input.FromEndpoint, input.Body)
+	if got := AppendRequestHash(input); got != legacy {
+		t.Fatalf("untargeted request hash=%s want pre-targeting hash=%s", got, legacy)
+	}
+	input.ToRole = "role/reviewer"
+	if got := AppendRequestHash(input); got == legacy {
+		t.Fatal("targeted request did not include its role in the hash")
+	}
+}
+
 func TestStoreProvidesDurableAtLeastOnceDelivery(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")
@@ -537,6 +549,144 @@ func TestStoreDurableRoleRebindsAcrossSessionReconnect(t *testing.T) {
 	}
 	if cursor, err := store.RecipientCursor("machine-reviewer", "agent/reviewer/second-session", conversation.ID, now.Add(3*time.Second)); err != nil || cursor != 1 {
 		t.Fatalf("durable role sender cursor=%d err=%v, want one until the self-role delivery is acknowledged", cursor, err)
+	}
+}
+
+func TestStoreRoutesTargetedMessagesOnlyToTheirDurableRole(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 10, 12, 0, 0, 0, time.UTC)
+	const (
+		senderMachine   = "machine-sender"
+		senderSession   = "agent/sender/session"
+		ordinaryMachine = "machine-ordinary"
+		ordinarySession = "agent/ordinary/session"
+		firstMachine    = "machine-first"
+		firstSession    = "agent/first/session"
+		secondMachine   = "machine-second"
+		secondSession   = "agent/second/session"
+		firstRole       = "role/first"
+		secondRole      = "role/second"
+		unboundRole     = "role/unbound"
+	)
+	for _, attachment := range []struct {
+		machine  string
+		endpoint string
+	}{
+		{senderMachine, senderSession},
+		{ordinaryMachine, ordinarySession},
+		{firstMachine, firstSession},
+		{secondMachine, secondSession},
+	} {
+		if err := store.AdvertiseEndpoints(attachment.machine, []string{attachment.endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.CreateConversation(senderSession, []Member{
+		{Endpoint: senderSession, Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: ordinarySession, Capabilities: CapReceive},
+		{Role: firstRole, RoleMachineID: firstMachine, Capabilities: CapReceive},
+		{Role: secondRole, RoleMachineID: secondMachine, Capabilities: CapReceive},
+		{Role: unboundRole, RoleMachineID: secondMachine, Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession(firstMachine, firstRole, firstSession, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession(secondMachine, secondRole, secondSession, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	targeted := AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: senderSession, ToRole: secondRole, Body: "only second", IdempotencyKey: "target-second", Now: now}
+	message, duplicate, err := store.AppendMessage(targeted)
+	if err != nil || duplicate || message.ToRole != secondRole {
+		t.Fatalf("targeted message=%#v duplicate=%v err=%v", message, duplicate, err)
+	}
+	if cursor, err := store.RecipientCursor(ordinaryMachine, ordinarySession, conversation.ID, now); err != nil || cursor != message.Sequence {
+		t.Fatalf("unselected endpoint cursor=%d err=%v, want %d", cursor, err, message.Sequence)
+	}
+	for _, recipient := range []struct {
+		machine  string
+		endpoint string
+		want     int
+	}{
+		{ordinaryMachine, ordinarySession, 0},
+		{firstMachine, firstSession, 0},
+		{secondMachine, secondSession, 1},
+	} {
+		page, err := store.LeaseDeliveries(recipient.machine, "consumer-"+recipient.machine, recipient.endpoint, conversation.ID, now, time.Minute, 10)
+		if err != nil || len(page.Deliveries) != recipient.want {
+			t.Fatalf("targeted lease for %s=%#v err=%v, want %d", recipient.endpoint, page, err, recipient.want)
+		}
+	}
+	if retry, duplicate, err := store.AppendMessage(targeted); err != nil || !duplicate || retry != message {
+		t.Fatalf("targeted retry=%#v duplicate=%v err=%v", retry, duplicate, err)
+	}
+	changedTarget := targeted
+	changedTarget.ToRole = firstRole
+	if _, _, err := store.AppendMessage(changedTarget); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed target retry err=%v, want conflict", err)
+	}
+
+	var messagesBefore, deliveriesBefore int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM messages").Scan(&messagesBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM deliveries").Scan(&deliveriesBefore); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"role/missing", ordinarySession, " role/second"} {
+		input := targeted
+		input.ToRole = target
+		input.IdempotencyKey = "invalid-" + strings.ReplaceAll(target, "/", "-")
+		if _, _, err := store.AppendMessage(input); err == nil {
+			t.Fatalf("invalid target %q was accepted", target)
+		}
+	}
+	var messagesAfter, deliveriesAfter int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM messages").Scan(&messagesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM deliveries").Scan(&deliveriesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if messagesAfter != messagesBefore || deliveriesAfter != deliveriesBefore {
+		t.Fatalf("invalid target side effects messages=%d/%d deliveries=%d/%d", messagesAfter, messagesBefore, deliveriesAfter, deliveriesBefore)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO roles(role, machine_id) VALUES (?, ?)", "role/corrupt", secondMachine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO role_memberships(conversation_id, role, capabilities) VALUES (?, ?, ?)", conversation.ID, "role/corrupt", "not-a-capability"); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := targeted
+	corrupt.ToRole = "role/corrupt"
+	corrupt.IdempotencyKey = "target-corrupt"
+	if _, _, err := store.AppendMessage(corrupt); err == nil || errors.Is(err, ErrForbidden) || !strings.Contains(err.Error(), "read message target role") {
+		t.Fatalf("corrupt target err=%v, want target role storage error", err)
+	}
+
+	unbound := targeted
+	unbound.ToRole = unboundRole
+	unbound.IdempotencyKey = "target-unbound"
+	if _, _, err := store.AppendMessage(unbound); err != nil {
+		t.Fatalf("append to unbound role: %v", err)
+	}
+	page, err := store.LeaseDeliveries(secondMachine, "consumer-"+secondMachine, secondSession, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 { // only the previously targeted, bound second role
+		t.Fatalf("unbound role leased before binding page=%#v err=%v", page, err)
+	}
+	if err := store.BindRoleToSession(secondMachine, unboundRole, secondSession, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	page, err = store.LeaseDeliveries(secondMachine, "consumer-"+secondMachine, secondSession, conversation.ID, now.Add(time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 2 {
+		t.Fatalf("unbound role delivery after binding page=%#v err=%v", page, err)
 	}
 }
 

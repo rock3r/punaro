@@ -100,7 +100,7 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"roles", "role,machine_id", "role"},
 	{"role_memberships", "conversation_id,role,capabilities", "conversation_id,role"},
 	{"role_bindings", "role,session_endpoint,machine_id,ownership_generation,lease_until", "role"},
-	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
+	{"messages", "id,conversation_id,sequence,from_endpoint,to_role,body,created_at", "id"},
 	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
@@ -110,15 +110,28 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
+var migrationTableSpecsWithoutRoleTarget = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecs...)
+	specs[6].columns = "id,conversation_id,sequence,from_endpoint,body,created_at"
+	return specs
+}()
+
 var roleMigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
 	return append(specs, migrationTableSpecs[13])
+}()
+
+var roleMigrationTableSpecsWithoutRoleTarget = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecsWithoutRoleTarget[:11]...)
+	return append(specs, migrationTableSpecsWithoutRoleTarget[13])
 }()
 
 var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"endpoints", "endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until", "endpoint"},
 	{"conversations", "id,next_sequence,created_at", "id"},
 	{"memberships", "conversation_id,endpoint,capabilities", "conversation_id,endpoint"},
+	// Version 1 sources predate role-addressed messages. Keep their original
+	// row shape so a prepared source can still be resumed without mutation.
 	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
 	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
@@ -376,6 +389,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('conversation_controls','conversation_control_idempotency')`).Scan(&controlTables); err != nil || controlTables != 0 && controlTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	targetedMessages, err := migrationSourceHasTargetRoleColumn(ctx, q)
+	if err != nil {
+		return MigrationSourceManifest{}, err
+	}
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
 	tableSpecs, schema := migrationTableSpecs, migrationSourceSchema
@@ -388,6 +405,14 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	}
+	if !targetedMessages {
+		switch manifest.Version {
+		case 2:
+			tableSpecs = roleMigrationTableSpecsWithoutRoleTarget
+		case 3:
+			tableSpecs = migrationTableSpecsWithoutRoleTarget
+		}
 	}
 	var storedFingerprint sql.NullString
 	var controlRows int
@@ -417,7 +442,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, targetedMessages); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -487,11 +512,34 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls bool) error {
+func migrationSourceHasTargetRoleColumn(ctx context.Context, q migrationQueryer) (bool, error) {
+	rows, err := q.QueryContext(ctx, `PRAGMA table_info(messages)`)
+	if err != nil {
+		return false, errors.New("relay migration source columns are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var ordinal, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&ordinal, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, errors.New("relay migration source columns are malformed")
+		}
+		if name == "to_role" {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, errors.New("relay migration source columns are unavailable")
+	}
+	return false, nil
+}
+
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, targetedMessages bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls)
+	return verifyMigrationSourceSchema(ctx, q, controls, targetedMessages)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -526,7 +574,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, targetedMessages bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -554,7 +602,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"roles":                            {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
 		"role_memberships":                 {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
 		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
-		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "to_role:TEXT:0:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
 		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
 		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
@@ -563,6 +611,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"conversation_control_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"request_nonces":                   {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
 		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+	}
+	if !targetedMessages {
+		expectedColumns["messages"] = []string{"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"}
 	}
 	if !controls {
 		delete(expectedColumns, "conversation_controls")
@@ -772,7 +823,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		OR EXISTS (SELECT 1 FROM role_memberships WHERE capabilities<1 OR capabilities>7)
         OR EXISTS (SELECT 1 FROM memberships AS membership LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=membership.endpoint WHERE endpoint.endpoint IS NULL)
         OR EXISTS (SELECT 1 FROM messages WHERE sequence<1 OR length(CAST(body AS blob))>32768)
-        OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
+		OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
+		OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN role_memberships AS membership ON membership.conversation_id=message.conversation_id AND membership.role=message.to_role AND (membership.capabilities & 2)<>0 WHERE message.to_role IS NOT NULL AND membership.role IS NULL)
         OR EXISTS (SELECT 1 FROM messages AS message JOIN conversations AS conversation ON conversation.id=message.conversation_id WHERE message.sequence>conversation.next_sequence)
         OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))
         OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
@@ -803,7 +855,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 				OR typeof(binding.ownership_generation)<>'integer' OR binding.ownership_generation<1
 				OR typeof(binding.lease_until)<>'integer' OR role.machine_id<>binding.machine_id
 				OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)
-		OR EXISTS (SELECT 1 FROM messages WHERE typeof(sequence)<>'integer' OR typeof(from_endpoint)<>'text' OR typeof(body)<>'text' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM messages WHERE typeof(sequence)<>'integer' OR typeof(from_endpoint)<>'text' OR (to_role IS NOT NULL AND typeof(to_role)<>'text') OR typeof(body)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM deliveries WHERE typeof(recipient_endpoint)<>'text' OR (lease_machine_id IS NOT NULL AND typeof(lease_machine_id)<>'text') OR typeof(lease_generation)<>'integer' OR (lease_token IS NOT NULL AND (typeof(lease_token)<>'text' OR length(lease_token)<>64 OR lease_token GLOB '*[^0-9a-f]*')) OR (ownership_generation IS NOT NULL AND typeof(ownership_generation)<>'integer') OR (consumer_generation IS NOT NULL AND typeof(consumer_generation)<>'integer') OR (lease_until IS NOT NULL AND typeof(lease_until)<>'integer') OR (acked_at IS NOT NULL AND typeof(acked_at)<>'integer'))
 		OR EXISTS (SELECT 1 FROM recipient_cursors WHERE typeof(recipient_endpoint)<>'text' OR typeof(sequence)<>'integer')
 		OR EXISTS (SELECT 1 FROM idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
@@ -824,6 +876,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		} {
 			logicalStateQuery = strings.ReplaceAll(logicalStateQuery, clause, "")
 		}
+	}
+	if !targetedMessages {
+		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "\n\t\tOR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN role_memberships AS membership ON membership.conversation_id=message.conversation_id AND membership.role=message.to_role AND (membership.capabilities & 2)<>0 WHERE message.to_role IS NOT NULL AND membership.role IS NULL)", "")
+		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "OR (to_role IS NOT NULL AND typeof(to_role)<>'text')", "")
 	}
 	var invalidLogicalState bool
 	if err := q.QueryRowContext(ctx, logicalStateQuery).Scan(&invalidLogicalState); err != nil || invalidLogicalState {
@@ -861,7 +917,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 	switch table + "." + column {
 	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "role_bindings.session_endpoint", "conversation_controls.actor_endpoint", "conversation_controls.member_endpoint":
 		valid = ValidEndpoint(text)
-	case "roles.role", "role_memberships.role", "role_bindings.role":
+	case "roles.role", "role_memberships.role", "role_bindings.role", "messages.to_role":
 		valid = ValidRole(text)
 	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "request_nonces.machine_id":
 		valid = ValidMachineID(text)

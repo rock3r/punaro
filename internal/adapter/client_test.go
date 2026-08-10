@@ -687,8 +687,16 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 			if r.Header.Get("Idempotency-Key") != "send-1" {
 				t.Fatal("missing idempotency key")
 			}
+			var send struct {
+				FromEndpoint string `json:"from_endpoint"`
+				ToRole       string `json:"to_role"`
+				Body         string `json:"body"`
+			}
+			if err := json.Unmarshal(body, &send); err != nil || send.FromEndpoint != "agent/a" || send.ToRole != "role/reviewer" || send.Body != "reply" {
+				t.Fatalf("targeted send body=%s err=%v", body, err)
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"reply","created_at":"2026-07-13T12:00:00Z"}`))
+			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","to_role":"role/reviewer","body":"reply","created_at":"2026-07-13T12:00:00Z"}`))
 		case "/v1/conversations":
 			if r.Header.Get("Idempotency-Key") != "create-1" {
 				t.Fatal("missing create idempotency key")
@@ -719,8 +727,8 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	if err != nil || len(deliveries) != 0 {
 		t.Fatalf("lease = %#v, %v", deliveries, err)
 	}
-	message, err := client.Send(context.Background(), "conversation-1", "agent/a", "reply", "send-1")
-	if err != nil || message.ID != "message-1" {
+	message, err := client.SendToRole(context.Background(), "conversation-1", "agent/a", "role/reviewer", "reply", "send-1")
+	if err != nil || message.ID != "message-1" || message.ToRole != "role/reviewer" {
 		t.Fatalf("send = %#v, %v", message, err)
 	}
 	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")

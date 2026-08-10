@@ -1403,6 +1403,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
+	contracttest.RunRoleTargeting(t, app, "postgres-target")
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)

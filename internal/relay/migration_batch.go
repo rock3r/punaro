@@ -75,8 +75,25 @@ func (h *MigrationTableHasher) Add(row MigrationSourceRow) error {
 	if err := decoder.Decode(&payload); err != nil {
 		return errors.New("relay migration row payload is invalid")
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || len(payload) != len(h.columns) {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("relay migration row payload is invalid")
+	}
+	if len(payload) != len(h.columns) {
+		// Version 1 SQLite sources did not have messages.to_role. A receiver
+		// accepts that historical representation and imports it as NULL.
+		if h.table != "mail_messages" || len(payload) != len(h.columns)-1 {
+			return errors.New("relay migration row payload is invalid")
+		}
+		legacyColumns := []string{"id", "conversation_id", "sequence", "from_endpoint", "body", "created_at"}
+		for _, column := range legacyColumns {
+			if _, ok := payload[column]; !ok {
+				return errors.New("relay migration row payload is incomplete")
+			}
+		}
+		if _, exists := payload["to_role"]; exists {
+			return errors.New("relay migration row payload is invalid")
+		}
+		h.columns = legacyColumns
 	}
 	for _, column := range h.columns {
 		value, ok := payload[column]
@@ -166,6 +183,14 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	}
 	if manifest.Phase != MigrationSourcePrepared {
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
+	}
+	targetedMessages, err := migrationSourceHasTargetRoleColumn(ctx, tx)
+	if err != nil {
+		return MigrationSourceBatch{}, err
+	}
+	if !targetedMessages && table == "mail_messages" {
+		legacy := legacyMigrationTableSpecs[3]
+		spec = &migrationBatchSpec{target: table, source: legacy, keyColumns: spec.keyColumns}
 	}
 	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
 	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) {

@@ -299,6 +299,17 @@ listing, and wake routing authorize an active role binding as well as an
 existing endpoint member, while legacy endpoint membership retains its current
 behavior unchanged.
 
+Messages may carry the optional `to_role` field. When omitted, routing retains
+the legacy broadcast fan-out to every receive-capable endpoint and durable
+role, excluding the sender endpoint. When supplied, it must be one exact,
+receive-capable durable role member of that conversation; the relay creates a
+delivery only for that role's durable recipient identity. It rejects malformed,
+unknown, non-member, or non-receiving targets before allocating a sequence,
+message, delivery, or idempotency record. An unbound selected role retains its
+delivery until a valid owner-session binding is established. `to_role` is
+immutable message metadata and part of the request hash, so changing it under
+the same sender key conflicts.
+
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. Roles may use only those three capabilities;
 `invoke` is endpoint-only because a role has no stable process target. The

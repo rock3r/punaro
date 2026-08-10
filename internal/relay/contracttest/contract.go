@@ -244,6 +244,71 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	runLeasePageContract(t, backend, namespace, now)
 }
 
+// RunRoleTargeting verifies selective durable-role delivery and compatible
+// untargeted broadcast behavior against every role-capable durable backend.
+func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	roles, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not support durable role bindings")
+	}
+	now := time.Date(2026, time.August, 10, 13, 0, 0, 0, time.UTC)
+	senderMachine, receiverMachine := namespace+"-sender", namespace+"-receiver"
+	sender, receiver := "agent/"+namespace+"/sender", "agent/"+namespace+"/receiver"
+	if err := backend.AdvertiseEndpoints(senderMachine, []string{sender}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(receiverMachine, []string{receiver}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	reviewer, implementer := "role/"+namespace+"/reviewer", "role/"+namespace+"/implementer"
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{MachineID: senderMachine, CreatorEndpoint: sender, IdempotencyKey: namespace + "-create", Now: now, Members: []relay.Member{
+		{Endpoint: sender, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: receiver, Capabilities: relay.CapReceive},
+		{Role: reviewer, RoleMachineID: receiverMachine, Capabilities: relay.CapReceive},
+		{Role: implementer, RoleMachineID: receiverMachine, Capabilities: relay.CapReceive},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{reviewer, implementer} {
+		if err := roles.BindRoleToSession(receiverMachine, role, receiver, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targetedInput := relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: sender, ToRole: reviewer, Body: "targeted", IdempotencyKey: namespace + "-targeted", Now: now}
+	targeted, duplicate, err := backend.AppendMessage(targetedInput)
+	if err != nil || duplicate || targeted.ToRole != reviewer {
+		t.Fatalf("targeted message=%#v duplicate=%t err=%v", targeted, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(receiverMachine, namespace+"-consumer", receiver, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.ToRole != reviewer {
+		t.Fatalf("targeted page=%#v err=%v", page, err)
+	}
+	if err := backend.AckDelivery(receiverMachine, receiver, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	changed := targetedInput
+	changed.ToRole = implementer
+	if _, _, err := backend.AppendMessage(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed target retry err=%v", err)
+	}
+	unknown := targetedInput
+	unknown.IdempotencyKey = namespace + "-unknown"
+	unknown.ToRole = "role/" + namespace + "/missing"
+	if _, _, err := backend.AppendMessage(unknown); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("unknown target err=%v", err)
+	}
+	broadcast, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: sender, Body: "broadcast", IdempotencyKey: namespace + "-broadcast", Now: now})
+	if err != nil || duplicate || broadcast.ToRole != "" {
+		t.Fatalf("broadcast=%#v duplicate=%t err=%v", broadcast, duplicate, err)
+	}
+	page, err = backend.LeaseDeliveries(receiverMachine, namespace+"-consumer", receiver, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 3 {
+		t.Fatalf("broadcast page=%#v err=%v", page, err)
+	}
+}
+
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
 	t.Helper()
 	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"

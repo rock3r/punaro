@@ -20,6 +20,11 @@ type CLIMailbox struct {
 
 type commandRunner func(context.Context, []string, []byte) ([]byte, error)
 
+const (
+	punaroMessageSchemaV1 = "1"
+	punaroMessageSchemaV2 = "2"
+)
+
 // NewCLIMailbox configures the local group whose active memberships determine
 // the only sessions advertised to Punaro.
 func NewCLIMailbox(binary, stateDir, group string) (*CLIMailbox, error) {
@@ -72,11 +77,18 @@ func (m *CLIMailbox) Send(ctx context.Context, endpoint string, message InboundM
 	if err != nil {
 		return fmt.Errorf("encode local mailbox envelope: %w", err)
 	}
-	_, err = m.run(ctx, []string{"send", "--to", endpoint, "--subject", "Punaro message", "--content-type", "application/vnd.punaro.message+json", "--schema-version", "1", "--body-file", "-", "--json"}, body)
+	_, err = m.run(ctx, []string{"send", "--to", endpoint, "--subject", "Punaro message", "--content-type", "application/vnd.punaro.message+json", "--schema-version", punaroMessageSchemaVersion(message), "--body-file", "-", "--json"}, body)
 	if err != nil {
 		return fmt.Errorf("send local mailbox envelope: %w", err)
 	}
 	return nil
+}
+
+func punaroMessageSchemaVersion(message InboundMessage) string {
+	if message.ToRole != "" {
+		return punaroMessageSchemaV2
+	}
+	return punaroMessageSchemaV1
 }
 
 func runAgentMailbox(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {

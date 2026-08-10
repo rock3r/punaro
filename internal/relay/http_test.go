@@ -100,6 +100,54 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPTargetedMessageRequiresOneValidDurableRole(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	for _, target := range []struct {
+		name string
+		body string
+	}{
+		{"null", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":null}`},
+		{"empty", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":""}`},
+		{"missing", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":"role/missing"}`},
+		{"malformed", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":" agent/a/session"}`},
+	} {
+		response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", target.body, "send-"+target.name, "send-"+target.name)
+		if response.Code != http.StatusBadRequest && response.Code != http.StatusForbidden {
+			t.Fatalf("invalid target response=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	var messages, deliveries int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM messages").Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), "SELECT count(*) FROM deliveries").Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 || deliveries != 0 {
+		t.Fatalf("invalid HTTP target side effects messages=%d deliveries=%d", messages, deliveries)
+	}
+}
+
 type principalEndpointRecordingBackend struct {
 	Backend
 	plainCalls     int

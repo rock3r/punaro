@@ -44,7 +44,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 	message, duplicate, err := store.AppendMessage(AppendInput{
 		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/source/a",
-		Body: "migration body", IdempotencyKey: "source-message", Now: now,
+		ToRole: "role/source-reviewer", Body: "migration body", IdempotencyKey: "source-message", Now: now,
 	})
 	if err != nil || duplicate {
 		t.Fatalf("append=%#v duplicate=%t err=%v", message, duplicate, err)
@@ -88,6 +88,14 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 	if prepared.Phase != MigrationSourcePrepared || prepared.EpochID != epochID || prepared.TargetIdentity != targetID || prepared.Fingerprint == first.Fingerprint {
 		t.Fatalf("prepared manifest=%#v active=%#v", prepared, first)
+	}
+	messages, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 10)
+	var migratedMessage map[string]any
+	if err == nil && len(messages.Rows) == 1 {
+		err = json.Unmarshal(messages.Rows[0].Payload, &migratedMessage)
+	}
+	if err != nil || len(messages.Rows) != 1 || migratedMessage["to_role"] != "role/source-reviewer" {
+		t.Fatalf("targeted message migration batch=%#v err=%v", messages, err)
 	}
 	preparedRetry, err := PrepareMigrationSource(ctx, path, epochID, targetID, first.Fingerprint, now.Add(time.Minute))
 	if err != nil || preparedRetry != prepared {
@@ -510,6 +518,15 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	conversation, err := store.CreateConversation("agent/legacy/a", []Member{{Endpoint: "agent/legacy/a", Capabilities: CapSend | CapReceive | CapAdmin}}, now)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/legacy/a", Body: "historical broadcast", IdempotencyKey: "legacy-message", Now: now}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +535,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles; ALTER TABLE messages DROP COLUMN to_role`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -574,6 +591,21 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil || len(batch.Rows) != 1 || !batch.Done {
 		t.Fatalf("legacy endpoint batch=%#v err=%v", batch, err)
 	}
+	messages, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 1)
+	if err != nil || len(messages.Rows) != 1 || !messages.Done || strings.Contains(string(messages.Rows[0].Payload), `"to_role"`) {
+		t.Fatalf("legacy message batch=%#v err=%v", messages, err)
+	}
+	messageHasher, err := NewMigrationTableHasher("mail_messages")
+	if err != nil {
+		t.Fatalf("legacy message hasher err=%v", err)
+	}
+	if err := messageHasher.Add(messages.Rows[0]); err != nil {
+		t.Fatalf("legacy message hasher err=%v", err)
+	}
+	messageCount, messageDigest := messageHasher.Evidence()
+	if messageCount != prepared.Counts.Messages || messageDigest != prepared.TableSHA256.Messages {
+		t.Fatalf("legacy message evidence count=%d digest=%s manifest=%#v", messageCount, messageDigest, prepared)
+	}
 	controls, err = ReadMigrationSourceBatch(ctx, path, "mail_conversation_controls", "", 1)
 	if err != nil || len(controls.Rows) != 0 || !controls.Done {
 		t.Fatalf("legacy control batch=%#v err=%v", controls, err)
@@ -612,6 +644,15 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 		_ = store.Close()
 		t.Fatal(err)
 	}
+	conversationID := ""
+	if err := store.db.QueryRowContext(ctx, `SELECT id FROM conversations`).Scan(&conversationID); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "historical role broadcast", IdempotencyKey: "role-only-message", Now: now}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +660,7 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; ALTER TABLE messages DROP COLUMN to_role`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -634,6 +675,10 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	preparedV2, err := PrepareMigrationSource(ctx, path, epoch, target, active.Fingerprint, now.Add(time.Minute))
 	if err != nil || preparedV2.Version != 2 || preparedV2.Phase != MigrationSourcePrepared {
 		t.Fatalf("role-only v2 preparation=%#v err=%v", preparedV2, err)
+	}
+	messages, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 1)
+	if err != nil || len(messages.Rows) != 1 || !messages.Done || strings.Contains(string(messages.Rows[0].Payload), `"to_role"`) {
+		t.Fatalf("role-only v2 historical message batch=%#v err=%v", messages, err)
 	}
 	preparedV2AfterRestart, err := InspectMigrationSource(ctx, path)
 	if err != nil || preparedV2AfterRestart.Version != 2 || preparedV2AfterRestart.Phase != MigrationSourcePrepared || preparedV2AfterRestart.Fingerprint != preparedV2.Fingerprint {
