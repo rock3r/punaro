@@ -115,6 +115,14 @@ database, health endpoint, and Compose credentials remain host-local.
 
 ## Add or revoke a mailbox client
 
+First prove that the tunnel's device route and health route terminate at this
+installation. Health may be routed to a dedicated loopback listener while
+signed device requests go elsewhere; `/readyz` alone is therefore not daemon
+identity. Record the Compose project, exact image, process/listener ownership,
+and one harmless signed-request outcome. If an older systemd relay or LAN test
+stack shares the host, keep it out of the evidence unless the tunnel route is
+explicitly switched to it.
+
 After initialization and before mail cutover, replace the complete public
 enrollment set through the same host-local lifecycle rather than editing
 generated files. Keep the JSON file owner-only and include every client that
@@ -153,6 +161,13 @@ retries and overlapping IDs, keys, endpoints, or prefixes fail closed. To
 revoke a client, remove it with `relay configure`, stop its local adapter, and
 revoke its distinct Access token. Never edit `punarod.env`, the Compose
 override, `installation.json`, or PostgreSQL authority rows directly.
+
+Relay authority requires a loopback device listener. For a legacy tunnel whose
+origin is a private-LAN address, stage this installation on a free loopback
+port, change the tunnel origin, verify signed traffic and readiness, and retain
+the old origin as the rollback target until all adapters pass. Do not publish
+the device listener on the LAN or preserve an old manual environment overlay;
+`punaro up` and current daemon configuration fail closed for that state.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the

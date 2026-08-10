@@ -227,6 +227,15 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    `git status --porcelain` is required. Keep the previously installed commit
    available until post-upgrade verification succeeds; it is the rollback
    source, not a backup of credentials or mailbox state.
+   Before changing any service, map the public adapter URL to its exact daemon
+   and listener. A tunnel may route `/readyz` to a separate health origin, so a
+   successful readiness request alone does not prove which daemon handles
+   signed `/v1/` requests. Record the service manager, process, listener, and
+   deployed commit or image for the device origin and health origin separately;
+   prove the device origin with one harmless signed request before treating it
+   as release evidence. If two `punarod` processes or installations exist on
+   one host, stop and identify their routes rather than upgrading both by
+   assumption.
 2. For a **new** machine, first check whether the server has completed mail
    cutover. Run the client installer *without* enablement only when the machine
    can still be enrolled safely. It creates a fresh machine key and prints the
@@ -244,6 +253,12 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    write authority rows by hand. Keep the adapter disabled until registration,
    relay readiness, its distinct Access Service Auth probe, and endpoint
    attachment all succeed.
+   The authenticated device listener must remain loopback-only. When a legacy
+   tunnel still targets a private-LAN listener, first stage the candidate on an
+   unused loopback address, update the tunnel origin with an explicit rollback
+   to the prior origin, and prove a signed request reaches the staged process.
+   Do not make a LAN listener acceptable by editing generated environment or
+   marker files; current candidates deliberately refuse that topology.
 3. For an **existing** machine, rerun the same installer from the clean
    checkout using the original relay URL and machine ID. The installer proves
    that the existing key, enrollment record, and profile still belong to those

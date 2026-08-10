@@ -472,6 +472,16 @@ content-free path/schema/health states. The generated M-5 server Compose file
 still uses an externally provisioned PostgreSQL service; the bundled production
 PostgreSQL/profile shape arrives in M-23.
 
+Topology discovery must distinguish the device and health routes. A public
+`/readyz` may terminate at a dedicated health listener even when signed device
+requests reach another `punarod`. Before rollout, correlate each tunnel origin
+with its service manager, PID/container, listener, and exact candidate, then
+issue one harmless signed request. Multiple daemons on one host are separate
+deployments until this correlation proves otherwise. Current relay authority is
+loopback-only; migrate a legacy private-LAN tunnel origin to a staged loopback
+candidate with an explicit origin rollback instead of hand-editing generated
+files or weakening the listener gate.
+
 Create a client in two exact steps. The first prints the effective grants and
 preview hash without touching the database. The confirmed invocation must
 repeat the same grant flags and bind the prior hash:
