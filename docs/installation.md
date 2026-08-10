@@ -87,7 +87,9 @@ The machine ID must be unique. The script derives the exclusive endpoint
 namespace `agent/laptop-review/`, builds `punaro-adapter`, creates the local
 `group/punaro-attached` group, writes owner-only local state, installs the
 launchd (macOS) or user-systemd (Linux) service definition, and prints a
-public enrollment JSON record. It does not start the adapter yet.
+public enrollment JSON record. launchd declares it as a background process;
+systemd disables terminal input and sends output only to the journal. It does
+not start the adapter yet.
 
 ### Windows 10/11 client
 
@@ -103,11 +105,13 @@ powershell -NoProfile -File .\scripts\install-client.ps1 `
 ```
 
 The installer writes private state below `%LOCALAPPDATA%\Punaro`, applies an
-exclusive ACL for the current user, and registers the **Punaro Adapter** task
-to run only in that user's interactive session. It does not weaken PowerShell
-execution policy, accept Access secrets as arguments, or run as a Windows
-service. Add that machine's distinct Access token pair manually to
-`%LOCALAPPDATA%\Punaro\config\adapter.env`, then rerun with `-Enable` and
+exclusive ACL for the current user, and registers the hidden **Punaro Adapter**
+task to start at that user's sign-in without showing a PowerShell console. It
+runs in that user's interactive security context because the adapter must
+access that user's mailbox and private credentials; it is not a privileged
+Windows service. It does not weaken PowerShell execution policy or accept
+Access secrets as arguments. Add that machine's distinct Access token pair
+manually to `%LOCALAPPDATA%\Punaro\config\adapter.env`, then rerun with `-Enable` and
 verify with:
 
 ```powershell

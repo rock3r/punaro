@@ -42,6 +42,8 @@ for expected in \
 	'<string>org.punaro.adapter</string>' \
 	'<key>KeepAlive</key>' \
 	'<true/>' \
+	'<key>ProcessType</key>' \
+	'<string>Background</string>' \
 	'<string>exec "$HOME/.local/bin/punaro-adapter"</string>'; do
 	if ! grep -Fq "$expected" "$launch_agent"; then
 		printf '%s\n' "adapter LaunchAgent is missing required setting: $expected" >&2
@@ -72,6 +74,9 @@ for expected in \
 	'ProtectSystem=strict' \
 	'PrivateTmp=yes' \
 	'PrivateDevices=yes' \
+	'StandardInput=null' \
+	'StandardOutput=journal' \
+	'StandardError=journal' \
 	'CapabilityBoundingSet=' \
 	'UMask=0077'; do
 	if ! grep -Fqx "$expected" "$unit"; then
