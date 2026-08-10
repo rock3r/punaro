@@ -183,6 +183,7 @@ func run(args []string, stderr io.Writer) int {
 		}
 	}
 	accessReadiness := func() error { return nil }
+	lifecycleReadiness := func() error { return nil }
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -234,7 +235,7 @@ func run(args []string, stderr io.Writer) int {
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"status":"ok"}\n`)) })
 	healthMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if postgresReadiness() != nil || accessReadiness() != nil || (trustedAttachmentHandler != nil && trustedAttachmentHandler.Ready() != nil) {
+		if !runtimeReady(postgresReadiness, lifecycleReadiness, accessReadiness, trustedAttachmentHandler) {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
@@ -247,10 +248,8 @@ func run(args []string, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL device store is unavailable")
 			return 2
 		}
-		lifecycleCtx, lifecycleCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		lifecycleErr := database.ClientLifecycleRuntimeReady(lifecycleCtx)
-		lifecycleCancel()
-		if lifecycleErr != nil {
+		lifecycleReadiness = clientLifecycleReadiness(database)
+		if err := lifecycleReadiness(); err != nil {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL client lifecycle schema is unavailable")
 			return 2
 		}
@@ -316,6 +315,19 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func clientLifecycleReadiness(database deviceDatabase) func() error {
+	return func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return database.ClientLifecycleRuntimeReady(ctx)
+	}
+}
+
+func runtimeReady(postgresReadiness, lifecycleReadiness, accessReadiness func() error, trustedAttachmentHandler *trustedAttachmentRuntime) bool {
+	return postgresReadiness() == nil && lifecycleReadiness() == nil && accessReadiness() == nil &&
+		(trustedAttachmentHandler == nil || trustedAttachmentHandler.Ready() == nil)
 }
 
 func registerDeviceRoutes(mux *http.ServeMux, deviceHandler http.Handler) {
