@@ -154,6 +154,17 @@ if you decline it during client setup.
    add its paired client ID and secret to the owner-only
    `~/.config/punaro/adapter.env`. Do not pass them as command-line arguments
    or reuse a token on another machine.
+
+   Cloudflare uses two different credentials in this workflow. The operator's
+   account API key/token is used only to administer Access. A current
+   account-scoped value has the `cfat_` prefix, is sent as an `Authorization:
+   Bearer` credential, and is verified at the account-scoped
+   `/client/v4/accounts/<account-id>/tokens/verify` endpoint. Do not test it at
+   the user-token endpoint. The per-machine Access service-token pair is the
+   `CF-Access-Client-Id` and `CF-Access-Client-Secret` admitted by a Service
+   Auth (`non_identity`) policy on the relay application; it is not the
+   account API key and must never be reused as one. Confirm an authenticated
+   `/readyz` request through the public hostname before enabling the adapter.
 3. Bind each reachable agent to an explicit address under that machine's
    namespace, then attach it to the local group. For example:
 
@@ -202,13 +213,25 @@ dirty checkout, reuse another machine's key or Access token, or copy an
    `git status --porcelain` is required. Keep the previously installed commit
    available until post-upgrade verification succeeds; it is the rollback
    source, not a backup of credentials or mailbox state.
-2. For a **new** machine, run the client installer *without* enablement. It
-   creates a fresh machine key and prints the public enrollment record. Add
-   only that record to the relay enrollment set, apply it through the existing
-   owner-managed relay deployment, and verify relay readiness. Create a new
-   Access service token for the machine and place it only in that machine's
-   owner-only profile. Bind and attach the chosen aliases, then enable the
-   local adapter.
+2. For a **new** machine, first check whether the server has completed mail
+   cutover. Run the client installer *without* enablement only when the machine
+   can still be enrolled safely. It creates a fresh machine key and prints the
+   public enrollment record. Before cutover, add only that record to the
+   complete relay enrollment set, apply it through `punaro relay configure`
+   and `punaro up`, and verify relay readiness. Then create a new Access
+   service token for the machine, install it only in that machine's owner-only
+   profile, bind and attach its aliases, and enable the adapter.
+
+   After mail cutover, stop here: the active transition authority accepts only
+   keys that were registered before cutover, and `punaro relay configure`
+   rejects a newly generated key. Device-credential enrollment does not make a
+   new mailbox Ed25519 key eligible. Do not copy another machine's key, edit
+   `punarod.env`, alter the installation marker, or write authority rows by
+   hand. Until a durable post-cutover registration workflow is delivered, the
+   supported choices are to keep the new adapter disabled or provision it on a
+   fresh installation before that installation's cutover. Therefore inventory
+   and enroll every intended macOS, Linux, and Windows adapter before executing
+   mail cutover.
 3. For an **existing** machine, rerun the same installer from the clean
    checkout using the original relay URL and machine ID. The installer proves
    that the existing key, enrollment record, and profile still belong to those
