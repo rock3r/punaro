@@ -282,8 +282,9 @@ cutover and do not silently change current SQLite routing.
 Applying schema 44 invalidates every still-unredeemed older invitation because
 those rows have no owner-approved machine ID; issue a replacement invitation
 after migration. It also converts every active device credential to the
-first-release non-expiring policy. Revoked credentials and their history are
-unchanged.
+first-release non-expiring policy. A credential already expired when the
+migration begins is permanently revoked and generation-fenced; previously
+revoked credentials and their history are unchanged.
 
 Migration 4 adds project identities, aliases, generation-bound merge previews,
 and bounded reconciliation records. Migration 5 adds the backup GC-fence,

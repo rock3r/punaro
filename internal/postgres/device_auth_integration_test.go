@@ -267,6 +267,18 @@ VALUES ($1, gen_random_uuid(), $2, 'bounded prune target',
 	if err != nil || len(clients) != 2 || clients[1].LifecycleState != "revoked" || clients[1].RevocationReason != "self" || clients[1].Generation != selfCredential.Generation+1 {
 		t.Fatalf("self-revoked client inventory=%#v err=%v", clients, err)
 	}
+	duplicateKeyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "duplicate-self-key-client", Label: "duplicate self key client", AllProjects: true, TTL: time.Minute}
+	duplicateKeyPending, err := admin.CreateEnrollment(ctx, owner.ID, duplicateKeyRequest, selfPreviewHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateKeyCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: duplicateKeyPending.ID, ClientBinding: duplicateKeyRequest.ClientBinding, Code: duplicateKeyPending.Code, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := app.SelfRevokeDevice(ctx, duplicateKeyCredential.Encoded, selfKey); err != nil || result.Status != "revoked" {
+		t.Fatalf("second client self revocation with reused key result=%#v err=%v", result, err)
+	}
 
 	raceRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "revocation-race-client", Label: "revocation race client", AllProjects: true, TTL: time.Minute}
 	racePending, err := admin.CreateEnrollment(ctx, owner.ID, raceRequest, selfPreviewHash)

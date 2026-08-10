@@ -31,7 +31,7 @@ CREATE TABLE auth.client_installations (
     created_at timestamptz NOT NULL DEFAULT statement_timestamp(),
     revoked_at timestamptz,
     revocation_reason text CHECK (revocation_reason IN ('lost', 'retired', 'compromised', 'replaced', 'self')),
-    self_revoke_idempotency uuid UNIQUE,
+    self_revoke_idempotency uuid,
     CHECK (
         (lifecycle_state = 'active' AND revoked_at IS NULL AND revocation_reason IS NULL AND self_revoke_idempotency IS NULL)
         OR
@@ -47,6 +47,17 @@ CREATE TABLE relay.client_endpoint_authority (
     generation bigint NOT NULL DEFAULT 1 CHECK (generation >= 1),
     created_at timestamptz NOT NULL DEFAULT statement_timestamp()
 );
+
+WITH expired_credentials AS (
+    UPDATE auth.device_credentials
+    SET revoked_at = statement_timestamp(), generation = generation + 1
+    WHERE revoked_at IS NULL AND expires_at <= statement_timestamp()
+    RETURNING principal_id
+)
+UPDATE auth.principals AS principal
+SET auth_generation = auth_generation + 1
+FROM expired_credentials AS expired
+WHERE principal.id = expired.principal_id;
 
 INSERT INTO auth.client_installations
 (machine_id, label, principal_id, credential_lookup_id, generation, lifecycle_state, created_at, revoked_at, revocation_reason)

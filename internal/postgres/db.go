@@ -1286,7 +1286,7 @@ SELECT enrollments_oid IS NOT NULL AND pending_machine_oid IS NOT NULL
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[4]::smallint[] AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[5]::smallint[] AND convalidated)
-   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[11]::smallint[] AND convalidated)
+   AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'u' AND conkey = ARRAY[11]::smallint[])
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'f' AND conkey = ARRAY[4]::smallint[] AND confrelid = 'auth.principals'::regclass AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND contype = 'f' AND conkey = ARRAY[5]::smallint[] AND confrelid = 'auth.device_credentials'::regclass AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)

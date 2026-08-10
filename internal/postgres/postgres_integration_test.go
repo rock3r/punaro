@@ -77,6 +77,18 @@ func TestPostgresPlatformSubstrateIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	testV33ConsolidationSourcesUpgradeIntegration(ctx, t, pairOwnerDSN)
+	pairDB, err = open(ctx, pairOwnerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pairDB.ExecContext(ctx, `DROP SCHEMA auth, relay, attachment, brain, jobs, audit CASCADE; REVOKE CONNECT ON DATABASE punaro_pair FROM punaro_app; REVOKE CONNECT ON DATABASE punaro_other FROM punaro_app`); err != nil {
+		_ = pairDB.Close()
+		t.Fatalf("auxiliary pair cleanup after v33 upgrade test failed: %v", err)
+	}
+	if err := pairDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	testV43ClientLifecycleUpgradeIntegration(ctx, t, pairOwnerDSN)
 
 	app, err := OpenApplication(ctx, Config{DSNFile: appFile})
 	if err != nil {
@@ -926,6 +938,76 @@ func testV33ConsolidationSourcesUpgradeIntegration(ctx context.Context, t *testi
 	var checkpointSequence int64
 	if err := ownerDB.QueryRowContext(ctx, `SELECT timeline_id::text,change_sequence FROM brain.memory_consolidation_checkpoints WHERE scope_id=$1`, scopeID).Scan(&checkpointTimeline, &checkpointSequence); err != nil || checkpointTimeline != rootTimeline || checkpointTimeline == restoredTimeline || checkpointSequence != 0 {
 		t.Fatalf("v33 restored checkpoint rebase timeline=%q sequence=%d root=%q restored=%q err=%v", checkpointTimeline, checkpointSequence, rootTimeline, restoredTimeline, err)
+	}
+}
+
+func testV43ClientLifecycleUpgradeIntegration(ctx context.Context, t *testing.T, ownerDSN string) {
+	t.Helper()
+	ownerDB, err := open(ctx, ownerDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ownerDB.Close() }()
+	current := CurrentManifest()
+	v43 := Manifest{MinSupported: 10, MaxSupported: 43, Migrations: append([]Migration(nil), current.Migrations[:43]...)}
+	if state, err := migrate(ctx, ownerDB, v43); err != nil || state.Classification != Compatible || state.Version != 43 {
+		t.Fatalf("v43 client lifecycle setup state=%#v err=%v", state, err)
+	}
+	expiredLookup, currentLookup := uuid.NewString(), uuid.NewString()
+	expiredSecret := sha256.Sum256([]byte("expired-v43-credential"))
+	currentSecret := sha256.Sum256([]byte("current-v43-credential"))
+	expiredDigest := sha256.Sum256(expiredSecret[:])
+	currentDigest := sha256.Sum256(currentSecret[:])
+	var expiredPrincipal, currentPrincipal string
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals(kind, display_name) VALUES ('device', 'expired v43 device') RETURNING id::text`).Scan(&expiredPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	if err := ownerDB.QueryRowContext(ctx, `INSERT INTO auth.principals(kind, display_name) VALUES ('device', 'current v43 device') RETURNING id::text`).Scan(&currentPrincipal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.device_credentials
+(lookup_id, principal_id, label, secret_digest, created_at, expires_at)
+VALUES ($1, $2, 'expired v43 device', $3, statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour'),
+       ($4, $5, 'current v43 device', $6, statement_timestamp() - interval '1 hour', statement_timestamp() + interval '1 hour')`,
+		expiredLookup, expiredPrincipal, expiredDigest[:], currentLookup, currentPrincipal, currentDigest[:]); err != nil {
+		t.Fatal(err)
+	}
+	conn := mustConn(ctx, t, ownerDB)
+	defer func() { _ = conn.Close() }()
+	if state, err := migrateConnExpectedAppRole(ctx, conn, current, "punaro_app", true); err != nil || state.Classification != Compatible || state.Version != current.MaxSupported {
+		t.Fatalf("v43 client lifecycle bridge state=%#v err=%v", state, err)
+	}
+	var credentialRevoked, expiryRetained, clientRevoked bool
+	var credentialGeneration, principalGeneration int64
+	var lifecycleState string
+	if err := ownerDB.QueryRowContext(ctx, `SELECT credential.revoked_at IS NOT NULL, credential.expires_at IS NOT NULL,
+credential.generation, principal.auth_generation, client.lifecycle_state, client.revoked_at IS NOT NULL
+FROM auth.device_credentials AS credential
+JOIN auth.principals AS principal ON principal.id = credential.principal_id
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+WHERE credential.lookup_id = $1`, expiredLookup).Scan(&credentialRevoked, &expiryRetained, &credentialGeneration, &principalGeneration, &lifecycleState, &clientRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if !credentialRevoked || !expiryRetained || credentialGeneration != 2 || principalGeneration != 1 || lifecycleState != "revoked" || !clientRevoked {
+		t.Fatalf("expired v43 credential was not permanently fenced revoked=%t expiry_retained=%t credential_generation=%d principal_generation=%d lifecycle=%q client_revoked=%t", credentialRevoked, expiryRetained, credentialGeneration, principalGeneration, lifecycleState, clientRevoked)
+	}
+	var credentialCurrent, expiryCleared, clientActive bool
+	if err := ownerDB.QueryRowContext(ctx, `SELECT credential.revoked_at IS NULL, credential.expires_at IS NULL,
+client.lifecycle_state = 'active'
+FROM auth.device_credentials AS credential
+JOIN auth.client_installations AS client ON client.credential_lookup_id = credential.lookup_id
+WHERE credential.lookup_id = $1`, currentLookup).Scan(&credentialCurrent, &expiryCleared, &clientActive); err != nil {
+		t.Fatal(err)
+	}
+	if !credentialCurrent || !expiryCleared || !clientActive {
+		t.Fatalf("current v43 credential conversion current=%t expiry_cleared=%t client_active=%t", credentialCurrent, expiryCleared, clientActive)
+	}
+	database := &Database{db: ownerDB}
+	if _, err := database.AuthenticateDevice(ctx, encodeDeviceCredential(expiredLookup, expiredSecret[:])); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expired v43 credential was reactivated: %v", err)
+	}
+	if _, err := database.AuthenticateDevice(ctx, encodeDeviceCredential(currentLookup, currentSecret[:])); err != nil {
+		t.Fatalf("current v43 credential did not survive migration: %v", err)
 	}
 }
 
