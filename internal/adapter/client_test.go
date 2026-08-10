@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -49,19 +50,8 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/punaro-access-session" {
-			if r.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatal("signed permit request was replayed during Access preflight")
-			}
-			http.SetCookie(w, &http.Cookie{Name: "CF_Authorization", Value: "permit-session", Path: "/"})
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v2/permits" || r.URL.RawQuery != "" || r.Header.Get("Content-Type") != "application/cbor" {
 			t.Fatalf("unexpected request %s %s type=%q", r.Method, r.URL.String(), r.Header.Get("Content-Type"))
-		}
-		if !strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=permit-session") {
-			t.Fatal("permit request omitted Access session cookie")
 		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -87,7 +77,6 @@ func TestHTTPRelayClientIssuesHolderSignedPermitRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enableTestAccessSession(t, client)
 	permit, err := client.IssuePermit(context.Background(), permitRequest)
 	if err != nil || permit != expectedPermit {
 		t.Fatalf("permit=%+v err=%v", permit, err)
@@ -347,14 +336,6 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/.well-known/punaro-access-session" {
-			if r.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatal("signed v3 attachment request was replayed during Access preflight")
-			}
-			http.SetCookie(w, &http.Cookie{Name: "CF_Authorization", Value: "attachment-session", Path: "/"})
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
 		gotBody := mustReadAll(t, r)
 		if r.Method != http.MethodPut || r.URL.Path != path || string(gotBody) != string(body) {
 			t.Fatalf("request=%s %s body=%q", r.Method, r.URL.Path, gotBody)
@@ -371,9 +352,6 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 		if !ed25519.Verify(machinePublic, relay.CanonicalRequest(request), request.Signature) {
 			t.Fatal("attachment request did not have valid machine signature")
 		}
-		if !strings.Contains(r.Header.Get("Cookie"), "CF_Authorization=attachment-session") {
-			t.Fatal("v3 attachment request omitted Access session cookie")
-		}
 		w.Header().Set("Content-Type", "application/cbor")
 		_, _ = w.Write([]byte{0xa1})
 	}))
@@ -382,7 +360,6 @@ func TestHTTPRelayClientSendsBoundV3AttachmentOperation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enableTestAccessSession(t, client)
 	result, err := client.DoV3Attachment(context.Background(), http.MethodPut, path, body, permit, op)
 	if err != nil || string(result) != string([]byte{0xa1}) {
 		t.Fatalf("result=%x err=%v", result, err)
@@ -455,60 +432,13 @@ func TestHTTPRelayClientDoesNotFollowRedirectForOfferNotice(t *testing.T) {
 	}
 }
 
-func TestHTTPRelayClientEstablishesAccessSessionWithoutReplayingSignedRequest(t *testing.T) {
-	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	step := 0
-	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		step++
-		if request.Header.Get("CF-Access-Client-Id") != "access-id" || request.Header.Get("CF-Access-Client-Secret") != "access-secret" {
-			t.Fatalf("request %d omitted Access headers", step)
-		}
-		switch step {
-		case 1:
-			if request.URL.Host != "relay.example" || request.URL.Path != "/.well-known/punaro-access-session" || request.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatalf("unsafe initial preflight: %s %s", request.URL, request.Header.Get("X-Punaro-Signature"))
-			}
-			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://team.cloudflareaccess.com/session"}}), nil
-		case 2:
-			if request.URL.Host != "team.cloudflareaccess.com" || request.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatalf("signed relay request reached Access: %s", request.URL)
-			}
-			return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://relay.example/.well-known/punaro-access-session"}}), nil
-		case 3:
-			if request.URL.Host != "relay.example" || request.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatalf("unsafe returning preflight: %s", request.URL)
-			}
-			return testHTTPResponse(request, http.StatusNotFound, http.Header{"Set-Cookie": []string{"CF_Authorization=session; Path=/; Secure"}}), nil
-		case 4:
-			if request.URL.Host != "relay.example" || request.Method != http.MethodPut || request.URL.Path != "/v1/machines/me/endpoints" {
-				t.Fatalf("unexpected signed request: %s %s", request.Method, request.URL)
-			}
-			if request.Header.Get("X-Punaro-Signature") == "" || !strings.Contains(request.Header.Get("Cookie"), "CF_Authorization=session") {
-				t.Fatal("signed request did not carry the origin-scoped Access session")
-			}
-			return testHTTPResponse(request, http.StatusNoContent, nil), nil
-		default:
-			t.Fatalf("unexpected request %d: %s", step, request.URL)
-			return nil, nil
-		}
-	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Advertise(context.Background(), []string{"agent/a"}); err != nil {
-		t.Fatal(err)
-	}
-	if step != 4 {
-		t.Fatalf("request count=%d want 4", step)
-	}
-}
-
 func TestOpenAccessSessionSkipsCookiePreflightForServiceTokens(t *testing.T) {
 	requests := 0
-	client, err := OpenAccessSession(context.Background(), "https://relay.example", &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := OpenAccessSession(context.Background(), "https://relay.example", &http.Client{Jar: jar, Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		requests++
 		return nil, errors.New("service-token bootstrap should not preflight")
 	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
@@ -520,29 +450,36 @@ func TestOpenAccessSessionSkipsCookiePreflightForServiceTokens(t *testing.T) {
 	}
 }
 
-func TestHTTPRelayClientAcceptsAccessCookieFromUnauthorizedPreflight(t *testing.T) {
+func TestHTTPRelayClientServiceTokenDoesNotReplayAccessAuthorizationCookie(t *testing.T) {
 	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	requests := 0
-	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayURL, err := url.Parse("https://relay.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jar.SetCookies(relayURL, []*http.Cookie{{Name: "CF_Authorization", Value: "stale", Path: "/", Secure: true}})
+	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Jar: jar, Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		requests++
-		switch requests {
-		case 1:
-			if request.URL.Path != "/.well-known/punaro-access-session" || request.Header.Get("X-Punaro-Signature") != "" {
-				t.Fatalf("unexpected preflight request: %s %s", request.URL, request.Header.Get("X-Punaro-Signature"))
-			}
-			return testHTTPResponse(request, http.StatusUnauthorized, http.Header{"Set-Cookie": []string{"CF_Authorization=session; Path=/; Secure"}}), nil
-		case 2:
-			if request.Header.Get("X-Punaro-Signature") == "" || !strings.Contains(request.Header.Get("Cookie"), "CF_Authorization=session") {
-				t.Fatal("signed request did not use the Access cookie returned with HTTP 401")
-			}
-			return testHTTPResponse(request, http.StatusNoContent, nil), nil
-		default:
-			t.Fatalf("unexpected request %d", requests)
-			return nil, nil
+		if request.Header.Get("CF-Access-Client-Id") != "access-id" || request.Header.Get("CF-Access-Client-Secret") != "access-secret" {
+			t.Fatal("request omitted Access service-token headers")
 		}
+		if request.URL.Path == "/.well-known/punaro-access-session" {
+			return testHTTPResponse(request, http.StatusNotFound, http.Header{"Set-Cookie": []string{"CF_Authorization=stale; Path=/; Secure"}}), nil
+		}
+		if request.URL.Path != "/v1/machines/me/endpoints" || request.Header.Get("X-Punaro-Signature") == "" {
+			t.Fatalf("unexpected protected request: %s %s", request.Method, request.URL)
+		}
+		if request.Header.Get("Cookie") != "" {
+			return testHTTPResponse(request, http.StatusForbidden, nil), nil
+		}
+		return testHTTPResponse(request, http.StatusNoContent, nil), nil
 	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
 	if err != nil {
 		t.Fatal(err)
@@ -550,45 +487,8 @@ func TestHTTPRelayClientAcceptsAccessCookieFromUnauthorizedPreflight(t *testing.
 	if err := client.Advertise(context.Background(), []string{"agent/a"}); err != nil {
 		t.Fatal(err)
 	}
-	if requests != 2 {
-		t.Fatalf("requests=%d want 2", requests)
-	}
-}
-
-func TestHTTPRelayClientRejectsUntrustedAccessSessionRedirect(t *testing.T) {
-	_, machinePrivate, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	requests := 0
-	client, err := NewHTTPRelayClient("https://relay.example", "machine-a", machinePrivate, &http.Client{Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		requests++
-		if request.Header.Get("X-Punaro-Signature") != "" {
-			t.Fatal("signed relay request was sent before a trusted Access session")
-		}
-		return testHTTPResponse(request, http.StatusFound, http.Header{"Location": []string{"https://attacker.example/session"}}), nil
-	})}, AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := client.Advertise(context.Background(), []string{"agent/a"}); err == nil {
-		t.Fatal("untrusted Access redirect was accepted")
-	}
 	if requests != 1 {
 		t.Fatalf("requests=%d want 1", requests)
-	}
-}
-
-func TestCloudflareAccessHost(t *testing.T) {
-	for host, want := range map[string]bool{
-		"team.cloudflareaccess.com":             true,
-		"TEAM.CLOUDFLAREACCESS.COM.":            true,
-		"cloudflareaccess.com":                  false,
-		"cloudflareaccess.com.attacker.example": false,
-	} {
-		if got := cloudflareAccessHost(host); got != want {
-			t.Fatalf("cloudflareAccessHost(%q)=%t want %t", host, got, want)
-		}
 	}
 }
 
@@ -854,16 +754,6 @@ func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	default:
 		t.Fatal("wake was not delivered")
 	}
-}
-
-func enableTestAccessSession(t *testing.T, client *HTTPRelayClient) {
-	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client.httpClient.Jar = jar
-	client.access = &accessSession{baseURL: client.baseURL, client: client.httpClient, token: AccessServiceToken{ClientID: "access-id", ClientSecret: "access-secret"}}
 }
 
 func TestHTTPRelayClientRejectsInsecureRemoteURLAndPartialAccessToken(t *testing.T) {

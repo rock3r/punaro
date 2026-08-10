@@ -184,7 +184,10 @@ if you decline it during client setup.
    several exact service-token include rules, but every enrolled machine still
    needs a different token pair. Never use `any_valid_service_token`: adding an
    unrelated token to the account would then silently grant it admission to
-   Punaro.
+   Punaro. The native clients send both service-token headers on every
+   protected request. They do not establish or replay a browser
+   `CF_Authorization` cookie with those headers; mixed cookie and Service Auth
+   identity can be rejected by Access before a signed request reaches Punaro.
 
    Test the device application, not only `/readyz`. Make a header-authenticated
    request to `/v1/conversations` without a Punaro machine signature and with
