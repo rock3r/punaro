@@ -1319,10 +1319,14 @@ only a public key recorded in the durable cutover enrollment history, so a
 temporary revocation does not strand a previously migrated machine. A new
 post-cutover machine uses the separate owner-only `punaro relay register`
 workflow. It accepts one protected installer-produced public enrollment object,
-serializes with the active cutover and legacy gate, and commits an idempotent
-content-free PostgreSQL legacy-machine registration before extending the local
-known-key history and static relay enrollment marker-last. A crash can therefore
-leave only a registered but unauthenticated key; the exact command safely
+holds the installation's host-local authority lock across local-state loading,
+active-cutover and legacy-gate registration, and marker-last publication, and
+commits an idempotent content-free PostgreSQL legacy-machine registration
+before extending the local known-key history and static relay enrollment. A
+concurrent cutover, configure, or register command fails before mutation and
+can retry exactly. A crash releases the lock and, because the database commit
+precedes local publication, can leave only a registered but unauthenticated
+key; the exact command safely
 retries, while a changed label, key, endpoint authority, non-owner caller,
 inactive cutover, or conflicting recovery fails closed. The transaction does
 not reopen the migration-wide legacy gate: under an active cutover, only its

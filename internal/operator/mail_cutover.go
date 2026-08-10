@@ -40,6 +40,11 @@ func (p MailCutoverPublication) Validate() error {
 // Compose inputs, then publishes installation.json last. Exact retries recover
 // crashes at any earlier publication boundary; changed retries fail closed.
 func PublishMailCutover(directory string, publication MailCutoverPublication) (Installation, error) {
+	unlock, err := acquireRelayAuthorityLock(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	defer unlock()
 	return publishMailCutover(directory, publication, nil)
 }
 
@@ -75,6 +80,11 @@ func publishMailCutover(directory string, publication MailCutoverPublication, af
 // ConfigureMailCutoverRelayMachines durably records the exact non-secret
 // static relay authority before any irreversible source transition begins.
 func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Installation, error) {
+	unlock, err := acquireRelayAuthorityLock(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	defer unlock()
 	canonical, err := ReadRelayMachinesFile(enrollmentFile)
 	if err != nil {
 		return Installation{}, err
@@ -101,6 +111,11 @@ func ConfigureMailCutoverRelayMachines(directory, enrollmentFile string) (Instal
 // installation; callers provide a protected declarative file rather than
 // editing generated runtime configuration.
 func ConfigureRelayMachines(directory, enrollmentFile string) (Installation, error) {
+	unlock, err := acquireRelayAuthorityLock(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	defer unlock()
 	canonical, err := ReadRelayMachinesFile(enrollmentFile)
 	if err != nil {
 		return Installation{}, err
@@ -159,6 +174,11 @@ type PostCutoverMachineRegistrar func(string, ed25519.PublicKey) error
 // can leave only a harmless registered-but-unconfigured key and the exact
 // command is always safe to retry.
 func RegisterPostCutoverRelayMachine(directory, enrollmentFile string, register PostCutoverMachineRegistrar) (Installation, error) {
+	unlock, err := acquireRelayAuthorityLock(directory)
+	if err != nil {
+		return Installation{}, err
+	}
+	defer unlock()
 	return registerPostCutoverRelayMachine(directory, enrollmentFile, register, nil)
 }
 

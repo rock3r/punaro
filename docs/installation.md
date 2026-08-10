@@ -165,6 +165,10 @@ if you decline it during client setup.
    public key in the active PostgreSQL transition authority, then marker-last
    publishes the merged static enrollment. Exact retries recover safely; a
    changed retry or conflicting machine/key/namespace fails closed.
+   Relay-authority changes are serialized by a host-local installation lock.
+   If another configure, cutover-publication, or registration command is
+   already running, the later command fails before database or file mutation;
+   rerun its exact command after the first operation finishes.
    Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
    `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this
