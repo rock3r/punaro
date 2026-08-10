@@ -789,23 +789,41 @@ AS $function$ BEGIN RETURN NEW; END $function$`); err != nil {
 
 func testClientLifecycleSchemaDriftIntegration(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
 	t.Helper()
+	assertDrift := func(detail string) {
+		t.Helper()
+		if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+			t.Fatalf("%s state=%#v err=%v", detail, drifted, err)
+		}
+		if err := app.ClientLifecycleRuntimeReady(ctx); err == nil {
+			t.Fatalf("client lifecycle runtime accepted %s", detail)
+		}
+	}
 	if err := app.ClientLifecycleRuntimeReady(ctx); err != nil {
 		t.Fatalf("current client lifecycle runtime is unavailable: %v", err)
 	}
 	if _, err := ownerDB.ExecContext(ctx, `GRANT UPDATE (machine_id) ON auth.client_installations TO punaro_app`); err != nil {
 		t.Fatal(err)
 	}
-	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
-		t.Fatalf("permissive client lifecycle grant state=%#v err=%v", drifted, err)
-	}
-	if err := app.ClientLifecycleRuntimeReady(ctx); err == nil {
-		t.Fatal("client lifecycle runtime accepted schema drift")
-	}
+	assertDrift("permissive client lifecycle grant")
 	if _, err := ownerDB.ExecContext(ctx, `REVOKE UPDATE (machine_id) ON auth.client_installations FROM punaro_app`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE auth.client_installations DROP CONSTRAINT client_installations_generation_check`); err != nil {
+		t.Fatal(err)
+	}
+	assertDrift("missing client generation constraint")
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE auth.client_installations ADD CONSTRAINT client_installations_generation_check CHECK (generation >= 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.client_endpoint_authority ALTER COLUMN endpoint_prefix DROP NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
+	assertDrift("nullable endpoint prefix")
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.client_endpoint_authority ALTER COLUMN endpoint_prefix SET NOT NULL`); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.Ready(ctx); err != nil {
-		t.Fatalf("client lifecycle grant restoration did not recover readiness: %v", err)
+		t.Fatalf("client lifecycle schema restoration did not recover readiness: %v", err)
 	}
 	if err := app.ClientLifecycleRuntimeReady(ctx); err != nil {
 		t.Fatalf("client lifecycle runtime did not recover readiness: %v", err)

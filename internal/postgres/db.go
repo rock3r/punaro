@@ -1292,6 +1292,72 @@ SELECT enrollments_oid IS NOT NULL AND pending_machine_oid IS NOT NULL
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'p' AND conkey = ARRAY[1]::smallint[] AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'f' AND conkey = ARRAY[1]::smallint[] AND confrelid = clients_oid AND convalidated)
    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = authority_oid AND contype = 'u' AND conkey = ARRAY[2]::smallint[] AND convalidated)
+   AND ARRAY(
+       SELECT attname || '|' || format_type(atttypid, atttypmod) || '|' || attnotnull::text || '|' || COALESCE(pg_get_expr(adbin, adrelid), '')
+       FROM pg_attribute
+       LEFT JOIN pg_attrdef ON adrelid = attrelid AND adnum = attnum
+       WHERE attrelid = clients_oid AND attnum > 0 AND NOT attisdropped
+       ORDER BY attnum
+   ) = ARRAY[
+       'id|uuid|true|gen_random_uuid()',
+       'machine_id|text|true|',
+       'label|text|true|',
+       'principal_id|uuid|true|',
+       'credential_lookup_id|uuid|true|',
+       'generation|bigint|true|1',
+       'lifecycle_state|text|true|''active''::text',
+       'created_at|timestamp with time zone|true|statement_timestamp()',
+       'revoked_at|timestamp with time zone|false|',
+       'revocation_reason|text|false|',
+       'self_revoke_idempotency|uuid|false|'
+   ]
+   AND ARRAY(
+       SELECT conname::text
+       FROM pg_constraint
+       WHERE conrelid = clients_oid AND contype = 'c' AND convalidated
+       ORDER BY conname
+   ) = ARRAY[
+       'client_installations_check',
+       'client_installations_generation_check',
+       'client_installations_label_check',
+       'client_installations_lifecycle_state_check',
+       'client_installations_machine_id_check',
+       'client_installations_revocation_reason_check'
+   ]
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND conname = 'client_installations_check' AND pg_get_constraintdef(oid) = 'CHECK ((((lifecycle_state = ''active''::text) AND (revoked_at IS NULL) AND (revocation_reason IS NULL) AND (self_revoke_idempotency IS NULL)) OR ((lifecycle_state = ''revoked''::text) AND (revoked_at IS NOT NULL) AND (revocation_reason IS NOT NULL))))')
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND conname = 'client_installations_generation_check' AND pg_get_constraintdef(oid) = 'CHECK ((generation >= 1))')
+   AND EXISTS (
+       SELECT 1 FROM pg_constraint
+       WHERE conrelid = clients_oid AND conname = 'client_installations_label_check'
+         AND pg_get_constraintdef(oid) IN (
+             'CHECK ((((char_length(label) >= 1) AND (char_length(label) <= 128)) AND (octet_length(label) <= 512) AND (label !~ ''[[:cntrl:]]''::text)))',
+             'CHECK (((char_length(label) >= 1) AND (char_length(label) <= 128) AND (octet_length(label) <= 512) AND (label !~ ''[[:cntrl:]]''::text)))'
+         )
+   )
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND conname = 'client_installations_lifecycle_state_check' AND pg_get_constraintdef(oid) = 'CHECK ((lifecycle_state = ANY (ARRAY[''active''::text, ''revoked''::text])))')
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND conname = 'client_installations_machine_id_check' AND pg_get_constraintdef(oid) = 'CHECK ((machine_id ~ ''^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$''::text))')
+   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = clients_oid AND conname = 'client_installations_revocation_reason_check' AND pg_get_constraintdef(oid) = 'CHECK ((revocation_reason = ANY (ARRAY[''lost''::text, ''retired''::text, ''compromised''::text, ''replaced''::text, ''self''::text])))')
+   AND ARRAY(
+       SELECT attname || '|' || format_type(atttypid, atttypmod) || '|' || attnotnull::text || '|' || COALESCE(pg_get_expr(adbin, adrelid), '')
+       FROM pg_attribute
+       LEFT JOIN pg_attrdef ON adrelid = attrelid AND adnum = attnum
+       WHERE attrelid = authority_oid AND attnum > 0 AND NOT attisdropped
+       ORDER BY attnum
+   ) = ARRAY[
+       'client_id|uuid|true|',
+       'endpoint_prefix|text|true|',
+       'generation|bigint|true|1',
+       'created_at|timestamp with time zone|true|statement_timestamp()'
+   ]
+   AND ARRAY(
+       SELECT conname || '|' || pg_get_constraintdef(oid)
+       FROM pg_constraint
+       WHERE conrelid = authority_oid AND contype = 'c' AND convalidated
+       ORDER BY conname
+   ) = ARRAY[
+       'client_endpoint_authority_endpoint_prefix_check|CHECK ((endpoint_prefix ~ ''^agent/[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?/$''::text))',
+       'client_endpoint_authority_generation_check|CHECK ((generation >= 1))'
+   ]
    AND has_table_privilege('punaro_app', clients_oid, 'SELECT')
    AND NOT has_table_privilege('punaro_app', clients_oid, 'INSERT')
    AND NOT has_table_privilege('punaro_app', clients_oid, 'UPDATE')
