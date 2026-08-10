@@ -24,6 +24,8 @@ import (
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
+const minimumClientLifecycleSchema int64 = 44
+
 var (
 	inspectSchema = func(ctx context.Context, dsnFile string) (punaropostgres.SchemaState, error) {
 		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: dsnFile})
@@ -122,6 +124,22 @@ var (
 		}
 		defer func() { _ = admin.Close() }()
 		return admin.CreateEnrollment(ctx, installation.OwnerPrincipalID, request, previewHash)
+	}
+	listClients = func(ctx context.Context, installation operator.Installation, limit int) ([]punaropostgres.ClientMetadata, error) {
+		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = admin.Close() }()
+		return admin.ListClients(ctx, installation.OwnerPrincipalID, limit)
+	}
+	revokeClient = func(ctx context.Context, installation operator.Installation, clientID, reason string) error {
+		admin, err := punaropostgres.OpenAdministration(ctx, punaropostgres.Config{DSNFile: installation.OwnerDSNFile})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = admin.Close() }()
+		return admin.RevokeClient(ctx, installation.OwnerPrincipalID, clientID, reason)
 	}
 	startServices = func(ctx context.Context, installation operator.Installation) error {
 		command, err := composeUpCommand(ctx, installation)
@@ -332,8 +350,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "doctor":
 		return runStatus(args[1:], stdout, stderr, true)
 	case "client":
-		if len(args) > 1 && args[1] == "add" {
+		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "list" {
+			return runClientList(args[2:], stdout, stderr)
+		}
+		if len(args) > 1 && args[1] == "revoke" {
+			return runClientRevoke(args[2:], stderr)
 		}
 	case "mail":
 		if len(args) > 1 && args[1] == "cutover" {
@@ -583,14 +607,14 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	directory := flags.String("directory", "", "absolute installation directory")
 	name := flags.String("name", "", "client display name")
+	machineID := flags.String("machine-id", "", "unique lowercase client machine ID")
 	allProjects := flags.Bool("all-projects", false, "grant current and future project access")
 	confirmed := flags.Bool("yes", false, "confirm the exact printed grants")
 	confirmedHash := flags.String("confirm-preview-hash", "", "exact preview hash printed by the prior preview-only run")
 	ttl := flags.Duration("ttl", 10*time.Minute, "single-use code lifetime")
-	credentialTTL := flags.Duration("credential-ttl", 0, "optional credential lifetime")
 	var projects stringList
 	flags.Var(&projects, "project", "selected opaque project UUID (repeatable)")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *name == "" {
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *name == "" || *machineID == "" {
 		return 2
 	}
 	installation, err := operator.Load(*directory)
@@ -623,7 +647,7 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	state, err := inspectSchema(context.Background(), installation.AppDSNFile)
-	if err != nil || state.Classification != punaropostgres.Compatible {
+	if err != nil || state.Classification != punaropostgres.Compatible || state.Version < minimumClientLifecycleSchema {
 		_, _ = fmt.Fprintln(stderr, "client enrollment refused: database schema is not compatible")
 		return 1
 	}
@@ -636,12 +660,73 @@ func runClientAdd(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, "client enrollment refused: database owner does not match the installation configuration")
 		return 1
 	}
-	pending, err := issueEnrollment(context.Background(), installation, punaropostgres.EnrollmentRequest{ClientBinding: uuid.NewString(), Label: *name, ProjectIDs: projects, AllProjects: *allProjects, TTL: *ttl, CredentialTTL: *credentialTTL}, previewHash)
+	pending, err := issueEnrollment(context.Background(), installation, punaropostgres.EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: *machineID, Label: *name, ProjectIDs: projects, AllProjects: *allProjects, TTL: *ttl}, previewHash)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "client enrollment failed")
 		return 1
 	}
 	return writeJSON(stdout, stderr, pending)
+}
+
+func runClientList(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("client list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute installation directory")
+	limit := flags.Int("limit", 100, "maximum rows (1-1000)")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *limit < 1 || *limit > 1000 {
+		return 2
+	}
+	installation, err := loadClientAdministration(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "client inventory refused: installation is unavailable or unsafe")
+		return 1
+	}
+	clients, err := listClients(context.Background(), installation, *limit)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "client inventory failed")
+		return 1
+	}
+	return writeJSON(stdout, stderr, map[string]any{"clients": clients})
+}
+
+func runClientRevoke(args []string, stderr io.Writer) int {
+	flags := flag.NewFlagSet("client revoke", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute installation directory")
+	clientID := flags.String("client", "", "opaque client UUID")
+	reason := flags.String("reason", "", "lost, retired, compromised, or replaced")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || *clientID == "" || *reason == "" {
+		return 2
+	}
+	installation, err := loadClientAdministration(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "client revocation refused: installation is unavailable or unsafe")
+		return 1
+	}
+	if err := revokeClient(context.Background(), installation, *clientID, *reason); err != nil {
+		_, _ = fmt.Fprintln(stderr, "client revocation failed")
+		return 1
+	}
+	return 0
+}
+
+func loadClientAdministration(directory string) (operator.Installation, error) {
+	installation, err := operator.Load(directory)
+	if err != nil || len(operator.CheckPaths(installation)) != 0 {
+		return operator.Installation{}, errors.New("installation is unavailable")
+	}
+	state, err := inspectSchema(context.Background(), installation.AppDSNFile)
+	if err != nil || state.Classification != punaropostgres.Compatible || state.Version < minimumClientLifecycleSchema {
+		return operator.Installation{}, errors.New("database schema is not compatible")
+	}
+	if err := verifyInstallationPair(context.Background(), installation.AppDSNFile, installation.OwnerDSNFile); err != nil {
+		return operator.Installation{}, err
+	}
+	owner, err := inspectOwner(context.Background(), installation.AppDSNFile)
+	if err != nil || owner.ID != installation.OwnerPrincipalID {
+		return operator.Installation{}, errors.New("database owner does not match installation")
+	}
+	return installation, nil
 }
 
 func runBackup(args []string, stdout, stderr io.Writer) int {

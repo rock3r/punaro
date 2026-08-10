@@ -397,8 +397,9 @@ punaro-enroll prepare \
 
 The command prints only the canonical origin and an opaque `client_binding`.
 Give that public value to the server owner. The owner previews and creates the
-least-privilege grant with `punaro-admin client add`; the owner chooses the
-projects and cannot be overridden by the client. With `--yes`, that command
+least-privilege grant with `punaro-admin client invite --machine-id ID`; the
+owner chooses the unique machine ID and projects, and neither can be overridden
+by the client. With `--yes`, that command
 prints the confirmed preview followed by the pending enrollment object. Treat
 the complete exact output as short-lived enrollment material: transfer it
 unchanged through an approved protected channel into a current-user-only regular
@@ -446,19 +447,20 @@ the same `redeem` command; if the transfer file is gone, use `punaro-enroll
 recover` with the state and credential paths, and include the same
 `--access-file` when the origin is Access-protected. The retry has the same
 idempotency key, so it cannot mint a second device credential. The server retains that
-recovery record while its credential and principal remain active; after either
-expires, is revoked, or is disabled, request a new enrollment. A rejected
-(including
-expired, already-used, or revoked) enrollment fails closed and tells the user
+recovery record while its non-expiring credential and principal remain active;
+after revocation or disablement, request a new enrollment. A rejected (including
+expired-first-use, already-used, or revoked) enrollment fails closed and tells the user
 to request a new enrollment; its private recovery journal is removed so the
 replacement material is not blocked. After success, remove the transferred material
 through its approved secret-handling process; the identity sidecar remains
 non-secret and the recovery journal is removed.
 
-The server owner rotates or revokes a device with `punaro-admin credential
-rotate` or `punaro-admin credential revoke`, using the content-free credential
-inventory. Rotation and revocation are server-controlled: a local identity
-sidecar or copied credential cannot restore access.
+The server owner lists and permanently revokes installed clients with
+`punaro-admin client list` and `punaro-admin client revoke`, using only
+content-free lifecycle inventory. Credential rotation remains available through
+`punaro-admin credential rotate`; the old credential revoke command delegates
+to whole-client revocation. A local identity sidecar or copied credential cannot
+restore access.
 
 ## 5. Retired v2/v3 attachment evidence
 

@@ -71,10 +71,46 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "laptop", ProjectIDs: []string{project.ProjectID}, TTL: 10 * time.Minute, CredentialTTL: time.Minute}
+	request := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "laptop", Label: "laptop", ProjectIDs: []string{project.ProjectID}, TTL: 10 * time.Minute}
 	preview, previewHash, err := PreviewTrustedAgentEnrollment(request.ProjectIDs, request.AllProjects)
 	if err != nil || len(preview) == 0 || previewHash == "" {
 		t.Fatalf("preview=%#v hash=%q err=%v", preview, previewHash, err)
+	}
+	const boundedPruneMachineID = "bounded-prune-reissue"
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at)
+SELECT $1, gen_random_uuid(), 'older-stale-' || ordinal::text, 'older stale enrollment',
+       sha256(convert_to('older-code-' || ordinal::text, 'UTF8')),
+       sha256(convert_to('older-preview-' || ordinal::text, 'UTF8')),
+       statement_timestamp() - interval '4 hours', statement_timestamp() - interval '3 hours'
+FROM generate_series(1, 100) AS ordinal`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at, invalidated_at)
+SELECT $1, gen_random_uuid(), $2, 'invalidated same-machine enrollment',
+       sha256(convert_to('invalidated-code-' || ordinal::text, 'UTF8')),
+       sha256(convert_to('invalidated-preview-' || ordinal::text, 'UTF8')),
+       statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour',
+       statement_timestamp() - interval '30 minutes'
+FROM generate_series(1, 2) AS ordinal`, owner.ID, boundedPruneMachineID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `INSERT INTO auth.pending_enrollments
+(issuer_principal_id, client_binding, machine_id, label, code_digest, preview_hash, created_at, expires_at)
+VALUES ($1, gen_random_uuid(), $2, 'bounded prune target',
+        sha256(convert_to('bounded-prune-code', 'UTF8')),
+        sha256(convert_to('bounded-prune-preview', 'UTF8')),
+        statement_timestamp() - interval '2 hours', statement_timestamp() - interval '1 hour')`, owner.ID, boundedPruneMachineID); err != nil {
+		t.Fatal(err)
+	}
+	reissueRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: boundedPruneMachineID, Label: "bounded prune reissue", AllProjects: true, TTL: time.Minute}
+	_, reissuePreviewHash, err := PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.CreateEnrollment(ctx, owner.ID, reissueRequest, reissuePreviewHash); err != nil {
+		t.Fatalf("reissue after bounded stale prune: %v", err)
 	}
 	pending, err := admin.CreateEnrollment(ctx, owner.ID, request, previewHash)
 	if err != nil {
@@ -102,8 +138,15 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err != nil {
 		t.Fatal(err)
 	}
-	if time.Until(credential.ExpiresAt) < 50*time.Second {
-		t.Fatalf("credential TTL was anchored to enrollment issuance: expires_at=%s", credential.ExpiresAt)
+	if credential.ClientID == "" || credential.MachineID != request.MachineID || credential.EndpointPrefix != "agent/"+request.MachineID+"/" {
+		t.Fatalf("redemption lifecycle metadata=%#v", credential)
+	}
+	if !credential.ExpiresAt.IsZero() {
+		t.Fatalf("first-release credential unexpectedly expires: expires_at=%s", credential.ExpiresAt)
+	}
+	clients, err := admin.ListClients(ctx, owner.ID, 100)
+	if err != nil || len(clients) != 1 || clients[0].ClientID != credential.ClientID || clients[0].LifecycleState != "active" || clients[0].Generation != credential.Generation {
+		t.Fatalf("initial client inventory=%#v err=%v", clients, err)
 	}
 	replayed, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: pending.ID, ClientBinding: request.ClientBinding, Code: pending.Code, IdempotencyKey: redeemKey})
 	if err != nil || replayed.Encoded != credential.Encoded || replayed.LookupID != credential.LookupID {
@@ -112,7 +155,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, pending.ID); err != nil {
 		t.Fatal(err)
 	}
-	pruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "prune trigger", AllProjects: true, TTL: time.Minute}
+	pruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "prune-trigger", Label: "prune trigger", AllProjects: true, TTL: time.Minute}
 	_, pruneHash, err := PreviewTrustedAgentEnrollment(nil, true)
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +198,9 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rotated.ClientID != credential.ClientID || rotated.MachineID != credential.MachineID || rotated.EndpointPrefix != credential.EndpointPrefix || rotated.Generation != credential.Generation+1 {
+		t.Fatalf("rotated lifecycle metadata=%#v", rotated)
+	}
 	rotationRetry, err := admin.RotateDeviceCredential(ctx, owner.ID, rotation)
 	if err != nil || rotationRetry.Encoded != rotated.Encoded || rotationRetry.Generation != rotated.Generation {
 		t.Fatalf("exact rotation retry=%#v err=%v", rotationRetry, err)
@@ -177,10 +223,105 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err := admin.RevokeDeviceCredential(ctx, owner.ID, rotated.LookupID); err != nil {
 		t.Fatal(err)
 	}
+	if err := admin.RevokeClient(ctx, owner.ID, credential.ClientID, "compromised"); err != nil {
+		t.Fatalf("owner revocation retry: %v", err)
+	}
 	if _, err := app.AuthenticateDevice(ctx, rotated.Encoded); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("revoked credential error=%v", err)
 	}
-	recoveryRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "recoverable client", AllProjects: true, TTL: time.Minute, CredentialTTL: time.Minute}
+	clients, err = admin.ListClients(ctx, owner.ID, 100)
+	if err != nil || len(clients) != 1 || clients[0].LifecycleState != "revoked" || clients[0].RevocationReason != "replaced" || clients[0].Generation != rotated.Generation+1 {
+		t.Fatalf("owner-revoked client inventory=%#v err=%v", clients, err)
+	}
+
+	selfRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "self-revoking-client", Label: "self revoking client", AllProjects: true, TTL: time.Minute}
+	_, selfPreviewHash, err := PreviewTrustedAgentEnrollment(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfPending, err := admin.CreateEnrollment(ctx, owner.ID, selfRequest, selfPreviewHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: selfPending.ID, ClientBinding: selfRequest.ClientBinding, Code: selfPending.Code, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfKey := uuid.NewString()
+	if result, err := app.SelfRevokeDevice(ctx, selfCredential.Encoded, selfKey); err != nil || result.Status != "revoked" {
+		t.Fatalf("self revocation result=%#v err=%v", result, err)
+	}
+	if result, err := app.SelfRevokeDevice(ctx, selfCredential.Encoded, selfKey); err != nil || result.Status != "revoked" {
+		t.Fatalf("self revocation retry result=%#v err=%v", result, err)
+	}
+	if _, err := app.SelfRevokeDevice(ctx, selfCredential.Encoded, uuid.NewString()); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("self revocation accepted a different retry key: %v", err)
+	}
+	if _, err := app.AuthenticateDevice(ctx, selfCredential.Encoded); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("self-revoked credential error=%v", err)
+	}
+	if err := admin.RevokeClient(ctx, owner.ID, selfCredential.ClientID, "retired"); err != nil {
+		t.Fatalf("owner retry of self-revoked client: %v", err)
+	}
+	clients, err = admin.ListClients(ctx, owner.ID, 100)
+	if err != nil || len(clients) != 2 || clients[1].LifecycleState != "revoked" || clients[1].RevocationReason != "self" || clients[1].Generation != selfCredential.Generation+1 {
+		t.Fatalf("self-revoked client inventory=%#v err=%v", clients, err)
+	}
+	duplicateKeyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "duplicate-self-key-client", Label: "duplicate self key client", AllProjects: true, TTL: time.Minute}
+	duplicateKeyPending, err := admin.CreateEnrollment(ctx, owner.ID, duplicateKeyRequest, selfPreviewHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicateKeyCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: duplicateKeyPending.ID, ClientBinding: duplicateKeyRequest.ClientBinding, Code: duplicateKeyPending.Code, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := app.SelfRevokeDevice(ctx, duplicateKeyCredential.Encoded, selfKey); err != nil || result.Status != "revoked" {
+		t.Fatalf("second client self revocation with reused key result=%#v err=%v", result, err)
+	}
+
+	raceRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "revocation-race-client", Label: "revocation race client", AllProjects: true, TTL: time.Minute}
+	racePending, err := admin.CreateEnrollment(ctx, owner.ID, raceRequest, selfPreviewHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceCredential, err := app.RedeemEnrollment(ctx, RedeemEnrollment{EnrollmentID: racePending.ID, ClientBinding: raceRequest.ClientBinding, Code: racePending.Code, IdempotencyKey: uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceSelfKey := uuid.NewString()
+	selfResult := make(chan error, 1)
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, revokeErr := app.SelfRevokeDevice(ctx, raceCredential.Encoded, raceSelfKey)
+		selfResult <- revokeErr
+	}()
+	go func() { ownerResult <- admin.RevokeClient(ctx, owner.ID, raceCredential.ClientID, "lost") }()
+	selfErr, ownerErr := <-selfResult, <-ownerResult
+	if ownerErr != nil || (selfErr != nil && !errors.Is(selfErr, ErrUnauthenticated)) {
+		t.Fatalf("owner/self revocation race self=%v owner=%v", selfErr, ownerErr)
+	}
+	clients, err = admin.ListClients(ctx, owner.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raced ClientMetadata
+	for _, client := range clients {
+		if client.ClientID == raceCredential.ClientID {
+			raced = client
+		}
+	}
+	if raced.LifecycleState != "revoked" || (raced.RevocationReason != "self" && raced.RevocationReason != "lost") {
+		t.Fatalf("owner/self revocation race inventory=%#v", raced)
+	}
+	_, retryErr := app.SelfRevokeDevice(ctx, raceCredential.Encoded, raceSelfKey)
+	if raced.RevocationReason == "self" && retryErr != nil {
+		t.Fatalf("self-winning race was not retryable: %v", retryErr)
+	}
+	if raced.RevocationReason == "lost" && !errors.Is(retryErr, ErrUnauthenticated) {
+		t.Fatalf("owner-winning race accepted self retry: %v", retryErr)
+	}
+	recoveryRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "recoverable-client", Label: "recoverable client", AllProjects: true, TTL: time.Minute}
 	recoveryPending, err := admin.CreateEnrollment(ctx, owner.ID, recoveryRequest, pruneHash)
 	if err != nil {
 		t.Fatal(err)
@@ -199,7 +340,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.pending_enrollments SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, recoveryPending.ID); err != nil {
 		t.Fatal(err)
 	}
-	activePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "active credential prune trigger", AllProjects: true, TTL: time.Minute}
+	activePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "active-prune-trigger", Label: "active credential prune trigger", AllProjects: true, TTL: time.Minute}
 	if _, err := admin.CreateEnrollment(ctx, owner.ID, activePruneTrigger, pruneHash); err != nil {
 		t.Fatalf("create enrollment after expired recovery enrollment: %v", err)
 	}
@@ -215,7 +356,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if _, err := ownerDB.ExecContext(ctx, `UPDATE auth.device_credentials SET created_at = statement_timestamp() - interval '2 seconds', expires_at = statement_timestamp() - interval '1 second' WHERE lookup_id = $1`, recoveryCredential.LookupID); err != nil {
 		t.Fatal(err)
 	}
-	latePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "expired credential prune trigger", AllProjects: true, TTL: time.Minute}
+	latePruneTrigger := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "expired-credential-trigger", Label: "expired credential prune trigger", AllProjects: true, TTL: time.Minute}
 	if _, err := admin.CreateEnrollment(ctx, owner.ID, latePruneTrigger, pruneHash); err != nil {
 		t.Fatalf("create enrollment after credential expiry: %v", err)
 	}
@@ -227,7 +368,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
         (SELECT count(*) FROM auth.pending_enrollment_grants WHERE enrollment_id = $1)`, recoveryPending.ID).Scan(&redeemedRows, &redeemedGrantRows); err != nil || redeemedRows != 0 || redeemedGrantRows != 0 {
 		t.Fatalf("expired credential recovery rows=%d grants=%d err=%v, want pruned", redeemedRows, redeemedGrantRows, err)
 	}
-	expiredRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "expired client", AllProjects: true, TTL: time.Minute}
+	expiredRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "expired-client", Label: "expired client", AllProjects: true, TTL: time.Minute}
 	_, expiredHash, err := PreviewTrustedAgentEnrollment(nil, true)
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +384,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 		t.Fatalf("expired enrollment error=%v", err)
 	}
 
-	concurrentRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "desktop", AllProjects: true, TTL: 10 * time.Minute}
+	concurrentRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "desktop", Label: "desktop", AllProjects: true, TTL: 10 * time.Minute}
 	_, concurrentHash, err := PreviewTrustedAgentEnrollment(nil, true)
 	if err != nil {
 		t.Fatal(err)
@@ -291,7 +432,7 @@ func testDeviceAuthIntegration(ctx context.Context, t *testing.T, app *Database,
 	if err := admin.DisableLegacyAuthentication(ctx, owner.ID); err == nil {
 		t.Fatal("legacy authentication disabled with a pending intended machine")
 	}
-	legacyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), Label: "legacy replacement", AllProjects: true, LegacyPrincipalID: legacy.PrincipalID, TTL: 10 * time.Minute}
+	legacyRequest := EnrollmentRequest{ClientBinding: uuid.NewString(), MachineID: "legacy-replacement", Label: "legacy replacement", AllProjects: true, LegacyPrincipalID: legacy.PrincipalID, TTL: 10 * time.Minute}
 	legacyPending, err := admin.CreateEnrollment(ctx, owner.ID, legacyRequest, concurrentHash)
 	if err != nil {
 		t.Fatal(err)

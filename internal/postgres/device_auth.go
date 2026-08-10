@@ -18,7 +18,6 @@ const (
 	maxEnrollmentProjects = 100
 	minEnrollmentTTL      = time.Minute
 	maxEnrollmentTTL      = 24 * time.Hour
-	maxCredentialTTL      = 365 * 24 * time.Hour
 )
 
 // GrantSpec is one principal-independent grant displayed before enrollment.
@@ -95,6 +94,7 @@ func PreviewTrustedAgentEnrollment(projectIDs []string, allProjects bool) ([]Gra
 // EnrollmentRequest is a bounded host-local request to create one pending client.
 type EnrollmentRequest struct {
 	ClientBinding     string
+	MachineID         string
 	Label             string
 	ProjectIDs        []string
 	AllProjects       bool
@@ -106,11 +106,34 @@ type EnrollmentRequest struct {
 
 // Validate rejects ambiguous grants, friendly client bindings, and unsafe lifetimes.
 func (r EnrollmentRequest) Validate() error {
-	if !validOpaqueID(r.ClientBinding) || !validDisplayName(r.Label) || len(r.ProjectIDs) > maxEnrollmentProjects || r.TTL < minEnrollmentTTL || r.TTL > maxEnrollmentTTL || r.CredentialTTL < 0 || r.CredentialTTL > maxCredentialTTL || (r.CredentialTTL > 0 && r.CredentialTTL < minEnrollmentTTL) || !r.ExpiresAt.IsZero() || (r.LegacyPrincipalID != "" && !validOpaqueID(r.LegacyPrincipalID)) {
+	if !validOpaqueID(r.ClientBinding) || !validLifecycleMachineID(r.MachineID) || !validDisplayName(r.Label) || len(r.ProjectIDs) > maxEnrollmentProjects || r.TTL < minEnrollmentTTL || r.TTL > maxEnrollmentTTL || r.CredentialTTL != 0 || !r.ExpiresAt.IsZero() || (r.LegacyPrincipalID != "" && !validOpaqueID(r.LegacyPrincipalID)) {
 		return errors.New("invalid enrollment request")
 	}
 	_, err := TrustedAgentGrantPreview(r.ProjectIDs, r.AllProjects)
 	return err
+}
+
+func validLifecycleMachineID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	first := value[0]
+	switch {
+	case first >= 'a' && first <= 'z':
+	case first >= '0' && first <= '9':
+	default:
+		return false
+	}
+	for index, character := range []byte(value) {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' {
+			continue
+		}
+		if index > 0 && index < len(value)-1 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func newDeviceCredential() (encoded, lookupID string, digest [sha256.Size]byte, err error) {

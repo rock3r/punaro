@@ -1308,6 +1308,20 @@ cross-origin, unavailable, expired, already-used, or revoked enrollment fails
 closed; only the server owner can issue a replacement, rotate a credential, or
 revoke it.
 
+Schema version 44 adds the first server-side named-release lifecycle
+foundation. Every newly redeemed bearer credential atomically owns one
+immutable, unique machine ID, opaque client installation, and derived exclusive
+`agent/<machine-id>/` endpoint namespace. First-release credentials are
+non-expiring; rotation and either owner or targetless self-revocation advance
+the credential, client, principal, and endpoint-authority fences together.
+`punaro client list` exposes only bounded lifecycle metadata, while `punaro
+client revoke` is host-local, permanent, and idempotent. The public self-revoke
+route accepts no body or target and permits an already-revoked credential only
+for the exact committed self-revocation key. Authentication and session checks
+fail closed unless every lifecycle generation agrees. This sub-slice does not
+yet replace static relay endpoint authority, import exact legacy enrollments,
+or implement the new invitation, hello, updater, fleet, or recovery protocols.
+
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the
 source fingerprint, exact counts, and PostgreSQL target identity without a

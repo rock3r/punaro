@@ -34,6 +34,7 @@ wake-up hints containing an opaque conversation ID and sequence only.
 Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [architecture and security design](DESIGN.md),
 [platform compatibility contracts](docs/platform-contracts.md),
+[proposed client lifecycle, compatibility, and recovery RFC](docs/client-lifecycle-compatibility-recovery-rfc.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [installation guide](docs/installation.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),

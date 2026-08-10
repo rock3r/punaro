@@ -70,16 +70,18 @@ func TestDeviceCredentialEncodingHasOpaqueLookupAnd256BitSecret(t *testing.T) {
 }
 
 func TestEnrollmentAndCredentialBounds(t *testing.T) {
-	valid := EnrollmentRequest{ClientBinding: testPrincipalB, Label: "laptop", ProjectIDs: []string{testProjectA}, TTL: 10 * time.Minute}
+	valid := EnrollmentRequest{ClientBinding: testPrincipalB, MachineID: "laptop-a", Label: "laptop", ProjectIDs: []string{testProjectA}, TTL: 10 * time.Minute}
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	for name, request := range map[string]EnrollmentRequest{
-		"binding": {ClientBinding: "laptop", Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: valid.TTL},
-		"label":   {ClientBinding: valid.ClientBinding, Label: "", ProjectIDs: valid.ProjectIDs, TTL: valid.TTL},
-		"ttl":     {ClientBinding: valid.ClientBinding, Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: 25 * time.Hour},
+		"binding":    {ClientBinding: "laptop", MachineID: valid.MachineID, Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: valid.TTL},
+		"machine":    {ClientBinding: valid.ClientBinding, MachineID: "", Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: valid.TTL},
+		"label":      {ClientBinding: valid.ClientBinding, MachineID: valid.MachineID, Label: "", ProjectIDs: valid.ProjectIDs, TTL: valid.TTL},
+		"ttl":        {ClientBinding: valid.ClientBinding, MachineID: valid.MachineID, Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: 25 * time.Hour},
+		"credential": {ClientBinding: valid.ClientBinding, MachineID: valid.MachineID, Label: valid.Label, ProjectIDs: valid.ProjectIDs, TTL: valid.TTL, CredentialTTL: time.Hour},
 		"projects": {ClientBinding: valid.ClientBinding, Label: valid.Label,
-			ProjectIDs: append(make([]string, maxEnrollmentProjects), testProjectA), TTL: valid.TTL},
+			MachineID: valid.MachineID, ProjectIDs: append(make([]string, maxEnrollmentProjects), testProjectA), TTL: valid.TTL},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := request.Validate(); err == nil {
