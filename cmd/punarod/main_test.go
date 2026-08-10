@@ -61,6 +61,25 @@ func TestProductionRoutesOmitRetiredAttachments(t *testing.T) {
 	}
 }
 
+func TestDeviceSelfRevokeRouteWinsOverRelayCatchAll(t *testing.T) {
+	mux := http.NewServeMux()
+	device := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	})
+	relay := http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusTeapot)
+	})
+	registerDeviceRoutes(mux, device)
+	registerProductionRoutes(mux, nil, nil, relay, nil)
+
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/device/session/revoke", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("self-revoke route status=%d, want device handler status", response.Code)
+	}
+}
+
 func TestBuildMemoryHandlerIsDarkByDefaultAndRequiresCompleteAuthority(t *testing.T) {
 	handler, err := buildMemoryHandler(config.Config{}, &refusingPlatformDatabase{})
 	if err != nil || handler != nil {

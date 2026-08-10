@@ -260,8 +260,7 @@ func run(args []string, stderr io.Writer) int {
 			return 2
 		}
 		deviceHandler := devicehttp.New(database, policy)
-		mux.Handle("/v1/enrollments/redeem", deviceHandler)
-		mux.Handle("/v1/device/session", deviceHandler)
+		registerDeviceRoutes(mux, deviceHandler)
 	}
 	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler, remoteMCPMetadataHandler)
 	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
@@ -317,6 +316,15 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func registerDeviceRoutes(mux *http.ServeMux, deviceHandler http.Handler) {
+	if deviceHandler == nil {
+		return
+	}
+	mux.Handle("/v1/enrollments/redeem", deviceHandler)
+	mux.Handle("/v1/device/session", deviceHandler)
+	mux.Handle("/v1/device/session/revoke", deviceHandler)
 }
 
 func registerProductionRoutes(mux *http.ServeMux, memoryHandler http.Handler, trustedAttachmentHandler *trustedAttachmentRuntime, relayHandler http.Handler, remoteMCPMetadataHandler http.Handler) {
