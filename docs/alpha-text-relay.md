@@ -277,6 +277,13 @@ does not alter the user's LaunchAgent environment. The installer first creates
 an HTTPS relay profile; the test then redirects only that disposable profile to
 its private loopback relay proxy. This does not relax production installation
 or trust requirements.
+
+For an opt-in release-candidate check of durable-role session replacement
+across `mac-studio`, `coso`, and `mattone`, follow the
+[durable-role LAN validation runbook](durable-role-lan-e2e.md). It requires
+read-only topology discovery and an already deployed candidate; it never
+provisions credentials or changes an operator's adapter configuration.
+
 It never stops or replaces an operator's installed adapter. It is intentionally
 not a CI job: it exercises the actual local service manager and is independent
 of any deployment hostname, credentials, ingress, or operator topology.

@@ -182,6 +182,73 @@ and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
 follow the [alpha onboarding revocation procedure](alpha-text-relay.md#onboard-and-revoke-a-machine): remove attached aliases, remove the relay enrollment, revoke the machine's Access token, stop the service, and securely erase its key.
 
+## 4. New-machine, upgrade, and rollback runbook
+
+Use this sequence for every new adapter machine and for an adapter upgrade. It
+keeps the machine identity and its private configuration in place while
+replacing only reviewed binaries and service definitions. Do not deploy from a
+dirty checkout, reuse another machine's key or Access token, or copy an
+`adapter.env` file between machines.
+
+1. Record the exact 40-character source commit and obtain a clean checkout of
+   it on the target. Confirm it before installing:
+
+   ```sh
+   git rev-parse HEAD
+   git status --porcelain
+   ```
+
+   On Windows, run the same commands in PowerShell from the checkout. An empty
+   `git status --porcelain` is required. Keep the previously installed commit
+   available until post-upgrade verification succeeds; it is the rollback
+   source, not a backup of credentials or mailbox state.
+2. For a **new** machine, run the client installer *without* enablement. It
+   creates a fresh machine key and prints the public enrollment record. Add
+   only that record to the relay enrollment set, apply it through the existing
+   owner-managed relay deployment, and verify relay readiness. Create a new
+   Access service token for the machine and place it only in that machine's
+   owner-only profile. Bind and attach the chosen aliases, then enable the
+   local adapter.
+3. For an **existing** machine, rerun the same installer from the clean
+   checkout using the original relay URL and machine ID. The installer proves
+   that the existing key, enrollment record, and profile still belong to those
+   values before it replaces the adapter binary and managed service file. It
+   does not rewrite the token pair. Never delete an existing key merely to
+   make this check pass.
+4. Enable or restart only through the installed platform service:
+
+   ```sh
+   # macOS and Linux: append --enable to the installer invocation.
+   # macOS verification
+   launchctl print gui/$(id -u)/org.punaro.adapter
+
+   # Linux verification
+   systemctl --user status punaro-adapter.service
+   ```
+
+   ```powershell
+   # Windows: append -Enable to the installer invocation.
+   Get-ScheduledTask -TaskName 'Punaro Adapter'
+   Get-Process punaro-adapter -ErrorAction SilentlyContinue
+   ```
+
+   The Windows task is intentionally per-user and interactive; a disabled task
+   or missing process is not a deployed adapter. For a Linux machine that must
+   remain available after logout, enable user lingering before relying on it.
+5. Confirm the adapter has advertised only the newly attached aliases, then
+   run a disposable, harmless message/acknowledgement check. For release
+   candidates, use the [durable-role LAN validation runbook](durable-role-lan-e2e.md)
+   rather than reusing a production conversation or endpoint.
+
+If a binary or service update fails before the adapter is healthy, stop the
+updated service, return to the retained clean checkout at the prior verified
+commit, rerun the same installer with the same identity values, and verify the
+service again. Do not restore, edit, or copy private keys, Access tokens,
+mailbox state, relay databases, or production conversations as part of an
+adapter rollback. Relay rollback follows the owner-managed deployment's
+recorded image/commit and database recovery process; it is not an adapter
+installer operation.
+
 ### Adapter profile for direct commands and the service
 
 The installed `punaro-adapter` validates and reads the same owner-only,
@@ -308,7 +375,7 @@ rotate` or `punaro-admin credential revoke`, using the content-free credential
 inventory. Rotation and revocation are server-controlled: a local identity
 sidecar or copied credential cannot restore access.
 
-## 4. Retired v2/v3 attachment evidence
+## 5. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree
 on a production host. `punarod` rejects all legacy attachment, directory, and permit settings;
