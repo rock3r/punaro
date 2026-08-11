@@ -213,7 +213,7 @@ func (c *HTTPRelayClient) Lease(ctx context.Context, endpoint string) ([]relay.D
 	var response struct {
 		Deliveries []relay.Delivery `json:"deliveries"`
 	}
-	_, err := c.doJSON(ctx, http.MethodPost, "/v1/deliveries/lease", map[string]any{"endpoint": endpoint, "consumer_id": c.consumerID}, &response)
+	_, err := c.doJSON(ctx, http.MethodPost, "/v2/deliveries/lease", map[string]any{"endpoint": endpoint, "consumer_id": c.consumerID}, &response)
 	return response.Deliveries, err
 }
 
@@ -335,7 +335,11 @@ func (c *HTTPRelayClient) SendToRole(ctx context.Context, conversationID, fromEn
 		request["to_role"] = toRole
 	}
 	var message relay.Message
-	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/messages", request, idempotencyKey, &message)
+	path := "/v1/conversations/" + url.PathEscape(conversationID) + "/messages"
+	if toRole != "" {
+		path = "/v2/conversations/" + url.PathEscape(conversationID) + "/messages"
+	}
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, path, request, idempotencyKey, &message)
 	if err != nil {
 		return message, &relayHTTPStatusError{status: status, err: err}
 	}

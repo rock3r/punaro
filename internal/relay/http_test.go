@@ -131,7 +131,7 @@ func TestHTTPTargetedMessageRequiresOneValidDurableRole(t *testing.T) {
 		{"missing", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":"role/missing"}`},
 		{"malformed", `{"from_endpoint":"agent/a/session","body":"opaque","to_role":" agent/a/session"}`},
 	} {
-		response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", target.body, "send-"+target.name, "send-"+target.name)
+		response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v2/conversations/"+conversation.ID+"/messages", target.body, "send-"+target.name, "send-"+target.name)
 		if response.Code != http.StatusBadRequest && response.Code != http.StatusForbidden {
 			t.Fatalf("invalid target response=%d body=%s", response.Code, response.Body.String())
 		}

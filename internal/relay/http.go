@@ -100,7 +100,14 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "route not found")
 			return
 		}
-		h.appendMessage(w, body, machineID, authority, conversationID, now, r.Header.Get("Idempotency-Key"))
+		h.appendMessage(w, body, machineID, authority, conversationID, now, r.Header.Get("Idempotency-Key"), false)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v2/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v2/conversations/"), "/messages")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.appendMessage(w, body, machineID, authority, conversationID, now, r.Header.Get("Idempotency-Key"), true)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/invocations"):
 		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/invocations")
 		if conversationID == "" || strings.Contains(conversationID, "/") {
@@ -130,7 +137,9 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.controlAudit(w, body, machineID, conversationID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
-		h.leaseDeliveries(w, body, machineID, now)
+		h.leaseDeliveries(w, body, machineID, now, false)
+	case r.Method == http.MethodPost && r.URL.Path == "/v2/deliveries/lease":
+		h.leaseDeliveries(w, body, machineID, now, true)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
 		h.leaseInvocations(w, body, machineID, now)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/invocations/") && strings.HasSuffix(r.URL.Path, "/outcome"):
@@ -437,7 +446,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	writeJSON(w, http.StatusCreated, conversation)
 }
 
-func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID string, authority PrincipalAuthority, conversationID string, now time.Time, idempotencyKey string) {
+func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID string, authority PrincipalAuthority, conversationID string, now time.Time, idempotencyKey string, roleAware bool) {
 	if !ValidRequestToken(idempotencyKey) {
 		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
 		return
@@ -449,6 +458,10 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 		ArtifactIDs  []string        `json:"artifact_ids"`
 	}
 	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid message request")
+		return
+	}
+	if !roleAware && request.ToRole != nil {
 		writeError(w, http.StatusBadRequest, "invalid message request")
 		return
 	}
@@ -482,7 +495,11 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 	if duplicate {
 		status = http.StatusOK
 	}
-	writeJSON(w, status, message)
+	if roleAware {
+		writeJSON(w, status, message)
+		return
+	}
+	writeJSON(w, status, legacyMessage(message))
 }
 
 func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
@@ -587,7 +604,7 @@ func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID string, now time.Time, roleAware bool) {
 	var request struct {
 		Endpoint       string `json:"endpoint"`
 		ConsumerID     string `json:"consumer_id"`
@@ -614,7 +631,45 @@ func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID 
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, page)
+	if roleAware {
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	writeJSON(w, http.StatusOK, legacyDeliveryPage(page))
+}
+
+type legacyMessageWire struct {
+	ID             string    `json:"id"`
+	ConversationID string    `json:"conversation_id"`
+	Sequence       int64     `json:"sequence"`
+	FromEndpoint   string    `json:"from_endpoint"`
+	Body           string    `json:"body"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func legacyMessage(message Message) legacyMessageWire {
+	return legacyMessageWire{message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt}
+}
+
+type legacyDeliveryWire struct {
+	ID                string            `json:"id"`
+	RecipientEndpoint string            `json:"recipient_endpoint"`
+	Message           legacyMessageWire `json:"message"`
+	LeaseToken        string            `json:"lease_token"`
+	LeaseGeneration   int64             `json:"lease_generation"`
+	LeaseUntil        time.Time         `json:"lease_until"`
+}
+type legacyDeliveryPageWire struct {
+	Deliveries []legacyDeliveryWire `json:"deliveries"`
+	Cursors    map[string]int64     `json:"cursors"`
+}
+
+func legacyDeliveryPage(page DeliveryLeasePage) legacyDeliveryPageWire {
+	deliveries := make([]legacyDeliveryWire, 0, len(page.Deliveries))
+	for _, delivery := range page.Deliveries {
+		deliveries = append(deliveries, legacyDeliveryWire{delivery.ID, delivery.RecipientEndpoint, legacyMessage(delivery.Message), delivery.LeaseToken, delivery.LeaseGeneration, delivery.LeaseUntil})
+	}
+	return legacyDeliveryPageWire{deliveries, page.Cursors}
 }
 
 func (h *handler) ackDelivery(w http.ResponseWriter, body []byte, machineID, deliveryID string, now time.Time) {

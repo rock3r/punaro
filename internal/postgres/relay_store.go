@@ -756,39 +756,44 @@ func postgresAdvanceConversationRecipientCursors(tx *sql.Tx, conversationID stri
 	if err != nil {
 		return errors.New("recipient cursor recipients are unavailable")
 	}
+	recipients := make([]string, 0)
 	for rows.Next() {
 		var endpoint string
 		if err := rows.Scan(&endpoint); err != nil {
 			_ = rows.Close()
 			return errors.New("recipient cursor recipient is unavailable")
 		}
-		if err := postgresAdvanceRecipientCursor(tx, endpoint, conversationID); err != nil {
-			_ = rows.Close()
-			return err
-		}
+		recipients = append(recipients, endpoint)
 	}
 	if err := rows.Close(); err != nil {
 		return errors.New("recipient cursor recipients are unavailable")
 	}
 	if !rolesAvailable {
+		for _, recipient := range recipients {
+			if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	roles, err := tx.QueryContext(context.Background(), `SELECT role FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive)
 	if err != nil {
 		return errors.New("durable recipient cursors are unavailable")
 	}
-	defer func() { _ = roles.Close() }()
 	for roles.Next() {
 		var role string
 		if err := roles.Scan(&role); err != nil {
 			return errors.New("durable recipient cursor is unavailable")
 		}
-		if err := postgresAdvanceRecipientCursor(tx, "\x1erole:"+role, conversationID); err != nil {
+		recipients = append(recipients, "\x1erole:"+role)
+	}
+	if err := roles.Close(); err != nil {
+		return errors.New("durable recipient cursors are unavailable")
+	}
+	for _, recipient := range recipients {
+		if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
 			return err
 		}
-	}
-	if err := roles.Err(); err != nil {
-		return errors.New("durable recipient cursors are unavailable")
 	}
 	return nil
 }

@@ -680,10 +680,10 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 		case "/v1/machines/me/endpoints":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"lease_until":"2026-07-13T12:00:00Z"}`))
-		case "/v1/deliveries/lease":
+		case "/v2/deliveries/lease":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"deliveries":[]}`))
-		case "/v1/conversations/conversation-1/messages":
+		case "/v2/conversations/conversation-1/messages":
 			if r.Header.Get("Idempotency-Key") != "send-1" {
 				t.Fatal("missing idempotency key")
 			}

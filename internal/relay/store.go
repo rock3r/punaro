@@ -1186,16 +1186,14 @@ func advanceConversationRecipientCursors(tx *sql.Tx, conversationID string) erro
 	if err != nil {
 		return fmt.Errorf("find recipient cursors: %w", err)
 	}
+	recipients := make([]string, 0)
 	for rows.Next() {
 		var endpoint string
 		if err := rows.Scan(&endpoint); err != nil {
 			_ = rows.Close()
 			return err
 		}
-		if err := advanceRecipientCursor(tx, endpoint, conversationID); err != nil {
-			_ = rows.Close()
-			return err
-		}
+		recipients = append(recipients, endpoint)
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -1204,17 +1202,22 @@ func advanceConversationRecipientCursors(tx *sql.Tx, conversationID string) erro
 	if err != nil {
 		return fmt.Errorf("find durable role cursors: %w", err)
 	}
-	defer func() { _ = roles.Close() }()
 	for roles.Next() {
 		var role string
 		if err := roles.Scan(&role); err != nil {
 			return err
 		}
-		if err := advanceRecipientCursor(tx, roleRecipient(role), conversationID); err != nil {
+		recipients = append(recipients, roleRecipient(role))
+	}
+	if err := roles.Close(); err != nil {
+		return err
+	}
+	for _, recipient := range recipients {
+		if err := advanceRecipientCursor(tx, recipient, conversationID); err != nil {
 			return err
 		}
 	}
-	return roles.Err()
+	return nil
 }
 
 // LeaseDeliveries leases a bounded page of pending deliveries for one active

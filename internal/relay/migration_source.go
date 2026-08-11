@@ -825,6 +825,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
         OR EXISTS (SELECT 1 FROM messages WHERE sequence<1 OR length(CAST(body AS blob))>32768)
 		OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
 		OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN role_memberships AS membership ON membership.conversation_id=message.conversation_id AND membership.role=message.to_role AND (membership.capabilities & 2)<>0 WHERE message.to_role IS NOT NULL AND membership.role IS NULL)
+		OR EXISTS (SELECT 1 FROM messages AS message WHERE message.to_role IS NOT NULL AND (SELECT count(*) FROM deliveries AS delivery WHERE delivery.message_id=message.id AND delivery.recipient_endpoint=char(30)||'role:'||message.to_role)<>1)
+		OR EXISTS (SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE message.to_role IS NOT NULL AND delivery.recipient_endpoint<>char(30)||'role:'||message.to_role)
         OR EXISTS (SELECT 1 FROM messages AS message JOIN conversations AS conversation ON conversation.id=message.conversation_id WHERE message.sequence>conversation.next_sequence)
         OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))
         OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
@@ -879,6 +881,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if !targetedMessages {
 		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "\n\t\tOR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN role_memberships AS membership ON membership.conversation_id=message.conversation_id AND membership.role=message.to_role AND (membership.capabilities & 2)<>0 WHERE message.to_role IS NOT NULL AND membership.role IS NULL)", "")
+		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "\n\t\tOR EXISTS (SELECT 1 FROM messages AS message WHERE message.to_role IS NOT NULL AND (SELECT count(*) FROM deliveries AS delivery WHERE delivery.message_id=message.id AND delivery.recipient_endpoint=char(30)||'role:'||message.to_role)<>1)", "")
+		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "\n\t\tOR EXISTS (SELECT 1 FROM deliveries AS delivery JOIN messages AS message ON message.id=delivery.message_id WHERE message.to_role IS NOT NULL AND delivery.recipient_endpoint<>char(30)||'role:'||message.to_role)", "")
 		logicalStateQuery = strings.ReplaceAll(logicalStateQuery, "OR (to_role IS NOT NULL AND typeof(to_role)<>'text')", "")
 	}
 	var invalidLogicalState bool
