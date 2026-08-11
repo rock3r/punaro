@@ -61,8 +61,8 @@ func (p *Policy) Validate() error {
 		if !privateOrLinkLocal(bind) {
 			return errors.New("LAN bind must be private or link-local")
 		}
-		_, network, err := net.ParseCIDR(p.TrustedLAN)
-		if err != nil || !privateNetwork(network) || !network.Contains(bind) {
+		address, network, err := net.ParseCIDR(p.TrustedLAN)
+		if err != nil || !address.Equal(network.IP) || !privateNetwork(network) || !network.Contains(bind) {
 			return errors.New("trusted LAN must be a private or link-local network containing the bind")
 		}
 		if p.PublicURL != "" {

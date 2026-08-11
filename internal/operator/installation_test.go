@@ -235,6 +235,21 @@ func TestInitAcceptsRelayAuthorityWithExplicitTrustedLANListener(t *testing.T) {
 	}
 }
 
+func TestInitRejectsNoncanonicalTrustedLANBeforeBootstrap(t *testing.T) {
+	options := validInitOptions(t)
+	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.10/24", AllowPlaintext: true}
+	called := false
+	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{}, nil
+	}); err == nil || called {
+		t.Fatalf("noncanonical trusted LAN reached bootstrap: err=%v called=%t", err, called)
+	}
+	if _, err := os.Stat(options.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("noncanonical trusted LAN created installation state: %v", err)
+	}
+}
+
 func TestInitRejectsAttachmentDirectoryResolvedOutsideDataBeforeBootstrap(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink containment is covered by Unix path semantics")
