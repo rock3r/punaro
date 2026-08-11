@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rock3r/punaro/internal/clientidentity"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 )
 
@@ -115,6 +116,23 @@ func TestPrepareRetriesIdentityDirectorySyncBeforePublishingBinding(t *testing.T
 	}
 	if parentSyncs != 2 {
 		t.Fatalf("state directory parent syncs=%d", parentSyncs)
+	}
+}
+
+func TestPreparePersistsExplicitTrustedLANPolicy(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "state")
+	if code := run([]string{"prepare", "--origin", "http://192.168.1.4:8080", "--state-dir", stateDir, "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("LAN prepare code=%d", code)
+	}
+	state, err := loadIdentity(filepath.Join(stateDir, identityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Version != clientidentity.LANVersion || !state.AllowLANHTTP || state.TrustedLANCIDR != "192.168.1.0/24" {
+		t.Fatalf("identity=%#v", state)
+	}
+	if code := run([]string{"prepare", "--origin", "http://192.168.2.4:8080", "--state-dir", filepath.Join(t.TempDir(), "outside"), "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}, io.Discard, io.Discard); code != 2 {
+		t.Fatalf("out-of-CIDR prepare code=%d", code)
 	}
 }
 

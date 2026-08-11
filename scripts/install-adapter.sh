@@ -7,15 +7,17 @@ umask 077
 
 usage() {
 	cat <<'EOF'
-Usage: scripts/install-adapter.sh --relay-url HTTPS_URL --machine-id ID [options]
+Usage: scripts/install-adapter.sh --relay-url URL --machine-id ID [options]
 
 Install a per-user Punaro adapter, trusted-attachment client, and stateless
 memory client; generate one private machine key, create the local attachment
 group, and print enrollment.
 
 Options:
-  --relay-url HTTPS_URL       Public relay base URL (required)
+  --relay-url URL             HTTPS or explicitly acknowledged literal LAN HTTP origin (required)
   --machine-id ID             Unique machine ID; becomes agent/ID/ (required)
+  --allow-lan-http            Acknowledge plaintext credentials on a trusted LAN
+  --trusted-lan-cidr CIDR     Private/link-local CIDR containing the literal HTTP origin
   --agent-mailbox-bin PATH    agent-mailbox executable (default: agent-mailbox)
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
@@ -44,6 +46,12 @@ require_safe_value() {
 	esac
 }
 
+require_safe_relay_url() {
+	case "$1" in
+		''|*[!][A-Za-z0-9_./:@%+=,-]*) fail 'relay URL contains unsupported characters' ;;
+	esac
+}
+
 file_mode() {
 	if stat -f %Lp "$1" >/dev/null 2>&1; then
 		stat -f %Lp "$1"
@@ -63,11 +71,15 @@ mailbox_state_dir=
 attached_group=group/punaro-attached
 agent_guidance_dir=
 enable=0
+allow_lan_http=false
+trusted_lan_cidr=
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--relay-url) [ "$#" -ge 2 ] || fail '--relay-url requires a value'; relay_url=$2; shift 2 ;;
 		--machine-id) [ "$#" -ge 2 ] || fail '--machine-id requires a value'; machine_id=$2; shift 2 ;;
+		--allow-lan-http) allow_lan_http=true; shift ;;
+		--trusted-lan-cidr) [ "$#" -ge 2 ] || fail '--trusted-lan-cidr requires a value'; trusted_lan_cidr=$2; shift 2 ;;
 		--agent-mailbox-bin) [ "$#" -ge 2 ] || fail '--agent-mailbox-bin requires a value'; mailbox_bin=$2; shift 2 ;;
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
@@ -88,24 +100,37 @@ case "$machine_id" in
 	.*|-*) fail 'machine ID must start with a letter or digit' ;;
 esac
 case "$relay_url" in
-	https://*) ;;
-	*) fail 'relay URL must use https://' ;;
+	https://*) [ "$allow_lan_http" = false ] && [ -z "$trusted_lan_cidr" ] || fail 'trusted-LAN options are valid only with an http:// relay URL' ;;
+	http://*) [ "$allow_lan_http" = true ] && [ -n "$trusted_lan_cidr" ] || fail 'LAN HTTP requires --allow-lan-http and --trusted-lan-cidr together' ;;
+	*) fail 'relay URL must use https:// or explicitly acknowledged trusted-LAN http://' ;;
 esac
 
 if [ -z "$mailbox_state_dir" ]; then
 	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
 fi
 
-require_safe_value "$relay_url" 'relay URL'
+require_safe_relay_url "$relay_url"
 require_safe_value "$HOME" 'HOME'
 require_safe_value "$mailbox_bin" 'agent-mailbox path'
 require_safe_value "$mailbox_state_dir" 'mailbox state directory'
 require_safe_value "$attached_group" 'attached group'
+if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trusted LAN CIDR'; fi
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 [ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
+if [ "$allow_lan_http" = true ]; then
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" --allow-lan-http --trusted-lan-cidr "$trusted_lan_cidr" >/dev/null 2>&1
+	) || fail 'relay transport policy is invalid'
+else
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" >/dev/null 2>&1
+	) || fail 'relay transport policy is invalid'
+fi
 if [ "$mailbox_bin" = agent-mailbox ]; then
 	mailbox_bin=$(command -v agent-mailbox) || fail 'agent-mailbox is required; install it before onboarding this machine'
 elif [ ! -x "$mailbox_bin" ]; then
@@ -177,6 +202,8 @@ PUNARO_ADAPTER_DATA_DIR=$state_dir
 PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir
 PUNARO_ADAPTER_POLL_INTERVAL=30s
 PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin
+PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http
+PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr
 
 # If the relay is protected by Cloudflare Access, add this machine's distinct
 # client ID and secret here with an editor or secret-manager injection. Do not
@@ -196,6 +223,17 @@ if [ -e "$config_file" ] || [ -L "$config_file" ]; then
 		"PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin"; do
 		grep -Fqx "$expected" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
 	done
+	if [ "$allow_lan_http" = false ] && [ -z "$trusted_lan_cidr" ]; then
+		if grep -q '^PUNARO_ADAPTER_ALLOW_LAN_HTTP=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+		if grep -q '^PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+	else
+		grep -Fqx "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		grep -Fqx "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+	fi
 else
 	( set -C; : >"$config_file" ) 2>/dev/null || fail 'could not create adapter.env without overwriting an existing file'
 	write_config >"$config_file"

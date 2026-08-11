@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/memoryclient"
 )
 
@@ -722,6 +723,67 @@ func TestRunProfileWritePersistsProtectedDefaults(t *testing.T) {
 	}
 }
 
+func TestRunProfileWritePersistsTrustedLANPolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	profilePath := filepath.Join(directory, "lan-profile.json")
+	credential := filepath.Join(directory, "credential")
+	var stdout, stderr strings.Builder
+	args := []string{"profile-write", "--profile", profilePath, "--origin", "http://192.168.1.4:8080", "--credential-file", credential, "--project", cliProject, "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}
+	if code := run(args, &stdout, &stderr); code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	loaded, err := loadProfile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Version != 2 || !loaded.AllowLANHTTP || loaded.TrustedLANCIDR != "192.168.1.0/24" {
+		t.Fatalf("profile=%#v", loaded)
+	}
+}
+
+func TestRunUsesTrustedLANProfilePolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	profilePath := filepath.Join(directory, "lan-profile.json")
+	credential := filepath.Join(directory, "credential")
+	if err := saveProfile(profilePath, profile{Origin: "http://192.168.1.4:8080", CredentialFile: credential, Project: cliProject, AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	previousLoader, previousFactory := loadCredential, newMemoryClientWithPolicy
+	t.Cleanup(func() { loadCredential, newMemoryClientWithPolicy = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClientWithPolicy = func(origin, value string, policy clienttransport.Policy) (client, error) {
+		if origin != "http://192.168.1.4:8080" || value != "device-secret" || !policy.AllowLANHTTP || policy.TrustedLANCIDR != "192.168.1.0/24" {
+			t.Fatalf("origin=%q credential=%q policy=%#v", origin, value, policy)
+		}
+		return fake, nil
+	}
+	var stdout, stderr strings.Builder
+	if code := run([]string{"get", "--profile", profilePath, "--item", cliItem}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunUsesDirectTrustedLANPolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	credential := filepath.Join(directory, "credential")
+	previousLoader, previousFactory := loadCredential, newMemoryClientWithPolicy
+	t.Cleanup(func() { loadCredential, newMemoryClientWithPolicy = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClientWithPolicy = func(origin, value string, policy clienttransport.Policy) (client, error) {
+		if origin != "http://192.168.1.4:8080" || value != "device-secret" || !policy.AllowLANHTTP || policy.TrustedLANCIDR != "192.168.1.0/24" {
+			t.Fatalf("origin=%q credential=%q policy=%#v", origin, value, policy)
+		}
+		return fake, nil
+	}
+	var stdout, stderr strings.Builder
+	args := []string{"get", "--origin", "http://192.168.1.4:8080", "--credential-file", credential, "--project", cliProject, "--item", cliItem, "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestRunProfileWriteRejectsCredentialClobber(t *testing.T) {
 	directory := resolvedTempDir(t)
 	credential := filepath.Join(directory, "credential")
@@ -768,11 +830,16 @@ func TestLoadProfileRejectsUnsafeProfileFiles(t *testing.T) {
 		raw  string
 		mode os.FileMode
 	}{
+		{"missing version", `{"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o600},
+		{"zero LAN version", `{"version":0,"origin":"http://192.168.1.4:8080","credential_file":"` + credential + `","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`, 0o600},
+		{"v1 explicit false", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","allow_lan_http":false}`, 0o600},
+		{"v1 explicit empty cidr", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","trusted_lan_cidr":""}`, 0o600},
 		{"group readable", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o640},
 		{"unknown field", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","secret":"device-secret"}`, 0o600},
 		{"duplicate field", `{"version":1,"origin":"https://first.test","origin":"https://second.test","credential_file":"` + credential + `"}`, 0o600},
 		{"relative credential", `{"version":1,"origin":"https://profile.test","credential_file":"relative"}`, 0o600},
 		{"unsafe origin", `{"version":1,"origin":"https://user@profile.test","credential_file":"` + credential + `"}`, 0o600},
+		{"loopback plaintext", `{"version":1,"origin":"http://127.0.0.1:8080","credential_file":"` + credential + `"}`, 0o600},
 		{"invalid project", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","project":"not-a-uuid"}`, 0o600},
 	}
 	for _, test := range tests {

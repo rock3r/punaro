@@ -6,6 +6,8 @@ param(
     [string]$MailboxStateDir = (Join-Path $env:LOCALAPPDATA 'ai-agent\mailbox'),
     [string]$AttachedGroup = 'group/punaro-attached',
     [string]$AgentGuidanceDir,
+    [switch]$AllowLanHttp,
+    [string]$TrustedLanCidr,
     [switch]$Enable
 )
 
@@ -78,10 +80,14 @@ function Read-PunaroEnvironment([string]$Path) {
     return $values
 }
 
-function Assert-Configuration([string]$Path, [hashtable]$Expected) {
+function Assert-Configuration([string]$Path, [hashtable]$Expected, [hashtable]$MissingDefaults) {
     $existing = Read-PunaroEnvironment -Path $Path
     foreach ($name in $Expected.Keys) {
-        if (-not $existing.ContainsKey($name) -or $existing[$name] -ne $Expected[$name]) {
+        if (-not $existing.ContainsKey($name)) {
+            if ($MissingDefaults.ContainsKey($name) -and $Expected[$name] -eq $MissingDefaults[$name]) { continue }
+            Stop-Install 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
+        }
+        if ($existing[$name] -ne $Expected[$name]) {
             Stop-Install 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
         }
     }
@@ -126,10 +132,34 @@ function Invoke-Program([string]$Program, [string[]]$Arguments, [string]$Descrip
 if ($env:OS -ne 'Windows_NT') { Stop-Install 'Windows client installation must run on Windows' }
 if ($MachineId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { Stop-Install 'machine ID must start with a letter or digit and contain only letters, digits, dot, underscore, or hyphen' }
 if ($AttachedGroup -notmatch '^group/[A-Za-z0-9._/-]+$') { Stop-Install 'attached group must be a group/ address' }
-try { $relay = [Uri]$RelayUrl } catch { Stop-Install 'relay URL must use https://' }
-if (-not $relay.IsAbsoluteUri -or $relay.Scheme -ne 'https') { Stop-Install 'relay URL must use https://' }
+try { $relay = [Uri]$RelayUrl } catch { Stop-Install 'relay URL is invalid' }
+if (-not $relay.IsAbsoluteUri) { Stop-Install 'relay URL is invalid' }
+if ($relay.Scheme -eq 'https') {
+    if ($AllowLanHttp -or -not [string]::IsNullOrWhiteSpace($TrustedLanCidr)) { Stop-Install 'trusted-LAN options are valid only with an http:// relay URL' }
+} elseif ($relay.Scheme -eq 'http') {
+    $literalAddress = $null
+    if (-not $AllowLanHttp -or [string]::IsNullOrWhiteSpace($TrustedLanCidr) -or -not [System.Net.IPAddress]::TryParse($relay.DnsSafeHost, [ref]$literalAddress)) {
+        Stop-Install 'LAN HTTP requires -AllowLanHttp, -TrustedLanCidr, and a literal IP origin'
+    }
+} else {
+    Stop-Install 'relay URL must use https:// or explicitly acknowledged trusted-LAN http://'
+}
 
 $repoDir = Split-Path -Parent $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $repoDir 'go.mod') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $repoDir 'cmd\punaro-adapter') -PathType Container)) {
+    Stop-Install 'run this installer from a complete Punaro source checkout'
+}
+try { Get-Command 'go' -CommandType Application -ErrorAction Stop | Out-Null } catch { Stop-Install 'Go is required to build the adapter from this checkout' }
+$validationArguments = @('run', './cmd/punaro-adapter', 'validate-relay-transport', '--relay-url', $RelayUrl)
+if ($AllowLanHttp) { $validationArguments += @('--allow-lan-http', '--trusted-lan-cidr', $TrustedLanCidr) }
+Push-Location -LiteralPath $repoDir
+try {
+    $validation = Invoke-NativeProgramRaw -Program 'go' -Arguments $validationArguments
+} finally {
+    Pop-Location
+}
+if ($validation.ExitCode -ne 0) { Stop-Install 'relay transport policy is invalid' }
+
 $root = Join-Path $env:LOCALAPPDATA 'Punaro'
 $binDir = Join-Path $root 'bin'
 $configDir = Join-Path $root 'config'
@@ -179,9 +209,10 @@ if (Test-Path -LiteralPath $keyFile) {
     Protect-PunaroPath -Path $keyFile
 }
 
-$expected = @{ PUNARO_ADAPTER_RELAY_URL = $RelayUrl; PUNARO_MACHINE_ID = $MachineId; PUNARO_MACHINE_PRIVATE_KEY_FILE = $keyFile; PUNARO_ATTACHED_GROUP = $AttachedGroup; PUNARO_ADAPTER_DATA_DIR = $stateDir; PUNARO_MAILBOX_STATE_DIR = $MailboxStateDir; PUNARO_AGENT_MAILBOX_BIN = $mailbox }
+$expected = @{ PUNARO_ADAPTER_RELAY_URL = $RelayUrl; PUNARO_MACHINE_ID = $MachineId; PUNARO_MACHINE_PRIVATE_KEY_FILE = $keyFile; PUNARO_ATTACHED_GROUP = $AttachedGroup; PUNARO_ADAPTER_DATA_DIR = $stateDir; PUNARO_MAILBOX_STATE_DIR = $MailboxStateDir; PUNARO_AGENT_MAILBOX_BIN = $mailbox; PUNARO_ADAPTER_ALLOW_LAN_HTTP = $AllowLanHttp.ToString().ToLowerInvariant(); PUNARO_ADAPTER_TRUSTED_LAN_CIDR = [string]$TrustedLanCidr }
+$missingDefaults = @{ PUNARO_ADAPTER_ALLOW_LAN_HTTP = 'false'; PUNARO_ADAPTER_TRUSTED_LAN_CIDR = '' }
 if (Test-Path -LiteralPath $configFile) {
-    Assert-Configuration -Path $configFile -Expected $expected
+    Assert-Configuration -Path $configFile -Expected $expected -MissingDefaults $missingDefaults
 } else {
     $config = @(
         '# Created by Punaro. Keep this current-user-only file out of source control and backups.',
@@ -193,6 +224,8 @@ if (Test-Path -LiteralPath $configFile) {
         "PUNARO_MAILBOX_STATE_DIR=$MailboxStateDir",
         'PUNARO_ADAPTER_POLL_INTERVAL=30s',
         "PUNARO_AGENT_MAILBOX_BIN=$mailbox",
+        "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$($AllowLanHttp.ToString().ToLowerInvariant())",
+        "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$TrustedLanCidr",
         '',
         '# Add this machine''s distinct Cloudflare Access client ID and secret here with a secret manager or editor.',
         '# Do not pass them as installer arguments or reuse another machine''s token.'

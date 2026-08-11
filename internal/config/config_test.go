@@ -325,7 +325,7 @@ func TestLoadRequiresDistinctLoopbackHealthListener(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsLegacyRoutesOnNonLoopbackDeviceIngress(t *testing.T) {
+func TestLoadAcceptsSignedRelayOnExplicitTrustedLANDeviceIngress(t *testing.T) {
 	t.Setenv("PUNARO_POSTGRES_ENABLED", "true")
 	t.Setenv("PUNARO_POSTGRES_DSN_FILE", "/run/secrets/punaro-app-dsn")
 	t.Setenv("PUNARO_DEVICE_AUTH_ENABLED", "true")
@@ -335,8 +335,10 @@ func TestLoadRejectsLegacyRoutesOnNonLoopbackDeviceIngress(t *testing.T) {
 	t.Setenv("PUNARO_TRUSTED_LAN_HTTP", "true")
 	t.Setenv("PUNARO_RELAY_ENABLED", "true")
 	t.Setenv("PUNARO_RELAY_MACHINES_JSON", `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`)
-	if _, err := Load(""); err == nil {
-		t.Fatal("non-loopback device ingress exposed legacy relay routes")
+	t.Setenv("PUNARO_RELAY_STORE", "postgres")
+	config, err := Load("")
+	if err != nil || !config.RelayEnabled || config.RelayStore != "postgres" || config.IngressMode != "lan" {
+		t.Fatalf("trusted-LAN relay config=%#v err=%v", config, err)
 	}
 }
 

@@ -449,13 +449,16 @@ punaro init ... --mode lan --listen-addr 192.168.50.4:8080 \
   --trusted-lan-cidr 192.168.50.0/24 --allow-lan-http
 ```
 
-A non-loopback trusted-LAN listener is valid only for the two bounded device
-routes added by M-5. Configuration fails closed if legacy relay, directory,
-permit, or attachment routes are enabled on that process. Those surfaces stay
-loopback-only until their separately reviewed public runtime milestone. Health
-and readiness are mounted on the separate `127.0.0.1:8081` listener by default;
-override it only with `--health-listen-addr` naming another distinct concrete
-loopback address.
+A non-loopback trusted-LAN listener admits the bounded device routes and may
+also host the signed relay when initialization explicitly supplies a protected
+`--relay-machines-file`. That exception requires the complete device-auth and
+trusted-LAN policy: Punaro verifies relay signatures and enrolled membership,
+then applies the CIDR to the observed TCP peer without trusting forwarded
+headers. It is not a general public-runtime exception. Directory, permit, and
+attachment surfaces remain subject to their separately reviewed activation and
+authorization boundaries. Health and readiness are mounted on the separate
+`127.0.0.1:8081` listener by default; override it only with
+`--health-listen-addr` naming another distinct concrete loopback address.
 
 Fresh initialization requires the application-role view to be pristine,
 migrates through the owner role, then reopens both roles and proves their
@@ -735,8 +738,10 @@ non-symlink parent directories, owned by the current user, have no group/other
 permissions, and have exactly one hard link. On Windows it must have one
 protected FullControl ACE for the current user and no shared ACEs, and neither
 the credential nor any parent may be a reparse point. The CLI accepts an
-explicit HTTPS `--origin` and `--credential-file`, and the bearer credential
-value is never stored by the client.
+explicit HTTPS `--origin` and `--credential-file`, or an explicit literal-IP
+trusted-LAN HTTP origin with both `--allow-lan-http` and
+`--trusted-lan-cidr`. The bearer credential value is never stored by the
+client.
 
 M-17C2 adds a protected local profile for convenience. Create it only with an
 absolute target path:
@@ -750,11 +755,16 @@ punaro-memory profile-write \
 ```
 
 The profile is an atomically replaced `0600` JSON file containing only
-non-secret defaults: origin, credential-file path, and optional project UUID.
+non-secret defaults: origin, credential-file path, optional project UUID, and,
+for a version-2 LAN profile, the explicit LAN acknowledgement and CIDR. Use the
+same `--allow-lan-http` and `--trusted-lan-cidr` flags accepted by the client
+installers; missing, partial, DNS-based, public, or out-of-CIDR policies are
+rejected before a request is sent. HTTPS profiles remain version 1.
 On Windows the binary writes and verifies the equivalent exclusive current-user
 DACL before reading it; reparse points, shared ACLs, and replacement races are
 rejected. Normal commands may pass `--profile`; explicit `--origin`, `--credential-file`,
-and `--project` flags override the profile defaults for that invocation.
+and `--project` flags override the profile defaults for that invocation. The
+LAN transport disables ambient proxies and redirects.
 
 Pass an explicit `--project` UUID to project-scoped commands. `resolve` accepts
 only an explicit `--kind` and `--locator`; it discovers existing authorized

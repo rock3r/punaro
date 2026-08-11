@@ -17,6 +17,7 @@ func TestPolicyValidationFailsClosed(t *testing.T) {
 		{name: "lan wildcard", policy: Policy{Mode: LAN, ListenAddr: "0.0.0.0:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}},
 		{name: "lan public bind", policy: Policy{Mode: LAN, ListenAddr: "8.8.8.8:8080", TrustedLAN: "8.8.8.0/24", AllowPlaintext: true}},
 		{name: "lan public network", policy: Policy{Mode: LAN, ListenAddr: "192.168.1.4:8080", TrustedLAN: "8.8.8.0/24", AllowPlaintext: true}},
+		{name: "lan noncanonical network", policy: Policy{Mode: LAN, ListenAddr: "192.168.1.4:8080", TrustedLAN: "192.168.1.4/24", AllowPlaintext: true}},
 		{name: "lan plaintext not explicit", policy: Policy{Mode: LAN, ListenAddr: "192.168.1.4:8080", TrustedLAN: "192.168.1.0/24"}},
 		{name: "zero port", policy: Policy{Mode: Internet, ListenAddr: "127.0.0.1:0", PublicURL: "https://punaro.example"}},
 		{name: "service port", policy: Policy{Mode: Internet, ListenAddr: "127.0.0.1:http", PublicURL: "https://punaro.example"}},

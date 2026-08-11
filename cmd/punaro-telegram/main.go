@@ -20,21 +20,23 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/adapter"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/telegram"
 )
 
 const defaultTelegramAPIURL = "https://api.telegram.org"
 
 type config struct {
-	relayURL      string
-	machineID     string
-	privateKey    ed25519.PrivateKey
-	botToken      string
-	allowedUserID int64
-	endpoint      string
-	stateDir      string
-	apiURL        string
-	accessToken   adapter.AccessServiceToken
+	relayURL        string
+	machineID       string
+	privateKey      ed25519.PrivateKey
+	botToken        string
+	allowedUserID   int64
+	endpoint        string
+	stateDir        string
+	apiURL          string
+	accessToken     adapter.AccessServiceToken
+	transportPolicy clienttransport.Policy
 }
 
 type routeRequest struct {
@@ -101,7 +103,7 @@ func run() error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
-	relayClient, err := adapter.NewHTTPRelayClient(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken)
+	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
 	if err != nil {
 		return err
 	}
@@ -189,6 +191,14 @@ func loadConfig() (config, error) {
 	if (cfg.accessToken.ClientID == "") != (cfg.accessToken.ClientSecret == "") {
 		return config{}, fmt.Errorf("both PUNARO_CF_ACCESS_CLIENT_ID and PUNARO_CF_ACCESS_CLIENT_SECRET are required together")
 	}
+	allowLANHTTP, err := parseLANHTTP(strings.TrimSpace(os.Getenv("PUNARO_ADAPTER_ALLOW_LAN_HTTP")))
+	if err != nil {
+		return config{}, err
+	}
+	cfg.transportPolicy = clienttransport.Policy{AllowLANHTTP: allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(os.Getenv("PUNARO_ADAPTER_TRUSTED_LAN_CIDR"))}
+	if _, err := clienttransport.ValidateOrigin(cfg.relayURL, cfg.transportPolicy); err != nil {
+		return config{}, fmt.Errorf("telegram relay transport policy is invalid")
+	}
 	allowedUserID, err := strconv.ParseInt(strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ALLOWED_USER_ID")), 10, 64)
 	if err != nil || allowedUserID == 0 {
 		return config{}, fmt.Errorf("PUNARO_TELEGRAM_ALLOWED_USER_ID must be a non-zero integer")
@@ -209,6 +219,17 @@ func loadConfig() (config, error) {
 	}
 	cfg.stateDir = absolute
 	return cfg, nil
+}
+
+func parseLANHTTP(raw string) (bool, error) {
+	switch raw {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, fmt.Errorf("PUNARO_ADAPTER_ALLOW_LAN_HTTP must be true or false")
+	}
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {

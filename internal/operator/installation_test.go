@@ -220,17 +220,33 @@ func TestCheckPathsRejectsAttachmentDarkLegacyTemplate(t *testing.T) {
 	}
 }
 
-func TestInitRejectsRelayAuthorityWithLANListenerBeforeBootstrap(t *testing.T) {
+func TestInitAcceptsRelayAuthorityWithExplicitTrustedLANListener(t *testing.T) {
 	options := validInitOptions(t)
 	options.RelayEnabled = true
 	options.RelayMachinesJSON = testRelayMachinesJSON
 	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}
 	called := false
+	installation, err := Init(context.Background(), options, func(_ context.Context, _, name string) (punaropostgres.Principal, error) {
+		called = true
+		return punaropostgres.Principal{ID: "11111111-1111-4111-8111-111111111111", DisplayName: name}, nil
+	})
+	if err != nil || !called || !installation.RelayEnabled || installation.Ingress.Mode != ingress.LAN {
+		t.Fatalf("LAN relay authority installation=%#v err=%v bootstrap=%t", installation, err, called)
+	}
+}
+
+func TestInitRejectsNoncanonicalTrustedLANBeforeBootstrap(t *testing.T) {
+	options := validInitOptions(t)
+	options.Ingress = ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.10:8080", TrustedLAN: "192.168.1.10/24", AllowPlaintext: true}
+	called := false
 	if _, err := Init(context.Background(), options, func(context.Context, string, string) (punaropostgres.Principal, error) {
 		called = true
 		return punaropostgres.Principal{}, nil
 	}); err == nil || called {
-		t.Fatalf("LAN relay authority err=%v bootstrap=%t", err, called)
+		t.Fatalf("noncanonical trusted LAN reached bootstrap: err=%v called=%t", err, called)
+	}
+	if _, err := os.Stat(options.Directory); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("noncanonical trusted LAN created installation state: %v", err)
 	}
 }
 

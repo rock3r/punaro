@@ -16,7 +16,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
@@ -52,6 +52,18 @@ try {
         $global:punaroRegisteredAction = $Action
         return [pscustomobject]@{}
     }
+
+    $invalidLocalAppData = Join-Path $fixture 'invalid-localappdata'
+    $env:LOCALAPPDATA = $invalidLocalAppData
+    $invalidPolicyBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'http://192.168.2.4:8080' -MachineId 'invalid-lan-client' -AgentMailboxBin $mailbox -AllowLanHttp -TrustedLanCidr '192.168.1.0/24'
+    } catch {
+        if ($_.Exception.Message.Contains('relay transport policy is invalid')) { $invalidPolicyBlocked = $true } else { throw }
+    }
+    if (-not $invalidPolicyBlocked) { throw 'Windows client installer accepted an invalid complete trusted-LAN policy' }
+    if (Test-Path -LiteralPath (Join-Path $invalidLocalAppData 'Punaro')) { throw 'invalid trusted-LAN policy created Windows installation artifacts' }
+    $env:LOCALAPPDATA = Join-Path $fixture 'localappdata'
 
     Push-Location -LiteralPath $fixture
     try {
@@ -89,6 +101,11 @@ exit /b 0
     [System.IO.File]::WriteAllText($mailbox, $existingGroupMailbox, [System.Text.Encoding]::ASCII)
     & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer was not idempotent' }
+    $adapterEnvironment = Join-Path $root 'config\adapter.env'
+    $prePolicyProfile = @([System.IO.File]::ReadAllLines($adapterEnvironment) | Where-Object { $_ -notmatch '^PUNARO_ADAPTER_(ALLOW_LAN_HTTP|TRUSTED_LAN_CIDR)=' })
+    [System.IO.File]::WriteAllLines($adapterEnvironment, $prePolicyProfile, [System.Text.Encoding]::UTF8)
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer rejected a safe pre-policy HTTPS profile' }
     [System.IO.File]::WriteAllText((Join-Path $root 'bin\punaro-attachment.exe'), 'legacy', [System.Text.Encoding]::ASCII)
     $legacyBlocked = $false
     try {

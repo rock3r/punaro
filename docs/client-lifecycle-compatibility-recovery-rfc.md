@@ -7,8 +7,11 @@ updates to `DESIGN.md`, tests, release gates, and operator documentation.
 Implementation is intentionally incremental. Database schema 44 and the first
 server-side bearer-client lifecycle sub-slice implement authoritative client
 records, derived endpoint namespaces, owner inventory/revocation, and narrow
-self-revocation. Supported invitation consumption, exact legacy authority
-import, protocol negotiation, updates, and recovery remain outstanding.
+self-revocation. Supported invitation consumption and crash-safe client
+credential persistence are implemented. The explicit trusted-LAN profile now
+binds plaintext permission and a private/link-local CIDR independently on the
+server and native relay clients. Exact legacy authority import, protocol
+negotiation, signed updates, and recovery remain outstanding.
 
 In this RFC, **gateway** means the central Punaro installation and `punarod`
 service. The optional Telegram bridge remains a separately enrolled client.

@@ -115,13 +115,18 @@ CAS operation. PostgreSQL remains authoritative for capability checks,
 idempotency, atomic proposal application, secret rejection, and permanent
 read-only project aliases. The native local memory client now exists as an
 independently reviewed slice. `punaro-memory` binds each command to a fixed
-HTTPS origin and protected device credential file. Operators may create an
+origin and protected device credential file. The default remains HTTPS; an
+HTTP origin is accepted only when it is a literal private or link-local IP and
+the operator supplies both an explicit LAN acknowledgement and a containing
+CIDR. Operators may create an
 explicit local profile, but it is only a non-secret convenience contract:
 versioned JSON containing origin, credential-file path, and optional project
-UUID. The profile never stores the bearer credential value. Profile files are
+UUID. A version-2 LAN profile additionally records the acknowledgement and
+CIDR; HTTPS profiles remain version 1. The profile never stores the bearer
+credential value. Profile files are
 atomically replaced, owner-only regular files under trusted non-writable,
 non-symlink parent directories. Loading revalidates the path, owner-only file
-state, strict schema, fixed-HTTPS origin, absolute credential path, and
+state, strict schema, origin transport policy, absolute credential path, and
 optional project UUID before any request can use the defaults. Explicit CLI
 flags override profile defaults for the current invocation. The same binary
 also has a local stdio MCP mode, `punaro-memory mcp`, that loads the protected
@@ -251,7 +256,10 @@ client recovery store and a server migration/parity source until cutover. The
 current SQLite/systemd deployment remains an alpha compatibility path while
 the staged migration is implemented; it is not the target production shape.
 Internet ingress always uses TLS. An explicitly enabled trusted-LAN HTTP mode
-may accept only validated private or link-local bind and source addresses.
+may accept only validated private or link-local bind and source addresses. A
+native client independently opts into that plaintext boundary with the same
+kind of containing CIDR; the origin must use a literal address, and client
+transports disable ambient proxies and redirects.
 
 ## Identities and authorization
 
@@ -1276,8 +1284,9 @@ closure, key retirement, credential rotation/revocation, principal disablement,
 mapping removal, timeout, or database failure closes the socket.
 
 Every native client records its non-secret transition relationship in a
-versioned private local sidecar: version, canonical fixed HTTPS origin, opaque
-client-generated enrollment binding, and, only during a mailbox migration, the exact
+versioned private local sidecar: version, canonical fixed origin, its explicit
+trusted-LAN plaintext policy when applicable, opaque client-generated
+enrollment binding, and, only during a mailbox migration, the exact
 legacy machine ID. Device credentials, enrollment codes, private keys, Access
 tokens, project grants, endpoint aliases, and mailbox state are never fields in
 that record. The adapter accepts the sidecar only when its matching protected
@@ -1290,8 +1299,9 @@ platform-specific sidecar creation belong to the client onboarding flow; the
 owner-controlled server cutover remains the irreversible authority boundary.
 
 The supported onboarding client is `punaro-enroll`. `prepare` creates a
-private current-user state directory and records only the canonical HTTPS
-origin plus a fresh opaque binding in the versioned non-secret sidecar. It
+private current-user state directory and records only the canonical origin,
+an explicit containing CIDR for trusted-LAN plaintext when selected, and a
+fresh opaque binding in the versioned non-secret sidecar. It
 prints that public binding for the server owner to use in the exact
 least-privilege `trusted-agent` grant preview. `redeem` reads the server's
 short-lived enrollment JSON only from a protected local file, requires its
@@ -1413,8 +1423,10 @@ an observed peer in that CIDR. Wildcard/public binds and peers fail closed;
 forwarded headers never establish TLS or source trust. The public surface added
 here is limited to strict, bounded enrollment redemption and a
 bearer-authenticated session check. PostgreSQL remains dark for mail and
-project identity APIs. A non-loopback device listener cannot be combined with
-legacy relay, directory, permit, or attachment routes; those remain loopback-only.
+project identity APIs. The signed relay surface may share a trusted-LAN
+listener only when its static machine authority is explicitly configured; it
+uses the observed peer policy before signature authentication. Directory,
+permit, and attachment routes remain loopback-only.
 Health and readiness use a distinct concrete loopback-only listener and are
 never mounted on the device/legacy listener.
 

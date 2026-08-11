@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/rock3r/punaro/internal/config"
+	"github.com/rock3r/punaro/internal/ingress"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/trustedattachment"
 )
@@ -77,6 +78,32 @@ func TestDeviceSelfRevokeRouteWinsOverRelayCatchAll(t *testing.T) {
 	mux.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent {
 		t.Fatalf("self-revoke route status=%d, want device handler status", response.Code)
+	}
+}
+
+func TestTrustedLANRelayAdmissionUsesObservedPeerNotForwardedHeaders(t *testing.T) {
+	policy := &ingress.Policy{Mode: ingress.LAN, ListenAddr: "192.168.1.4:8080", TrustedLAN: "192.168.1.0/24", AllowPlaintext: true}
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	handler := admitRelayTransport(policy, http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	allowed := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://192.168.1.4:8080/v1/messages", nil)
+	allowed.RemoteAddr = "192.168.1.20:40000"
+	allowedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(allowedResponse, allowed)
+	if allowedResponse.Code != http.StatusNoContent {
+		t.Fatalf("trusted peer status=%d", allowedResponse.Code)
+	}
+	denied := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "http://192.168.1.4:8080/v1/messages", nil)
+	denied.RemoteAddr = "203.0.113.20:40000"
+	denied.Header.Set("X-Forwarded-For", "192.168.1.20")
+	denied.Header.Set("X-Forwarded-Proto", "https")
+	deniedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deniedResponse, denied)
+	if deniedResponse.Code != http.StatusForbidden {
+		t.Fatalf("untrusted peer status=%d", deniedResponse.Code)
 	}
 }
 

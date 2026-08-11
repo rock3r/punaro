@@ -13,12 +13,18 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/relay"
 	"golang.org/x/net/idna"
 )
 
 // Version is the current compatible client identity state schema.
 const Version = 1
+
+// LANVersion adds the explicit client-side plaintext acknowledgement and
+// pinned CIDR required for a trusted-LAN origin. Version one remains the
+// canonical HTTPS identity shape.
+const LANVersion = 2
 
 var (
 	// ErrInvalidState reports malformed, unsafe, or unsupported state data.
@@ -34,10 +40,13 @@ type State struct {
 	Origin          string
 	ClientBinding   string
 	LegacyMachineID string
+	AllowLANHTTP    bool
+	TrustedLANCIDR  string
 }
 
-// Parse accepts exactly the current schema version and rejects ambiguous JSON
-// before any client uses its local routing or migration relationship.
+// Parse accepts only the defined HTTPS and trusted-LAN schema versions and
+// rejects ambiguous JSON before any client uses its local routing or migration
+// relationship.
 func Parse(raw []byte) (State, error) {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	token, err := decoder.Token()
@@ -51,7 +60,7 @@ func Parse(raw []byte) (State, error) {
 			return State{}, ErrInvalidState
 		}
 		key, ok := name.(string)
-		if !ok || (key != "version" && key != "origin" && key != "client_binding" && key != "legacy_machine_id") {
+		if !ok || (key != "version" && key != "origin" && key != "client_binding" && key != "legacy_machine_id" && key != "allow_lan_http" && key != "trusted_lan_cidr") {
 			return State{}, ErrInvalidState
 		}
 		if _, duplicate := fields[key]; duplicate {
@@ -73,12 +82,25 @@ func Parse(raw []byte) (State, error) {
 	if json.Unmarshal(fields["version"], &state.Version) != nil || json.Unmarshal(fields["origin"], &state.Origin) != nil || json.Unmarshal(fields["client_binding"], &state.ClientBinding) != nil {
 		return State{}, ErrInvalidState
 	}
+	if state.Version == Version && (fields["allow_lan_http"] != nil || fields["trusted_lan_cidr"] != nil) {
+		return State{}, ErrInvalidState
+	}
 	if rawMachine, present := fields["legacy_machine_id"]; present {
 		var machine string
 		if json.Unmarshal(rawMachine, &machine) != nil || !validLegacyMachineID(machine) {
 			return State{}, ErrInvalidState
 		}
 		state.LegacyMachineID = machine
+	}
+	if rawAllow, present := fields["allow_lan_http"]; present {
+		if json.Unmarshal(rawAllow, &state.AllowLANHTTP) != nil {
+			return State{}, ErrInvalidState
+		}
+	}
+	if rawCIDR, present := fields["trusted_lan_cidr"]; present {
+		if json.Unmarshal(rawCIDR, &state.TrustedLANCIDR) != nil {
+			return State{}, ErrInvalidState
+		}
 	}
 	if err := state.validate(); err != nil {
 		return State{}, ErrInvalidState
@@ -96,13 +118,15 @@ func (s State) Encode() ([]byte, error) {
 		Origin          string `json:"origin"`
 		ClientBinding   string `json:"client_binding"`
 		LegacyMachineID string `json:"legacy_machine_id,omitempty"`
-	}{Version: s.Version, Origin: s.Origin, ClientBinding: s.ClientBinding, LegacyMachineID: s.LegacyMachineID})
+		AllowLANHTTP    bool   `json:"allow_lan_http,omitempty"`
+		TrustedLANCIDR  string `json:"trusted_lan_cidr,omitempty"`
+	}{Version: s.Version, Origin: s.Origin, ClientBinding: s.ClientBinding, LegacyMachineID: s.LegacyMachineID, AllowLANHTTP: s.AllowLANHTTP, TrustedLANCIDR: s.TrustedLANCIDR})
 }
 
 // Match proves the supplied non-secret local configuration is for exactly this
 // identity. It deliberately exposes no stored values in mismatch errors.
 func (s State) Match(origin, clientBinding, legacyMachineID string) error {
-	canonicalOrigin, ok := canonicalOrigin(origin)
+	canonicalOrigin, ok := canonicalOriginForPolicy(origin, s.TransportPolicy())
 	if s.validate() != nil || !ok || !validBinding(clientBinding) || (legacyMachineID != "" && !validLegacyMachineID(legacyMachineID)) || s.Origin != canonicalOrigin || s.ClientBinding != clientBinding || (s.LegacyMachineID != "" && s.LegacyMachineID != legacyMachineID) {
 		return ErrStateMismatch
 	}
@@ -120,10 +144,32 @@ func (s State) MatchLegacyAdapter(origin, clientBinding, machineID string) error
 }
 
 func (s State) validate() error {
-	if s.Version != Version || !validOrigin(s.Origin) || !validBinding(s.ClientBinding) || (s.LegacyMachineID != "" && !validLegacyMachineID(s.LegacyMachineID)) {
+	if !validBinding(s.ClientBinding) || (s.LegacyMachineID != "" && !validLegacyMachineID(s.LegacyMachineID)) {
+		return ErrInvalidState
+	}
+	switch s.Version {
+	case Version:
+		if s.AllowLANHTTP || s.TrustedLANCIDR != "" || !validOrigin(s.Origin) {
+			return ErrInvalidState
+		}
+	case LANVersion:
+		if !s.AllowLANHTTP || s.TrustedLANCIDR == "" {
+			return ErrInvalidState
+		}
+		canonical, ok := canonicalOriginForPolicy(s.Origin, s.TransportPolicy())
+		if !ok || canonical != s.Origin {
+			return ErrInvalidState
+		}
+	default:
 		return ErrInvalidState
 	}
 	return nil
+}
+
+// TransportPolicy returns the non-secret LAN transport boundary bound into
+// this identity. HTTPS version-one identities return the zero policy.
+func (s State) TransportPolicy() clienttransport.Policy {
+	return clienttransport.Policy{AllowLANHTTP: s.AllowLANHTTP, TrustedLANCIDR: s.TrustedLANCIDR}
 }
 
 func validOrigin(raw string) bool {
@@ -165,6 +211,23 @@ func canonicalOrigin(raw string) (string, bool) {
 // native client is allowed to contact. Callers must persist the returned value
 // before accepting credentials or network input.
 func CanonicalOrigin(raw string) (string, bool) { return canonicalOrigin(raw) }
+
+// CanonicalOriginWithPolicy validates the explicit trusted-LAN HTTP exception
+// used only by version-two identity records.
+func CanonicalOriginWithPolicy(raw string, policy clienttransport.Policy) (string, bool) {
+	return canonicalOriginForPolicy(raw, policy)
+}
+
+func canonicalOriginForPolicy(raw string, policy clienttransport.Policy) (string, bool) {
+	if !policy.AllowLANHTTP && policy.TrustedLANCIDR == "" {
+		return canonicalOrigin(raw)
+	}
+	parsed, err := clienttransport.ValidateOrigin(raw, policy)
+	if err != nil {
+		return "", false
+	}
+	return parsed.String(), true
+}
 
 func canonicalHost(hostname string) string {
 	if strings.Contains(hostname, ":") {

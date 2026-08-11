@@ -18,6 +18,11 @@ trusted attachment storage, memory APIs, ingress, and lifecycle recovery
 together. `scripts/install-server.sh` below is retained only for historical
 alpha relay deployments; do not use it for a new unified server.
 
+For direct private-network operation before Internet ingress is configured,
+follow the separate [trusted-LAN deployment profile](trusted-lan-deployment.md).
+It requires explicit, matching server and client CIDR policy and documents the
+plaintext boundary.
+
 ## Historical alpha server installer (not for new unified servers)
 
 First collect the **public** client enrollment records into one JSON array on

@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clientidentity"
+	"github.com/rock3r/punaro/internal/clienttransport"
 )
 
 const (
@@ -128,10 +129,13 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(io.Discard)
 	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
 	stateDir := flags.String("state-dir", "", "absolute private enrollment state directory")
+	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
+	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *stateDir == "" {
 		return invalid(stderr)
 	}
-	canonical, ok := clientidentity.CanonicalOrigin(*origin)
+	policy := clienttransport.Policy{AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
+	canonical, ok := clientidentity.CanonicalOriginWithPolicy(*origin, policy)
 	if !ok || !safeStateDir(*stateDir) || ensurePrivateDir(*stateDir) != nil {
 		return enrollmentError(stderr, "state preparation failed", 2)
 	}
@@ -139,11 +143,15 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	state, err := loadIdentity(identityPath)
 	if errors.Is(err, os.ErrNotExist) {
 		binding := uuid.NewString()
-		state = clientidentity.State{Version: clientidentity.Version, Origin: canonical, ClientBinding: binding}
+		version := clientidentity.Version
+		if policy.AllowLANHTTP {
+			version = clientidentity.LANVersion
+		}
+		state = clientidentity.State{Version: version, Origin: canonical, ClientBinding: binding, AllowLANHTTP: policy.AllowLANHTTP, TrustedLANCIDR: policy.TrustedLANCIDR}
 		if err := writePrivateAtomicNew(identityPath, mustEncodeIdentity(state)); err != nil {
 			return enrollmentError(stderr, "state preparation failed", 2)
 		}
-	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" {
+	} else if err != nil || state.Match(canonical, state.ClientBinding, "") != nil || state.LegacyMachineID != "" || state.TransportPolicy() != policy {
 		return enrollmentError(stderr, "state preparation failed", 2)
 	}
 	if err := syncPrivateDirectory(*stateDir); err != nil {
@@ -231,7 +239,7 @@ func runRedeem(args []string, stdout, stderr io.Writer, recoveryOnly bool) int {
 	if err := syncPrivateDirectory(*stateDir); err != nil {
 		return enrollmentError(stderr, "enrollment recovery could not be made durable; retry this command", 1)
 	}
-	response, result := postRedemption(state.Origin, journal, accessToken)
+	response, result := postRedemption(state.Origin, journal, accessToken, state.TransportPolicy())
 	if result == redemptionRejected {
 		if err := removeJournalIfCurrent(journalPath, journal); err != nil {
 			return enrollmentError(stderr, "enrollment was rejected; remove the private recovery file before requesting a new enrollment", 1)
@@ -609,7 +617,7 @@ const (
 	redemptionSucceeded
 )
 
-func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken) (redemptionResponse, redemptionResult) {
+func postRedemption(origin string, journal redemptionJournal, accessToken adapter.AccessServiceToken, policy clienttransport.Policy) (redemptionResponse, redemptionResult) {
 	body, err := json.Marshal(redemptionRequest{EnrollmentID: journal.EnrollmentID, ClientBinding: journal.ClientBinding, Code: journal.Code, IdempotencyKey: journal.IdempotencyKey})
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
@@ -619,7 +627,7 @@ func postRedemption(origin string, journal redemptionJournal, accessToken adapte
 		return redemptionResponse{}, redemptionUnavailable
 	}
 	request.Header.Set("Content-Type", "application/json")
-	client, err := adapter.OpenAccessSession(context.Background(), origin, newEnrollmentHTTPClient(), accessToken)
+	client, err := adapter.OpenAccessSessionWithPolicy(context.Background(), origin, newEnrollmentHTTPClient(), accessToken, policy)
 	if err != nil {
 		return redemptionResponse{}, redemptionUnavailable
 	}
