@@ -244,6 +244,91 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	runLeasePageContract(t, backend, namespace, now)
 }
 
+// RunRoleTargeting proves the same targeted-role and compatible-broadcast
+// routing contract against every durable backend.
+func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	now := time.Date(2026, time.August, 10, 13, 0, 0, 0, time.UTC)
+	senderMachine, recipientMachine := namespace+"-sender", namespace+"-recipient"
+	senderEndpoint, recipientEndpoint := "agent/"+namespace+"/sender", "agent/"+namespace+"/recipient"
+	if err := backend.AdvertiseEndpoints(senderMachine, []string{senderEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(recipientMachine, []string{recipientEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	reviewerRole, implementerRole := "role/"+namespace+"/reviewer", "role/"+namespace+"/implementer"
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: senderMachine, CreatorEndpoint: senderEndpoint, IdempotencyKey: namespace + "-create", Now: now,
+		Members: []relay.Member{
+			{Endpoint: senderEndpoint, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: recipientEndpoint, Capabilities: relay.CapReceive},
+			{Role: reviewerRole, RoleMachineID: recipientMachine, Capabilities: relay.CapReceive},
+			{Role: implementerRole, RoleMachineID: recipientMachine, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []string{reviewerRole, implementerRole} {
+		if err := roleBackend.BindRoleToSession(recipientMachine, role, recipientEndpoint, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	targetedInput := relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: senderEndpoint, TargetRole: reviewerRole, Body: "targeted", IdempotencyKey: namespace + "-targeted", Now: now}
+	targeted, duplicate, err := backend.AppendMessage(targetedInput)
+	if err != nil || duplicate {
+		t.Fatalf("targeted message=%#v duplicate=%t err=%v", targeted, duplicate, err)
+	}
+	machines, err := backend.RecipientMachines(targeted.ID, now)
+	if err != nil || len(machines) != 1 || machines[0] != recipientMachine {
+		t.Fatalf("targeted recipient machines=%v err=%v", machines, err)
+	}
+	page, err := backend.LeaseDeliveries(recipientMachine, namespace+"-consumer", recipientEndpoint, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("targeted page=%#v err=%v", page, err)
+	}
+	if page.Deliveries[0].RecipientRole != reviewerRole {
+		t.Fatalf("targeted recipient role=%q want %q", page.Deliveries[0].RecipientRole, reviewerRole)
+	}
+	if err := backend.AckDelivery(recipientMachine, recipientEndpoint, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if cursor, err := backend.RecipientCursor(recipientMachine, recipientEndpoint, conversation.ID, now); err != nil || cursor != targeted.Sequence {
+		t.Fatalf("targeted recipient cursor=%d want=%d err=%v", cursor, targeted.Sequence, err)
+	}
+	changed := targetedInput
+	changed.TargetRole = implementerRole
+	if _, _, err := backend.AppendMessage(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed target retry err=%v", err)
+	}
+	missing := targetedInput
+	missing.IdempotencyKey = namespace + "-missing"
+	missing.TargetRole = "role/" + namespace + "/missing"
+	if _, _, err := backend.AppendMessage(missing); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("missing target role err=%v", err)
+	}
+	broadcast, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: senderMachine, FromEndpoint: senderEndpoint, Body: "broadcast", IdempotencyKey: namespace + "-broadcast", Now: now})
+	if err != nil || duplicate {
+		t.Fatalf("broadcast message=%#v duplicate=%t err=%v", broadcast, duplicate, err)
+	}
+	broadcastPage, err := backend.LeaseDeliveries(recipientMachine, namespace+"-consumer", recipientEndpoint, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(broadcastPage.Deliveries) != 3 {
+		t.Fatalf("broadcast page=%#v err=%v", broadcastPage, err)
+	}
+	roles := map[string]int{"": 0, reviewerRole: 0, implementerRole: 0}
+	for _, delivery := range broadcastPage.Deliveries {
+		roles[delivery.RecipientRole]++
+	}
+	if roles[""] != 1 || roles[reviewerRole] != 1 || roles[implementerRole] != 1 || len(roles) != 3 {
+		t.Fatalf("broadcast recipient roles=%v", roles)
+	}
+}
+
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
 	t.Helper()
 	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"

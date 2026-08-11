@@ -85,6 +85,73 @@ func (a *Administration) RegisterLegacyMachine(ctx context.Context, actorPrincip
 	return machine, nil
 }
 
+// RegisterPostCutoverLegacyMachine adds one Ed25519 machine only after the
+// mail authority is durably active in PostgreSQL. Exact retries return the
+// existing content-free inventory row; a changed label or retired key fails
+// closed. The global migration gate stays disabled: ResolveLegacyMachine
+// admits only a pending key registered under the active-cutover lock. The
+// caller must separately publish the same public key into the static relay
+// enrollment before the daemon can authenticate it.
+func (a *Administration) RegisterPostCutoverLegacyMachine(ctx context.Context, actorPrincipalID, label string, publicKey ed25519.PublicKey) (LegacyMachine, error) {
+	if !validOpaqueID(actorPrincipalID) || !validDisplayName(label) || len(publicKey) != ed25519.PublicKeySize {
+		return LegacyMachine{}, errors.New("invalid post-cutover legacy machine")
+	}
+	digest := sha256.Sum256(publicKey)
+	tx, err := beginMutation(ctx, a.db)
+	if err != nil {
+		return LegacyMachine{}, mutationStartError(err, "post-cutover legacy registration cannot start")
+	}
+	defer func() { _ = tx.Rollback() }()
+	if ok, err := lockInstallationOwner(ctx, tx, actorPrincipalID); err != nil || !ok {
+		return LegacyMachine{}, ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, mailCutoverLockKey); err != nil {
+		return LegacyMachine{}, errors.New("post-cutover legacy registration cannot be serialized with mail cutover")
+	}
+	var phase MailCutoverPhase
+	if err := tx.QueryRowContext(ctx, `SELECT phase FROM relay.mail_cutover_epochs WHERE phase IN ('importing','verified','active') FOR UPDATE`).Scan(&phase); err != nil || phase != MailCutoverActive {
+		return LegacyMachine{}, errors.New("post-cutover legacy registration requires active mail cutover")
+	}
+	if err := lockLegacyMutations(ctx, tx); err != nil {
+		return LegacyMachine{}, err
+	}
+	var existing LegacyMachine
+	err = tx.QueryRowContext(ctx, `SELECT machine.principal_id::text, principal.display_name, machine.state
+FROM auth.legacy_machines AS machine
+JOIN auth.principals AS principal ON principal.id = machine.principal_id
+WHERE machine.public_key_digest = $1 AND machine.public_key = $2`, digest[:], []byte(publicKey)).Scan(&existing.PrincipalID, &existing.Label, &existing.State)
+	if err == nil {
+		if existing.Label != label || existing.State == LegacyRetired {
+			return LegacyMachine{}, errors.New("post-cutover legacy registration conflicts with existing machine")
+		}
+		if err := tx.Commit(); err != nil {
+			return LegacyMachine{}, errors.New("post-cutover legacy registration retry could not commit")
+		}
+		return existing, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return LegacyMachine{}, errors.New("post-cutover legacy registration cannot inspect existing machine")
+	}
+	machine := LegacyMachine{Label: label, State: LegacyPending}
+	if err := tx.QueryRowContext(ctx, `INSERT INTO auth.principals (kind, display_name) VALUES ('legacy_machine', $1) RETURNING id::text`, label).Scan(&machine.PrincipalID); err != nil {
+		return LegacyMachine{}, errors.New("post-cutover legacy principal could not be created")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO auth.legacy_machines (principal_id, public_key, public_key_digest) VALUES ($1, $2, $3)`, machine.PrincipalID, []byte(publicKey), digest[:]); err != nil {
+		return LegacyMachine{}, errors.New("post-cutover legacy machine could not be registered")
+	}
+	control := &ControlTx{tx: tx}
+	if err := control.AppendAudit(ctx, AuditEvent{PrincipalID: actorPrincipalID, Action: AuditLegacyRegister, Outcome: AuditSucceeded, TargetKind: AuditTargetLegacyMachine, TargetID: machine.PrincipalID}); err != nil {
+		return LegacyMachine{}, err
+	}
+	if _, err := control.AdvanceChange(ctx); err != nil {
+		return LegacyMachine{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return LegacyMachine{}, errors.New("post-cutover legacy registration could not commit")
+	}
+	return machine, nil
+}
+
 // ResolveLegacyMachine maps a key only after the existing Ed25519 request
 // verifier has authenticated it. It never treats a friendly machine label as authority.
 func (d *Database) ResolveLegacyMachine(ctx context.Context, publicKey ed25519.PublicKey) (string, error) {
@@ -93,13 +160,16 @@ func (d *Database) ResolveLegacyMachine(ctx context.Context, publicKey ed25519.P
 	}
 	digest := sha256.Sum256(publicKey)
 	var principalID string
-	var enabled bool
-	err := d.db.QueryRowContext(ctx, `SELECT machine.principal_id::text, state.enabled
+	var admitted bool
+	err := d.db.QueryRowContext(ctx, `SELECT machine.principal_id::text,
+state.enabled OR (machine.state = 'pending' AND EXISTS (
+    SELECT 1 FROM relay.mail_cutover_epochs WHERE phase = 'active'
+))
 FROM auth.legacy_machines AS machine
 JOIN auth.principals AS principal ON principal.id = machine.principal_id
 CROSS JOIN auth.legacy_auth_state AS state
-WHERE machine.public_key_digest = $1 AND machine.public_key = $2 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:], []byte(publicKey)).Scan(&principalID, &enabled)
-	if err != nil || !enabled {
+WHERE machine.public_key_digest = $1 AND machine.public_key = $2 AND machine.state <> 'retired' AND principal.disabled_at IS NULL AND state.singleton`, digest[:], []byte(publicKey)).Scan(&principalID, &admitted)
+	if err != nil || !admitted {
 		return "", ErrUnauthenticated
 	}
 	return principalID, nil

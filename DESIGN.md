@@ -299,6 +299,18 @@ listing, and wake routing authorize an active role binding as well as an
 existing endpoint member, while legacy endpoint membership retains its current
 behavior unchanged.
 
+Message routing is explicit and server-authorized. Omitting `target_role`
+preserves broadcast delivery to every receiving endpoint and role member other
+than the sending endpoint. Supplying a non-empty `target_role` creates a
+delivery only for that receiving role membership; endpoint members and other
+roles receive nothing. The relay rejects an unknown or non-receiving role
+before allocating a message sequence or idempotency row. The target role is
+part of the sender's idempotency request hash, while an untargeted request keeps
+the pre-targeting broadcast hash so retries remain valid across upgrades.
+Every leased role delivery carries a server-derived `recipient_role`; the
+adapter preserves it in the inert mailbox envelope so two roles bound to one
+session remain distinguishable without interpreting the untrusted body.
+
 Each conversation has an explicit membership table with `send`, `receive`,
 and `admin` capabilities. Roles may use only those three capabilities;
 `invoke` is endpoint-only because a role has no stable process target. The
@@ -312,14 +324,14 @@ Cloudflare; revoking the machine credential stops it at Punaro. Store both in
 the OS keychain or a root-readable service secret file, never in an agent
 prompt, repository, or mailbox body.
 
-Some Cloudflare Access deployments establish a service-token session through
-an initial redirect. Before a signed adapter operation, the client may perform
-a payload-free session preflight that carries only the two Access headers. It
-may follow at most one HTTPS hop to a `*.cloudflareaccess.com` host and then
-only back to the exact relay origin; it requires an origin-scoped
-`CF_Authorization` cookie before proceeding. Signed request bodies, machine
-signatures, nonces, and idempotency keys are never replayed through this flow.
-All signed relay operations still reject redirects.
+Cloudflare Access Service Auth authenticates every protected request from that
+machine's service-token headers. Adapter and enrollment clients therefore send
+both headers on every protected request and never establish, retain, or replay
+a browser `CF_Authorization` cookie alongside them. Mixing those two identity
+mechanisms can be rejected by Access before the signed relay request reaches
+Punaro. Signed request bodies, machine signatures, nonces, and idempotency keys
+are never sent through an Access-session preflight. All signed relay operations
+still reject redirects.
 
 `punarod` validates Cloudflare Access JWTs itself (audience, issuer, expiry,
 not-before, and signature via cached JWKS) in addition to accepting traffic
@@ -802,7 +814,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
-| `POST` | `/v1/conversations/{id}/messages` | Append an authorized message. |
+| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
@@ -1233,8 +1245,10 @@ behind its explicit ingress transport policy. Credential caches
 and long-lived sessions revalidate within two seconds. The existing Ed25519
 relay remains active while its intended machines are durably inventoried as
 pending, migrated, or retired; the global legacy gate cannot close while any
-machine is pending. PostgreSQL remains dark for mail and SQLite routing is
-unchanged.
+machine is pending before cutover. After mail cutover is active, an
+owner-registered new machine is deliberately pending but is admitted by that
+active-cutover record rather than by reopening the migration-wide gate.
+PostgreSQL remains dark for mail and SQLite routing is unchanged.
 
 The dormant M-9 credential-transition bridge does not duplicate relay
 authority in PostgreSQL. A successful proof-bound exchange already records the
@@ -1246,11 +1260,14 @@ exactly the existing endpoint prefixes, exact endpoints, and attachment-device
 binding. Duplicate configured public keys fail startup. Ordinary device
 credentials, stale generations, retired mappings, and unavailable database
 state fail authentication without revealing which check failed. In the same
-mode every Ed25519 relay request consults the durable legacy gate after
-signature verification and before consuming its nonce; closing the gate blocks
-new legacy requests while migrated credentials remain usable. The switch is
-off by default and requires device auth plus the PostgreSQL relay, so this
-slice does not activate PostgreSQL mail authority or change the SQLite default.
+mode every Ed25519 relay request consults durable transition authority after
+signature verification and before consuming its nonce. The open legacy gate
+admits the pre-cutover migration inventory. Once mail cutover is active and
+that gate is closed, only a pending key added by the owner-only post-cutover
+registration transaction is admitted; migrated and retired legacy keys remain
+blocked while migrated credentials remain usable. The switch is off by default
+and requires device auth plus the PostgreSQL relay, so this slice does not
+activate PostgreSQL mail authority or change the SQLite default.
 Long-lived notification sockets retain only a non-secret generation/gate fence,
 not the bearer credential. A check starts every second with a one-second
 deadline in a dedicated loop; wake writes cannot delay it, and fence failure
@@ -1315,9 +1332,26 @@ marker-last before SQLite prepare, remains the canonical endpoint authority
 after cutover, and cannot be changed by a recovery retry. The complete static
 set can subsequently revoke any machine, including every machine via explicit
 `[]`; that restart-safe revocation fails closed. A later replacement may restore
-only a public key recorded in the durable cutover enrollment history, never a
-new key, so a temporary revocation does not strand a previously migrated
-machine. SQLite prepare fences
+only a public key recorded in the durable cutover enrollment history, so a
+temporary revocation does not strand a previously migrated machine. A new
+post-cutover machine uses the separate owner-only `punaro relay register`
+workflow. It accepts one protected installer-produced public enrollment object,
+holds the installation's host-local authority lock across local-state loading,
+active-cutover and legacy-gate registration, and marker-last publication, and
+commits an idempotent content-free PostgreSQL legacy-machine registration
+before extending the local known-key history and static relay enrollment. A
+concurrent cutover, configure, or register command fails before mutation and
+can retry exactly. A crash releases the lock and, because the database commit
+precedes local publication, can leave only a registered but unauthenticated
+key; the exact command safely
+retries, while a changed label, key, endpoint authority, non-owner caller,
+inactive cutover, or conflicting recovery fails closed. The transaction does
+not reopen the migration-wide legacy gate: under an active cutover, only its
+new pending key becomes eligible for Ed25519 request resolution. Migrated and
+retired keys stay blocked. The new key remains pending for an eventual
+proof-bound device-credential exchange. This workflow neither
+copies another machine's authority nor treats the public record, machine name,
+or device credential as authorization by itself. SQLite prepare fences
 old daemons and clears every lease holder while advancing fences. Staging is
 bounded to 128 rows per page and resumes from durable PostgreSQL checkpoints.
 Verification rejects any missing, extra, reordered, malformed, or changed row.

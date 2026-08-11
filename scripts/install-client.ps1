@@ -87,16 +87,40 @@ function Assert-Configuration([string]$Path, [hashtable]$Expected) {
     }
 }
 
+function Invoke-NativeProgramRaw([string]$Program, [string[]]$Arguments) {
+    # Windows PowerShell turns a native program's stderr into PowerShell error
+    # records. The installer must decide success from the native exit code so
+    # expected diagnostics (for example, "group already exists") can be
+    # handled by the idempotence path below.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $Program @Arguments
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    return [pscustomobject]@{ Output = $output; ExitCode = $exitCode }
+}
+
 function Build-PunaroBinary([string]$Package, [string]$Output) {
-    & go build -trimpath -buildvcs=true -o $Output $Package
-    if ($LASTEXITCODE -ne 0) { Stop-Install "could not build $Package" }
+    # `go build` discovers go.mod from the working directory, not from the
+    # package argument. Keep the installer usable when invoked by an absolute
+    # path from PowerShell's default directory.
+    Push-Location -LiteralPath $repoDir
+    try {
+        $result = Invoke-NativeProgramRaw -Program 'go' -Arguments @('build', '-trimpath', '-buildvcs=true', '-o', $Output, $Package)
+        if ($result.ExitCode -ne 0) { Stop-Install "could not build $Package" }
+    } finally {
+        Pop-Location
+    }
     Protect-PunaroPath -Path $Output
 }
 
 function Invoke-Program([string]$Program, [string[]]$Arguments, [string]$Description) {
-    $output = & $Program @Arguments
-    if ($LASTEXITCODE -ne 0) { Stop-Install "$Description failed" }
-    return (($output | ForEach-Object { [string]$_ }) -join "`n").Trim()
+    $result = Invoke-NativeProgramRaw -Program $Program -Arguments $Arguments
+    if ($result.ExitCode -ne 0) { Stop-Install "$Description failed" }
+    return (($result.Output | ForEach-Object { [string]$_ }) -join "`n").Trim()
 }
 
 if ($env:OS -ne 'Windows_NT') { Stop-Install 'Windows client installation must run on Windows' }
@@ -176,8 +200,8 @@ if (Test-Path -LiteralPath $configFile) {
     Write-NewPrivateText -Path $configFile -Text ($config + "`n")
 }
 
-& $mailbox '--state-dir' $MailboxStateDir 'group' 'create' '--group' $AttachedGroup
-if ($LASTEXITCODE -ne 0) {
+$groupCreate = Invoke-NativeProgramRaw -Program $mailbox -Arguments @('--state-dir', $MailboxStateDir, 'group', 'create', '--group', $AttachedGroup)
+if ($groupCreate.ExitCode -ne 0) {
     $groups = Invoke-Program -Program $mailbox -Arguments @('--state-dir', $MailboxStateDir, 'group', 'list', '--json') -Description 'attachment group lookup' | ConvertFrom-Json
     $groupAddresses = @($groups | ForEach-Object { $_.address })
     if ($groupAddresses -notcontains $AttachedGroup) { Stop-Install 'could not create the local Punaro attachment group' }

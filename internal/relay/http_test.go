@@ -100,6 +100,79 @@ func TestHTTPDurableMessageFlowRequiresSignedMachineRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPTargetRoleRoutesExclusivelyAndBroadcastRemainsCompatible(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "target-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "target-advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]},{"role":"role/reviewer","role_machine_id":"machine-b","capabilities":["receive"]},{"role":"role/implementer","role_machine_id":"machine-b","capabilities":["receive"]}]}`, "target-create", "target-create")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create status=%d body=%s", created.Code, created.Body.String())
+	}
+	for index, role := range []string{"role/reviewer", "role/implementer"} {
+		bound := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/roles/bindings", `{"role":"`+role+`","session_endpoint":"agent/b/session"}`, "target-bind-"+string(rune('a'+index)), "")
+		if bound.Code != http.StatusNoContent {
+			t.Fatalf("bind %s status=%d body=%s", role, bound.Code, bound.Body.String())
+		}
+	}
+	targeted := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"role/reviewer","body":"review this"}`, "target-send", "target-send")
+	if targeted.Code != http.StatusCreated {
+		t.Fatalf("targeted status=%d body=%s", targeted.Code, targeted.Body.String())
+	}
+	lease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"target-consumer"}`, "target-lease", "")
+	var targetedPage DeliveryLeasePage
+	if lease.Code != http.StatusOK || json.NewDecoder(lease.Body).Decode(&targetedPage) != nil || len(targetedPage.Deliveries) != 1 {
+		t.Fatalf("targeted lease status=%d page=%#v body=%s", lease.Code, targetedPage, lease.Body.String())
+	}
+	if targetedPage.Deliveries[0].RecipientRole != "role/reviewer" {
+		t.Fatalf("targeted lease recipient role=%q", targetedPage.Deliveries[0].RecipientRole)
+	}
+	if err := store.AckDelivery("machine-b", "agent/b/session", targetedPage.Deliveries[0].ID, targetedPage.Deliveries[0].LeaseToken, targetedPage.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	broadcast := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"broadcast"}`, "broadcast-send", "broadcast-send")
+	if broadcast.Code != http.StatusCreated {
+		t.Fatalf("broadcast status=%d body=%s", broadcast.Code, broadcast.Body.String())
+	}
+	broadcastLease := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"target-consumer"}`, "broadcast-lease", "")
+	var broadcastPage DeliveryLeasePage
+	if broadcastLease.Code != http.StatusOK || json.NewDecoder(broadcastLease.Body).Decode(&broadcastPage) != nil || len(broadcastPage.Deliveries) != 3 {
+		t.Fatalf("broadcast lease status=%d page=%#v body=%s", broadcastLease.Code, broadcastPage, broadcastLease.Body.String())
+	}
+	roles := map[string]int{"": 0, "role/reviewer": 0, "role/implementer": 0}
+	for _, delivery := range broadcastPage.Deliveries {
+		roles[delivery.RecipientRole]++
+	}
+	if roles[""] != 1 || roles["role/reviewer"] != 1 || roles["role/implementer"] != 1 || len(roles) != 3 {
+		t.Fatalf("broadcast recipient roles=%v", roles)
+	}
+	missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","target_role":"role/missing","body":"nobody"}`, "missing-target", "missing-target")
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("missing target status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}
+
 type principalEndpointRecordingBackend struct {
 	Backend
 	plainCalls     int

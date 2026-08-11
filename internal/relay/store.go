@@ -126,6 +126,7 @@ type Message struct {
 type Delivery struct {
 	ID                string    `json:"id"`
 	RecipientEndpoint string    `json:"recipient_endpoint"`
+	RecipientRole     string    `json:"recipient_role,omitempty"`
 	Message           Message   `json:"message"`
 	LeaseToken        string    `json:"lease_token"`
 	LeaseGeneration   int64     `json:"lease_generation"`
@@ -148,6 +149,7 @@ type AppendInput struct {
 	CredentialLookupID   string
 	CredentialGeneration int64
 	FromEndpoint         string
+	TargetRole           string
 	Body                 string
 	ArtifactIDs          []string
 	IdempotencyKey       string
@@ -1059,7 +1061,7 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || (input.TargetRole != "" && !ValidRole(input.TargetRole)) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
 	}
 	if len(input.Body) > maxMessageBodyBytes {
@@ -1080,6 +1082,15 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	if capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
+	}
+	if input.TargetRole != "" {
+		var allowed bool
+		if err := tx.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM role_memberships WHERE conversation_id = ? AND role = ? AND (capabilities & ?) != 0)", input.ConversationID, input.TargetRole, CapReceive).Scan(&allowed); err != nil {
+			return Message{}, false, fmt.Errorf("authorize target role: %w", err)
+		}
+		if !allowed {
+			return Message{}, false, ErrForbidden
+		}
 	}
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT message_id, request_hash FROM idempotency WHERE machine_id = ? AND key = ?", input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -1125,27 +1136,39 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	for _, endpoint := range recipients {
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
-			return Message{}, false, fmt.Errorf("create delivery: %w", err)
+		if input.TargetRole == "" {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, endpoint); err != nil {
+				return Message{}, false, fmt.Errorf("create delivery: %w", err)
+			}
+		} else if err := advanceRecipientCursor(tx, endpoint, input.ConversationID); err != nil {
+			return Message{}, false, err
 		}
 	}
 	roleRows, err := tx.QueryContext(context.Background(), "SELECT role FROM role_memberships WHERE conversation_id = ? AND (capabilities & ?) != 0", input.ConversationID, CapReceive)
 	if err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
 	}
+	var roles []string
 	for roleRows.Next() {
 		var role string
 		if err := roleRows.Scan(&role); err != nil {
 			_ = roleRows.Close()
 			return Message{}, false, err
 		}
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, roleRecipient(role)); err != nil {
-			_ = roleRows.Close()
-			return Message{}, false, fmt.Errorf("create durable role delivery: %w", err)
-		}
+		roles = append(roles, role)
 	}
 	if err := roleRows.Close(); err != nil {
 		return Message{}, false, fmt.Errorf("find durable role recipients: %w", err)
+	}
+	for _, role := range roles {
+		recipient := roleRecipient(role)
+		if input.TargetRole == "" || role == input.TargetRole {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)", uuid.NewString(), message.ID, recipient); err != nil {
+				return Message{}, false, fmt.Errorf("create durable role delivery: %w", err)
+			}
+		} else if err := advanceRecipientCursor(tx, recipient, input.ConversationID); err != nil {
+			return Message{}, false, err
+		}
 	}
 	if err := advanceSessionCursors(tx, input.SenderMachineID, input.FromEndpoint, input.ConversationID, input.Now); err != nil {
 		return Message{}, false, err
@@ -1230,6 +1253,9 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 			return DeliveryLeasePage{}, err
 		}
 		delivery.RecipientEndpoint = endpoint
+		if role, isRole := parseRoleRecipient(recipientID); isRole {
+			delivery.RecipientRole = role
+		}
 		delivery.Message.CreatedAt = fromMillis(createdAt)
 		if leaseMachine.Valid && leaseMachine.String == machineID && leaseToken.Valid && leaseOwnership.Valid && leaseOwnership.Int64 == ownershipGeneration && leaseConsumer.Valid && leaseConsumer.Int64 == consumerGeneration && leaseUntil.Valid && leaseUntil.Int64 > now.UnixMilli() {
 			delivery.LeaseToken = leaseToken.String
@@ -1683,6 +1709,11 @@ func memberIdentity(member Member) string {
 
 func appendHash(input AppendInput) string {
 	parts := []string{input.ConversationID, input.FromEndpoint, input.Body}
+	// Preserve the exact pre-targeting hash for broadcasts so an accepted
+	// request can be retried safely across an in-place upgrade.
+	if input.TargetRole != "" {
+		parts = append(parts, "target-role:"+input.TargetRole)
+	}
 	if len(input.ArtifactIDs) != 0 {
 		parts = append(parts, input.PrincipalID)
 		parts = append(parts, input.ArtifactIDs...)

@@ -47,6 +47,18 @@ Cloudflare Access application, or copy any client secret.
 On a later `--enable` run, the installer restarts the relay after updating the
 configuration so the requested enrollment and Access settings take effect.
 
+That restart is safe only when the installed database already matches the
+replacement binary. The historical installer replaces `punarod`; it does not
+install the unified `punaro` lifecycle wrapper, create an update journal or
+backup, or migrate PostgreSQL. Before rebuilding an existing PostgreSQL-backed
+alpha relay from a newer checkout, compare the installed schema with the target
+release metadata. If the target requires a newer schema, leave the last
+compatible binary running and adopt the supported production Compose lifecycle;
+then perform the upgrade with `punaro update`. Do not run `punaro-migrate`
+directly, grant schema ownership to `punaro_app`, or repeatedly restart a new
+binary that reports `upgrade_required`. A direct binary replacement may be
+rolled back only while no schema migration has started.
+
 `--access-*` is strongly recommended for an internet-reachable deployment.
 All three Access options are required together; they are public identifiers and
 URLs. The installer writes the JWKS URL only to root-owned
@@ -149,8 +161,26 @@ if you decline it during client setup.
    Use the explicit JSON value `[]` to revoke the final client; the restarted
    relay then accepts no signed machine requests.
    After mail cutover, this command can only retain or remove already registered
-   keys. New mailbox clients are currently unavailable until a durable
-   post-cutover authority-registration workflow is delivered.
+   keys. Register one genuinely new installer-produced public record through
+   the owner-controlled workflow instead:
+
+   ```sh
+   punaro relay register \
+     --directory INSTALLATION_DIR \
+     --machine-enrollment-file /absolute/private/new-machine.json \
+     --yes
+   punaro up --directory INSTALLATION_DIR
+   ```
+
+   The input is the single JSON object printed by that machine's installer,
+   protected as an owner-only regular file. The command first records its exact
+   public key in the active PostgreSQL transition authority, then marker-last
+   publishes the merged static enrollment. Exact retries recover safely; a
+   changed retry or conflicting machine/key/namespace fails closed.
+   Relay-authority changes are serialized by a host-local installation lock.
+   If another configure, cutover-publication, or registration command is
+   already running, the later command fails before database or file mutation;
+   rerun its exact command after the first operation finishes.
    Do not hand-edit `PUNARO_RELAY_MACHINES_JSON` or widen a namespace to
    `codex/` or `claude/`.
 2. Create a **distinct** Cloudflare Access service token and policy for this
@@ -158,6 +188,36 @@ if you decline it during client setup.
    add its paired client ID and secret to the owner-only
    `~/.config/punaro/adapter.env`. Do not pass them as command-line arguments
    or reuse a token on another machine.
+
+   Cloudflare uses two different credentials in this workflow. The operator's
+   account API key/token is used only to administer Access. A current
+   account-scoped value has the `cfat_` prefix, is sent as an `Authorization:
+   Bearer` credential, and is verified at the account-scoped
+   `/client/v4/accounts/<account-id>/tokens/verify` endpoint. Do not test it at
+   the user-token endpoint. The per-machine Access service-token pair is the
+   `CF-Access-Client-Id` and `CF-Access-Client-Secret` admitted by a Service
+   Auth (`non_identity`) policy on the relay application; it is not the
+   account API key and must never be reused as one. The Access application
+   policy action must be **Service Auth** and its include rule must name this
+   exact service token; an ordinary Allow policy sends the adapter to an
+   interactive identity-provider login. One Service Auth policy may contain
+   several exact service-token include rules, but every enrolled machine still
+   needs a different token pair. Never use `any_valid_service_token`: adding an
+   unrelated token to the account would then silently grant it admission to
+   Punaro. The native clients send both service-token headers on every
+   protected request. They do not establish or replay a browser
+   `CF_Authorization` cookie with those headers; mixed cookie and Service Auth
+   identity can be rejected by Access before a signed request reaches Punaro.
+
+   Test the device application, not only `/readyz`. Make a header-authenticated
+   request to `/v1/conversations` without a Punaro machine signature and with
+   redirects disabled. The expected result is Punaro's application-level JSON
+   `401`: that proves Access admitted the service token and the device route
+   reached Punaro, while Punaro still rejected the unsigned caller. A `3xx`,
+   HTML response, identity-provider page, or Cloudflare policy error means the
+   Service Auth rule is missing or does not include that token. Never print the
+   two headers while testing. `/readyz` may use a separate route or bypass
+   policy and is only a health check; it cannot prove device admission.
 3. Bind each reachable agent to an explicit address under that machine's
    namespace, then attach it to the local group. For example:
 
@@ -185,6 +245,106 @@ The client installer is idempotent only for the same machine ID, relay URL,
 and local paths. It refuses to overwrite an existing key, enrollment record,
 configuration file, or project skill that does not match. To revoke a client,
 follow the [alpha onboarding revocation procedure](alpha-text-relay.md#onboard-and-revoke-a-machine): remove attached aliases, remove the relay enrollment, revoke the machine's Access token, stop the service, and securely erase its key.
+
+## 4. New-machine, upgrade, and rollback runbook
+
+Use this sequence for every new adapter machine and for an adapter upgrade. It
+keeps the machine identity and its private configuration in place while
+replacing only reviewed binaries and service definitions. Do not deploy from a
+dirty checkout, reuse another machine's key or Access token, or copy an
+`adapter.env` file between machines.
+
+1. Record the exact 40-character source commit and obtain a clean checkout of
+   it on the target. Confirm it before installing:
+
+   ```sh
+   git rev-parse HEAD
+   git status --porcelain
+   ```
+
+   On Windows, run the same commands in PowerShell from the checkout. An empty
+   `git status --porcelain` is required. Keep the previously installed commit
+   available until post-upgrade verification succeeds; it is the rollback
+   source, not a backup of credentials or mailbox state.
+   Build macOS clients natively on the target architecture by running the
+   installer there. Do not substitute a `CGO_ENABLED=0` cross-build: Punaro's
+   platform-specific private-file checks are part of the security boundary,
+   and a cross-built binary is not a valid deployment candidate merely because
+   its process starts. Windows releases must likewise use the repository's
+   Windows installer/build path and retain the current-user ACL checks.
+   Before changing any service, map the public adapter URL to its exact daemon
+   and listener. A tunnel may route `/readyz` to a separate health origin, so a
+   successful readiness request alone does not prove which daemon handles
+   signed `/v1/` requests. Record the service manager, process, listener, and
+   deployed commit or image for the device origin and health origin separately;
+   prove the device origin with one harmless signed request before treating it
+   as release evidence. If two `punarod` processes or installations exist on
+   one host, stop and identify their routes rather than upgrading both by
+   assumption.
+2. For a **new** machine, first check whether the server has completed mail
+   cutover. Run the client installer *without* enablement only when the machine
+   can still be enrolled safely. It creates a fresh machine key and prints the
+   public enrollment record. Before cutover, add only that record to the
+   complete relay enrollment set, apply it through `punaro relay configure`
+   and `punaro up`, and verify relay readiness. Then create a new Access
+   service token for the machine, install it only in that machine's owner-only
+   profile, bind and attach its aliases, and enable the adapter. Verify the
+   Service Auth rule with the unsigned-API `401` check above before interpreting
+   adapter failures as machine-enrollment failures.
+
+   After mail cutover, use `punaro relay register` with that single public
+   enrollment object, followed by `punaro up`; ordinary `relay configure`
+   deliberately rejects the unknown key. Device-credential enrollment remains
+   separate and does not make a mailbox Ed25519 key eligible. Do not copy
+   another machine's key, edit `punarod.env`, alter the installation marker, or
+   write authority rows by hand. Keep the adapter disabled until registration,
+   relay readiness, its distinct Access Service Auth probe, and endpoint
+   attachment all succeed.
+   The authenticated device listener must remain loopback-only. When a legacy
+   tunnel still targets a private-LAN listener, first stage the candidate on an
+   unused loopback address, update the tunnel origin with an explicit rollback
+   to the prior origin, and prove a signed request reaches the staged process.
+   Do not make a LAN listener acceptable by editing generated environment or
+   marker files; current candidates deliberately refuse that topology.
+3. For an **existing** machine, rerun the same installer from the clean
+   checkout using the original relay URL and machine ID. The installer proves
+   that the existing key, enrollment record, and profile still belong to those
+   values before it replaces the adapter binary and managed service file. It
+   does not rewrite the token pair. Never delete an existing key merely to
+   make this check pass.
+4. Enable or restart only through the installed platform service:
+
+   ```sh
+   # macOS and Linux: append --enable to the installer invocation.
+   # macOS verification
+   launchctl print gui/$(id -u)/org.punaro.adapter
+
+   # Linux verification
+   systemctl --user status punaro-adapter.service
+   ```
+
+   ```powershell
+   # Windows: append -Enable to the installer invocation.
+   Get-ScheduledTask -TaskName 'Punaro Adapter'
+   Get-Process punaro-adapter -ErrorAction SilentlyContinue
+   ```
+
+   The Windows task is intentionally per-user and interactive; a disabled task
+   or missing process is not a deployed adapter. For a Linux machine that must
+   remain available after logout, enable user lingering before relying on it.
+5. Confirm the adapter has advertised only the newly attached aliases, then
+   run a disposable, harmless message/acknowledgement check. For release
+   candidates, use the [durable-role LAN validation runbook](durable-role-lan-e2e.md)
+   rather than reusing a production conversation or endpoint.
+
+If a binary or service update fails before the adapter is healthy, stop the
+updated service, return to the retained clean checkout at the prior verified
+commit, rerun the same installer with the same identity values, and verify the
+service again. Do not restore, edit, or copy private keys, Access tokens,
+mailbox state, relay databases, or production conversations as part of an
+adapter rollback. Relay rollback follows the owner-managed deployment's
+recorded image/commit and database recovery process; it is not an adapter
+installer operation.
 
 ### Adapter profile for direct commands and the service
 
@@ -314,7 +474,7 @@ content-free lifecycle inventory. Credential rotation remains available through
 to whole-client revocation. A local identity sidecar or copied credential cannot
 restore access.
 
-## 4. Retired v2/v3 attachment evidence
+## 5. Retired v2/v3 attachment evidence
 
 Do not execute the historical provisioning helpers retained in the source tree
 on a production host. `punarod` rejects all legacy attachment, directory, and permit settings;

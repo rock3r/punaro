@@ -115,6 +115,14 @@ database, health endpoint, and Compose credentials remain host-local.
 
 ## Add or revoke a mailbox client
 
+First prove that the tunnel's device route and health route terminate at this
+installation. Health may be routed to a dedicated loopback listener while
+signed device requests go elsewhere; `/readyz` alone is therefore not daemon
+identity. Record the Compose project, exact image, process/listener ownership,
+and one harmless signed-request outcome. If an older systemd relay or LAN test
+stack shares the host, keep it out of the evidence unless the tunnel route is
+explicitly switched to it.
+
 After initialization and before mail cutover, replace the complete public
 enrollment set through the same host-local lifecycle rather than editing
 generated files. Keep the JSON file owner-only and include every client that
@@ -134,11 +142,43 @@ an exact retry. It is valid both before and after mail cutover; the cutover
 marker itself cannot change. Removing a machine from the complete set prevents
 new signed requests after the next `punaro up`; use `[]` to revoke the final
 client. After mail cutover, additions with a new public key are rejected because
-the active transition authority cannot authenticate them. New mailbox clients
-are currently unavailable until a durable post-cutover authority-registration
-workflow is delivered. Also stop its local adapter and revoke its distinct
-Access token. Never edit `punarod.env`, the Compose override, or
-`installation.json` directly.
+the active transition authority cannot authenticate them until the owner
+registers that one key explicitly. For a new machine, keep its adapter disabled
+and use the single protected JSON object printed by its installer:
+
+```sh
+punaro relay register \
+  --directory INSTALLATION_DIR \
+  --machine-enrollment-file /absolute/private/new-machine.json \
+  --yes
+punaro up --directory INSTALLATION_DIR
+```
+
+The registration transaction is owner-only and commits before marker-last
+runtime publication. An interruption can leave a registered key absent from
+the runtime, never the reverse; rerun the exact command to recover. Changed
+retries and overlapping IDs, keys, endpoints, or prefixes fail closed. To
+revoke a client, remove it with `relay configure`, stop its local adapter, and
+revoke its distinct Access token. Never edit `punarod.env`, the Compose
+override, `installation.json`, or PostgreSQL authority rows directly.
+
+Relay authority requires a loopback device listener. For a legacy tunnel whose
+origin is a private-LAN address, stage this installation on a free loopback
+port, change the tunnel origin, verify signed traffic and readiness, and retain
+the old origin as the rollback target until all adapters pass. Do not publish
+the device listener on the LAN or preserve an old manual environment overlay;
+`punaro up` and current daemon configuration fail closed for that state.
+
+Cloudflare Access admission is a separate boundary from tunnel routing. For
+each machine-scoped service token, require a **Service Auth** policy that
+includes that exact token. With redirects disabled, a request carrying only
+the token headers to the protected `/v1/conversations` route must reach Punaro
+and return its JSON `401`; a `3xx` or HTML login response is a policy failure.
+One policy may include several exact machine tokens, but never use
+`any_valid_service_token` and never reuse one token pair across machines.
+Do not use `/readyz` as this proof, because health and device paths may have
+different routes or policies. Only after this check should a harmless signed
+request be used to prove relay enrollment and the final device origin.
 
 For every later release, use `punaro update --directory INSTALLATION_DIR` with
 the protected release metadata distributed for that release. This preserves the

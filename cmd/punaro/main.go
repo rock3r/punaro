@@ -367,6 +367,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if len(args) > 1 && args[1] == "configure" {
 			return runRelayConfigure(args[2:], stdout, stderr, operator.ConfigureRelayMachines)
 		}
+		if len(args) > 1 && args[1] == "register" {
+			return runRelayRegister(args[2:], stdout, stderr, registerPostCutoverRelayMachine)
+		}
 	case "backup":
 		return runBackup(args[1:], stdout, stderr)
 	case "restore":

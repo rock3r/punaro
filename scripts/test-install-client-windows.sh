@@ -22,7 +22,8 @@ for expected in \
 	'punaro-enroll.exe' \
 	'retired attachment artifact exists at' \
 	'agent-mailbox' \
-	'AgentGuidanceDir'; do
+	'AgentGuidanceDir' \
+	'Push-Location -LiteralPath $repoDir'; do
 	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
 done
 

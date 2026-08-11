@@ -664,6 +664,18 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
+	if input.TargetRole != "" {
+		if !relay.ValidRole(input.TargetRole) || !rolesAvailable {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+		var allowed bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_role_memberships WHERE conversation_id=$1::uuid AND role=$2 AND (capabilities & $3) <> 0)`, input.ConversationID, input.TargetRole, relay.CapReceive).Scan(&allowed); err != nil {
+			return relay.Message{}, false, errors.New("target role authorization is unavailable")
+		}
+		if !allowed {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+	}
 	hash := relay.AppendRequestHash(input)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT message_id::text,request_hash FROM relay.mail_message_idempotency WHERE machine_id=$1 AND key=$2`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
@@ -703,15 +715,20 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "append message")
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint); err != nil {
+		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE $5='' AND conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, input.TargetRole); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
 	}
 	if rolesAvailable {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
-		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0`, message.ID, message.ConversationID, relay.CapReceive); err != nil {
+		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0 AND ($4='' OR membership.role=$4)`, message.ID, message.ConversationID, relay.CapReceive, input.TargetRole); err != nil {
 			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+		}
+	}
+	if input.TargetRole != "" {
+		if err := postgresAdvanceSkippedTargetCursors(tx, input.ConversationID, input.FromEndpoint, input.TargetRole); err != nil {
+			return relay.Message{}, false, err
 		}
 	}
 	if len(input.ArtifactIDs) != 0 {
@@ -787,7 +804,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_endpoints SET consumer_id=$1,consumer_generation=$2,consumer_lease_until=$3 WHERE endpoint=$4 AND ownership_generation=$5`, consumerID, consumerGeneration, consumerLeaseUntil, endpoint, ownershipGeneration); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
-	query := `SELECT delivery.id::text,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
+	query := `SELECT delivery.id::text,delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
 		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
@@ -815,10 +832,14 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	var pending []leasedRow
 	for rows.Next() {
 		var row leasedRow
+		var recipientID string
 		row.delivery.RecipientEndpoint = endpoint
-		if err := rows.Scan(&row.delivery.ID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
+		if err := rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
 			_ = rows.Close()
 			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
+		}
+		if role, isRole := postgresParseRoleRecipient(recipientID); isRole {
+			row.delivery.RecipientRole = role
 		}
 		row.delivery.Message.CreatedAt = row.delivery.Message.CreatedAt.UTC()
 		pending = append(pending, row)
@@ -1206,6 +1227,39 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 	if target > cursor {
 		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_recipient_cursors SET sequence=$1 WHERE recipient_endpoint=$2 AND conversation_id=$3::uuid AND sequence=$4`, target, endpoint, conversationID, cursor); err != nil {
 			return relayDatabaseError(err, "advance recipient cursor")
+		}
+	}
+	return nil
+}
+
+func postgresAdvanceSkippedTargetCursors(tx *sql.Tx, conversationID, senderEndpoint, targetRole string) error {
+	rows, err := tx.QueryContext(context.Background(), `
+		SELECT endpoint FROM relay.mail_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND endpoint<>$3
+		UNION ALL
+		SELECT chr(30)||'role:'||role FROM relay.mail_role_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND role<>$4`, conversationID, relay.CapReceive, senderEndpoint, targetRole)
+	if err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	var recipients []string
+	for rows.Next() {
+		var recipient string
+		if err := rows.Scan(&recipient); err != nil {
+			_ = rows.Close()
+			return errors.New("skipped target recipient is malformed")
+		}
+		recipients = append(recipients, recipient)
+	}
+	if err := rows.Close(); err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	if err := rows.Err(); err != nil {
+		return errors.New("skipped target recipients are unavailable")
+	}
+	for _, recipient := range recipients {
+		if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
+			return err
 		}
 	}
 	return nil

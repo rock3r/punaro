@@ -153,19 +153,21 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 8. Versions 1 through 7 are reported
-as `upgrade_required`; damaged older objects remain `incompatible`. Migration 3 is
-additive and creates the host-local ownership, pending enrollment, device
-credential, cache/session generation, and Ed25519 migration-inventory records.
-Migration 6 adds the durable update coordinator, exact recovery evidence, and
-the mutation fence. Migration 7 adds the PostgreSQL mail store, durable
-recipient cursors, replay protection, and relay-table mutation guards.
-Migration 8 adds the M-9 cutover substrate: owner-only migration epochs,
-bounded staging rows and checkpoints, and an application-role mail-write fence
-for an importing or verified epoch. The host wrapper's one-shot executor is the
-only supported authority transition. It always reads `relay.db` from Punaro's
-validated private service data directory; there is no caller-selected source
-path.
+The current binary requires schema version 44 and supports an intact schema
+from version 10 through 44 as an update boundary. Versions 10 through 43 are
+reported as `upgrade_required`; versions below the compatibility floor, newer
+versions, and damaged objects are `incompatible`. The embedded manifest and
+target release metadata are authoritative; check them instead of assuming a
+version from this guide when preparing a future release. Migration 40 adds
+durable conversation roles, migration 41 adds relay membership controls,
+migration 42 applies those controls to mail cutover, migration 43 adds the
+relay invocation capability, and migration 44 adds client lifecycle authority.
+Migration 44 invalidates unredeemed legacy enrollment invitations while
+converting existing device credentials into lifecycle-managed client records,
+so it must not be applied as an ad hoc repair. The host wrapper's one-shot
+executor is the only supported authority transition. It always reads `relay.db`
+from Punaro's validated private service data directory; there is no
+caller-selected source path.
 PostgreSQL mail work uses a reserved four-connection application-role pool;
 each operation and lock wait is bounded to five seconds so platform work cannot
 consume the mail budget indefinitely.
@@ -222,6 +224,27 @@ After success, run `punaro up --directory /absolute/private/punaro` to recreate
 the daemon from the published PostgreSQL and credential-transition settings.
 Never reopen or replace the retired SQLite file. Once PostgreSQL accepts new
 mail, recovery uses a PostgreSQL backup or forward repair.
+
+To add a new mailbox adapter after that activation, keep the adapter disabled
+and use the owner-only post-cutover registration path with the single public
+JSON object emitted by its installer:
+
+```sh
+punaro relay register \
+  --directory /absolute/private/punaro \
+  --machine-enrollment-file /absolute/private/new-machine.json \
+  --yes
+punaro up --directory /absolute/private/punaro
+```
+
+The command verifies the installation owner and database pair, registers the
+exact Ed25519 public key under the active cutover and legacy-gate locks, and
+then extends the known-key history plus static runtime authority marker-last.
+The database mutation is idempotent for the exact machine name and key. A
+publication failure is recovered by rerunning the exact command; never change
+the enrollment file during recovery. The adapter remains unauthorized until
+both phases and `punaro up` complete. Device enrollment, Cloudflare Access, and
+endpoint attachment are still separate least-privilege steps.
 
 Do not
 hand edit ownership, enrollment, credential, idempotency, capacity, lease,
@@ -285,6 +308,18 @@ after migration. It also converts every active device credential to the
 first-release non-expiring policy. A credential already expired when the
 migration begins is permanently revoked and generation-fenced; previously
 revoked credentials and their history are unchanged.
+
+For durable-role mail validation, `punaro-adapter send --target-role ROLE`
+must create a delivery only for that receiving conversation role. An unknown
+role is denied without message state, and changing the role under the same
+idempotency key is a conflict. A send without `--target-role` is the compatible
+broadcast path. A leased role delivery and its local inert mailbox envelope
+carry the server-derived `recipient_role`; use that field—not the untrusted
+body—to distinguish multiple roles bound to one session. During deployment
+evidence, verify both paths and confirm that
+ordinary endpoint members receive the broadcast but not the targeted probe;
+follow [the isolated LAN runbook](durable-role-lan-e2e.md) and never record
+message bodies or production conversation identifiers.
 
 Migration 4 adds project identities, aliases, generation-bound merge previews,
 and bounded reconciliation records. Migration 5 adds the backup GC-fence,
@@ -462,6 +497,16 @@ Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
 content-free path/schema/health states. The generated M-5 server Compose file
 still uses an externally provisioned PostgreSQL service; the bundled production
 PostgreSQL/profile shape arrives in M-23.
+
+Topology discovery must distinguish the device and health routes. A public
+`/readyz` may terminate at a dedicated health listener even when signed device
+requests reach another `punarod`. Before rollout, correlate each tunnel origin
+with its service manager, PID/container, listener, and exact candidate, then
+issue one harmless signed request. Multiple daemons on one host are separate
+deployments until this correlation proves otherwise. Current relay authority is
+loopback-only; migrate a legacy private-LAN tunnel origin to a staged loopback
+candidate with an explicit origin rollback instead of hand-editing generated
+files or weakening the listener gate.
 
 Create a client in two exact steps. The first prints the effective grants and
 preview hash without touching the database. The confirmed invocation must

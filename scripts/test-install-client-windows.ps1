@@ -53,7 +53,12 @@ try {
         return [pscustomobject]@{}
     }
 
-    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    Push-Location -LiteralPath $fixture
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    } finally {
+        Pop-Location
+    }
     if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed' }
     $root = Join-Path $env:LOCALAPPDATA 'Punaro'
     foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $root 'bin\punaro-trusted-attachment.exe'), (Join-Path $root 'bin\punaro-memory.exe'), (Join-Path $root 'bin\punaro-enroll.exe'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -1530,6 +1531,37 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 	if repeated, err := admin.ActivateMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint, retiredManifest); err != nil || repeated.Phase != MailCutoverActive {
 		t.Fatalf("idempotent activation=%#v err=%v", repeated, err)
 	}
+	// Activation closes the migration-wide legacy gate. Owner-authorized
+	// post-cutover registration must not reopen it or make a migrated key valid
+	// again; only the newly registered pending key is admitted.
+	if resolved, err := app.ResolveLegacyMachine(ctx, migratedKey); err == nil || resolved != "" {
+		t.Fatalf("disabled migrated legacy key resolved principal=%q err=%v", resolved, err)
+	}
+	postCutoverKey := make([]byte, ed25519.PublicKeySize)
+	postCutoverKey[0] = 91
+	if _, err := admin.RegisterLegacyMachine(ctx, actor, "post-cutover machine", postCutoverKey); err == nil {
+		t.Fatal("pre-cutover registration path accepted an active mail cutover")
+	}
+	postCutoverMachine, err := admin.RegisterPostCutoverLegacyMachine(ctx, actor, "post-cutover machine", postCutoverKey)
+	if err != nil || postCutoverMachine.State != LegacyPending {
+		t.Fatalf("post-cutover machine=%#v err=%v", postCutoverMachine, err)
+	}
+	repeatedPostCutover, err := admin.RegisterPostCutoverLegacyMachine(ctx, actor, "post-cutover machine", postCutoverKey)
+	if err != nil || repeatedPostCutover != postCutoverMachine {
+		t.Fatalf("repeated post-cutover machine=%#v err=%v", repeatedPostCutover, err)
+	}
+	if _, err := admin.RegisterPostCutoverLegacyMachine(ctx, actor, "changed label", postCutoverKey); err == nil {
+		t.Fatal("post-cutover registration accepted conflicting retry")
+	}
+	if _, err := admin.RegisterPostCutoverLegacyMachine(ctx, uuid.NewString(), "post-cutover machine", postCutoverKey); err == nil {
+		t.Fatal("non-owner registered post-cutover machine")
+	}
+	if resolved, err := app.ResolveLegacyMachine(ctx, postCutoverKey); err != nil || resolved != postCutoverMachine.PrincipalID {
+		t.Fatalf("resolved post-cutover principal=%q err=%v", resolved, err)
+	}
+	if resolved, err := app.ResolveLegacyMachine(ctx, migratedKey); err == nil || resolved != "" {
+		t.Fatalf("post-cutover registration reopened migrated key principal=%q err=%v", resolved, err)
+	}
 	if err := admin.AbortMailCutover(ctx, actor, activationRequest.EpochID, activationRequest.SourceFingerprint); err == nil {
 		t.Fatal("active mail cutover was abortable")
 	}
@@ -1549,6 +1581,7 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 func testRelayIntegration(t *testing.T, app *Database) {
 	t.Helper()
 	contracttest.Run(t, app, "postgres-contract")
+	contracttest.RunRoleTargeting(t, app, "postgres-target")
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)

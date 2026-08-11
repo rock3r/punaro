@@ -583,8 +583,11 @@ must authenticate as current and resolve through
 that key selects one non-ambiguous static relay machine enrollment. The device
 therefore receives precisely the old machine ID, endpoint prefixes, exact
 endpoints, and attachment-device binding. Every Ed25519 request in this mode
-also resolves its exact public key through `auth.legacy_auth_state`, so a closed
-gate fails legacy authentication. Database errors, revoked or stale device
+also resolves its exact public key through the durable transition authority.
+Before cutover the open legacy gate admits the migration inventory. After an
+active cutover closes that gate, only a pending key created by the owner-only
+post-cutover registration transaction is admitted; migrated and retired keys
+remain blocked. Database errors, revoked or stale device
 credentials, ordinary unenrolled device credentials, retired mappings, and
 duplicate configured keys all fail closed. Enabling the mode requires device
 auth and the PostgreSQL relay; it does not itself make PostgreSQL writable mail

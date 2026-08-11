@@ -37,3 +37,25 @@ func TestRelayConfigurePublishesOnlyThroughOperator(t *testing.T) {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
 }
+
+func TestRelayRegisterRequiresConfirmationAndUsesOwnerWorkflow(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	register := func(directory, file string) (operator.Installation, error) {
+		called = directory == "/install" && file == "/private/machine.json"
+		return operator.Installation{Directory: directory}, nil
+	}
+	if code := runRelayRegister([]string{"--directory", "/install", "--machine-enrollment-file", "/private/machine.json"}, &stdout, &stderr, register); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runRelayRegister([]string{"--directory", "/install", "--machine-enrollment-file", "/private/machine.json", "--yes"}, &stdout, &stderr, register); code != 0 || !called || !bytes.Contains(stdout.Bytes(), []byte(`"relay_machine_registered"`)) {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	if code := runRelayRegister([]string{"--directory", "/install", "--machine-enrollment-file", "/private/machine.json", "--yes"}, &stdout, &stderr, func(string, string) (operator.Installation, error) {
+		return operator.Installation{}, errors.New("unsafe")
+	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
