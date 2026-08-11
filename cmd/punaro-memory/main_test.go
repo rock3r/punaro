@@ -832,6 +832,8 @@ func TestLoadProfileRejectsUnsafeProfileFiles(t *testing.T) {
 	}{
 		{"missing version", `{"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o600},
 		{"zero LAN version", `{"version":0,"origin":"http://192.168.1.4:8080","credential_file":"` + credential + `","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`, 0o600},
+		{"v1 explicit false", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","allow_lan_http":false}`, 0o600},
+		{"v1 explicit empty cidr", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","trusted_lan_cidr":""}`, 0o600},
 		{"group readable", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o640},
 		{"unknown field", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","secret":"device-secret"}`, 0o600},
 		{"duplicate field", `{"version":1,"origin":"https://first.test","origin":"https://second.test","credential_file":"` + credential + `"}`, 0o600},

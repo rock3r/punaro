@@ -401,6 +401,10 @@ func loadProfile(path string) (profile, error) {
 	if err := rejectDuplicateTopLevelJSONFields(raw); err != nil {
 		return value, err
 	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil {
+		return value, errors.New("profile is invalid")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&value); err != nil {
@@ -409,7 +413,9 @@ func loadProfile(path string) (profile, error) {
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return value, errors.New("profile has trailing data")
 	}
-	if !validProfile(value) {
+	_, allowLANPresent := fields["allow_lan_http"]
+	_, trustedLANPresent := fields["trusted_lan_cidr"]
+	if (value.Version == profileVersion && (allowLANPresent || trustedLANPresent)) || !validProfile(value) {
 		return value, errors.New("profile is invalid")
 	}
 	return value, nil
