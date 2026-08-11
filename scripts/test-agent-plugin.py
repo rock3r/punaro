@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import struct
 from pathlib import Path
@@ -128,12 +129,24 @@ def validate_mcp() -> dict[str, Any]:
     if set(config) != {"$schema", "mcpServers"} or config.get("$schema") != MCP_SCHEMA:
         raise ValidationError("mcp.json must use the closed Agent Plugins 1.0.0 shape")
     servers = config.get("mcpServers")
-    if not isinstance(servers, dict) or set(servers) != {"agent-mailbox"}:
-        raise ValidationError("mcp.json must declare only the agent-mailbox server")
-    server = servers["agent-mailbox"]
-    expected = {"type": "stdio", "command": "punaro-adapter", "args": ["mailbox-mcp"]}
-    if server != expected:
-        raise ValidationError("mcp.json agent-mailbox server drifted from the reviewed command")
+    expected = {
+        "agent-mailbox": {
+            "type": "stdio",
+            "command": "./scripts/punaro-plugin-mcp",
+        },
+        "agent-mailbox-windows": {
+            "type": "stdio",
+            "command": "./scripts/punaro-plugin-mcp.cmd",
+        },
+    }
+    if servers != expected:
+        raise ValidationError("mcp.json mailbox servers drifted from the reviewed package launchers")
+    for server in expected.values():
+        launcher = ROOT / server["command"].removeprefix("./")
+        if not launcher.is_file() or launcher.is_symlink():
+            raise ValidationError(f"mailbox launcher must be a regular package file: {launcher.name}")
+    if not os.access(ROOT / "scripts/punaro-plugin-mcp", os.X_OK):
+        raise ValidationError("POSIX mailbox launcher must be executable")
     return config
 
 

@@ -6,10 +6,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -159,23 +159,32 @@ func TestMailboxMCPCommandFailsClosedWithoutConfiguredState(t *testing.T) {
 func TestMailboxMCPShutdownIsClean(t *testing.T) {
 	if os.Getenv("PUNARO_TEST_MAILBOX_MCP_HELPER") == "1" {
 		ready := os.Getenv("PUNARO_TEST_MAILBOX_MCP_READY")
+		handled := os.Getenv("PUNARO_TEST_MAILBOX_MCP_HANDLED")
 		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil { // #nosec G703 -- parent test selects this private readiness fixture.
 			os.Exit(2)
 		}
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, os.Interrupt)
-		<-signals
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			os.Exit(3)
+		}
+		if err := os.WriteFile(handled, []byte("handled"), 0o600); err != nil { // #nosec G703 -- parent test selects this private completion fixture.
+			os.Exit(4)
+		}
 		os.Exit(0)
 	}
 
-	ready := filepath.Join(t.TempDir(), "ready")
+	directory := t.TempDir()
+	ready := filepath.Join(directory, "ready")
+	handled := filepath.Join(directory, "handled")
 	t.Setenv("PUNARO_TEST_MAILBOX_MCP_HELPER", "1")
 	t.Setenv("PUNARO_TEST_MAILBOX_MCP_READY", ready)
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_HANDLED", handled)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	input, keepInputOpen := io.Pipe()
+	defer func() { _ = keepInputOpen.Close() }()
 	done := make(chan error, 1)
 	go func() {
-		done <- runMailboxMCPProcess(ctx, []string{os.Args[0], "-test.run=^TestMailboxMCPShutdownIsClean$"})
+		done <- runMailboxMCPProcess(ctx, []string{os.Args[0], "-test.run=^TestMailboxMCPShutdownIsClean$"}, input, io.Discard, io.Discard)
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -198,6 +207,9 @@ func TestMailboxMCPShutdownIsClean(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("mailbox MCP shutdown did not complete")
+	}
+	if _, err := os.Stat(handled); err != nil {
+		t.Fatalf("mailbox MCP helper did not handle graceful input closure: %v", err)
 	}
 }
 

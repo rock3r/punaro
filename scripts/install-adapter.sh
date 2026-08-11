@@ -108,6 +108,8 @@ esac
 if [ -z "$mailbox_state_dir" ]; then
 	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
 fi
+mailbox_bin_input=$mailbox_bin
+mailbox_state_dir_input=$mailbox_state_dir
 
 require_safe_relay_url "$relay_url"
 require_safe_value "$HOME" 'HOME'
@@ -165,8 +167,64 @@ mkdir -p "$mailbox_state_dir" || fail 'could not create the local mailbox state 
 mailbox_state_dir=$(CDPATH= cd -- "$mailbox_state_dir" && pwd -P) || fail 'mailbox state directory is unavailable'
 
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-adapter-install.XXXXXXXX")
-cleanup() { rm -rf -- "$build_dir"; }
+migration_file=
+cleanup() {
+	if [ -n "$migration_file" ]; then rm -f -- "$migration_file"; fi
+	rm -rf -- "$build_dir"
+}
 trap cleanup EXIT HUP INT TERM
+
+config_exists=0
+if [ -e "$config_file" ] || [ -L "$config_file" ]; then
+	config_exists=1
+	regular_private_file "$config_file" || fail 'existing adapter.env must be a non-symlink regular 0600 file'
+	for expected in \
+		"PUNARO_ADAPTER_RELAY_URL=$relay_url" \
+		"PUNARO_MACHINE_ID=$machine_id" \
+		"PUNARO_MACHINE_PRIVATE_KEY_FILE=$key_file" \
+		"PUNARO_ATTACHED_GROUP=$attached_group" \
+		"PUNARO_ADAPTER_DATA_DIR=$state_dir"; do
+		grep -Fqx "$expected" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
+	done
+	migrate_mailbox_bin=0
+	if ! grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin" "$config_file"; then
+		[ "$mailbox_bin_input" != "$mailbox_bin" ] && grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin_input" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
+		migrate_mailbox_bin=1
+	fi
+	migrate_mailbox_state=0
+	if ! grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir" "$config_file"; then
+		[ "$mailbox_state_dir_input" != "$mailbox_state_dir" ] && grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir_input" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
+		migrate_mailbox_state=1
+	fi
+	if [ "$allow_lan_http" = false ] && [ -z "$trusted_lan_cidr" ]; then
+		if grep -q '^PUNARO_ADAPTER_ALLOW_LAN_HTTP=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+		if grep -q '^PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+	else
+		grep -Fqx "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		grep -Fqx "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+	fi
+	if [ "$migrate_mailbox_bin" -eq 1 ] || [ "$migrate_mailbox_state" -eq 1 ]; then
+		migration_file=$(mktemp "$config_dir/.adapter.env.XXXXXXXX")
+		while IFS= read -r line || [ -n "$line" ]; do
+			if [ "$migrate_mailbox_bin" -eq 1 ] && [ "$line" = "PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin_input" ]; then
+				printf '%s\n' "PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin"
+			elif [ "$migrate_mailbox_state" -eq 1 ] && [ "$line" = "PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir_input" ]; then
+				printf '%s\n' "PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir"
+			else
+				printf '%s\n' "$line"
+			fi
+		done <"$config_file" >"$migration_file"
+		chmod 600 "$migration_file"
+		mv "$migration_file" "$config_file"
+		migration_file=
+		grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin" "$config_file" || fail 'could not migrate the installed mailbox binary path'
+		grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir" "$config_file" || fail 'could not migrate the installed mailbox state path'
+	fi
+fi
 
 (
 	cd "$repo_dir"
@@ -216,30 +274,7 @@ PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr
 EOF
 }
 
-if [ -e "$config_file" ] || [ -L "$config_file" ]; then
-	regular_private_file "$config_file" || fail 'existing adapter.env must be a non-symlink regular 0600 file'
-	for expected in \
-		"PUNARO_ADAPTER_RELAY_URL=$relay_url" \
-		"PUNARO_MACHINE_ID=$machine_id" \
-		"PUNARO_MACHINE_PRIVATE_KEY_FILE=$key_file" \
-		"PUNARO_ATTACHED_GROUP=$attached_group" \
-		"PUNARO_ADAPTER_DATA_DIR=$state_dir" \
-		"PUNARO_MAILBOX_STATE_DIR=$mailbox_state_dir" \
-		"PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin"; do
-		grep -Fqx "$expected" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
-	done
-	if [ "$allow_lan_http" = false ] && [ -z "$trusted_lan_cidr" ]; then
-		if grep -q '^PUNARO_ADAPTER_ALLOW_LAN_HTTP=' "$config_file"; then
-			grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
-		fi
-		if grep -q '^PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file"; then
-			grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
-		fi
-	else
-		grep -Fqx "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
-		grep -Fqx "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
-	fi
-else
+if [ "$config_exists" -eq 0 ]; then
 	( set -C; : >"$config_file" ) 2>/dev/null || fail 'could not create adapter.env without overwriting an existing file'
 	write_config >"$config_file"
 	chmod 600 "$config_file"

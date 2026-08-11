@@ -3,10 +3,11 @@
   "mcpServers": {
     "agent-mailbox": {
       "type": "stdio",
-      "command": "punaro-adapter",
-      "args": [
-        "mailbox-mcp"
-      ]
+      "command": "./scripts/punaro-plugin-mcp"
+    },
+    "agent-mailbox-windows": {
+      "type": "stdio",
+      "command": "./scripts/punaro-plugin-mcp.cmd"
     }
   }
 }

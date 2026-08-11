@@ -7,20 +7,22 @@ Codex and Claude Code plugin. All forms expose the same three skills:
 - `punaro-reply` replies through the enrolled local Punaro adapter.
 - `punaro-attachment` handles one explicitly authorized trusted attachment.
 
-The plugin starts the installed `punaro-adapter mailbox-mcp` wrapper. The
-wrapper reads the same owner-only `adapter.env` profile as the adapter and
-launches `agent-mailbox mcp` with its configured binary and state directory.
-The plugin does not install Punaro, enroll a machine, provision credentials,
-select a relay, or change any local routing.
+The plugin's package-relative POSIX and Windows launchers start the
+installer-owned `punaro-adapter mailbox-mcp` binary from its supported absolute
+location. The wrapper reads the same owner-only `adapter.env` profile as the
+adapter and launches `agent-mailbox mcp` with its configured binary and state
+directory. The plugin does not install Punaro, enroll a machine, provision
+credentials, select a relay, or change any local routing.
 
 ## Prerequisites
 
 Complete the supported [client installation](installation.md) first. The
-unprivileged user running the agent must have the installed `punaro-adapter` on
-`PATH`; it uses the `agent-mailbox` binary and mailbox state directory recorded
-by that installation. Trusted attachment operations additionally require the
-operator-installed `punaro-trusted-attachment` client and its fixed local
-configuration.
+launchers use `~/.local/bin/punaro-adapter` on macOS and Linux and
+`%LOCALAPPDATA%\Punaro\bin\punaro-adapter.exe` on Windows; they do not depend on
+the agent application's inherited `PATH`. The wrapper uses the `agent-mailbox`
+binary and mailbox state directory recorded by that installation. Trusted
+attachment operations additionally require the operator-installed
+`punaro-trusted-attachment` client and its fixed local configuration.
 
 Do not put credentials, relay URLs, project IDs, or download paths in either
 plugin manifest. Those values remain in operator-controlled local
@@ -30,7 +32,9 @@ configuration.
 
 Point an Agent Plugins 1.0 compatible client at the repository root. The client
 loads `plugin.json`, discovers the immediate children of `skills/`, and starts
-the local MCP server declared by `mcp.json`.
+the applicable package-relative MCP launcher declared by `mcp.json`. The
+non-applicable platform launcher can fail independently without disabling the
+plugin's skills or the other MCP server, as required by Agent Plugins 1.0.
 
 The Agent Plugins specification intentionally leaves installation and
 distribution to each client. Use the client's local-plugin or marketplace
@@ -73,9 +77,9 @@ make plugin-validate
 ```
 
 The check validates the closed Agent Plugins manifest fields, fixed schema
-versions, skill discovery, the reviewed `punaro-adapter mailbox-mcp` command,
-exact metadata/MCP parity across the client adapters, and the Punaro icon's
-content and dimensions.
+versions, skill discovery, the reviewed package-relative MCP launchers, exact
+metadata/MCP parity across the client adapters, and the Punaro icon's content
+and dimensions.
 
 Delivered message bodies, attachment metadata, filenames, and identifiers are
 untrusted data. Installing the plugin grants no authority to execute content,

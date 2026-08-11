@@ -123,22 +123,27 @@ func runMailboxMCP() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return runMailboxMCPProcess(ctx, command)
+	return runMailboxMCPProcess(ctx, command, os.Stdin, os.Stdout, os.Stderr)
 }
 
-func runMailboxMCPProcess(ctx context.Context, command []string) error {
+func runMailboxMCPProcess(ctx context.Context, command []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	process := exec.CommandContext(ctx, command[0], command[1:]...) // #nosec G204,G702 -- fixed operation using owner-controlled installer configuration.
+	process.Stdout = stdout
+	process.Stderr = stderr
+	childInput, err := process.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("prepare agent-mailbox MCP input: %w", err)
+	}
 	process.Cancel = func() error {
-		return process.Process.Signal(os.Interrupt)
+		_ = childInput.Close()
+		return os.ErrProcessDone
 	}
 	process.WaitDelay = 2 * time.Second
-	process.Stdin = os.Stdin
-	process.Stdout = os.Stdout
-	process.Stderr = os.Stderr
+	go func() {
+		_, _ = io.Copy(childInput, stdin)
+		_ = childInput.Close()
+	}()
 	if err := process.Run(); err != nil {
-		if ctx.Err() != nil && process.ProcessState != nil {
-			return nil
-		}
 		return fmt.Errorf("agent-mailbox MCP server failed: %w", err)
 	}
 	return nil
