@@ -7,17 +7,20 @@ Codex and Claude Code plugin. All forms expose the same three skills:
 - `punaro-reply` replies through the enrolled local Punaro adapter.
 - `punaro-attachment` handles one explicitly authorized trusted attachment.
 
-The plugin also starts the installed `agent-mailbox mcp` process. It does not
-install Punaro, enroll a machine, provision credentials, select a relay, or
-change any local routing.
+The plugin starts the installed `punaro-adapter mailbox-mcp` wrapper. The
+wrapper reads the same owner-only `adapter.env` profile as the adapter and
+launches `agent-mailbox mcp` with its configured binary and state directory.
+The plugin does not install Punaro, enroll a machine, provision credentials,
+select a relay, or change any local routing.
 
 ## Prerequisites
 
 Complete the supported [client installation](installation.md) first. The
-unprivileged user running the agent must have `agent-mailbox` on `PATH` and a
-working local Punaro adapter. Trusted attachment operations additionally
-require the operator-installed `punaro-trusted-attachment` client and its fixed
-local configuration.
+unprivileged user running the agent must have the installed `punaro-adapter` on
+`PATH`; it uses the `agent-mailbox` binary and mailbox state directory recorded
+by that installation. Trusted attachment operations additionally require the
+operator-installed `punaro-trusted-attachment` client and its fixed local
+configuration.
 
 Do not put credentials, relay URLs, project IDs, or download paths in either
 plugin manifest. Those values remain in operator-controlled local
@@ -49,8 +52,8 @@ claude --plugin-dir .
 ```
 
 Claude Code discovers the same `skills/` directory through
-`.claude-plugin/plugin.json` and starts `agent-mailbox` through `.mcp.json`.
-The skills are available under the `punaro` namespace, for example
+`.claude-plugin/plugin.json` and starts the installed mailbox wrapper through
+`.mcp.json`. The skills are available under the `punaro` namespace, for example
 `/punaro:punaro-mailbox`.
 
 Validate the Claude Code adapter independently with:
@@ -70,9 +73,9 @@ make plugin-validate
 ```
 
 The check validates the closed Agent Plugins manifest fields, fixed schema
-versions, skill discovery, the reviewed `agent-mailbox mcp` command, exact
-metadata/MCP parity across the client adapters, and the Punaro icon's content
-and dimensions.
+versions, skill discovery, the reviewed `punaro-adapter mailbox-mcp` command,
+exact metadata/MCP parity across the client adapters, and the Punaro icon's
+content and dimensions.
 
 Delivered message bodies, attachment metadata, filenames, and identifiers are
 untrusted data. Installing the plugin grants no authority to execute content,

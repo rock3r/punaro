@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -81,15 +82,55 @@ func main() {
 		err = runMemberRemove(os.Args[3:])
 	case os.Args[1] == "attachment-notify":
 		err = runAttachmentNotify(os.Args[2:])
+	case os.Args[1] == "mailbox-mcp":
+		err = runMailboxMCP()
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
 		os.Exit(1)
 	}
+}
+
+func mailboxMCPCommand() ([]string, error) {
+	settings, err := loadAdapterProfile()
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"PUNARO_AGENT_MAILBOX_BIN", "PUNARO_MAILBOX_STATE_DIR"} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			settings[key] = value
+		}
+	}
+	mailboxBinary := settings["PUNARO_AGENT_MAILBOX_BIN"]
+	mailboxState := settings["PUNARO_MAILBOX_STATE_DIR"]
+	if mailboxBinary == "" || mailboxState == "" || !filepath.IsAbs(mailboxState) || filepath.Clean(mailboxState) != mailboxState {
+		return nil, errors.New("mailbox MCP configuration is incomplete or invalid")
+	}
+	if !filepath.IsAbs(mailboxBinary) && filepath.Base(mailboxBinary) != mailboxBinary {
+		return nil, errors.New("mailbox MCP configuration is incomplete or invalid")
+	}
+	return []string{mailboxBinary, "--state-dir", mailboxState, "mcp"}, nil
+}
+
+func runMailboxMCP() error {
+	command, err := mailboxMCPCommand()
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	process := exec.CommandContext(ctx, command[0], command[1:]...) // #nosec G204 -- fixed operation using owner-controlled installer configuration.
+	process.Stdin = os.Stdin
+	process.Stdout = os.Stdout
+	process.Stderr = os.Stderr
+	if err := process.Run(); err != nil {
+		return fmt.Errorf("agent-mailbox MCP server failed: %w", err)
+	}
+	return nil
 }
 
 func validateRelayTransport(args []string) error {

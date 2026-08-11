@@ -131,7 +131,7 @@ def validate_mcp() -> dict[str, Any]:
     if not isinstance(servers, dict) or set(servers) != {"agent-mailbox"}:
         raise ValidationError("mcp.json must declare only the agent-mailbox server")
     server = servers["agent-mailbox"]
-    expected = {"type": "stdio", "command": "agent-mailbox", "args": ["mcp"]}
+    expected = {"type": "stdio", "command": "punaro-adapter", "args": ["mailbox-mcp"]}
     if server != expected:
         raise ValidationError("mcp.json agent-mailbox server drifted from the reviewed command")
     return config

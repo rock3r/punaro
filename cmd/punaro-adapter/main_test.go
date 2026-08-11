@@ -120,6 +120,38 @@ func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	}
 }
 
+func TestMailboxMCPCommandUsesInstalledNonDefaultState(t *testing.T) {
+	clearAdapterEnvironment(t)
+	profile := filepath.Join(t.TempDir(), "adapter.env")
+	mailboxState := filepath.Join(t.TempDir(), "custom-mailbox")
+	mailboxBinary := filepath.Join(t.TempDir(), "agent-mailbox")
+	contents := strings.Join([]string{
+		"PUNARO_MAILBOX_STATE_DIR=" + mailboxState,
+		"PUNARO_AGENT_MAILBOX_BIN=" + mailboxBinary,
+		"",
+	}, "\n")
+	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+
+	command, err := mailboxMCPCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(command, "\x00"), strings.Join([]string{mailboxBinary, "--state-dir", mailboxState, "mcp"}, "\x00"); got != want {
+		t.Fatalf("mailbox MCP command = %q, want %q", got, want)
+	}
+}
+
+func TestMailboxMCPCommandFailsClosedWithoutConfiguredState(t *testing.T) {
+	clearAdapterEnvironment(t)
+	t.Setenv(adapterProfileFileEnv, filepath.Join(t.TempDir(), "missing.env"))
+	if _, err := mailboxMCPCommand(); err == nil {
+		t.Fatal("missing adapter profile was accepted")
+	}
+}
+
 func TestLoadConfigLoadsPrivateKeyWithoutLoggingIt(t *testing.T) {
 	clearAdapterEnvironment(t)
 	t.Setenv("HOME", t.TempDir())

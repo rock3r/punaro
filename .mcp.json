@@ -1,9 +1,9 @@
 {
   "mcpServers": {
     "agent-mailbox": {
-      "command": "agent-mailbox",
+      "command": "punaro-adapter",
       "args": [
-        "mcp"
+        "mailbox-mcp"
       ]
     }
   }
