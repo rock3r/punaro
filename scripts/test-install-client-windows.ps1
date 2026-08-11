@@ -76,6 +76,8 @@ try {
     foreach ($path in @((Join-Path $root 'config\machine.key'), (Join-Path $root 'config\enrollment.json'), (Join-Path $root 'config\adapter.env'), (Join-Path $root 'bin\punaro-trusted-attachment.exe'), (Join-Path $root 'bin\punaro-memory.exe'), (Join-Path $root 'bin\punaro-enroll.exe'), (Join-Path $project '.agents\skills\punaro-mailbox\SKILL.md'))) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Windows client installer did not create $path" }
     }
+    & (Join-Path $repoDir 'scripts\punaro-plugin-mcp.cmd')
+    if ($LASTEXITCODE -ne 0) { throw 'Windows plugin launcher could not start the installer-owned adapter' }
     foreach ($path in @((Join-Path $root 'bin\punaro-attachment.exe'), (Join-Path $root 'bin\punaro-directory.exe'), (Join-Path $root 'bin\punaro-dpapi.exe'), (Join-Path $root 'Run-PunaroAttachment.ps1'))) {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }

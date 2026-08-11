@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/relay"
@@ -117,6 +121,95 @@ func TestLoadConfigRequiresPrivateKeyAndAttachmentGroup(t *testing.T) {
 	t.Setenv("PUNARO_ATTACHED_GROUP", "group/punaro")
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("missing private key file accepted")
+	}
+}
+
+func TestMailboxMCPCommandUsesInstalledNonDefaultState(t *testing.T) {
+	clearAdapterEnvironment(t)
+	profile := filepath.Join(t.TempDir(), "adapter.env")
+	mailboxState := filepath.Join(t.TempDir(), "custom-mailbox")
+	mailboxBinary := filepath.Join(t.TempDir(), "agent-mailbox")
+	contents := strings.Join([]string{
+		"PUNARO_MAILBOX_STATE_DIR=" + mailboxState,
+		"PUNARO_AGENT_MAILBOX_BIN=" + mailboxBinary,
+		"",
+	}, "\n")
+	if err := os.WriteFile(profile, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(adapterProfileFileEnv, profile)
+
+	command, err := mailboxMCPCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(command, "\x00"), strings.Join([]string{mailboxBinary, "--state-dir", mailboxState, "mcp"}, "\x00"); got != want {
+		t.Fatalf("mailbox MCP command = %q, want %q", got, want)
+	}
+}
+
+func TestMailboxMCPCommandFailsClosedWithoutConfiguredState(t *testing.T) {
+	clearAdapterEnvironment(t)
+	t.Setenv(adapterProfileFileEnv, filepath.Join(t.TempDir(), "missing.env"))
+	if _, err := mailboxMCPCommand(); err == nil {
+		t.Fatal("missing adapter profile was accepted")
+	}
+}
+
+func TestMailboxMCPShutdownIsClean(t *testing.T) {
+	if os.Getenv("PUNARO_TEST_MAILBOX_MCP_HELPER") == "1" {
+		ready := os.Getenv("PUNARO_TEST_MAILBOX_MCP_READY")
+		handled := os.Getenv("PUNARO_TEST_MAILBOX_MCP_HANDLED")
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil { // #nosec G703 -- parent test selects this private readiness fixture.
+			os.Exit(2)
+		}
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			os.Exit(3)
+		}
+		if err := os.WriteFile(handled, []byte("handled"), 0o600); err != nil { // #nosec G703 -- parent test selects this private completion fixture.
+			os.Exit(4)
+		}
+		os.Exit(0)
+	}
+
+	directory := t.TempDir()
+	ready := filepath.Join(directory, "ready")
+	handled := filepath.Join(directory, "handled")
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_HELPER", "1")
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_READY", ready)
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_HANDLED", handled)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	input, keepInputOpen := io.Pipe()
+	defer func() { _ = keepInputOpen.Close() }()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMailboxMCPProcess(ctx, []string{os.Args[0], "-test.run=^TestMailboxMCPShutdownIsClean$"}, input, io.Discard, io.Discard)
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mailbox MCP helper did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("normal mailbox MCP shutdown failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mailbox MCP shutdown did not complete")
+	}
+	if _, err := os.Stat(handled); err != nil {
+		t.Fatalf("mailbox MCP helper did not handle graceful input closure: %v", err)
 	}
 }
 

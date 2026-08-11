@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+fail() {
+	printf '%s\n' "punaro reply skill: $*" >&2
+	exit 1
+}
+
+passwd_home() {
+	account_record=$1
+	account_field=1
+	while [ "$account_field" -lt 6 ]; do
+		case "$account_record" in
+		*:*) account_record=${account_record#*:} ;;
+		*) return 1 ;;
+		esac
+		account_field=$((account_field + 1))
+	done
+	case "$account_record" in
+	*:*) printf '%s\n' "${account_record%%:*}" ;;
+	*) return 1 ;;
+	esac
+}
+
+user_home=${HOME:-}
+if [ -z "$user_home" ]; then
+	case "$(uname -s)" in
+	Darwin)
+		user_name=$(/usr/bin/id -un) || fail 'could not identify the current user'
+		home_record=$(/usr/bin/dscl . -read "/Users/$user_name" NFSHomeDirectory) || fail 'could not locate the current user home'
+		user_home=${home_record#*: }
+		;;
+	Linux)
+		user_id=$(id -u) || fail 'could not identify the current user'
+		if [ -x /usr/bin/getent ]; then
+			home_record=$(/usr/bin/getent passwd "$user_id") || fail 'could not locate the current user home'
+		elif [ -x /bin/getent ]; then
+			home_record=$(/bin/getent passwd "$user_id") || fail 'could not locate the current user home'
+		else
+			fail 'HOME is unavailable and no account lookup is installed'
+		fi
+		user_home=$(passwd_home "$home_record") || fail 'current user account record is invalid'
+		;;
+	*) fail 'this launcher supports macOS and Linux' ;;
+	esac
+fi
+
+adapter="$user_home/.local/bin/punaro-adapter"
+[ -f "$adapter" ] && [ ! -L "$adapter" ] && [ -x "$adapter" ] || fail "installed adapter is unavailable at $adapter; run the Punaro client installer first"
+exec "$adapter" "$@"

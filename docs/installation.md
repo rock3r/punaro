@@ -156,6 +156,12 @@ overwrites a differing local skill.
 Run `./scripts/install-agent-guidance.sh --directory /path/to/project` later
 if you decline it during client setup.
 
+Agents with plugin support can instead load the repository's
+[Punaro agent plugin](agent-plugin.md). It provides the same three skills plus
+the local `agent-mailbox` MCP declaration without modifying a project's
+guidance files. Use one skill-installation method for a project so the same
+skills are not discovered twice.
+
 ## 3. Approve and configure the client
 
 1. For a new unified server, add the printed JSON record to the protected

@@ -6,6 +6,7 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-install-test.XXXXXXXX")
+fixture_dir=$(CDPATH= cd -- "$fixture_dir" && pwd -P)
 # The installer deliberately uses a temporary HOME. Keep Go's shared caches
 # outside that fixture so this test does not repeatedly download dependencies.
 go_mod_cache=$(go env GOMODCACHE)
@@ -28,6 +29,7 @@ printf '%s\n' "$*" >> "$PUNARO_TEST_MAILBOX_LOG"
 case " $* " in
   *' group create '*) exit 0 ;;
   *' group list '*) printf '%s\n' '["group/punaro-attached"]'; exit 0 ;;
+  *' mcp '*) exit 0 ;;
 esac
 exit 1
 EOF
@@ -87,6 +89,8 @@ grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config"
 grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config"
 grep -Fq '"endpoint_prefixes":["agent/macbook/"]' "$enrollment"
 grep -Fq 'group create --group group/punaro-attached' "$mailbox_log"
+HOME="$home" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" "$repo_dir/scripts/punaro-plugin-mcp"
+grep -Fq -- "--state-dir $mailbox_state mcp" "$mailbox_log"
 grep -Fq '"id":"macbook"' "$fixture_dir/first.out"
 if grep -Fq 'PUNARO_CF_ACCESS_CLIENT_SECRET' "$fixture_dir/first.out"; then
 	printf '%s\n' 'installer output must not solicit or print Access secrets' >&2
@@ -178,6 +182,51 @@ PATH="$fixture_dir:$PATH" HOME="$ipv6_home" GOTOOLCHAIN=local GOMODCACHE="$go_mo
 grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=http://[fd12:3456::4]:8080' "$ipv6_home/.config/punaro/adapter.env"
 grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=fd12:3456::/64' "$ipv6_home/.config/punaro/adapter.env"
 
+relative_home="$fixture_dir/relative-home"
+relative_root="$fixture_dir/relative-inputs"
+mkdir -p "$relative_home" "$relative_root/bin"
+relative_root=$(CDPATH= cd -- "$relative_root" && pwd -P)
+relative_mailbox="$relative_root/bin/agent-mailbox"
+relative_state="$relative_root/state/mailbox"
+cp "$mailbox" "$relative_mailbox"
+(
+	cd "$fixture_dir"
+	HOME="$relative_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+		sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id relative-paths \
+		--agent-mailbox-bin relative-inputs/bin/agent-mailbox \
+		--mailbox-state-dir relative-inputs/state/mailbox >"$fixture_dir/relative.out"
+)
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$relative_mailbox" "$relative_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$relative_state" "$relative_home/.config/punaro/adapter.env"
+grep -Fq -- "--state-dir $relative_state group create --group group/punaro-attached" "$mailbox_log"
+
+relative_config="$relative_home/.config/punaro/adapter.env"
+legacy_config="$relative_home/.config/punaro/adapter.env.legacy"
+while IFS= read -r line || [ -n "$line" ]; do
+	if [ "$line" = "PUNARO_AGENT_MAILBOX_BIN=$relative_mailbox" ]; then
+		printf '%s\n' 'PUNARO_AGENT_MAILBOX_BIN=relative-inputs/bin/agent-mailbox'
+	elif [ "$line" = "PUNARO_MAILBOX_STATE_DIR=$relative_state" ]; then
+		printf '%s\n' 'PUNARO_MAILBOX_STATE_DIR=relative-inputs/state/mailbox'
+	else
+		printf '%s\n' "$line"
+	fi
+done <"$relative_config" >"$legacy_config"
+mv "$legacy_config" "$relative_config"
+chmod 600 "$relative_config"
+(
+	cd "$fixture_dir"
+	HOME="$relative_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+		sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id relative-paths \
+		--agent-mailbox-bin relative-inputs/bin/agent-mailbox \
+		--mailbox-state-dir relative-inputs/state/mailbox >"$fixture_dir/relative-upgrade.out"
+)
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$relative_mailbox" "$relative_config"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$relative_state" "$relative_config"
+
 printf '%s\n' legacy >"$home/.local/bin/punaro-attachment"
 set +e
 run_install >"$fixture_dir/legacy-artifact.out" 2>&1
@@ -192,7 +241,8 @@ PATH="$fixture_dir:$PATH" HOME="$default_home" GOTOOLCHAIN=local GOMODCACHE="$go
 	sh "$repo_dir/scripts/install-client.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id default-path >"$fixture_dir/default.out"
-grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox" "$default_home/.config/punaro/adapter.env"
+default_mailbox_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox")" && pwd -P)
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/$(basename -- "$mailbox")" "$default_home/.config/punaro/adapter.env"
 
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1
