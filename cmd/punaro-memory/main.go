@@ -93,7 +93,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	explicit := make(map[string]bool)
 	flags.Visit(func(parsed *flag.Flag) { explicit[parsed.Name] = true })
 	if command == "profile-write" {
-		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project, AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
+		candidate := profile{Version: profileVersion, Origin: *origin, CredentialFile: *credentialFile, Project: *project, AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
+		if candidate.AllowLANHTTP {
+			candidate.Version = profileLANVersion
+		}
 		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanProfilePath(*profilePath, candidate.CredentialFile) {
 			return 2
 		}
@@ -104,7 +107,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 0
 	}
 	mcpMode := command == "mcp"
-	transportPolicy := clienttransport.Policy{}
+	transportPolicy := clienttransport.Policy{AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
 	if *profilePath != "" {
 		loaded, err := loadProfile(*profilePath)
 		if err != nil {
@@ -120,7 +123,9 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		if !explicit["project"] {
 			*project = loaded.Project
 		}
-		transportPolicy = loaded.transportPolicy()
+		if !explicit["allow-lan-http"] && !explicit["trusted-lan-cidr"] {
+			transportPolicy = loaded.transportPolicy()
+		}
 	}
 	if *origin == "" || !filepath.IsAbs(*credentialFile) {
 		return 2
@@ -226,7 +231,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 }
 
 func validFlags(command string, args []string, flags *flag.FlagSet) bool {
-	allowed := map[string]bool{"profile": true, "origin": true, "credential-file": true}
+	allowed := map[string]bool{"profile": true, "origin": true, "credential-file": true, "allow-lan-http": true, "trusted-lan-cidr": true}
 	for _, name := range commandFlags(command) {
 		allowed[name] = true
 	}
@@ -304,15 +309,17 @@ func commandFlags(command string) []string {
 }
 
 func saveProfile(path string, value profile) error {
+	if value.Version == 0 {
+		value.Version = profileVersion
+		if value.AllowLANHTTP {
+			value.Version = profileLANVersion
+		}
+	}
 	if !safeProfilePath(path) || !privateProfilePath(path) || !validProfile(value) || sameCleanProfilePath(path, value.CredentialFile) {
 		return errors.New("profile is invalid")
 	}
 	if !privateProfilePath(path) || !safeProfileCredentialPath(value.CredentialFile) {
 		return errors.New("profile path is unsafe")
-	}
-	value.Version = profileVersion
-	if value.AllowLANHTTP {
-		value.Version = profileLANVersion
 	}
 	raw, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
@@ -413,19 +420,17 @@ func safeProfilePath(path string) bool {
 }
 
 func validProfile(value profile) bool {
-	if value.Version != 0 {
-		switch value.Version {
-		case profileVersion:
-			if value.AllowLANHTTP || value.TrustedLANCIDR != "" {
-				return false
-			}
-		case profileLANVersion:
-			if !value.AllowLANHTTP || value.TrustedLANCIDR == "" {
-				return false
-			}
-		default:
+	switch value.Version {
+	case profileVersion:
+		if value.AllowLANHTTP || value.TrustedLANCIDR != "" {
 			return false
 		}
+	case profileLANVersion:
+		if !value.AllowLANHTTP || value.TrustedLANCIDR == "" {
+			return false
+		}
+	default:
+		return false
 	}
 	return validProfileOrigin(value.Origin, value.transportPolicy()) &&
 		filepath.IsAbs(value.CredentialFile) &&

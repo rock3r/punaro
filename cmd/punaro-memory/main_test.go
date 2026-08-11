@@ -764,6 +764,26 @@ func TestRunUsesTrustedLANProfilePolicy(t *testing.T) {
 	}
 }
 
+func TestRunUsesDirectTrustedLANPolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	credential := filepath.Join(directory, "credential")
+	previousLoader, previousFactory := loadCredential, newMemoryClientWithPolicy
+	t.Cleanup(func() { loadCredential, newMemoryClientWithPolicy = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClientWithPolicy = func(origin, value string, policy clienttransport.Policy) (client, error) {
+		if origin != "http://192.168.1.4:8080" || value != "device-secret" || !policy.AllowLANHTTP || policy.TrustedLANCIDR != "192.168.1.0/24" {
+			t.Fatalf("origin=%q credential=%q policy=%#v", origin, value, policy)
+		}
+		return fake, nil
+	}
+	var stdout, stderr strings.Builder
+	args := []string{"get", "--origin", "http://192.168.1.4:8080", "--credential-file", credential, "--project", cliProject, "--item", cliItem, "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
+	}
+}
+
 func TestRunProfileWriteRejectsCredentialClobber(t *testing.T) {
 	directory := resolvedTempDir(t)
 	credential := filepath.Join(directory, "credential")
@@ -810,6 +830,8 @@ func TestLoadProfileRejectsUnsafeProfileFiles(t *testing.T) {
 		raw  string
 		mode os.FileMode
 	}{
+		{"missing version", `{"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o600},
+		{"zero LAN version", `{"version":0,"origin":"http://192.168.1.4:8080","credential_file":"` + credential + `","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`, 0o600},
 		{"group readable", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `"}`, 0o640},
 		{"unknown field", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","secret":"device-secret"}`, 0o600},
 		{"duplicate field", `{"version":1,"origin":"https://first.test","origin":"https://second.test","credential_file":"` + credential + `"}`, 0o600},
