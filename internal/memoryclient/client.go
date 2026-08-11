@@ -69,7 +69,7 @@ func newWithHTTPClient(rawOrigin, credential string, provided *http.Client) (*Cl
 
 func newWithHTTPClientAndPolicy(rawOrigin, credential string, provided *http.Client, policy clienttransport.Policy) (*Client, error) {
 	base, err := clienttransport.ValidateOrigin(rawOrigin, policy)
-	if err != nil {
+	if err != nil || (policy == (clienttransport.Policy{}) && base.Scheme != "https") {
 		return nil, errors.New("invalid Punaro memory origin")
 	}
 	if !validCredential(credential) {

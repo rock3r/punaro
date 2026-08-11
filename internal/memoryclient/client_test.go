@@ -52,7 +52,7 @@ func response(status int, body string, headers map[string]string) *http.Response
 func jsonETag(value string) string { encoded, _ := json.Marshal(value); return string(encoded) }
 
 func TestNewRejectsUnsafeOriginCredentialAndProxy(t *testing.T) {
-	for _, origin := range []string{"", "ftp://punaro.test", "http://punaro.test", "https://u:p@punaro.test", "https://punaro.test/path", "https://punaro.test?q=1", "https://punaro.test#x"} {
+	for _, origin := range []string{"", "ftp://punaro.test", "http://punaro.test", "http://127.0.0.1:8080", "https://u:p@punaro.test", "https://punaro.test/path", "https://punaro.test?q=1", "https://punaro.test#x"} {
 		if _, err := New(origin, testCredential); err == nil {
 			t.Fatalf("origin %q accepted", origin)
 		}

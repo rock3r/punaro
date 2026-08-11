@@ -837,6 +837,7 @@ func TestLoadProfileRejectsUnsafeProfileFiles(t *testing.T) {
 		{"duplicate field", `{"version":1,"origin":"https://first.test","origin":"https://second.test","credential_file":"` + credential + `"}`, 0o600},
 		{"relative credential", `{"version":1,"origin":"https://profile.test","credential_file":"relative"}`, 0o600},
 		{"unsafe origin", `{"version":1,"origin":"https://user@profile.test","credential_file":"` + credential + `"}`, 0o600},
+		{"loopback plaintext", `{"version":1,"origin":"http://127.0.0.1:8080","credential_file":"` + credential + `"}`, 0o600},
 		{"invalid project", `{"version":1,"origin":"https://profile.test","credential_file":"` + credential + `","project":"not-a-uuid"}`, 0o600},
 	}
 	for _, test := range tests {

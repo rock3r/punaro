@@ -439,8 +439,8 @@ func validProfile(value profile) bool {
 }
 
 func validProfileOrigin(raw string, policy clienttransport.Policy) bool {
-	_, err := clienttransport.ValidateOrigin(raw, policy)
-	return err == nil
+	parsed, err := clienttransport.ValidateOrigin(raw, policy)
+	return err == nil && (policy != (clienttransport.Policy{}) || parsed.Scheme == "https")
 }
 
 func (value profile) transportPolicy() clienttransport.Policy {
