@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/relay"
 	"github.com/zeebo/blake3"
 )
@@ -764,6 +765,12 @@ func TestHTTPRelayClientRejectsInsecureRemoteURLAndPartialAccessToken(t *testing
 	}
 	if _, err := NewHTTPRelayClient("http://relay.example", "machine-a", private, http.DefaultClient, AccessServiceToken{}); err == nil {
 		t.Fatal("insecure remote URL accepted")
+	}
+	if _, err := NewHTTPRelayClientWithPolicy("http://192.168.1.4:8080", "machine-a", private, nil, AccessServiceToken{}, clienttransport.Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}); err != nil {
+		t.Fatalf("explicit trusted-LAN client rejected: %v", err)
+	}
+	if _, err := NewHTTPRelayClientWithPolicy("http://192.168.2.4:8080", "machine-a", private, nil, AccessServiceToken{}, clienttransport.Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}); err == nil {
+		t.Fatal("trusted-LAN client accepted an origin outside its CIDR")
 	}
 	if _, err := NewHTTPRelayClient("https://relay.example", "machine-a", private, http.DefaultClient, AccessServiceToken{ClientID: "only-id"}); err == nil {
 		t.Fatal("partial Access service token accepted")

@@ -133,3 +133,34 @@ func TestLoadConfigReadsAccessPairFromPrivateCredentialFile(t *testing.T) {
 		t.Fatal("multiple Access credential sources accepted")
 	}
 }
+
+func TestLoadConfigAcceptsOnlyCompleteExplicitLANPolicy(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	keyFile := filepath.Join(directory, "machine.key")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "http://192.168.1.4:8080")
+	t.Setenv("PUNARO_MACHINE_ID", "telegram-machine")
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
+	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN", "test-token")
+	t.Setenv("PUNARO_TELEGRAM_ALLOWED_USER_ID", "55")
+	t.Setenv("PUNARO_TELEGRAM_GATEWAY_ENDPOINT", "telegram/primary")
+	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
+	t.Setenv("PUNARO_ADAPTER_ALLOW_LAN_HTTP", "true")
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("LAN acknowledgement without CIDR was accepted")
+	}
+	t.Setenv("PUNARO_ADAPTER_TRUSTED_LAN_CIDR", "192.168.1.0/24")
+	config, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !config.transportPolicy.AllowLANHTTP || config.transportPolicy.TrustedLANCIDR != "192.168.1.0/24" {
+		t.Fatalf("transport policy=%#v", config.transportPolicy)
+	}
+}

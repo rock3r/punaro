@@ -369,9 +369,6 @@ func validateStatic(options InitOptions) (Installation, error) {
 	if options.RelayEnabled && relayMachines == "" {
 		return Installation{}, errors.New("enabled relay requires machine enrollment")
 	}
-	if options.RelayEnabled && !listener.IsLoopback(policy.ListenAddr) {
-		return Installation{}, errors.New("relay authority requires a loopback device listener")
-	}
 	return Installation{Version: 1, Directory: options.Directory, DataDir: options.DataDir, BackupDir: options.BackupDir, Image: options.Image, OwnerDSNFile: options.OwnerDSNFile, AppDSNFile: options.AppDSNFile, OwnerName: options.OwnerName, Ingress: policy, HealthListenAddr: healthListenAddr, HealthURL: localURL(healthListenAddr), MemoryAPIEnabled: options.MemoryAPIEnabled, MemoryMutationsEnabled: options.MemoryMutationsEnabled, TrustedAttachmentsEnabled: options.TrustedAttachmentsEnabled, TrustedAttachmentBlobDir: options.TrustedAttachmentBlobDir, RelayEnabled: options.RelayEnabled, RelayMachinesJSON: relayMachines}, nil
 }
 

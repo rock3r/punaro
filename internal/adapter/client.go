@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket"
 	attachmentv2 "github.com/rock3r/punaro/internal/attachment/v2"
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/relay"
 )
 
@@ -33,21 +34,28 @@ type AccessServiceToken struct {
 // Cloudflare Access-protected origin. Service-token policies authenticate each
 // protected request from its headers, so this deliberately does not establish
 // or retain a browser authorization-cookie session.
-func OpenAccessSession(_ context.Context, rawURL string, client *http.Client, token AccessServiceToken) (*http.Client, error) {
-	baseURL, err := url.Parse(rawURL)
-	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+func OpenAccessSession(ctx context.Context, rawURL string, client *http.Client, token AccessServiceToken) (*http.Client, error) {
+	return OpenAccessSessionWithPolicy(ctx, rawURL, client, token, clienttransport.Policy{})
+}
+
+// OpenAccessSessionWithPolicy applies the same explicit trusted-LAN transport
+// boundary used by the long-running relay client.
+func OpenAccessSessionWithPolicy(_ context.Context, rawURL string, client *http.Client, token AccessServiceToken, policy clienttransport.Policy) (*http.Client, error) {
+	baseURL, err := clienttransport.ValidateOrigin(rawURL, policy)
+	if err != nil {
 		return nil, fmt.Errorf("invalid relay URL")
-	}
-	if baseURL.Scheme != "https" && (baseURL.Scheme != "http" || !loopbackHost(baseURL.Hostname())) {
-		return nil, fmt.Errorf("relay URL must use HTTPS except for a loopback development listener")
 	}
 	if (token.ClientID == "") != (token.ClientSecret == "") {
 		return nil, fmt.Errorf("cloudflare Access service token must contain both ID and secret")
 	}
-	if client == nil {
-		client = http.DefaultClient
+	if token.ClientID != "" && baseURL.Scheme != "https" && !loopbackHost(baseURL.Hostname()) {
+		return nil, fmt.Errorf("cloudflare Access service token requires HTTPS")
 	}
-	clientCopy := *client
+	hardened, err := clienttransport.HardenClient(client, rawURL, policy)
+	if err != nil {
+		return nil, fmt.Errorf("invalid relay URL")
+	}
+	clientCopy := *hardened
 	// Service-token policies authenticate each protected request from its
 	// headers. They do not necessarily mint a browser cookie, so probing a
 	// relay-only path for CF_Authorization would reject valid admission before
@@ -84,12 +92,15 @@ func (e *relayHTTPStatusError) PermanentOfferNoticeFailure() bool {
 
 // NewHTTPRelayClient validates and creates a signed client for one machine.
 func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken) (*HTTPRelayClient, error) {
-	baseURL, err := url.Parse(rawURL)
-	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+	return NewHTTPRelayClientWithPolicy(rawURL, machineID, privateKey, client, accessToken, clienttransport.Policy{})
+}
+
+// NewHTTPRelayClientWithPolicy creates a signed client with an explicit
+// client-side trusted-LAN plaintext boundary when requested.
+func NewHTTPRelayClientWithPolicy(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken, policy clienttransport.Policy) (*HTTPRelayClient, error) {
+	baseURL, err := clienttransport.ValidateOrigin(rawURL, policy)
+	if err != nil {
 		return nil, fmt.Errorf("invalid relay URL")
-	}
-	if baseURL.Scheme != "https" && (baseURL.Scheme != "http" || !loopbackHost(baseURL.Hostname())) {
-		return nil, fmt.Errorf("relay URL must use HTTPS except for a loopback development listener")
 	}
 	if strings.TrimSpace(machineID) == "" || len(privateKey) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("machine ID and Ed25519 private key are required")
@@ -97,10 +108,14 @@ func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey,
 	if (accessToken.ClientID == "") != (accessToken.ClientSecret == "") {
 		return nil, fmt.Errorf("cloudflare Access service token must contain both ID and secret")
 	}
-	if client == nil {
-		client = http.DefaultClient
+	if accessToken.ClientID != "" && baseURL.Scheme != "https" && !loopbackHost(baseURL.Hostname()) {
+		return nil, fmt.Errorf("cloudflare Access service token requires HTTPS")
 	}
-	clientCopy := *client
+	hardened, err := clienttransport.HardenClient(client, rawURL, policy)
+	if err != nil {
+		return nil, fmt.Errorf("invalid relay URL")
+	}
+	clientCopy := *hardened
 	consumerID, err := randomConsumerID()
 	if err != nil {
 		return nil, fmt.Errorf("create relay consumer identity: %w", err)
@@ -569,7 +584,7 @@ func (c *HTTPRelayClient) ReadNotifications(ctx context.Context, receive func(re
 		headers.Set("CF-Access-Client-Secret", c.accessToken.ClientSecret)
 	}
 	c.addAccessCookies(headers)
-	connection, response, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
+	connection, response, err := websocket.Dial(ctx, target.String(), &websocket.DialOptions{HTTPClient: c.httpClient, HTTPHeader: headers, CompressionMode: websocket.CompressionDisabled})
 	if response != nil && response.Body != nil {
 		defer func() { _ = response.Body.Close() }()
 	}

@@ -242,6 +242,7 @@ func run(args []string, stderr io.Writer) int {
 		_, _ = w.Write([]byte(`{"status":"ready"}\n`))
 	})
 	mux := http.NewServeMux()
+	var transportPolicy *ingress.Policy
 	if cfg.DeviceAuthEnabled {
 		database, ok := platformDB.(deviceDatabase)
 		if !ok {
@@ -253,13 +254,16 @@ func run(args []string, stderr io.Writer) int {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: PostgreSQL client lifecycle schema is unavailable")
 			return 2
 		}
-		policy := &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
-		if err := policy.Validate(); err != nil {
+		transportPolicy = &ingress.Policy{Mode: ingress.Mode(cfg.IngressMode), ListenAddr: cfg.ListenAddr, PublicURL: cfg.PublicURL, TrustedLAN: cfg.TrustedLANCIDR, AllowPlaintext: cfg.TrustedLANHTTP}
+		if err := transportPolicy.Validate(); err != nil {
 			_, _ = fmt.Fprintln(stderr, "punarod device ingress error: invalid transport policy")
 			return 2
 		}
-		deviceHandler := devicehttp.New(database, policy)
+		deviceHandler := devicehttp.New(database, transportPolicy)
 		registerDeviceRoutes(mux, deviceHandler)
+	}
+	if relayHandler != nil && transportPolicy != nil {
+		relayHandler = admitRelayTransport(transportPolicy, relayHandler)
 	}
 	registerProductionRoutes(mux, memoryHandler, trustedAttachmentHandler, relayHandler, remoteMCPMetadataHandler)
 	server := configuredServer(cfg.ListenAddr, securityHeaders(mux))
@@ -315,6 +319,16 @@ func run(args []string, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func admitRelayTransport(policy *ingress.Policy, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if policy == nil || next == nil || !policy.AllowsCredential(request) {
+			http.Error(response, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(response, request)
+	})
 }
 
 func clientLifecycleReadiness(database deviceDatabase) func() error {

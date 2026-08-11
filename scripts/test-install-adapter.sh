@@ -83,6 +83,8 @@ fi
 grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=https://relay.example.test' "$config"
 grep -Fqx 'PUNARO_MACHINE_ID=macbook' "$config"
 grep -Fqx 'PUNARO_ATTACHED_GROUP=group/punaro-attached' "$config"
+grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config"
+grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config"
 grep -Fq '"endpoint_prefixes":["agent/macbook/"]' "$enrollment"
 grep -Fq 'group create --group group/punaro-attached' "$mailbox_log"
 grep -Fq '"id":"macbook"' "$fixture_dir/first.out"
@@ -106,6 +108,25 @@ status=$?
 set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'retired attachment-v3 installer option was accepted' >&2; exit 1; }
 grep -Fqx 'unknown option: --attachment-role' "$fixture_dir/attachment-retired.out"
+
+set +e
+HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url http://192.168.1.4:8080 --machine-id lan-client --allow-lan-http >"$fixture_dir/partial-lan.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'partial trusted-LAN policy was accepted' >&2; exit 1; }
+grep -Fqx 'LAN HTTP requires --allow-lan-http and --trusted-lan-cidr together' "$fixture_dir/partial-lan.out"
+
+lan_home="$fixture_dir/lan-home"
+mkdir -p "$lan_home"
+PATH="$fixture_dir:$PATH" HOME="$lan_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url http://192.168.1.4:8080 \
+		--machine-id lan-client \
+		--allow-lan-http \
+		--trusted-lan-cidr 192.168.1.0/24 >"$fixture_dir/lan.out"
+grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=http://192.168.1.4:8080' "$lan_home/.config/punaro/adapter.env"
+grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=true' "$lan_home/.config/punaro/adapter.env"
+grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=192.168.1.0/24' "$lan_home/.config/punaro/adapter.env"
 
 printf '%s\n' legacy >"$home/.local/bin/punaro-attachment"
 set +e
