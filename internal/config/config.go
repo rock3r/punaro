@@ -144,10 +144,10 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !listener.IsLoopback(healthListenAddr) || listener.Same(listenAddr, healthListenAddr) {
 		return Config{}, fmt.Errorf("PUNARO_HEALTH_LISTEN_ADDR must be a distinct concrete loopback address")
 	}
-	// The legacy relay origin stays loopback-only. A non-loopback listener is
-	// admitted only when the complete device-ingress policy is validated below
-	// and no legacy route can share that listener.
-	if !listener.IsLoopback(listenAddr) && (!deviceAuthEnabled || relayEnabled) {
+	// A non-loopback listener is admitted only when the complete device-ingress
+	// policy is validated below. When the signed relay is enabled, punarod wraps
+	// that handler in the same observed-peer transport admission policy.
+	if !listener.IsLoopback(listenAddr) && !deviceAuthEnabled {
 		return Config{}, fmt.Errorf("PUNARO_LISTEN_ADDR must be a loopback address until the authenticated public runtime is released")
 	}
 	if deviceAuthEnabled {
