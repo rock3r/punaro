@@ -1,4 +1,4 @@
-.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
+.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e plugin-validate vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
 PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
@@ -17,8 +17,12 @@ memory-client:
 	go build -trimpath -o "$(PUNARO_MEMORY_OUTPUT)" ./cmd/punaro-memory
 
 test:
+	python3 ./scripts/test-agent-plugin.py
 	go test -covermode=atomic ./...
 	PUNARO_REMOTE_MCP_E2E_LIVE= PUNARO_REMOTE_MCP_E2E_CONFIG= go test -tags=e2e ./internal/mcphttp
+
+plugin-validate:
+	python3 ./scripts/test-agent-plugin.py
 
 test-race:
 	go test -race -count=1 ./...

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agent-mailbox": {
+      "command": "agent-mailbox",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

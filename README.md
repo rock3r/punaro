@@ -1,4 +1,4 @@
-<img width="192" src="https://github.com/user-attachments/assets/338bebec-7f54-48b8-b9d8-dc83859e9e7f" />
+<img width="192" src="assets/punaro.png" />
 
 # Punaro
 
@@ -37,6 +37,7 @@ Read the [accepted platform and Big Brain plan](docs/big-brain-plan.md),
 [proposed client lifecycle, compatibility, and recovery RFC](docs/client-lifecycle-compatibility-recovery-rfc.md),
 [user guide](docs/user-guide.md), [operator guide](docs/operator-guide.md),
 [installation guide](docs/installation.md),
+[agent plugin guide](docs/agent-plugin.md),
 [trusted-LAN deployment guide](docs/trusted-lan-deployment.md),
 [alpha text-relay onboarding](docs/alpha-text-relay.md),
 [Telegram gateway guide](docs/telegram-gateway.md),
