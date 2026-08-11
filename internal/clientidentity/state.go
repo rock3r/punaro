@@ -82,6 +82,9 @@ func Parse(raw []byte) (State, error) {
 	if json.Unmarshal(fields["version"], &state.Version) != nil || json.Unmarshal(fields["origin"], &state.Origin) != nil || json.Unmarshal(fields["client_binding"], &state.ClientBinding) != nil {
 		return State{}, ErrInvalidState
 	}
+	if state.Version == Version && (fields["allow_lan_http"] != nil || fields["trusted_lan_cidr"] != nil) {
+		return State{}, ErrInvalidState
+	}
 	if rawMachine, present := fields["legacy_machine_id"]; present {
 		var machine string
 		if json.Unmarshal(rawMachine, &machine) != nil || !validLegacyMachineID(machine) {

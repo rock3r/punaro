@@ -37,6 +37,8 @@ func TestParseAcceptsOnlyExplicitVersionTwoLANState(t *testing.T) {
 	}
 	for name, raw := range map[string]string{
 		"implicit plaintext":     `{"version":1,"origin":"http://192.168.1.4:8080","client_binding":"11111111-1111-4111-8111-111111111111"}`,
+		"v1 explicit false":      `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":false}`,
+		"v1 explicit empty cidr": `{"version":1,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","trusted_lan_cidr":""}`,
 		"missing cidr":           `{"version":2,"origin":"http://192.168.1.4:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true}`,
 		"dns plaintext":          `{"version":2,"origin":"http://punaro.lan:8080","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
 		"https downgrade fields": `{"version":2,"origin":"https://punaro.example","client_binding":"11111111-1111-4111-8111-111111111111","allow_lan_http":true,"trusted_lan_cidr":"192.168.1.0/24"}`,
