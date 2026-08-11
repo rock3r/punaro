@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	attachmentv3 "github.com/rock3r/punaro/internal/attachment/v3"
 	"github.com/rock3r/punaro/internal/relay"
@@ -149,6 +153,51 @@ func TestMailboxMCPCommandFailsClosedWithoutConfiguredState(t *testing.T) {
 	t.Setenv(adapterProfileFileEnv, filepath.Join(t.TempDir(), "missing.env"))
 	if _, err := mailboxMCPCommand(); err == nil {
 		t.Fatal("missing adapter profile was accepted")
+	}
+}
+
+func TestMailboxMCPShutdownIsClean(t *testing.T) {
+	if os.Getenv("PUNARO_TEST_MAILBOX_MCP_HELPER") == "1" {
+		ready := os.Getenv("PUNARO_TEST_MAILBOX_MCP_READY")
+		if err := os.WriteFile(ready, []byte("ready"), 0o600); err != nil { // #nosec G703 -- parent test selects this private readiness fixture.
+			os.Exit(2)
+		}
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, os.Interrupt)
+		<-signals
+		os.Exit(0)
+	}
+
+	ready := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_HELPER", "1")
+	t.Setenv("PUNARO_TEST_MAILBOX_MCP_READY", ready)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- runMailboxMCPProcess(ctx, []string{os.Args[0], "-test.run=^TestMailboxMCPShutdownIsClean$"})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mailbox MCP helper did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("normal mailbox MCP shutdown failed: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mailbox MCP shutdown did not complete")
 	}
 }
 

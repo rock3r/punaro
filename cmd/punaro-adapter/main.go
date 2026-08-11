@@ -123,11 +123,22 @@ func runMailboxMCP() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	process := exec.CommandContext(ctx, command[0], command[1:]...) // #nosec G204 -- fixed operation using owner-controlled installer configuration.
+	return runMailboxMCPProcess(ctx, command)
+}
+
+func runMailboxMCPProcess(ctx context.Context, command []string) error {
+	process := exec.CommandContext(ctx, command[0], command[1:]...) // #nosec G204,G702 -- fixed operation using owner-controlled installer configuration.
+	process.Cancel = func() error {
+		return process.Process.Signal(os.Interrupt)
+	}
+	process.WaitDelay = 2 * time.Second
 	process.Stdin = os.Stdin
 	process.Stdout = os.Stdout
 	process.Stderr = os.Stderr
 	if err := process.Run(); err != nil {
+		if ctx.Err() != nil && process.ProcessState != nil {
+			return nil
+		}
 		return fmt.Errorf("agent-mailbox MCP server failed: %w", err)
 	}
 	return nil
