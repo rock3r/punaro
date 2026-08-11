@@ -9,12 +9,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/memoryclient"
 )
 
@@ -34,11 +34,18 @@ type client interface {
 }
 
 var newMemoryClient = func(origin, credential string) (client, error) { return memoryclient.New(origin, credential) }
+var newMemoryClientWithPolicy = func(origin, credential string, policy clienttransport.Policy) (client, error) {
+	if policy == (clienttransport.Policy{}) {
+		return newMemoryClient(origin, credential)
+	}
+	return memoryclient.NewWithPolicy(origin, credential, policy)
+}
 var loadCredential = memoryclient.LoadCredential
 
 const (
-	profileVersion = 1
-	maxProfileSize = int64(4096)
+	profileVersion    = 1
+	profileLANVersion = 2
+	maxProfileSize    = int64(4096)
 )
 
 type profile struct {
@@ -46,6 +53,8 @@ type profile struct {
 	Origin         string `json:"origin"`
 	CredentialFile string `json:"credential_file"`
 	Project        string `json:"project,omitempty"`
+	AllowLANHTTP   bool   `json:"allow_lan_http,omitempty"`
+	TrustedLANCIDR string `json:"trusted_lan_cidr,omitempty"`
 }
 
 func main() { os.Exit(runWithInput(os.Args[1:], os.Stdin, os.Stdout, os.Stderr)) }
@@ -63,8 +72,10 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	profilePath := flags.String("profile", "", "absolute protected non-secret profile file")
-	origin := flags.String("origin", "", "fixed Punaro HTTPS origin")
+	origin := flags.String("origin", "", "fixed Punaro origin")
 	credentialFile := flags.String("credential-file", "", "absolute protected device credential file")
+	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
+	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")
 	project := flags.String("project", "", "opaque project UUID")
 	item := flags.String("item", "", "opaque memory item UUID")
 	proposal := flags.String("proposal", "", "opaque proposal UUID")
@@ -82,7 +93,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	explicit := make(map[string]bool)
 	flags.Visit(func(parsed *flag.Flag) { explicit[parsed.Name] = true })
 	if command == "profile-write" {
-		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project}
+		candidate := profile{Origin: *origin, CredentialFile: *credentialFile, Project: *project, AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
 		if !safeProfilePath(*profilePath) || !validProfile(candidate) || sameCleanProfilePath(*profilePath, candidate.CredentialFile) {
 			return 2
 		}
@@ -93,6 +104,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return 0
 	}
 	mcpMode := command == "mcp"
+	transportPolicy := clienttransport.Policy{}
 	if *profilePath != "" {
 		loaded, err := loadProfile(*profilePath)
 		if err != nil {
@@ -108,6 +120,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		if !explicit["project"] {
 			*project = loaded.Project
 		}
+		transportPolicy = loaded.transportPolicy()
 	}
 	if *origin == "" || !filepath.IsAbs(*credentialFile) {
 		return 2
@@ -121,7 +134,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 			_, _ = fmt.Fprintln(stderr, "punaro-memory: protected credential is unavailable")
 			return 1
 		}
-		remote, err := newMemoryClient(*origin, credential)
+		remote, err := newMemoryClientWithPolicy(*origin, credential, transportPolicy)
 		if err != nil {
 			_, _ = fmt.Fprintln(stderr, "punaro-memory: client configuration is invalid")
 			return 1
@@ -140,7 +153,7 @@ func runWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		_, _ = fmt.Fprintln(stderr, "punaro-memory: protected credential is unavailable")
 		return 1
 	}
-	remote, err := newMemoryClient(*origin, credential)
+	remote, err := newMemoryClientWithPolicy(*origin, credential, transportPolicy)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro-memory: client configuration is invalid")
 		return 1
@@ -264,7 +277,7 @@ func commandFlags(command string) []string {
 	case "mcp":
 		return []string{"project"}
 	case "profile-write":
-		return []string{"profile", "origin", "credential-file", "project"}
+		return []string{"profile", "origin", "credential-file", "project", "allow-lan-http", "trusted-lan-cidr"}
 	case "resolve":
 		return []string{"kind", "locator"}
 	case "get":
@@ -298,6 +311,9 @@ func saveProfile(path string, value profile) error {
 		return errors.New("profile path is unsafe")
 	}
 	value.Version = profileVersion
+	if value.AllowLANHTTP {
+		value.Version = profileLANVersion
+	}
 	raw, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
@@ -386,7 +402,7 @@ func loadProfile(path string) (profile, error) {
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return value, errors.New("profile has trailing data")
 	}
-	if value.Version != profileVersion || !validProfile(value) {
+	if !validProfile(value) {
 		return value, errors.New("profile is invalid")
 	}
 	return value, nil
@@ -397,22 +413,33 @@ func safeProfilePath(path string) bool {
 }
 
 func validProfile(value profile) bool {
-	return validProfileOrigin(value.Origin) &&
+	if value.Version != 0 {
+		switch value.Version {
+		case profileVersion:
+			if value.AllowLANHTTP || value.TrustedLANCIDR != "" {
+				return false
+			}
+		case profileLANVersion:
+			if !value.AllowLANHTTP || value.TrustedLANCIDR == "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return validProfileOrigin(value.Origin, value.transportPolicy()) &&
 		filepath.IsAbs(value.CredentialFile) &&
 		filepath.Clean(value.CredentialFile) == value.CredentialFile &&
 		(value.Project == "" || validProfileUUID(value.Project))
 }
 
-func validProfileOrigin(raw string) bool {
-	parsed, err := url.Parse(raw)
-	return err == nil &&
-		parsed.Scheme == "https" &&
-		parsed.Host != "" &&
-		parsed.User == nil &&
-		parsed.RawQuery == "" &&
-		parsed.Fragment == "" &&
-		(parsed.Path == "" || parsed.Path == "/") &&
-		parsed.Opaque == ""
+func validProfileOrigin(raw string, policy clienttransport.Policy) bool {
+	_, err := clienttransport.ValidateOrigin(raw, policy)
+	return err == nil
+}
+
+func (value profile) transportPolicy() clienttransport.Policy {
+	return clienttransport.Policy{AllowLANHTTP: value.AllowLANHTTP, TrustedLANCIDR: value.TrustedLANCIDR}
 }
 
 func validProfileUUID(value string) bool {

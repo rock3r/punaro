@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/memoryclient"
 )
 
@@ -719,6 +720,47 @@ func TestRunProfileWritePersistsProtectedDefaults(t *testing.T) {
 	}
 	if loaded.Origin != "https://profile.test" || loaded.CredentialFile != credential || loaded.Project != cliProject {
 		t.Fatalf("profile=%#v", loaded)
+	}
+}
+
+func TestRunProfileWritePersistsTrustedLANPolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	profilePath := filepath.Join(directory, "lan-profile.json")
+	credential := filepath.Join(directory, "credential")
+	var stdout, stderr strings.Builder
+	args := []string{"profile-write", "--profile", profilePath, "--origin", "http://192.168.1.4:8080", "--credential-file", credential, "--project", cliProject, "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}
+	if code := run(args, &stdout, &stderr); code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	loaded, err := loadProfile(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Version != 2 || !loaded.AllowLANHTTP || loaded.TrustedLANCIDR != "192.168.1.0/24" {
+		t.Fatalf("profile=%#v", loaded)
+	}
+}
+
+func TestRunUsesTrustedLANProfilePolicy(t *testing.T) {
+	directory := resolvedTempDir(t)
+	profilePath := filepath.Join(directory, "lan-profile.json")
+	credential := filepath.Join(directory, "credential")
+	if err := saveProfile(profilePath, profile{Origin: "http://192.168.1.4:8080", CredentialFile: credential, Project: cliProject, AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	previousLoader, previousFactory := loadCredential, newMemoryClientWithPolicy
+	t.Cleanup(func() { loadCredential, newMemoryClientWithPolicy = previousLoader, previousFactory })
+	loadCredential = func(string) (string, error) { return "device-secret", nil }
+	fake := &recordingClient{}
+	newMemoryClientWithPolicy = func(origin, value string, policy clienttransport.Policy) (client, error) {
+		if origin != "http://192.168.1.4:8080" || value != "device-secret" || !policy.AllowLANHTTP || policy.TrustedLANCIDR != "192.168.1.0/24" {
+			t.Fatalf("origin=%q credential=%q policy=%#v", origin, value, policy)
+		}
+		return fake, nil
+	}
+	var stdout, stderr strings.Builder
+	if code := run([]string{"get", "--profile", profilePath, "--item", cliItem}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}
 }
 

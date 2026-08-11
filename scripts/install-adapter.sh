@@ -114,6 +114,17 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 [ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
+if [ "$allow_lan_http" = true ]; then
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" --allow-lan-http --trusted-lan-cidr "$trusted_lan_cidr" >/dev/null 2>&1
+	) || fail 'relay transport policy is invalid'
+else
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-adapter validate-relay-transport --relay-url "$relay_url" >/dev/null 2>&1
+	) || fail 'relay transport policy is invalid'
+fi
 if [ "$mailbox_bin" = agent-mailbox ]; then
 	mailbox_bin=$(command -v agent-mailbox) || fail 'agent-mailbox is required; install it before onboarding this machine'
 elif [ ! -x "$mailbox_bin" ]; then

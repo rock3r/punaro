@@ -127,6 +127,21 @@ set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'partial trusted-LAN policy was accepted' >&2; exit 1; }
 grep -Fqx 'LAN HTTP requires --allow-lan-http and --trusted-lan-cidr together' "$fixture_dir/partial-lan.out"
 
+invalid_policy_home="$fixture_dir/invalid-policy-home"
+mkdir -p "$invalid_policy_home"
+set +e
+PATH="$fixture_dir:$PATH" HOME="$invalid_policy_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url http://punaro.lan:8080 \
+		--machine-id invalid-lan-client \
+		--allow-lan-http \
+		--trusted-lan-cidr 192.168.1.0/24 >"$fixture_dir/invalid-policy.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'invalid complete trusted-LAN policy was accepted' >&2; exit 1; }
+grep -Fqx 'relay transport policy is invalid' "$fixture_dir/invalid-policy.out"
+[ ! -e "$invalid_policy_home/.config/punaro" ] || { printf '%s\n' 'invalid trusted-LAN policy created installation artifacts' >&2; exit 1; }
+
 lan_home="$fixture_dir/lan-home"
 mkdir -p "$lan_home"
 PATH="$fixture_dir:$PATH" HOME="$lan_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \

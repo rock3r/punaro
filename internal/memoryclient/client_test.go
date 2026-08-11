@@ -9,11 +9,15 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rock3r/punaro/internal/clienttransport"
 )
 
 const (
@@ -73,6 +77,34 @@ func TestNewRejectsUnsafeOriginCredentialAndProxy(t *testing.T) {
 	protocols := client.http.Transport.(*http.Transport).Protocols
 	if protocols == nil || !protocols.HTTP1() || protocols.HTTP2() {
 		t.Fatal("transport is not constrained to HTTP/1")
+	}
+}
+
+func TestLANPolicyIssuesActualMemoryRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer "+testCredential || request.Host != "192.168.1.4:8080" {
+			t.Fatalf("headers=%v host=%q", request.Header, request.Host)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		response.Header().Set("Cache-Control", "no-store")
+		_, _ = response.Write([]byte(`{"identity_id":"` + testInstallation + `","project_id":"` + testProject + `","kind":"git_remote"}`))
+	}))
+	defer server.Close()
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, target.Host)
+	}
+	client, err := newWithHTTPClientAndPolicy("http://192.168.1.4:8080", testCredential, &http.Client{Transport: transport}, clienttransport.Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Resolve(context.Background(), "git_remote", "github.com/Owner/Repo"); err != nil {
+		t.Fatal(err)
 	}
 }
 

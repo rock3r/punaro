@@ -735,8 +735,10 @@ non-symlink parent directories, owned by the current user, have no group/other
 permissions, and have exactly one hard link. On Windows it must have one
 protected FullControl ACE for the current user and no shared ACEs, and neither
 the credential nor any parent may be a reparse point. The CLI accepts an
-explicit HTTPS `--origin` and `--credential-file`, and the bearer credential
-value is never stored by the client.
+explicit HTTPS `--origin` and `--credential-file`, or an explicit literal-IP
+trusted-LAN HTTP origin with both `--allow-lan-http` and
+`--trusted-lan-cidr`. The bearer credential value is never stored by the
+client.
 
 M-17C2 adds a protected local profile for convenience. Create it only with an
 absolute target path:
@@ -750,11 +752,16 @@ punaro-memory profile-write \
 ```
 
 The profile is an atomically replaced `0600` JSON file containing only
-non-secret defaults: origin, credential-file path, and optional project UUID.
+non-secret defaults: origin, credential-file path, optional project UUID, and,
+for a version-2 LAN profile, the explicit LAN acknowledgement and CIDR. Use the
+same `--allow-lan-http` and `--trusted-lan-cidr` flags accepted by the client
+installers; missing, partial, DNS-based, public, or out-of-CIDR policies are
+rejected before a request is sent. HTTPS profiles remain version 1.
 On Windows the binary writes and verifies the equivalent exclusive current-user
 DACL before reading it; reparse points, shared ACLs, and replacement races are
 rejected. Normal commands may pass `--profile`; explicit `--origin`, `--credential-file`,
-and `--project` flags override the profile defaults for that invocation.
+and `--project` flags override the profile defaults for that invocation. The
+LAN transport disables ambient proxies and redirects.
 
 Pass an explicit `--project` UUID to project-scoped commands. `resolve` accepts
 only an explicit `--kind` and `--locator`; it discovers existing authorized

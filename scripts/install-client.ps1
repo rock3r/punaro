@@ -146,6 +146,20 @@ if ($relay.Scheme -eq 'https') {
 }
 
 $repoDir = Split-Path -Parent $PSScriptRoot
+if (-not (Test-Path -LiteralPath (Join-Path $repoDir 'go.mod') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $repoDir 'cmd\punaro-adapter') -PathType Container)) {
+    Stop-Install 'run this installer from a complete Punaro source checkout'
+}
+try { Get-Command 'go' -CommandType Application -ErrorAction Stop | Out-Null } catch { Stop-Install 'Go is required to build the adapter from this checkout' }
+$validationArguments = @('run', './cmd/punaro-adapter', 'validate-relay-transport', '--relay-url', $RelayUrl)
+if ($AllowLanHttp) { $validationArguments += @('--allow-lan-http', '--trusted-lan-cidr', $TrustedLanCidr) }
+Push-Location -LiteralPath $repoDir
+try {
+    $validation = Invoke-NativeProgramRaw -Program 'go' -Arguments $validationArguments
+} finally {
+    Pop-Location
+}
+if ($validation.ExitCode -ne 0) { Stop-Install 'relay transport policy is invalid' }
+
 $root = Join-Path $env:LOCALAPPDATA 'Punaro'
 $binDir = Join-Path $root 'bin'
 $configDir = Join-Path $root 'config'

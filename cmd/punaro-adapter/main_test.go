@@ -174,6 +174,23 @@ func TestLoadConfigRequiresCompleteExplicitLANPolicy(t *testing.T) {
 	}
 }
 
+func TestValidateRelayTransportRejectsUnsafeLANBeforeInstallation(t *testing.T) {
+	if err := validateRelayTransport([]string{"--relay-url", "http://192.168.1.4:8080", "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"}); err != nil {
+		t.Fatalf("valid LAN transport rejected: %v", err)
+	}
+	for name, args := range map[string][]string{
+		"dns":          {"--relay-url", "http://punaro.lan:8080", "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"},
+		"public":       {"--relay-url", "http://203.0.113.4:8080", "--allow-lan-http", "--trusted-lan-cidr", "203.0.113.0/24"},
+		"outside cidr": {"--relay-url", "http://192.168.2.4:8080", "--allow-lan-http", "--trusted-lan-cidr", "192.168.1.0/24"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateRelayTransport(args); err == nil {
+				t.Fatal("unsafe LAN transport accepted")
+			}
+		})
+	}
+}
+
 func TestLoadPrivateKeyRejectsUnsafeFileModesAndSymlinks(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

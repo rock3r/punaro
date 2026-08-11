@@ -81,13 +81,31 @@ func main() {
 		err = runMemberRemove(os.Args[3:])
 	case os.Args[1] == "attachment-notify":
 		err = runAttachmentNotify(os.Args[2:])
+	case os.Args[1] == "validate-relay-transport":
+		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
 		os.Exit(1)
 	}
+}
+
+func validateRelayTransport(args []string) error {
+	flags := flag.NewFlagSet("punaro-adapter validate-relay-transport", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	relayURL := flags.String("relay-url", "", "fixed relay origin")
+	allowLANHTTP := flags.Bool("allow-lan-http", false, "explicitly allow plaintext credentials on the pinned trusted LAN")
+	trustedLANCIDR := flags.String("trusted-lan-cidr", "", "private or link-local CIDR containing the literal HTTP origin")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *relayURL == "" {
+		return errors.New("relay transport policy is invalid")
+	}
+	policy := clienttransport.Policy{AllowLANHTTP: *allowLANHTTP, TrustedLANCIDR: strings.TrimSpace(*trustedLANCIDR)}
+	if _, err := clienttransport.ValidateOrigin(*relayURL, policy); err != nil {
+		return errors.New("relay transport policy is invalid")
+	}
+	return nil
 }
 
 type memberControlRequest struct {

@@ -76,6 +76,24 @@ Redemption and recovery reuse the persisted policy; they do not accept a
 different origin or CIDR. Cloudflare Access credentials are invalid in this
 profile.
 
+Create the native memory-client profile with that same explicit policy after
+the device credential has been redeemed:
+
+```sh
+punaro-memory profile-write \
+  --profile "$HOME/.config/punaro/memory-profile.json" \
+  --origin http://192.168.1.4:8080 \
+  --credential-file "$HOME/.config/punaro/device-enrollment/device.credential" \
+  --project 11111111-1111-4111-8111-111111111111 \
+  --allow-lan-http \
+  --trusted-lan-cidr 192.168.1.0/24
+```
+
+The protected version-2 profile records the non-secret LAN acknowledgement.
+Every memory request revalidates the literal private or link-local origin and
+CIDR, disables ambient proxies, and rejects redirects. HTTPS profiles remain
+version 1 and need no LAN flags.
+
 The separately enrolled Telegram bridge uses
 `PUNARO_ADAPTER_ALLOW_LAN_HTTP=true` and
 `PUNARO_ADAPTER_TRUSTED_LAN_CIDR=192.168.1.0/24` alongside its literal relay

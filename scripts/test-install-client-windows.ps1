@@ -53,6 +53,18 @@ try {
         return [pscustomobject]@{}
     }
 
+    $invalidLocalAppData = Join-Path $fixture 'invalid-localappdata'
+    $env:LOCALAPPDATA = $invalidLocalAppData
+    $invalidPolicyBlocked = $false
+    try {
+        & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'http://192.168.2.4:8080' -MachineId 'invalid-lan-client' -AgentMailboxBin $mailbox -AllowLanHttp -TrustedLanCidr '192.168.1.0/24'
+    } catch {
+        if ($_.Exception.Message.Contains('relay transport policy is invalid')) { $invalidPolicyBlocked = $true } else { throw }
+    }
+    if (-not $invalidPolicyBlocked) { throw 'Windows client installer accepted an invalid complete trusted-LAN policy' }
+    if (Test-Path -LiteralPath (Join-Path $invalidLocalAppData 'Punaro')) { throw 'invalid trusted-LAN policy created Windows installation artifacts' }
+    $env:LOCALAPPDATA = Join-Path $fixture 'localappdata'
+
     Push-Location -LiteralPath $fixture
     try {
         & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project

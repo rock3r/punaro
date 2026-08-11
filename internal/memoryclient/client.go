@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/rock3r/punaro/internal/clienttransport"
 )
 
 const (
@@ -56,9 +57,19 @@ func New(rawOrigin, credential string) (*Client, error) {
 	return newWithHTTPClient(rawOrigin, credential, nil)
 }
 
+// NewWithPolicy applies an explicit trusted-LAN plaintext policy. HTTPS callers
+// should use New so stale LAN policy cannot silently change transport meaning.
+func NewWithPolicy(rawOrigin, credential string, policy clienttransport.Policy) (*Client, error) {
+	return newWithHTTPClientAndPolicy(rawOrigin, credential, nil, policy)
+}
+
 func newWithHTTPClient(rawOrigin, credential string, provided *http.Client) (*Client, error) {
-	base, err := url.Parse(rawOrigin)
-	if err != nil || base.Scheme != "https" || base.Host == "" || base.User != nil || base.RawQuery != "" || base.Fragment != "" || (base.Path != "" && base.Path != "/") || base.Opaque != "" {
+	return newWithHTTPClientAndPolicy(rawOrigin, credential, provided, clienttransport.Policy{})
+}
+
+func newWithHTTPClientAndPolicy(rawOrigin, credential string, provided *http.Client, policy clienttransport.Policy) (*Client, error) {
+	base, err := clienttransport.ValidateOrigin(rawOrigin, policy)
+	if err != nil {
 		return nil, errors.New("invalid Punaro memory origin")
 	}
 	if !validCredential(credential) {
@@ -67,7 +78,11 @@ func newWithHTTPClient(rawOrigin, credential string, provided *http.Client) (*Cl
 	if provided == nil {
 		provided = &http.Client{Timeout: 15 * time.Second, Transport: directTransport()}
 	}
-	client := *provided
+	hardened, err := clienttransport.HardenClient(provided, rawOrigin, policy)
+	if err != nil {
+		return nil, errors.New("invalid Punaro memory origin")
+	}
+	client := *hardened
 	switch transport := client.Transport.(type) {
 	case nil:
 		client.Transport = directTransport()
