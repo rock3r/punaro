@@ -154,6 +154,17 @@ grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=http://192.168.1.4:8080' "$lan_home/.config/
 grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=true' "$lan_home/.config/punaro/adapter.env"
 grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=192.168.1.0/24' "$lan_home/.config/punaro/adapter.env"
 
+ipv6_home="$fixture_dir/ipv6-home"
+mkdir -p "$ipv6_home"
+PATH="$fixture_dir:$PATH" HOME="$ipv6_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url 'http://[fd12:3456::4]:8080' \
+		--machine-id ipv6-lan-client \
+		--allow-lan-http \
+		--trusted-lan-cidr 'fd12:3456::/64' >"$fixture_dir/ipv6.out"
+grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=http://[fd12:3456::4]:8080' "$ipv6_home/.config/punaro/adapter.env"
+grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=fd12:3456::/64' "$ipv6_home/.config/punaro/adapter.env"
+
 printf '%s\n' legacy >"$home/.local/bin/punaro-attachment"
 set +e
 run_install >"$fixture_dir/legacy-artifact.out" 2>&1

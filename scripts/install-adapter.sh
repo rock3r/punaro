@@ -46,6 +46,12 @@ require_safe_value() {
 	esac
 }
 
+require_safe_relay_url() {
+	case "$1" in
+		''|*[!A-Za-z0-9_./:@%+=,\[\]-]*) fail 'relay URL contains unsupported characters' ;;
+	esac
+}
+
 file_mode() {
 	if stat -f %Lp "$1" >/dev/null 2>&1; then
 		stat -f %Lp "$1"
@@ -103,7 +109,7 @@ if [ -z "$mailbox_state_dir" ]; then
 	mailbox_state_dir="$HOME/.local/state/ai-agent/mailbox"
 fi
 
-require_safe_value "$relay_url" 'relay URL'
+require_safe_relay_url "$relay_url"
 require_safe_value "$HOME" 'HOME'
 require_safe_value "$mailbox_bin" 'agent-mailbox path'
 require_safe_value "$mailbox_state_dir" 'mailbox state directory'
