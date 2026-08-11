@@ -6,6 +6,22 @@ fail() {
 	exit 1
 }
 
+passwd_home() {
+	account_record=$1
+	account_field=1
+	while [ "$account_field" -lt 6 ]; do
+		case "$account_record" in
+		*:*) account_record=${account_record#*:} ;;
+		*) return 1 ;;
+		esac
+		account_field=$((account_field + 1))
+	done
+	case "$account_record" in
+	*:*) printf '%s\n' "${account_record%%:*}" ;;
+	*) return 1 ;;
+	esac
+}
+
 user_home=${HOME:-}
 if [ -z "$user_home" ]; then
 	case "$(uname -s)" in
@@ -23,12 +39,7 @@ if [ -z "$user_home" ]; then
 		else
 			fail 'HOME is unavailable and no account lookup is installed'
 		fi
-		old_ifs=$IFS
-		IFS=:
-		set -- $home_record
-		IFS=$old_ifs
-		[ "$#" -ge 6 ] || fail 'current user account record is invalid'
-		user_home=$6
+		user_home=$(passwd_home "$home_record") || fail 'current user account record is invalid'
 		;;
 	*) fail 'this launcher supports macOS and Linux' ;;
 	esac

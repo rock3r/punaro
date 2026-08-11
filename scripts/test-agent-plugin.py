@@ -143,6 +143,8 @@ def validate_skills() -> None:
         posix_launcher = (skill_root / "scripts" / command).read_text(encoding="utf-8")
         if f'.local/bin/{command}' not in posix_launcher or "PATH" in posix_launcher:
             raise ValidationError(f"POSIX skill launcher must use the installer-owned path: {skill_name}/{command}")
+        if "set --" in posix_launcher:
+            raise ValidationError(f"POSIX skill launcher must preserve forwarded arguments: {skill_name}/{command}")
         windows_launcher = (skill_root / "scripts" / f"{command}.cmd").read_text(encoding="utf-8")
         if f"%LOCALAPPDATA%\\Punaro\\bin\\{command}.exe" not in windows_launcher or "%PATH%" in windows_launcher:
             raise ValidationError(f"Windows skill launcher must use the installer-owned path: {skill_name}/{command}")
