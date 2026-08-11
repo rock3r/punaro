@@ -162,11 +162,13 @@ def validate_claude_adapter(portable: dict[str, Any], portable_mcp: dict[str, An
 
     config = load_json(".mcp.json")
     expected_servers = {
-        name: {key: value for key, value in server.items() if key != "type"}
+        name: {
+            "command": "${CLAUDE_PLUGIN_ROOT}/" + server["command"].removeprefix("./"),
+        }
         for name, server in portable_mcp["mcpServers"].items()
     }
     if config != {"mcpServers": expected_servers}:
-        raise ValidationError(".mcp.json drifted from portable mcp.json")
+        raise ValidationError(".mcp.json drifted from the Claude plugin-root launchers")
 
 
 def validate_codex_adapter(portable: dict[str, Any]) -> None:
@@ -174,8 +176,8 @@ def validate_codex_adapter(portable: dict[str, Any]) -> None:
     for field in SHARED_METADATA:
         if manifest.get(field) != portable.get(field):
             raise ValidationError(f"Codex manifest metadata drifted: {field}")
-    if manifest.get("skills") != "./skills/" or manifest.get("mcpServers") != "./.mcp.json":
-        raise ValidationError("Codex manifest must use the shared skills and Claude-compatible MCP adapter")
+    if manifest.get("skills") != "./skills/" or "mcpServers" in manifest:
+        raise ValidationError("Codex manifest must use shared skills and default portable MCP discovery")
 
     interface = manifest.get("interface")
     if not isinstance(interface, dict):

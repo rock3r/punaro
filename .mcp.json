@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "agent-mailbox": {
-      "command": "./scripts/punaro-plugin-mcp"
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/punaro-plugin-mcp"
     },
     "agent-mailbox-windows": {
-      "command": "./scripts/punaro-plugin-mcp.cmd"
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/punaro-plugin-mcp.cmd"
     }
   }
 }

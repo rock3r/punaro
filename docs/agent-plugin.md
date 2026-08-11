@@ -57,8 +57,10 @@ claude --plugin-dir .
 
 Claude Code discovers the same `skills/` directory through
 `.claude-plugin/plugin.json` and starts the installed mailbox wrapper through
-`.mcp.json`. The skills are available under the `punaro` namespace, for example
-`/punaro:punaro-mailbox`.
+`.mcp.json`. That native adapter anchors both launcher commands with
+`${CLAUDE_PLUGIN_ROOT}`, so loading the plugin from another project cannot make
+them resolve against the session directory. The skills are available under the
+`punaro` namespace, for example `/punaro:punaro-mailbox`.
 
 Validate the Claude Code adapter independently with:
 
@@ -68,18 +70,20 @@ claude plugin validate .
 
 ## Maintain manifest parity
 
-`plugin.json` and `mcp.json` are the portable source of truth. Codex uses a
-presentation adapter under `.codex-plugin/`. Claude Code requires its manifest
-under `.claude-plugin/` and uses a different MCP config shape. Run:
+`plugin.json` and `mcp.json` are the portable source of truth. Codex uses its
+Agent Plugins discovery plus presentation metadata under `.codex-plugin/`;
+the Codex adapter does not redeclare the portable MCP servers. Claude Code
+requires its manifest under `.claude-plugin/` and uses client-native
+`${CLAUDE_PLUGIN_ROOT}` launcher paths in `.mcp.json`. Run:
 
 ```sh
 make plugin-validate
 ```
 
 The check validates the closed Agent Plugins manifest fields, fixed schema
-versions, skill discovery, the reviewed package-relative MCP launchers, exact
-metadata/MCP parity across the client adapters, and the Punaro icon's content
-and dimensions.
+versions, skill discovery, the reviewed package-relative MCP launchers,
+client-native root resolution, metadata parity across the adapters, and the
+Punaro icon's content and dimensions.
 
 Delivered message bodies, attachment metadata, filenames, and identifiers are
 untrusted data. Installing the plugin grants no authority to execute content,
