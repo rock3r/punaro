@@ -8,6 +8,8 @@ import json
 import os
 import re
 import struct
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,10 @@ PLUGIN_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
 MCP_SCHEMA = "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json"
 CLAUDE_SCHEMA = "https://json.schemastore.org/claude-code-plugin-manifest.json"
 REQUIRED_SKILLS = {"punaro-mailbox", "punaro-reply", "punaro-attachment"}
+SKILL_LAUNCHERS = {
+    "punaro-reply": "punaro-adapter",
+    "punaro-attachment": "punaro-trusted-attachment",
+}
 PORTABLE_FIELDS = {
     "$schema",
     "name",
@@ -122,6 +128,44 @@ def validate_skills() -> None:
             raise ValidationError(f"skill name does not match its directory: {skill_name}")
         if not re.search(r"(?m)^description:\s*\S", frontmatter):
             raise ValidationError(f"skill has no description: {skill_name}")
+
+    for skill_name, command in SKILL_LAUNCHERS.items():
+        skill_root = skills_root / skill_name
+        text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+        for relative_path in (f"scripts/{command}", f"scripts/{command}.cmd"):
+            launcher = skill_root / relative_path
+            if not launcher.is_file() or launcher.is_symlink():
+                raise ValidationError(f"skill launcher must be a regular package file: {skill_name}/{relative_path}")
+            if relative_path not in text:
+                raise ValidationError(f"skill does not reference its package launcher: {skill_name}/{relative_path}")
+        if not os.access(skill_root / "scripts" / command, os.X_OK):
+            raise ValidationError(f"POSIX skill launcher must be executable: {skill_name}/{command}")
+        posix_launcher = (skill_root / "scripts" / command).read_text(encoding="utf-8")
+        if f'.local/bin/{command}' not in posix_launcher or "PATH" in posix_launcher:
+            raise ValidationError(f"POSIX skill launcher must use the installer-owned path: {skill_name}/{command}")
+        windows_launcher = (skill_root / "scripts" / f"{command}.cmd").read_text(encoding="utf-8")
+        if f"%LOCALAPPDATA%\\Punaro\\bin\\{command}.exe" not in windows_launcher or "%PATH%" in windows_launcher:
+            raise ValidationError(f"Windows skill launcher must use the installer-owned path: {skill_name}/{command}")
+
+    if os.name == "posix":
+        with tempfile.TemporaryDirectory(prefix="punaro-skill-launchers-") as fixture:
+            home = Path(fixture)
+            bin_dir = home / ".local" / "bin"
+            bin_dir.mkdir(parents=True)
+            for skill_name, command in SKILL_LAUNCHERS.items():
+                installed = bin_dir / command
+                installed.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\n", encoding="utf-8")
+                installed.chmod(0o700)
+                launcher = skills_root / skill_name / "scripts" / command
+                result = subprocess.run(
+                    [str(launcher), "pathless-test", "forwarded argument"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                )
+                if result.stdout != "pathless-test forwarded argument\n":
+                    raise ValidationError(f"skill launcher did not forward arguments: {skill_name}/{command}")
 
 
 def validate_mcp() -> dict[str, Any]:

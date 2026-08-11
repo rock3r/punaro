@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+fail() {
+	printf '%s\n' "punaro attachment skill: $*" >&2
+	exit 1
+}
+
+user_home=${HOME:-}
+if [ -z "$user_home" ]; then
+	case "$(uname -s)" in
+	Darwin)
+		user_name=$(/usr/bin/id -un) || fail 'could not identify the current user'
+		home_record=$(/usr/bin/dscl . -read "/Users/$user_name" NFSHomeDirectory) || fail 'could not locate the current user home'
+		user_home=${home_record#*: }
+		;;
+	Linux)
+		user_id=$(id -u) || fail 'could not identify the current user'
+		if [ -x /usr/bin/getent ]; then
+			home_record=$(/usr/bin/getent passwd "$user_id") || fail 'could not locate the current user home'
+		elif [ -x /bin/getent ]; then
+			home_record=$(/bin/getent passwd "$user_id") || fail 'could not locate the current user home'
+		else
+			fail 'HOME is unavailable and no account lookup is installed'
+		fi
+		old_ifs=$IFS
+		IFS=:
+		set -- $home_record
+		IFS=$old_ifs
+		[ "$#" -ge 6 ] || fail 'current user account record is invalid'
+		user_home=$6
+		;;
+	*) fail 'this launcher supports macOS and Linux' ;;
+	esac
+fi
+
+client="$user_home/.local/bin/punaro-trusted-attachment"
+[ -f "$client" ] && [ ! -L "$client" ] && [ -x "$client" ] || fail "installed trusted-attachment client is unavailable at $client; run the Punaro client installer first"
+exec "$client" "$@"
