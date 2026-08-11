@@ -178,6 +178,26 @@ PATH="$fixture_dir:$PATH" HOME="$ipv6_home" GOTOOLCHAIN=local GOMODCACHE="$go_mo
 grep -Fqx 'PUNARO_ADAPTER_RELAY_URL=http://[fd12:3456::4]:8080' "$ipv6_home/.config/punaro/adapter.env"
 grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=fd12:3456::/64' "$ipv6_home/.config/punaro/adapter.env"
 
+relative_home="$fixture_dir/relative-home"
+relative_root="$fixture_dir/relative-inputs"
+mkdir -p "$relative_home" "$relative_root/bin"
+relative_root=$(CDPATH= cd -- "$relative_root" && pwd -P)
+relative_mailbox="$relative_root/bin/agent-mailbox"
+relative_state="$relative_root/state/mailbox"
+cp "$mailbox" "$relative_mailbox"
+(
+	cd "$fixture_dir"
+	HOME="$relative_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+		sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url https://relay.example.test \
+		--machine-id relative-paths \
+		--agent-mailbox-bin relative-inputs/bin/agent-mailbox \
+		--mailbox-state-dir relative-inputs/state/mailbox >"$fixture_dir/relative.out"
+)
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$relative_mailbox" "$relative_home/.config/punaro/adapter.env"
+grep -Fqx "PUNARO_MAILBOX_STATE_DIR=$relative_state" "$relative_home/.config/punaro/adapter.env"
+grep -Fq -- "--state-dir $relative_state group create --group group/punaro-attached" "$mailbox_log"
+
 printf '%s\n' legacy >"$home/.local/bin/punaro-attachment"
 set +e
 run_install >"$fixture_dir/legacy-artifact.out" 2>&1
@@ -192,7 +212,8 @@ PATH="$fixture_dir:$PATH" HOME="$default_home" GOTOOLCHAIN=local GOMODCACHE="$go
 	sh "$repo_dir/scripts/install-client.sh" \
 		--relay-url https://relay.example.test \
 		--machine-id default-path >"$fixture_dir/default.out"
-grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$mailbox" "$default_home/.config/punaro/adapter.env"
+default_mailbox_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox")" && pwd -P)
+grep -Fqx "PUNARO_AGENT_MAILBOX_BIN=$default_mailbox_dir/$(basename -- "$mailbox")" "$default_home/.config/punaro/adapter.env"
 
 set +e
 HOME="$home" sh "$repo_dir/scripts/install-adapter.sh" --relay-url https://relay.example.test --machine-id 'bad/id' >"$fixture_dir/invalid.out" 2>&1

@@ -136,6 +136,8 @@ if [ "$mailbox_bin" = agent-mailbox ]; then
 elif [ ! -x "$mailbox_bin" ]; then
 	fail 'agent-mailbox path is not executable'
 fi
+mailbox_bin_dir=$(CDPATH= cd -- "$(dirname -- "$mailbox_bin")" && pwd -P) || fail 'agent-mailbox path is unavailable'
+mailbox_bin="$mailbox_bin_dir/$(basename -- "$mailbox_bin")"
 
 config_dir="$HOME/.config/punaro"
 state_dir="$HOME/.local/state/punaro-adapter"
@@ -158,6 +160,9 @@ for retired_path in \
 		fail "retired attachment artifact exists at $retired_path; archive or remove it explicitly before installing the trusted client"
 	fi
 done
+
+mkdir -p "$mailbox_state_dir" || fail 'could not create the local mailbox state directory'
+mailbox_state_dir=$(CDPATH= cd -- "$mailbox_state_dir" && pwd -P) || fail 'mailbox state directory is unavailable'
 
 build_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-adapter-install.XXXXXXXX")
 cleanup() { rm -rf -- "$build_dir"; }
