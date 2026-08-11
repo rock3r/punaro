@@ -127,6 +127,19 @@ set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'partial trusted-LAN policy was accepted' >&2; exit 1; }
 grep -Fqx 'LAN HTTP requires --allow-lan-http and --trusted-lan-cidr together' "$fixture_dir/partial-lan.out"
 
+unsafe_url_home="$fixture_dir/unsafe-url-home"
+mkdir -p "$unsafe_url_home"
+set +e
+PATH="$fixture_dir:$PATH" HOME="$unsafe_url_home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
+	sh "$repo_dir/scripts/install-client.sh" \
+		--relay-url 'https://relay.example.test;touch' \
+		--machine-id unsafe-url-client >"$fixture_dir/unsafe-url.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'unsafe relay URL character was accepted' >&2; exit 1; }
+grep -Fqx 'relay URL contains unsupported characters' "$fixture_dir/unsafe-url.out"
+[ ! -e "$unsafe_url_home/.config/punaro" ] || { printf '%s\n' 'unsafe relay URL created installation artifacts' >&2; exit 1; }
+
 invalid_policy_home="$fixture_dir/invalid-policy-home"
 mkdir -p "$invalid_policy_home"
 set +e

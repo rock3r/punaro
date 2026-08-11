@@ -48,7 +48,7 @@ require_safe_value() {
 
 require_safe_relay_url() {
 	case "$1" in
-		''|*[!A-Za-z0-9_./:@%+=,\[\]-]*) fail 'relay URL contains unsupported characters' ;;
+		''|*[!][A-Za-z0-9_./:@%+=,-]*) fail 'relay URL contains unsupported characters' ;;
 	esac
 }
 
