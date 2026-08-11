@@ -80,10 +80,14 @@ function Read-PunaroEnvironment([string]$Path) {
     return $values
 }
 
-function Assert-Configuration([string]$Path, [hashtable]$Expected) {
+function Assert-Configuration([string]$Path, [hashtable]$Expected, [hashtable]$MissingDefaults) {
     $existing = Read-PunaroEnvironment -Path $Path
     foreach ($name in $Expected.Keys) {
-        if (-not $existing.ContainsKey($name) -or $existing[$name] -ne $Expected[$name]) {
+        if (-not $existing.ContainsKey($name)) {
+            if ($MissingDefaults.ContainsKey($name) -and $Expected[$name] -eq $MissingDefaults[$name]) { continue }
+            Stop-Install 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
+        }
+        if ($existing[$name] -ne $Expected[$name]) {
             Stop-Install 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
         }
     }
@@ -192,8 +196,9 @@ if (Test-Path -LiteralPath $keyFile) {
 }
 
 $expected = @{ PUNARO_ADAPTER_RELAY_URL = $RelayUrl; PUNARO_MACHINE_ID = $MachineId; PUNARO_MACHINE_PRIVATE_KEY_FILE = $keyFile; PUNARO_ATTACHED_GROUP = $AttachedGroup; PUNARO_ADAPTER_DATA_DIR = $stateDir; PUNARO_MAILBOX_STATE_DIR = $MailboxStateDir; PUNARO_AGENT_MAILBOX_BIN = $mailbox; PUNARO_ADAPTER_ALLOW_LAN_HTTP = $AllowLanHttp.ToString().ToLowerInvariant(); PUNARO_ADAPTER_TRUSTED_LAN_CIDR = [string]$TrustedLanCidr }
+$missingDefaults = @{ PUNARO_ADAPTER_ALLOW_LAN_HTTP = 'false'; PUNARO_ADAPTER_TRUSTED_LAN_CIDR = '' }
 if (Test-Path -LiteralPath $configFile) {
-    Assert-Configuration -Path $configFile -Expected $expected
+    Assert-Configuration -Path $configFile -Expected $expected -MissingDefaults $missingDefaults
 } else {
     $config = @(
         '# Created by Punaro. Keep this current-user-only file out of source control and backups.',

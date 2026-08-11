@@ -97,6 +97,17 @@ cp "$enrollment" "$fixture_dir/enrollment.before"
 run_install >"$fixture_dir/second.out"
 cmp "$fixture_dir/enrollment.before" "$enrollment"
 
+# Profiles written by the previous installer did not contain the explicit LAN
+# keys. Their absence is the safe HTTPS default and must remain upgradeable.
+grep -v '^PUNARO_ADAPTER_\(ALLOW_LAN_HTTP\|TRUSTED_LAN_CIDR\)=' "$config" >"$fixture_dir/pre-policy.env"
+mv "$fixture_dir/pre-policy.env" "$config"
+chmod 600 "$config"
+run_install >"$fixture_dir/pre-policy-upgrade.out"
+if grep -q '^PUNARO_ADAPTER_\(ALLOW_LAN_HTTP\|TRUSTED_LAN_CIDR\)=' "$config"; then
+	printf '%s\n' 'HTTPS compatibility upgrade unexpectedly rewrote adapter.env' >&2
+	exit 1
+fi
+
 set +e
 HOME="$home" GOTOOLCHAIN=local GOMODCACHE="$go_mod_cache" GOCACHE="$go_build_cache" PUNARO_TEST_MAILBOX_LOG="$mailbox_log" \
 	sh "$repo_dir/scripts/install-adapter.sh" \

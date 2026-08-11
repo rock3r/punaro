@@ -206,8 +206,17 @@ if [ -e "$config_file" ] || [ -L "$config_file" ]; then
 		"PUNARO_AGENT_MAILBOX_BIN=$mailbox_bin"; do
 		grep -Fqx "$expected" "$config_file" || fail 'existing adapter.env belongs to a different machine or relay; refusing to overwrite it'
 	done
-	grep -Fqx "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
-	grep -Fqx "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+	if [ "$allow_lan_http" = false ] && [ -z "$trusted_lan_cidr" ]; then
+		if grep -q '^PUNARO_ADAPTER_ALLOW_LAN_HTTP=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_ALLOW_LAN_HTTP=false' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+		if grep -q '^PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file"; then
+			grep -Fqx 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR=' "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		fi
+	else
+		grep -Fqx "PUNARO_ADAPTER_ALLOW_LAN_HTTP=$allow_lan_http" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+		grep -Fqx "PUNARO_ADAPTER_TRUSTED_LAN_CIDR=$trusted_lan_cidr" "$config_file" || fail 'existing adapter.env has a different LAN transport policy; refusing to overwrite it'
+	fi
 else
 	( set -C; : >"$config_file" ) 2>/dev/null || fail 'could not create adapter.env without overwriting an existing file'
 	write_config >"$config_file"
