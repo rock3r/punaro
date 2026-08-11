@@ -48,6 +48,11 @@ func ValidateOrigin(raw string, policy Policy) (*url.URL, error) {
 	if err != nil {
 		return nil, errors.New("plaintext client origin must use a literal IP address")
 	}
+	if address.Is6() {
+		// Preserve the interface zone in parsed for link-local dialing, but CIDR
+		// membership is defined only over the underlying address bits.
+		address = address.WithZone("")
+	}
 	address = address.Unmap()
 	if address.IsLoopback() {
 		if policy.AllowLANHTTP || policy.TrustedLANCIDR != "" {

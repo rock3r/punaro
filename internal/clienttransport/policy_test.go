@@ -16,6 +16,7 @@ func TestPolicyValidatesExplicitTrustedLANHTTP(t *testing.T) {
 		{name: "loopback development", origin: "http://127.0.0.1:8080", ok: true},
 		{name: "explicit private ipv4", origin: "http://192.168.1.4:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "192.168.1.0/24"}, ok: true},
 		{name: "explicit private ipv6", origin: "http://[fd12:3456::4]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fd12:3456::/64"}, ok: true},
+		{name: "explicit zoned link-local ipv6", origin: "http://[fe80::4%25en0]:8080", policy: Policy{AllowLANHTTP: true, TrustedLANCIDR: "fe80::/64"}, ok: true},
 		{name: "implicit private plaintext", origin: "http://192.168.1.4:8080", ok: false},
 		{name: "missing cidr", origin: "http://192.168.1.4:8080", policy: Policy{AllowLANHTTP: true}, ok: false},
 		{name: "cidr without acknowledgement", origin: "http://192.168.1.4:8080", policy: Policy{TrustedLANCIDR: "192.168.1.0/24"}, ok: false},
