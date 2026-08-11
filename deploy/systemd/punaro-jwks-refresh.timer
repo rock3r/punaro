@@ -1,9 +1,10 @@
 [Unit]
-Description=Refresh Punaro's Cloudflare Access JWKS snapshot every five minutes
+Description=Refresh Punaro's Cloudflare Access JWKS snapshot before expiry
 
 [Timer]
 OnBootSec=15s
-OnUnitActiveSec=5m
+OnUnitActiveSec=4m
+AccuracySec=10s
 Persistent=true
 Unit=punaro-jwks-refresh.service
 

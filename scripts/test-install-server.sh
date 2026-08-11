@@ -27,6 +27,8 @@ grep -Fqx 'PUNARO_ACCESS_AUDIENCE=punaro-relay' "$stage/etc/punaro/punaro.env"
 grep -Fqx 'PUNARO_ACCESS_JWKS_FILE=/etc/punaro/jwks/current.json' "$stage/etc/punaro/punaro.env"
 [ -f "$stage/etc/systemd/system/punaro-jwks-refresh.service" ] || { printf '%s\n' 'JWKS refresh service was not installed' >&2; exit 1; }
 [ -f "$stage/etc/systemd/system/punaro-jwks-refresh.timer" ] || { printf '%s\n' 'JWKS refresh timer was not installed' >&2; exit 1; }
+grep -Fqx 'OnUnitActiveSec=4m' "$stage/etc/systemd/system/punaro-jwks-refresh.timer"
+grep -Fqx 'AccuracySec=10s' "$stage/etc/systemd/system/punaro-jwks-refresh.timer"
 [ -x "$stage/usr/local/libexec/punaro/refresh-jwks" ] || { printf '%s\n' 'JWKS refresh helper was not installed' >&2; exit 1; }
 [ -f "$stage/etc/punaro/jwks-refresh.env" ] || { printf '%s\n' 'JWKS refresh environment was not installed' >&2; exit 1; }
 grep -Fqx 'PUNARO_ACCESS_JWKS_URL=https://team.cloudflareaccess.example/cdn-cgi/access/certs' "$stage/etc/punaro/jwks-refresh.env"
