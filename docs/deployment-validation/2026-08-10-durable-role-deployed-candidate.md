@@ -19,27 +19,30 @@
 
 ## Exact candidate
 
-- Integrated source commit: `8e8eeb8e6ce2c6efc8a658339044f1110f4e7952`.
+- Integrated source commit: `ef34cc74f9ff28ea1b98564b4e8078c9545527f8`.
 - Relay artifact-producing commit:
-  `8e8eeb8e6ce2c6efc8a658339044f1110f4e7952`.
+  `d58a9f75267172c2ddb1ce645531f507899ac186`.
 - Adapter artifact-producing commit:
-  `8e8eeb8e6ce2c6efc8a658339044f1110f4e7952`.
+  `d58a9f75267172c2ddb1ce645531f507899ac186`.
+- The integrated commit changes deployment documentation only; its executable
+  source tree is identical to the artifact-producing commit.
 - Review reference: PR #131, branch
   `agent/issue-55-durable-role-e2e`.
 - Signed/tagged release reference: none; official release remains withheld.
 - Linux/amd64, `CGO_ENABLED=0`, `punarod` SHA-256:
-  `9851706a1601abfe3ec1b88e7a97e58bf454a9b945fe4798077c571eff8215f1`.
+  `3f8ed32b929ec14a19b3c3c4c6b636fea8987486a7c89f94929ca76bd4b5e678`.
 - macOS/arm64 native-CGO `punaro-adapter` SHA-256, deployed independently on
   Mac Studio and Coso:
-  `0a705634a08ed78492ae06e2da58315bed7363f35b9fb85d93dbff53a257752d`.
+  `df668fc9c0546f5bdda81461548d2426da1d5ef3bc0c4fbcde6d09fbc84f9a9a`.
 - Windows/amd64, `CGO_ENABLED=0`, `punaro-adapter.exe` SHA-256:
-  `2b1521d8f54d10ff4970b94a119709fedd3b31da7985038ac99dcf4ed72abaf0`.
+  `134311ecc55134d5eaca47b973df1d7ec7c61b444f75405f68c042339edd5969`.
 - Container image digest: not applicable; the validated relay is the native
   systemd deployment.
 
 All four installed artifacts were hashed after the final scenario and matched
-the values above. The relay and both native adapter artifacts were built from
-the same final review-head commit.
+the values above. The relay and native adapter artifacts were built from the
+same executable commit; the integrated head adds only this deployment record
+and deployment-guide corrections.
 
 ## Verification gates
 
@@ -54,19 +57,25 @@ env GOCACHE=/tmp/punaro-go-cache \
 Results included unit coverage, race tests, Staticcheck, `govulncheck` with no
 called vulnerabilities, `gosec` with zero issues, Gitleaks with no leaks, Go
 vet, lint, Windows compilation, deployment and installer verification, and the
-real two-client relay lifecycle E2E. The final integrated-head run's latter
-test passed in 78.642 seconds. The Docker-backed PostgreSQL integration suite
-also passed in 27.483 seconds after first demonstrating the relevant
-recipient-role contract failures against the pre-fix implementation.
+real two-client relay lifecycle E2E. The final executable-head run's latter
+test passed in 81.876 seconds. The Docker-backed PostgreSQL integration suite
+passed in 26.721 seconds and the command integration suite in 3.996 seconds
+after first demonstrating the skipped-recipient cursor failure against the
+pre-fix implementation.
 
 GitHub Actions candidate run:
-`https://github.com/rock3r/punaro/actions/runs/31439058495`. Configuration lint,
+`https://github.com/rock3r/punaro/actions/runs/31442527469`. Configuration lint,
 Go tests and analysis, PostgreSQL integration, Windows build, complete-product
 E2E, and Cursor Bugbot all passed at the final deployed review head.
 
 ## Deployment admission and enrollment
 
-- The relay, Mac Studio, Coso, and Mattone ran the exact candidate binaries.
+- The relay, Mac Studio, Coso, and Mattone ran the exact artifact-producing
+  candidate binaries while the integrated head differed only in documentation.
+- The relay is the historical native systemd/SQLite deployment. Its configured
+  health listener is `127.0.0.1:18081`; checking an assumed port caused an
+  unnecessary intermediate rollback. The final replacement used the configured
+  endpoint and required no PostgreSQL migration.
 - All machine credentials retained their narrow endpoint namespaces. Missing
   Mac Studio and Coso validation prefixes were added additively; no existing
   enrollment was removed or widened.
@@ -90,9 +99,10 @@ All probes used disposable aliases, roles, conversation state, opaque bodies,
 and idempotency keys. No credential, header value, private key, conversation
 identifier, delivery identifier, lease token, or body was recorded here.
 
-- Six pairwise host directions completed. Every intended endpoint observed
-  each opaque probe once and acknowledged it. A same-key retry returned the
-  original message identity and caused no duplicate mailbox injection.
+- Six pairwise host directions completed again on the final artifact. Every
+  intended endpoint observed each opaque probe once and acknowledged it. A
+  same-key retry returned the original message identity and caused no duplicate
+  mailbox injection.
 - Targeted role delivery reached only Coso's bound primary session. Its local
   endpoint, other Coso role, replacement session, Mac Studio, and every
   Mattone session received zero copies.
@@ -104,30 +114,27 @@ identifier, delivery identifier, lease token, or body was recorded here.
   invalidated its acknowledgement with HTTP `403`; the replacement reclaimed
   the same delivery at generation 2 and acknowledged with `204`. After normal
   detachment, stale bind also returned `403`.
-- Mattone replacement `w3 -> w4`: the same generation `1 -> 2`, stale-ack
+- Mattone replacement `w3 -> w4`: generation `2 -> 3`, stale-ack
   `403`, replacement-ack `204`, and detached stale-bind `403` proof passed
   using native Windows process and scheduled-task lifecycle.
-- Offline recovery: Coso was stopped through launchd, a targeted message was
-  accepted while unavailable, then the restored adapter committed and
-  acknowledged it on polling attempt 9. A later receive observed zero
-  duplicates.
-- Attachment fail-closed boundary: the running relay had zero trusted or
-  retired attachment environment keys. Signed trusted-attachment, v2
-  directory, and v3 permit routes each returned `404` without creating state.
-- Remote memory fail-closed boundary: the running relay had zero memory or
-  remote-MCP environment keys. Signed memory and MCP routes returned `404`.
+- Offline recovery: Coso was stopped through launchd and a targeted message was
+  accepted while unavailable. The restarted adapter was correctly fenced with
+  `409` until the stopped process's consumer lease expired, then injected one
+  authenticated-role delivery, acknowledged it, and produced zero duplicates.
+- Attachment fail-closed boundary was rechecked on the final relay: its process
+  had zero trusted or retired attachment environment keys. Signed
+  trusted-attachment, v2 directory, and v3 permit routes each returned `404`
+  without creating state.
+- Remote memory fail-closed boundary was rechecked on the final relay: its
+  process had zero memory or remote-MCP environment keys. Signed memory and MCP
+  routes returned `404`.
   A functional memory E2E was therefore intentionally unavailable; no mock or
   offline substitute was counted.
-- After deploying the final review-fix relay hash, a fresh targeted-role probe
-  reached Coso's fenced `c4` session exactly once. A second fresh targeted-role
-  probe reached Mattone's fenced `w4` session exactly once. In both native
-  adapter environments, the inert typed Punaro envelope carried the exact
-  server-derived `recipient_role` and the local delivery was acknowledged.
-  The Mac Studio sender, Coso, and Mattone all ran the final candidate while
-  these probes crossed the final relay. The unchanged routing, broadcast,
-  fencing, offline-recovery, and fail-closed scenarios above had already passed
-  against the immediately preceding candidate; the final delta changed only
-  authenticated recipient metadata and recovery-marker publication.
+- The final Coso and Mattone replacement proofs both carried the exact
+  server-derived `recipient_role`. Two local acknowledgements were recovered
+  from agent-mailbox's durable leased state after a deliberately malformed
+  test command, exercising at-least-once handling without duplicate injection
+  and without displaying lease tokens or message bodies.
 
 ## Cleanup, health, and rollback
 
@@ -145,8 +152,8 @@ identifier, delivery identifier, lease token, or body was recorded here.
 - Final health: relay `active` and ready; both macOS launchd adapters running;
   Mattone scheduled task hidden and running a hidden-window action with
   exactly one process at the candidate path.
-- Owner-managed adapter rollback copies with suffix `.pre-8e8eeb8` and the
-  final relay rollback copy `.pre-8e8eeb8` were retained beside their installed
+- Owner-managed adapter rollback copies of the preceding `439cb27` binaries
+  and the relay rollback copy of `8e8eeb8` were retained beside their installed
   binaries. Rollback requires the documented service stop, atomic binary
   replacement, restart, hash check, and readiness check. This evidence expires
   when any listed artifact is replaced or the Access policy/enrollment
