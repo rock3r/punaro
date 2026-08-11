@@ -449,13 +449,16 @@ punaro init ... --mode lan --listen-addr 192.168.50.4:8080 \
   --trusted-lan-cidr 192.168.50.0/24 --allow-lan-http
 ```
 
-A non-loopback trusted-LAN listener is valid only for the two bounded device
-routes added by M-5. Configuration fails closed if legacy relay, directory,
-permit, or attachment routes are enabled on that process. Those surfaces stay
-loopback-only until their separately reviewed public runtime milestone. Health
-and readiness are mounted on the separate `127.0.0.1:8081` listener by default;
-override it only with `--health-listen-addr` naming another distinct concrete
-loopback address.
+A non-loopback trusted-LAN listener admits the bounded device routes and may
+also host the signed relay when initialization explicitly supplies a protected
+`--relay-machines-file`. That exception requires the complete device-auth and
+trusted-LAN policy: Punaro verifies relay signatures and enrolled membership,
+then applies the CIDR to the observed TCP peer without trusting forwarded
+headers. It is not a general public-runtime exception. Directory, permit, and
+attachment surfaces remain subject to their separately reviewed activation and
+authorization boundaries. Health and readiness are mounted on the separate
+`127.0.0.1:8081` listener by default; override it only with
+`--health-listen-addr` naming another distinct concrete loopback address.
 
 Fresh initialization requires the application-role view to be pristine,
 migrates through the owner role, then reopens both roles and proves their
