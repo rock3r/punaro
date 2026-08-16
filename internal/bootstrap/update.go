@@ -177,6 +177,9 @@ func Update(request Request) (Result, error) {
 	if len(artifacts) == 0 {
 		return Result{}, errors.New("release has no artifacts for this platform")
 	}
+	if !platformHasAdapter(artifacts, request.GOOS, request.GOARCH) {
+		return Result{}, errors.New("release has no adapter for this platform")
+	}
 	current, err := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
 	if err != nil {
 		return Result{}, err
@@ -328,6 +331,16 @@ func currentSlotMatches(directory string, artifacts []punarorelease.Artifact) bo
 		}
 	}
 	return len(artifacts) > 0
+}
+
+func platformHasAdapter(artifacts []punarorelease.Artifact, goos, goarch string) bool {
+	want := artifactName(adapterComponent, goos, goarch)
+	for _, artifact := range artifacts {
+		if filepath.Base(artifact.Path) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func platformArtifacts(artifacts []punarorelease.Artifact, goos, goarch string) []punarorelease.Artifact {

@@ -471,6 +471,14 @@ func loadRecovery(directory string) (recoveryState, error) {
 	return record, nil
 }
 
+func clearRecovery(directory string) error {
+	err := os.Remove(filepath.Join(directory, recoveryFile))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncDir(directory)
+}
+
 func enterRecoveryOnly(directory, reason string) error {
 	if err := prepareDirectory(directory); err != nil {
 		return err
@@ -547,6 +555,13 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	}
 	if err := writeAtomic(filepath.Join(current, slotRecord), record, 0o600); err != nil {
 		return err
+	}
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		return err
+	}
+	if accepted.Release != "" && accepted.Release != localCheckoutRelease {
+		return nil
 	}
 	return saveAccepted(directory, acceptedState{
 		Schema:          1,

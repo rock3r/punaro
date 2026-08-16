@@ -15,6 +15,7 @@ done
 for expected in \
 	'LogonType Interactive' \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
+	'RestartCount' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \

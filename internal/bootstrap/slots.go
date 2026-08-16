@@ -148,6 +148,9 @@ func Rollback(directory string) (Result, error) {
 	if err := completeRollback(directory, target); err != nil {
 		return Result{}, err
 	}
+	if err := clearRecovery(directory); err != nil {
+		return Result{}, err
+	}
 	if err := clearJournal(directory); err != nil {
 		return Result{}, err
 	}
@@ -203,6 +206,9 @@ func recoverJournal(directory string) error {
 		if err := completeRollback(directory, slotState{Release: record.Release, Sequence: record.Sequence, ManifestSHA256: record.ManifestSHA256}); err != nil {
 			return err
 		}
+		if err := clearRecovery(directory); err != nil {
+			return err
+		}
 		return clearJournal(directory)
 	default:
 		return errors.New("bootstrap journal is invalid")
@@ -214,6 +220,9 @@ func finishPublication(directory string, accepted acceptedState) error {
 		return errors.New("bootstrap journal is invalid")
 	}
 	if err := saveAccepted(directory, accepted); err != nil {
+		return err
+	}
+	if err := clearRecovery(directory); err != nil {
 		return err
 	}
 	return clearJournal(directory)

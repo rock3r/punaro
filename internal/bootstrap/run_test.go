@@ -318,6 +318,58 @@ func TestSeedLocalCheckoutLeavesSignedHistoryUnblocked(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutPreservesSignedAcceptedState(t *testing.T) {
+	dir := privateDir(t)
+	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeAdapterSlot(t, dir, previousSlot, localCheckoutRelease, 1, "old-checkout")
+	if _, err := Rollback(dir); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("new-checkout"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := loadAccepted(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Release != "v0.1.0" || accepted.ReleaseSequence != 1 {
+		t.Fatalf("accepted=%#v", accepted)
+	}
+}
+
+func TestUpdateClearsRecoveryOnly(t *testing.T) {
+	dir := privateDir(t)
+	writeRecoveryOnly(t, dir)
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("successful update left recovery-only")
+	}
+}
+
 func TestRunDoesNotLaunchUnexpectedNames(t *testing.T) {
 	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)

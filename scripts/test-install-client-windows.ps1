@@ -16,7 +16,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'RestartCount', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"

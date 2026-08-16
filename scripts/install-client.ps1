@@ -253,6 +253,8 @@ $action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoPro
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
+$settings.RestartCount = 3
+$settings.RestartInterval = [TimeSpan]::FromSeconds(3)
 Register-ScheduledTask -TaskName 'Punaro Adapter' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
 if ($Enable) { Start-ScheduledTask -TaskName 'Punaro Adapter' }
 
