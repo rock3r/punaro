@@ -944,6 +944,16 @@ cover client retry windows.
 
 ## Telegram integration
 
+A Punaro conversation is the topic. `user-telegram` is a conversation-scoped
+built-in participant, not a durable `roles` row: creating or member-setting
+that label is rejected. `POST /v1/conversations/{id}/telegram-claim` is a
+singleton reservation (`request_hash` is SHA-256 of the conversation id).
+Only a live `telegram/primary` advertisement may complete a claim, list
+unclaimed named rooms, poll pending reservations, or submit
+`telegram-inbound`. Complete inserts `telegram/primary` with send|receive
+and materializes `user-telegram`. Targeted send `target_role=user-telegram`
+requires a completed claim and creates one delivery to `telegram/primary`.
+
 The Telegram gateway converts one explicitly configured topic into one Punaro
 conversation. It verifies the configured allowed Telegram user ID on every
 update. It persists `update_id` only after the relay append succeeds; retrying

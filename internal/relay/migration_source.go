@@ -565,7 +565,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		names = append(names, name)
 	}
 	names = filterOperationalQuotaTables(names)
-	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
+	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -598,16 +598,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		names = append(names, name)
 	}
 	names = filterOperationalQuotaTables(names)
-	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	switch {
 	case direct:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case rateBuckets:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case profiles:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case !controls:
-		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
@@ -619,8 +619,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"roles":                            {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
 		"role_memberships":                 {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
 		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
-		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "from_participant:TEXT:0:0:-", "in_reply_to_message_id:TEXT:0:0:-", "in_reply_to_endpoint:TEXT:0:0:-", "telegram_thread_id:INTEGER:0:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"rate_buckets":                     {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
+		"telegram_claims":                  {"conversation_id:TEXT:0:1:-", "status:TEXT:1:0:-", "requested_by_machine:TEXT:1:0:-", "requested_by_endpoint:TEXT:1:0:-", "idempotency_key:TEXT:1:0:-", "request_hash:TEXT:1:0:-", "created_at:INTEGER:1:0:-", "completed_at:INTEGER:0:0:-"},
+		"telegram_participants":            {"conversation_id:TEXT:0:1:-", "label:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"telegram_claim_events":            {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "event:TEXT:1:0:-", "actor_machine:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
 		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
 		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
@@ -693,6 +696,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"direct_conversations":             {"roles:role_low:role:NO ACTION:RESTRICT:NONE", "roles:role_high:role:NO ACTION:RESTRICT:NONE", "conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
 		"message_from_roles":               {"messages:message_id:id:NO ACTION:CASCADE:NONE", "roles:from_role:role:NO ACTION:RESTRICT:NONE"},
 		"direct_message_idempotency":       {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claims":                  {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_participants":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claim_events":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
 	}
 	if !controls {
 		delete(expectedForeignKeys, "conversation_controls")
@@ -746,13 +752,17 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 		"role_profiles:1:pk:0:role",
 		"role_profile_idempotency:1:pk:0:machine_id,key",
+		"telegram_claims:1:pk:0:conversation_id",
+		"telegram_participants:1:pk:0:conversation_id",
+		"telegram_claim_events:1:pk:0:id",
 	}
 	if !profiles {
-		expectedIndexes = expectedIndexes[:len(expectedIndexes)-2]
+		expectedIndexes = append(expectedIndexes[:len(expectedIndexes)-5], expectedIndexes[len(expectedIndexes)-3:]...)
 	}
 	if !controls {
 		expectedIndexes = []string{
 			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+			"telegram_claims:1:pk:0:conversation_id", "telegram_participants:1:pk:0:conversation_id", "telegram_claim_events:1:pk:0:id",
 		}
 	}
 	if rateBuckets {
@@ -848,16 +858,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	wantTriggers := 42
+	wantTriggers := 51
 	switch {
 	case direct:
-		wantTriggers = 60
+		wantTriggers = 69
 	case rateBuckets:
-		wantTriggers = 51
+		wantTriggers = 60
 	case profiles:
-		wantTriggers = 48
+		wantTriggers = 57
 	case !controls:
-		wantTriggers = 36
+		wantTriggers = 45
 	}
 	var quotaTables int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install','delivery_terminals')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 && quotaTables != 3 {

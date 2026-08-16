@@ -155,9 +155,15 @@ func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 const (
 	maxConversationDisplayNameRunes = 128
 	maxConversationDisplayNameBytes = 512
-	// TelegramPrimaryEndpoint is the gateway mailbox. It must occupy every
-	// claimed topic, so one-session occupancy fencing never applies to it.
-	TelegramPrimaryEndpoint = "telegram/primary"
+	// TelegramGatewayEndpoint is the enrolled gateway mailbox. Claim complete
+	// is the only writer that inserts it with send|receive.
+	TelegramGatewayEndpoint = "telegram/primary"
+	// TelegramUserParticipant is the built-in per-topic human label. It is
+	// never a durable roles row and never a member-set target.
+	TelegramUserParticipant = "user-telegram"
+	// TelegramPrimaryEndpoint is the occupancy-fence name for the gateway.
+	// It must occupy every claimed topic, so fencing never applies to it.
+	TelegramPrimaryEndpoint = TelegramGatewayEndpoint
 )
 
 // SanitizeConversationDisplayName trims and clamps a room label. Empty input is
@@ -249,6 +255,18 @@ type DisplayNameBackend interface {
 	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
 }
 
+// TelegramClaimBackend is the claim, occupancy, and gateway-inbound surface.
+// It stays off Backend so mail cutover parity is not blocked on topic APIs.
+type TelegramClaimBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
+	ReserveTelegramClaim(TelegramClaimInput) (TelegramClaim, bool, error)
+	CompleteTelegramClaim(TelegramClaimCompleteInput) (TelegramClaim, bool, error)
+	PendingTelegramClaims(machineID string, now time.Time, limit int) ([]TelegramClaim, error)
+	UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]UnclaimedTopic, error)
+	SessionTopic(machineID, endpoint string, now time.Time) (SessionTopic, error)
+	AppendTelegramInbound(TelegramInboundInput) (Message, bool, error)
+}
+
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
 // the stable authenticated principal used by trusted attachment snapshots.
 // Legacy backends remain mail-only and need not implement it.
@@ -297,3 +315,4 @@ var _ Backend = (*Store)(nil)
 var _ RoleProfileBackend = (*Store)(nil)
 var _ DirectMessageBackend = (*Store)(nil)
 var _ DisplayNameBackend = (*Store)(nil)
+var _ TelegramClaimBackend = (*Store)(nil)

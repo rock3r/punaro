@@ -2,7 +2,9 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +22,7 @@ var _ relay.RoleProfileBackend = (*Database)(nil)
 var _ relay.DirectMessageBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
 var _ relay.DisplayNameBackend = (*Database)(nil)
+var _ relay.TelegramClaimBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
 
@@ -163,7 +166,7 @@ func (d *Database) advertiseEndpoints(machineID string, authority relay.Principa
 // currently owned by its immutable owner machine. The endpoint generation
 // fences the binding against expiry or takeover.
 func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.Time, ttl time.Duration) error {
-	if !relay.ValidMachineID(machineID) || !relay.ValidRole(role) || !relay.ValidEndpoint(endpoint) || ttl <= 0 {
+	if !relay.ValidMachineID(machineID) || !relay.ValidRole(role) || role == relay.TelegramUserParticipant || !relay.ValidEndpoint(endpoint) || ttl <= 0 {
 		return relay.ErrForbidden
 	}
 	tx, cancel, err := d.beginRelayTransaction(nil)
@@ -189,9 +192,13 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	if err != nil {
 		return errors.New("conversation display name schema is unavailable")
 	}
+	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil {
+		return errors.New("telegram claim schema is unavailable")
+	}
 	var exclusiveIDs []string
-	if namesAvailable {
-		exclusiveIDs, err = postgresExclusiveConversationIDsForRole(tx, role, namesAvailable)
+	if namesAvailable || claimsAvailable {
+		exclusiveIDs, err = postgresExclusiveConversationIDsForRole(tx, role, namesAvailable, claimsAvailable)
 		if err != nil {
 			return err
 		}
@@ -761,7 +768,7 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 // ApplyControl mutates membership through the same explicit, server-authorized
 // control plane as SQLite. Controls never enter mail_messages or deliveries.
 func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || input.Member.Endpoint == relay.TelegramUserParticipant || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
 		return relay.ControlEvent{}, false, relay.ErrForbidden
 	}
 	if _, err := uuid.Parse(input.ConversationID); err != nil {
@@ -1110,11 +1117,26 @@ func postgresNullableDisplayName(value string) any {
 	return value
 }
 
-func postgresExclusiveConversationPredicate(alias string, namesAvailable bool) string {
-	if !namesAvailable {
+func postgresTelegramClaimsAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_telegram_claims') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
+}
+
+func postgresExclusiveConversationPredicate(alias string, namesAvailable, claimsAvailable bool) string {
+	var parts []string
+	if namesAvailable {
+		parts = append(parts, "("+alias+".display_name IS NOT NULL AND "+alias+".display_name <> '')")
+	}
+	if claimsAvailable {
+		parts = append(parts, "EXISTS (SELECT 1 FROM relay.mail_telegram_claims WHERE conversation_id = "+alias+".id)")
+	}
+	if len(parts) == 0 {
 		return "FALSE"
 	}
-	return "(" + alias + ".display_name IS NOT NULL AND " + alias + ".display_name <> '')"
+	return "(" + strings.Join(parts, " OR ") + ")"
 }
 
 func postgresNullableUUID(id string) any {
@@ -1124,13 +1146,13 @@ func postgresNullableUUID(id string) any {
 	return id
 }
 
-func postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable bool) string {
+func postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable, claimsAvailable bool) string {
 	query := `SELECT EXISTS (
 		SELECT 1 FROM relay.mail_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
 		WHERE membership.endpoint = $1
 		  AND ($2::uuid IS NULL OR membership.conversation_id <> $2::uuid)
-		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
+		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)
 	if rolesAvailable {
 		query += `
 		UNION ALL
@@ -1144,7 +1166,7 @@ func postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesA
 		  AND live.ownership_generation = binding.ownership_generation
 		  AND live.lease_until > $3
 		  AND ($2::uuid IS NULL OR membership.conversation_id <> $2::uuid)
-		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
+		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)
 	}
 	return query + `)`
 }
@@ -1208,18 +1230,25 @@ func postgresConversationIsExclusive(tx *sql.Tx, conversationID string) (bool, e
 	if err != nil {
 		return false, errors.New("conversation display name schema is unavailable")
 	}
-	if !namesAvailable {
-		return false, nil
+	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil {
+		return false, errors.New("telegram claim schema is unavailable")
 	}
-	var displayName sql.NullString
-	err = tx.QueryRowContext(context.Background(), `SELECT display_name FROM relay.mail_conversations WHERE id=$1::uuid`, conversationID).Scan(&displayName)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, relay.ErrForbidden
-	}
+	var exists bool
+	err = tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_conversations WHERE id=$1::uuid)`, conversationID).Scan(&exists)
 	if err != nil {
 		return false, errors.New("conversation occupancy is unavailable")
 	}
-	return displayName.Valid && displayName.String != "", nil
+	if !exists {
+		return false, relay.ErrForbidden
+	}
+	var exclusive bool
+	err = tx.QueryRowContext(context.Background(), `SELECT `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)+`
+		FROM relay.mail_conversations AS conversation WHERE conversation.id=$1::uuid`, conversationID).Scan(&exclusive)
+	if err != nil {
+		return false, errors.New("conversation occupancy is unavailable")
+	}
+	return exclusive, nil
 }
 
 func postgresSessionOccupiesOtherExclusiveConversation(tx *sql.Tx, endpoint, excludeConversationID string, now time.Time) error {
@@ -1230,14 +1259,18 @@ func postgresSessionOccupiesOtherExclusiveConversation(tx *sql.Tx, endpoint, exc
 	if err != nil {
 		return errors.New("conversation display name schema is unavailable")
 	}
-	if !namesAvailable {
+	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil {
+		return errors.New("telegram claim schema is unavailable")
+	}
+	if !namesAvailable && !claimsAvailable {
 		return nil
 	}
 	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
 	if err != nil {
 		return errors.New("durable role bindings are unavailable")
 	}
-	query := postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable)
+	query := postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable, claimsAvailable)
 	exclude := postgresNullableUUID(excludeConversationID)
 	var occupied bool
 	if rolesAvailable {
@@ -1355,14 +1388,14 @@ func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, n
 	return nil
 }
 
-func postgresExclusiveConversationIDsForRole(tx *sql.Tx, role string, namesAvailable bool) ([]string, error) {
-	if !namesAvailable {
+func postgresExclusiveConversationIDsForRole(tx *sql.Tx, role string, namesAvailable, claimsAvailable bool) ([]string, error) {
+	if !namesAvailable && !claimsAvailable {
 		return nil, nil
 	}
 	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text
 		FROM relay.mail_role_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
-		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable), role)
+		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable), role)
 	if err != nil {
 		return nil, errors.New("role occupancy conversations are unavailable")
 	}
@@ -1389,7 +1422,11 @@ func postgresRejectExclusiveBindOccupancy(tx *sql.Tx, sessionEndpoint, role stri
 	if err != nil {
 		return errors.New("conversation display name schema is unavailable")
 	}
-	if !namesAvailable {
+	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil {
+		return errors.New("telegram claim schema is unavailable")
+	}
+	if !namesAvailable && !claimsAvailable {
 		return nil
 	}
 	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
@@ -1404,7 +1441,7 @@ func postgresRejectExclusiveBindOccupancy(tx *sql.Tx, sessionEndpoint, role stri
 		SELECT membership.conversation_id AS id FROM relay.mail_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
 		WHERE membership.endpoint = $1
-		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable)+`
+		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)+`
 		UNION
 		SELECT membership.conversation_id FROM relay.mail_role_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
@@ -1416,12 +1453,12 @@ func postgresRejectExclusiveBindOccupancy(tx *sql.Tx, sessionEndpoint, role stri
 		  AND live.machine_id = binding.machine_id
 		  AND live.ownership_generation = binding.ownership_generation
 		  AND live.lease_until > $3
-		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable)+`
+		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)+`
 		UNION
 		SELECT membership.conversation_id FROM relay.mail_role_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
 		WHERE membership.role = $2
-		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable)+`
+		  AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)+`
 	) AS occupied`, sessionEndpoint, role, now.UTC()).Scan(&count)
 	if err != nil {
 		return errors.New("role-binding occupancy is unavailable")
@@ -1458,7 +1495,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		}
 		switch {
 		case member.Endpoint != "" && member.Role == "" && member.RoleMachineID == "":
-			if !relay.ValidEndpoint(member.Endpoint) {
+			if !relay.ValidEndpoint(member.Endpoint) || member.Endpoint == relay.TelegramUserParticipant {
 				return relay.Conversation{}, errors.New("invalid conversation member")
 			}
 			if _, duplicate := seen[member.Endpoint]; duplicate {
@@ -1468,7 +1505,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 			if member.Endpoint == input.CreatorEndpoint && member.Capabilities&(relay.CapSend|relay.CapReceive|relay.CapAdmin) == relay.CapSend|relay.CapReceive|relay.CapAdmin {
 				creatorAdmin = true
 			}
-		case member.Endpoint == "" && relay.ValidRole(member.Role) && relay.ValidMachineID(member.RoleMachineID):
+		case member.Endpoint == "" && relay.ValidRole(member.Role) && member.Role != relay.TelegramUserParticipant && relay.ValidMachineID(member.RoleMachineID):
 			if member.Capabilities&relay.CapInvoke != 0 {
 				return relay.Conversation{}, errors.New("invalid conversation member")
 			}
@@ -1706,7 +1743,18 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if err := postgresRejectDirectConversationAppend(tx, input.ConversationID); err != nil {
 		return relay.Message{}, false, err
 	}
-	if input.TargetRole != "" {
+	if input.TargetRole == relay.TelegramUserParticipant {
+		if err := postgresRequireCompleteTelegramClaim(tx, input.ConversationID); err != nil {
+			return relay.Message{}, false, err
+		}
+		var allowed bool
+		if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 AND (capabilities & $3) <> 0)`, input.ConversationID, relay.TelegramGatewayEndpoint, relay.CapReceive).Scan(&allowed); err != nil {
+			return relay.Message{}, false, errors.New("telegram participant authorization is unavailable")
+		}
+		if !allowed {
+			return relay.Message{}, false, relay.ErrForbidden
+		}
+	} else if input.TargetRole != "" {
 		if !relay.ValidRole(input.TargetRole) || !rolesAvailable {
 			return relay.Message{}, false, relay.ErrForbidden
 		}
@@ -1763,24 +1811,44 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	} else if err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "allocate message sequence")
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt); err != nil {
+	message.FromParticipant = input.FromParticipant
+	message.InReplyToPunaroMessageID = input.InReplyToPunaroMessageID
+	message.InReplyToEndpoint = input.InReplyToEndpoint
+	message.TelegramThreadID = input.TelegramThreadID
+	if metadataAvailable, metaErr := postgresMessageMetadataAvailable(tx); metaErr != nil {
+		return relay.Message{}, false, errors.New("message metadata schema is unavailable")
+	} else if metadataAvailable {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,from_participant,in_reply_to_message_id,in_reply_to_endpoint,telegram_thread_id,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, postgresNullableText(message.FromParticipant), postgresNullableText(message.InReplyToPunaroMessageID), postgresNullableText(message.InReplyToEndpoint), postgresNullableThreadID(message.TelegramThreadID), message.Body, message.CreatedAt); err != nil {
+			return relay.Message{}, false, relayDatabaseError(err, "append message")
+		}
+	} else if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, message.ID, message.ConversationID, message.Sequence, message.FromEndpoint, message.Body, message.CreatedAt); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "append message")
 	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
-		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE $5='' AND conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, input.TargetRole); err != nil {
-		return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
-	}
-	if rolesAvailable {
+	if input.TargetRole == relay.TelegramUserParticipant {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
+			SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE conversation_id=$2::uuid AND endpoint=$3 AND (capabilities & $4) <> 0 AND endpoint<>$5`, message.ID, message.ConversationID, relay.TelegramGatewayEndpoint, relay.CapReceive, message.FromEndpoint); err != nil {
+			return relay.Message{}, false, relayDatabaseError(err, "create telegram participant delivery")
+		}
+		if err := postgresAdvanceSkippedTelegramCursors(tx, input.ConversationID, input.FromEndpoint); err != nil {
+			return relay.Message{}, false, err
+		}
+	} else {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
+		SELECT $1::uuid,endpoint FROM relay.mail_memberships WHERE $5='' AND conversation_id=$2::uuid AND (capabilities & $3) <> 0 AND endpoint<>$4`, message.ID, message.ConversationID, relay.CapReceive, message.FromEndpoint, input.TargetRole); err != nil {
+			return relay.Message{}, false, relayDatabaseError(err, "create recipient deliveries")
+		}
+		if rolesAvailable {
+			if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint)
 		SELECT $1::uuid,chr(30)||'role:'||membership.role
 		FROM relay.mail_role_memberships AS membership
 		WHERE membership.conversation_id=$2::uuid AND (membership.capabilities & $3) <> 0 AND ($4='' OR membership.role=$4)`, message.ID, message.ConversationID, relay.CapReceive, input.TargetRole); err != nil {
-			return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+				return relay.Message{}, false, relayDatabaseError(err, "create durable role deliveries")
+			}
 		}
-	}
-	if input.TargetRole != "" {
-		if err := postgresAdvanceSkippedTargetCursors(tx, input.ConversationID, input.FromEndpoint, input.TargetRole); err != nil {
-			return relay.Message{}, false, err
+		if input.TargetRole != "" {
+			if err := postgresAdvanceSkippedTargetCursors(tx, input.ConversationID, input.FromEndpoint, input.TargetRole); err != nil {
+				return relay.Message{}, false, err
+			}
 		}
 	}
 	if len(input.ArtifactIDs) != 0 {
@@ -2336,12 +2404,40 @@ func postgresEndpointOwnershipLocked(tx *sql.Tx, endpoint, machineID string, now
 
 func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 	var message relay.Message
-	var fromRole sql.NullString
-	if err := tx.QueryRowContext(context.Background(), `SELECT message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role
+	metadataAvailable, err := postgresMessageMetadataAvailable(tx)
+	if err != nil {
+		return relay.Message{}, errors.New("message metadata schema is unavailable")
+	}
+	var fromRole, fromParticipant, replyMessage, replyEndpoint sql.NullString
+	var threadID sql.NullInt64
+	if !metadataAvailable {
+		if err := tx.QueryRowContext(context.Background(), `SELECT message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role
+			FROM relay.mail_messages AS message
+			LEFT JOIN relay.mail_message_from_roles AS sender ON sender.message_id=message.id
+			WHERE message.id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &message.CreatedAt, &fromRole); err != nil {
+			return relay.Message{}, errors.New("idempotent message is unavailable")
+		}
+		message.CreatedAt = message.CreatedAt.UTC()
+		postgresApplyDirectSender(&message, fromRole)
+		return message, nil
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.from_participant,message.in_reply_to_message_id,message.in_reply_to_endpoint,message.telegram_thread_id,message.body,message.created_at,sender.from_role
 		FROM relay.mail_messages AS message
 		LEFT JOIN relay.mail_message_from_roles AS sender ON sender.message_id=message.id
-		WHERE message.id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &message.CreatedAt, &fromRole); err != nil {
+		WHERE message.id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &fromParticipant, &replyMessage, &replyEndpoint, &threadID, &message.Body, &message.CreatedAt, &fromRole); err != nil {
 		return relay.Message{}, errors.New("idempotent message is unavailable")
+	}
+	if fromParticipant.Valid {
+		message.FromParticipant = fromParticipant.String
+	}
+	if replyMessage.Valid {
+		message.InReplyToPunaroMessageID = replyMessage.String
+	}
+	if replyEndpoint.Valid {
+		message.InReplyToEndpoint = replyEndpoint.String
+	}
+	if threadID.Valid {
+		message.TelegramThreadID = threadID.Int64
 	}
 	message.CreatedAt = message.CreatedAt.UTC()
 	postgresApplyDirectSender(&message, fromRole)
@@ -2353,6 +2449,18 @@ func postgresApplyDirectSender(message *relay.Message, fromRole sql.NullString) 
 		message.FromRole = fromRole.String
 		message.FromEndpoint = ""
 	}
+}
+
+func postgresMessageMetadataAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT EXISTS (
+		SELECT 1 FROM pg_attribute
+		WHERE attrelid = to_regclass('relay.mail_messages')
+		  AND attname = 'from_participant' AND attnum > 0 AND NOT attisdropped
+	)`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
 }
 
 func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string) error {
@@ -2418,6 +2526,393 @@ func postgresAdvanceSkippedTargetCursors(tx *sql.Tx, conversationID, senderEndpo
 		}
 	}
 	return nil
+}
+
+func postgresAdvanceSkippedTelegramCursors(tx *sql.Tx, conversationID, senderEndpoint string) error {
+	rows, err := tx.QueryContext(context.Background(), `
+		SELECT endpoint FROM relay.mail_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0 AND endpoint<>$3 AND endpoint<>$4
+		UNION ALL
+		SELECT chr(30)||'role:'||role FROM relay.mail_role_memberships
+		WHERE conversation_id=$1::uuid AND (capabilities & $2) <> 0`, conversationID, relay.CapReceive, senderEndpoint, relay.TelegramGatewayEndpoint)
+	if err != nil {
+		return errors.New("skipped telegram recipients are unavailable")
+	}
+	var recipients []string
+	for rows.Next() {
+		var recipient string
+		if err := rows.Scan(&recipient); err != nil {
+			_ = rows.Close()
+			return errors.New("skipped telegram recipient is malformed")
+		}
+		recipients = append(recipients, recipient)
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return errors.New("skipped telegram recipients are unavailable")
+	}
+	for _, recipient := range recipients {
+		if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func postgresRequireCompleteTelegramClaim(tx *sql.Tx, conversationID string) error {
+	available, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil || !available {
+		return relay.ErrForbidden
+	}
+	var status string
+	err = tx.QueryRowContext(context.Background(), `SELECT status FROM relay.mail_telegram_claims WHERE conversation_id=$1::uuid`, conversationID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) || status != "complete" {
+		return relay.ErrForbidden
+	}
+	if err != nil {
+		return errors.New("telegram claim is unavailable")
+	}
+	return nil
+}
+
+func postgresTelegramClaimByConversation(tx *sql.Tx, conversationID string) (relay.TelegramClaim, error) {
+	var claim relay.TelegramClaim
+	var completedAt sql.NullTime
+	if err := tx.QueryRowContext(context.Background(), `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
+		FROM relay.mail_telegram_claims AS claim
+		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
+		WHERE claim.conversation_id=$1::uuid`, conversationID).Scan(&claim.ConversationID, &claim.Status, &claim.DisplayName, &claim.CreatedAt, &completedAt); err != nil {
+		return relay.TelegramClaim{}, err
+	}
+	claim.CreatedAt = claim.CreatedAt.UTC()
+	if completedAt.Valid {
+		completed := completedAt.Time.UTC()
+		claim.CompletedAt = &completed
+	}
+	return claim, nil
+}
+
+func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.TelegramClaim, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.MachineID) || !relay.ValidEndpoint(input.Endpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	if _, err := uuid.Parse(input.ConversationID); err != nil {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim transaction cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	available, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil || !available {
+		return relay.TelegramClaim{}, false, errors.New("telegram claims are unavailable")
+	}
+	if _, err := postgresEndpointOwnershipLocked(tx, input.Endpoint, input.MachineID, input.Now); err != nil {
+		return relay.TelegramClaim{}, false, err
+	}
+	conversation, err := postgresConversationByID(tx, input.ConversationID)
+	if err != nil || conversation.DisplayName == "" {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	if input.Endpoint != relay.TelegramGatewayEndpoint {
+		if err := postgresLockSessionRoleBindings(tx, input.MachineID, input.Endpoint, input.Now); err != nil {
+			return relay.TelegramClaim{}, false, err
+		}
+		capabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.MachineID, input.Endpoint, input.Now)
+		if err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim actor authorization is unavailable")
+		}
+		if capabilities == 0 {
+			return relay.TelegramClaim{}, false, relay.ErrForbidden
+		}
+	}
+	claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim retry cannot commit")
+		}
+		return claim, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
+	}
+	if err := postgresRejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+		return relay.TelegramClaim{}, false, err
+	}
+	createdAt := input.Now.UTC().Truncate(time.Microsecond)
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at)
+		VALUES($1::uuid,'pending',$2,$3,$4,$5,$6)`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, postgresTelegramClaimHash(input.ConversationID), createdAt); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "reserve telegram claim")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "commit telegram claim")
+	}
+	return relay.TelegramClaim{ConversationID: input.ConversationID, Status: "pending", DisplayName: conversation.DisplayName, CreatedAt: createdAt}, false, nil
+}
+
+func postgresTelegramClaimHash(conversationID string) string {
+	digest := sha256.Sum256([]byte(conversationID))
+	return hex.EncodeToString(digest[:])
+}
+
+func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput) (relay.TelegramClaim, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.MachineID) {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	if _, err := uuid.Parse(input.ConversationID); err != nil {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim complete cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	available, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil || !available {
+		return relay.TelegramClaim{}, false, errors.New("telegram claims are unavailable")
+	}
+	if _, err := postgresEndpointOwnershipLocked(tx, relay.TelegramGatewayEndpoint, input.MachineID, input.Now); err != nil {
+		return relay.TelegramClaim{}, false, err
+	}
+	claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+	if err != nil {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	if claim.Status == "complete" {
+		if err := tx.Commit(); err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim complete retry cannot commit")
+		}
+		return claim, true, nil
+	}
+	if claim.Status != "pending" {
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
+	}
+	var existing relay.Capability
+	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, relay.TelegramGatewayEndpoint).Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, input.ConversationID, relay.TelegramGatewayEndpoint, relay.CapSend|relay.CapReceive); err != nil {
+			return relay.TelegramClaim{}, false, relayDatabaseError(err, "insert telegram gateway member")
+		}
+		if err := postgresAdvanceRecipientCursor(tx, relay.TelegramGatewayEndpoint, input.ConversationID); err != nil {
+			return relay.TelegramClaim{}, false, err
+		}
+	} else if err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram gateway member is unavailable")
+	}
+	completedAt := input.Now.UTC().Truncate(time.Microsecond)
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_participants(conversation_id,label,created_at) VALUES($1::uuid,$2,$3)`, input.ConversationID, relay.TelegramUserParticipant, completedAt); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "insert telegram participant")
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_telegram_claims SET status='complete', completed_at=$2 WHERE conversation_id=$1::uuid AND status='pending'`, input.ConversationID, completedAt); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "complete telegram claim")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claim_events(conversation_id,event,actor_machine,actor_endpoint,created_at) VALUES($1::uuid,'complete',$2,$3,$4)`, input.ConversationID, input.MachineID, relay.TelegramGatewayEndpoint, completedAt); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "record telegram claim event")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.TelegramClaim{}, false, relayDatabaseError(err, "commit telegram claim complete")
+	}
+	claim.Status = "complete"
+	claim.CompletedAt = &completedAt
+	return claim, false, nil
+}
+
+func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit int) ([]relay.TelegramClaim, error) {
+	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 {
+		return nil, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, errors.New("pending telegram claims cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if err := postgresEndpointOwnedBy(tx, relay.TelegramGatewayEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
+		FROM relay.mail_telegram_claims AS claim
+		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
+		WHERE claim.status='pending'
+		ORDER BY claim.created_at ASC, claim.conversation_id ASC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, errors.New("pending telegram claims are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var claims []relay.TelegramClaim
+	for rows.Next() {
+		var claim relay.TelegramClaim
+		var completedAt sql.NullTime
+		if err := rows.Scan(&claim.ConversationID, &claim.Status, &claim.DisplayName, &claim.CreatedAt, &completedAt); err != nil {
+			return nil, errors.New("pending telegram claim is malformed")
+		}
+		claim.CreatedAt = claim.CreatedAt.UTC()
+		if completedAt.Valid {
+			completed := completedAt.Time.UTC()
+			claim.CompletedAt = &completed
+		}
+		claims = append(claims, claim)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("pending telegram claims are unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("pending telegram claims cannot commit")
+	}
+	return claims, nil
+}
+
+func (d *Database) UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]relay.UnclaimedTopic, error) {
+	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 {
+		return nil, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, errors.New("unclaimed topics cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if err := postgresEndpointOwnedBy(tx, relay.TelegramGatewayEndpoint, machineID, now); err != nil {
+		return nil, err
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text, conversation.display_name, MAX(message.created_at)
+		FROM relay.mail_conversations AS conversation
+		LEFT JOIN relay.mail_messages AS message ON message.conversation_id = conversation.id
+		WHERE conversation.display_name IS NOT NULL AND conversation.display_name <> ''
+		  AND NOT EXISTS (SELECT 1 FROM relay.mail_telegram_claims WHERE conversation_id = conversation.id AND status = 'complete')
+		GROUP BY conversation.id
+		ORDER BY MAX(message.created_at) DESC NULLS LAST, conversation.created_at DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, errors.New("unclaimed topics are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var topics []relay.UnclaimedTopic
+	for rows.Next() {
+		var topic relay.UnclaimedTopic
+		var lastMessage sql.NullTime
+		if err := rows.Scan(&topic.ID, &topic.DisplayName, &lastMessage); err != nil {
+			return nil, errors.New("unclaimed topic is malformed")
+		}
+		if lastMessage.Valid {
+			at := lastMessage.Time.UTC()
+			topic.LastMessageAt = &at
+		}
+		topics = append(topics, topic)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("unclaimed topics are unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("unclaimed topics cannot commit")
+	}
+	return topics, nil
+}
+
+func (d *Database) SessionTopic(machineID, endpoint string, now time.Time) (relay.SessionTopic, error) {
+	if !relay.ValidMachineID(machineID) || !relay.ValidEndpoint(endpoint) {
+		return relay.SessionTopic{}, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return relay.SessionTopic{}, errors.New("session topic cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if err := postgresEndpointOwnedBy(tx, endpoint, machineID, now); err != nil {
+		return relay.SessionTopic{}, err
+	}
+	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	if err != nil {
+		return relay.SessionTopic{}, errors.New("conversation display name schema is unavailable")
+	}
+	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
+	if err != nil {
+		return relay.SessionTopic{}, errors.New("telegram claim schema is unavailable")
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text, COALESCE(conversation.display_name, ''), EXISTS(SELECT 1 FROM relay.mail_telegram_claims WHERE conversation_id = conversation.id AND status = 'complete')
+		FROM relay.mail_conversations AS conversation
+		WHERE `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable)+`
+		  AND (
+			EXISTS (SELECT 1 FROM relay.mail_memberships WHERE conversation_id = conversation.id AND endpoint = $1)
+			OR EXISTS (
+				SELECT 1 FROM relay.mail_role_memberships AS membership
+				JOIN relay.mail_role_bindings AS binding ON binding.role = membership.role
+				JOIN relay.mail_endpoints AS live ON live.endpoint = binding.session_endpoint
+				WHERE membership.conversation_id = conversation.id
+				  AND binding.session_endpoint = $1
+				  AND binding.lease_until > $2
+				  AND live.machine_id = binding.machine_id
+				  AND live.ownership_generation = binding.ownership_generation
+				  AND live.lease_until > $2
+			)
+		  )`, endpoint, now.UTC())
+	if err != nil {
+		return relay.SessionTopic{}, errors.New("session topic is unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var topics []relay.SessionTopic
+	for rows.Next() {
+		var topic relay.SessionTopic
+		if err := rows.Scan(&topic.ID, &topic.DisplayName, &topic.Claimed); err != nil {
+			return relay.SessionTopic{}, errors.New("session topic is malformed")
+		}
+		topics = append(topics, topic)
+	}
+	if err := rows.Err(); err != nil {
+		return relay.SessionTopic{}, errors.New("session topic is unavailable")
+	}
+	if len(topics) == 0 {
+		return relay.SessionTopic{}, relay.ErrForbidden
+	}
+	if len(topics) > 1 {
+		return relay.SessionTopic{}, relay.ErrConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.SessionTopic{}, errors.New("session topic cannot commit")
+	}
+	return topics[0], nil
+}
+
+func (d *Database) AppendTelegramInbound(input relay.TelegramInboundInput) (relay.Message, bool, error) {
+	if input.FromEndpoint != relay.TelegramGatewayEndpoint || input.FromParticipant != relay.TelegramUserParticipant {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if input.InReplyToEndpoint != "" && !relay.ValidEndpoint(input.InReplyToEndpoint) {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if input.TelegramThreadID < 0 {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
+	return d.AppendMessage(relay.AppendInput{
+		ConversationID:           input.ConversationID,
+		SenderMachineID:          input.SenderMachineID,
+		FromEndpoint:             input.FromEndpoint,
+		FromParticipant:          input.FromParticipant,
+		InReplyToPunaroMessageID: input.InReplyToMessageID,
+		InReplyToEndpoint:        input.InReplyToEndpoint,
+		TelegramThreadID:         input.TelegramThreadID,
+		Body:                     input.Body,
+		IdempotencyKey:           input.IdempotencyKey,
+		Now:                      input.Now,
+	})
+}
+
+func postgresNullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func postgresNullableThreadID(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
 }
 
 func postgresSessionCapabilities(tx *sql.Tx, conversationID, machineID, endpoint string, now time.Time) (relay.Capability, error) {
@@ -2614,6 +3109,9 @@ WITH objects AS (
            to_regclass('relay.mail_message_idempotency') AS message_idempotency_oid,
            to_regclass('relay.mail_conversation_idempotency') AS conversation_idempotency_oid,
            to_regclass('relay.mail_request_nonces') AS nonces_oid,
+		   to_regclass('relay.mail_telegram_claims') AS telegram_claims_oid,
+		   to_regclass('relay.mail_telegram_participants') AS telegram_participants_oid,
+		   to_regclass('relay.mail_telegram_claim_events') AS telegram_claim_events_oid,
 		   to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
 		   to_regclass('relay.mail_role_bindings_session') AS role_bindings_index_oid,
 		   to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
@@ -2622,8 +3120,8 @@ WITH objects AS (
            to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS cutover_guard_oid
 ), table_ownership AS (
-    SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
-    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+    SELECT count(*)=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
+    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
 ), expected_columns(table_oid,column_name,type_oid,required) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'endpoint','text'::regtype,true),(endpoints_oid,'machine_id','text'::regtype,true),
@@ -2638,6 +3136,12 @@ WITH objects AS (
 		(role_bindings_oid,'role','text'::regtype,true),(role_bindings_oid,'session_endpoint','text'::regtype,true),(role_bindings_oid,'machine_id','text'::regtype,true),(role_bindings_oid,'ownership_generation','bigint'::regtype,true),(role_bindings_oid,'lease_until','timestamptz'::regtype,true),
         (messages_oid,'id','uuid'::regtype,true),(messages_oid,'conversation_id','uuid'::regtype,true),(messages_oid,'sequence','bigint'::regtype,true),
         (messages_oid,'from_endpoint','text'::regtype,true),(messages_oid,'body','text'::regtype,true),(messages_oid,'created_at','timestamptz'::regtype,true),
+        (messages_oid,'from_participant','text'::regtype,false),(messages_oid,'in_reply_to_message_id','text'::regtype,false),(messages_oid,'in_reply_to_endpoint','text'::regtype,false),(messages_oid,'telegram_thread_id','bigint'::regtype,false),
+        (telegram_claims_oid,'conversation_id','uuid'::regtype,true),(telegram_claims_oid,'status','text'::regtype,true),(telegram_claims_oid,'requested_by_machine','text'::regtype,true),(telegram_claims_oid,'requested_by_endpoint','text'::regtype,true),
+        (telegram_claims_oid,'idempotency_key','text'::regtype,true),(telegram_claims_oid,'request_hash','bpchar'::regtype,true),(telegram_claims_oid,'created_at','timestamptz'::regtype,true),(telegram_claims_oid,'completed_at','timestamptz'::regtype,false),
+        (telegram_participants_oid,'conversation_id','uuid'::regtype,true),(telegram_participants_oid,'label','text'::regtype,true),(telegram_participants_oid,'created_at','timestamptz'::regtype,true),
+        (telegram_claim_events_oid,'id','uuid'::regtype,true),(telegram_claim_events_oid,'conversation_id','uuid'::regtype,true),(telegram_claim_events_oid,'event','text'::regtype,true),
+        (telegram_claim_events_oid,'actor_machine','text'::regtype,true),(telegram_claim_events_oid,'actor_endpoint','text'::regtype,true),(telegram_claim_events_oid,'created_at','timestamptz'::regtype,true),
         (deliveries_oid,'id','uuid'::regtype,true),(deliveries_oid,'message_id','uuid'::regtype,true),(deliveries_oid,'recipient_endpoint','text'::regtype,true),
         (deliveries_oid,'lease_machine_id','text'::regtype,false),(deliveries_oid,'lease_token','uuid'::regtype,false),(deliveries_oid,'lease_generation','bigint'::regtype,true),
         (deliveries_oid,'ownership_generation','bigint'::regtype,false),(deliveries_oid,'consumer_generation','bigint'::regtype,false),
@@ -2650,29 +3154,31 @@ WITH objects AS (
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
-      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
+      AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND expected.column_name IN ('from_participant','in_reply_to_message_id','in_reply_to_endpoint','telegram_thread_id'))))
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), columns AS (
     SELECT NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
        AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
-       AND (SELECT count(*)=2 FROM pg_attribute WHERE attrelid=ANY(ARRAY[message_idempotency_oid,conversation_idempotency_oid]) AND attname='request_hash' AND atttypid='bpchar'::regtype AND atttypmod=68)
-       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
+       AND (SELECT count(*)=CASE WHEN $1 >= 51 THEN 3 ELSE 2 END FROM pg_attribute WHERE attrelid=ANY(ARRAY[message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid]) AND attname='request_hash' AND atttypid='bpchar'::regtype AND atttypmod=68)
+       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
     FROM objects
 ), expected_defaults(table_oid,column_name,expression) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'ownership_generation','1'),(endpoints_oid,'consumer_generation','0'),
         (conversations_oid,'id','gen_random_uuid()'),(conversations_oid,'next_sequence','0'),(conversations_oid,'created_at','statement_timestamp()'),
         (messages_oid,'id','gen_random_uuid()'),(deliveries_oid,'id','gen_random_uuid()'),(deliveries_oid,'lease_generation','0'),
-        (cursors_oid,'sequence','0')
+        (cursors_oid,'sequence','0'),(telegram_claim_events_oid,'id','gen_random_uuid()')
     ) AS expected(table_oid,column_name,expression)
+    WHERE $1 >= 51 OR expected.table_oid IS DISTINCT FROM telegram_claim_events_oid
 ), actual_defaults AS (
     SELECT default_value.adrelid,attribute.attname,pg_get_expr(default_value.adbin,default_value.adrelid)
     FROM objects JOIN pg_attrdef AS default_value
-      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
     JOIN pg_attribute AS attribute ON attribute.attrelid=default_value.adrelid AND attribute.attnum=default_value.adnum
 ), defaults AS (
     SELECT NOT EXISTS (SELECT * FROM expected_defaults EXCEPT SELECT * FROM actual_defaults)
@@ -2685,14 +3191,16 @@ WITH objects AS (
         (deliveries_oid,'p'::"char",ARRAY[1]::smallint[]),(cursors_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (message_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),(conversation_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (nonces_oid,'p'::"char",ARRAY[1,2]::smallint[]),
+        (telegram_claims_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_participants_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_claim_events_oid,'p'::"char",ARRAY[1]::smallint[]),
         (messages_oid,'u'::"char",ARRAY[2,3]::smallint[]),(deliveries_oid,'u'::"char",ARRAY[2,3]::smallint[]),
         (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[])
     ) AS expected(table_oid,constraint_type,column_keys)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
 ), actual_keys AS (
     SELECT con.conrelid,con.contype,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND con.contype IN ('p','u') AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), expected_foreign_keys(table_oid,column_keys,foreign_table_oid,foreign_column_keys) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -2702,15 +3210,17 @@ WITH objects AS (
 		(role_bindings_oid,ARRAY[1]::smallint[],roles_oid,ARRAY[1]::smallint[]),(role_bindings_oid,ARRAY[2]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
 		(deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(deliveries_oid,ARRAY[3]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
 		(cursors_oid,ARRAY[1]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
-        (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[])
+        (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
+        (telegram_claims_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_participants_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_claim_events_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[])
     ) AS expected(table_oid,column_keys,foreign_table_oid,foreign_column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 < 40 OR (NOT (expected.table_oid=deliveries_oid AND expected.column_keys=ARRAY[3]::smallint[])
                          AND NOT (expected.table_oid=cursors_oid AND expected.column_keys=ARRAY[1]::smallint[])))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
 ), actual_foreign_keys AS (
     SELECT con.conrelid,con.conkey,con.confrelid,con.confkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[memberships_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid])
+      ON con.conrelid=ANY(ARRAY[memberships_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND con.contype='f' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
      AND con.confupdtype='a' AND con.confdeltype='a' AND con.confmatchtype='s'
 ), expected_check_keys(table_oid,column_keys) AS (
@@ -2720,21 +3230,26 @@ WITH objects AS (
         (conversations_oid,ARRAY[2]::smallint[]),(conversations_oid,ARRAY[4]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
 		(roles_oid,ARRAY[1]::smallint[]),(roles_oid,ARRAY[2]::smallint[]),(role_memberships_oid,ARRAY[3]::smallint[]),(role_bindings_oid,ARRAY[4]::smallint[]),
         (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
+        (messages_oid,ARRAY[7]::smallint[]),(messages_oid,ARRAY[8]::smallint[]),(messages_oid,ARRAY[9]::smallint[]),(messages_oid,ARRAY[10]::smallint[]),
         (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
-        (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
+        (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[]),
+        (telegram_claims_oid,ARRAY[2]::smallint[]),(telegram_claims_oid,ARRAY[3]::smallint[]),(telegram_claims_oid,ARRAY[4]::smallint[]),(telegram_claims_oid,ARRAY[5]::smallint[]),(telegram_claims_oid,ARRAY[6]::smallint[]),(telegram_claims_oid,ARRAY[2,8]::smallint[]),
+        (telegram_participants_oid,ARRAY[2]::smallint[]),
+        (telegram_claim_events_oid,ARRAY[3]::smallint[]),(telegram_claim_events_oid,ARRAY[4]::smallint[]),(telegram_claim_events_oid,ARRAY[5]::smallint[])
     ) AS expected(table_oid,column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
-      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_keys=ARRAY[4]::smallint[]))
+      AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_keys=ARRAY[4]::smallint[]))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND expected.column_keys=ANY(ARRAY[ARRAY[7]::smallint[],ARRAY[8]::smallint[],ARRAY[9]::smallint[],ARRAY[10]::smallint[]]))))
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND con.contype='c' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), check_expressions AS (
     SELECT NOT EXISTS (SELECT * FROM expected_check_keys EXCEPT ALL SELECT * FROM actual_check_keys)
        AND NOT EXISTS (SELECT * FROM actual_check_keys EXCEPT ALL SELECT * FROM expected_check_keys)
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(endpoint) >= 1) AND (char_length(endpoint) <= 512) AND (octet_length(endpoint) <= 2048) AND (endpoint !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)')
@@ -2742,7 +3257,7 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) OR ((char_length(consumer_id) >= 1) AND (char_length(consumer_id) <= 128) AND (octet_length(consumer_id) <= 512) AND (consumer_id !~ ''[[:cntrl:]]''::text)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
-	   AND ($1 < 45 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((display_name IS NULL) OR ((char_length(display_name) >= 1) AND (char_length(display_name) <= 128) AND (octet_length(display_name) <= 512) AND (display_name !~ ''[[:cntrl:]]''::text)))'))
+	   AND ($1 < 50 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((display_name IS NULL) OR ((char_length(display_name) >= 1) AND (char_length(display_name) <= 128) AND (octet_length(display_name) <= 512) AND (display_name !~ ''[[:cntrl:]]''::text)))'))
 	   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)=CASE WHEN $1 >= 43 THEN '((capabilities >= 1) AND (capabilities <= 15))' ELSE '((capabilities >= 1) AND (capabilities <= 7))' END)
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(role) >= 1) AND (char_length(role) <= 512) AND (octet_length(role) <= 2048) AND (role !~ ''[[:cntrl:]]''::text))'))
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'))
@@ -2750,6 +3265,20 @@ WITH objects AS (
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=role_bindings_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence > 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[7]::smallint[] AND pg_get_expr(conbin,conrelid)='((from_participant IS NULL) OR (from_participant = ''user-telegram''::text))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[8]::smallint[] AND pg_get_expr(conbin,conrelid)='((in_reply_to_message_id IS NULL) OR ((char_length(in_reply_to_message_id) >= 1) AND (char_length(in_reply_to_message_id) <= 128) AND (octet_length(in_reply_to_message_id) <= 512) AND (in_reply_to_message_id !~ ''[[:cntrl:]]''::text)))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[9]::smallint[] AND pg_get_expr(conbin,conrelid)='((in_reply_to_endpoint IS NULL) OR ((char_length(in_reply_to_endpoint) >= 1) AND (char_length(in_reply_to_endpoint) <= 512) AND (octet_length(in_reply_to_endpoint) <= 2048) AND (in_reply_to_endpoint !~ ''[[:cntrl:]]''::text)))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[10]::smallint[] AND pg_get_expr(conbin,conrelid)='((telegram_thread_id IS NULL) OR (telegram_thread_id > 0))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(status = ANY (ARRAY[''pending''::text, ''complete''::text]))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(requested_by_machine) >= 1) AND (char_length(requested_by_machine) <= 128) AND (octet_length(requested_by_machine) <= 512) AND (requested_by_machine !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(requested_by_endpoint) >= 1) AND (char_length(requested_by_endpoint) <= 512) AND (octet_length(requested_by_endpoint) <= 2048) AND (requested_by_endpoint !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(idempotency_key) >= 1) AND (char_length(idempotency_key) <= 128) AND (octet_length(idempotency_key) <= 512) AND (idempotency_key !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(request_hash ~ ''^[0-9a-f]{64}$''::text)'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claims_oid AND contype='c' AND conkey @> ARRAY[2,8]::smallint[] AND conkey <@ ARRAY[2,8]::smallint[] AND pg_get_expr(conbin,conrelid)='((status = ''complete''::text) = (completed_at IS NOT NULL))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_participants_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(label = ''user-telegram''::text)'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claim_events_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(event = ''complete''::text)'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claim_events_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(actor_machine) >= 1) AND (char_length(actor_machine) <= 128) AND (octet_length(actor_machine) <= 512) AND (actor_machine !~ ''[[:cntrl:]]''::text))'))
+	   AND ($1 < 51 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=telegram_claim_events_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(actor_endpoint) >= 1) AND (char_length(actor_endpoint) <= 512) AND (octet_length(actor_endpoint) <= 2048) AND (actor_endpoint !~ ''[[:cntrl:]]''::text))'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[4,5,7,8,9]::smallint[] AND conkey <@ ARRAY[4,5,7,8,9]::smallint[] AND pg_get_expr(conbin,conrelid)='(((lease_machine_id IS NULL) AND (lease_token IS NULL) AND (ownership_generation IS NULL) AND (consumer_generation IS NULL) AND (lease_until IS NULL)) OR ((lease_machine_id IS NOT NULL) AND (lease_token IS NOT NULL) AND (ownership_generation IS NOT NULL) AND (consumer_generation IS NOT NULL) AND (lease_until IS NOT NULL)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=cursors_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence >= 0)')
@@ -2760,17 +3289,17 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=nonces_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(nonce) >= 1) AND (char_length(nonce) <= 128) AND (octet_length(nonce) <= 512) AND (nonce !~ ''[[:cntrl:]]''::text))') AS exact
     FROM objects
 ), constraints AS (
-    SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
+    SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
-	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 40 THEN 12 ELSE 10 END
-	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 45 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
+	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 10 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_foreign_keys EXCEPT SELECT * FROM expected_foreign_keys)
 	       AND bool_and(check_expressions.exact) AS exact
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND con.convalidated CROSS JOIN check_expressions
 ), expected_guards(table_oid, trigger_name) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -2785,11 +3314,15 @@ WITH objects AS (
         (cursors_oid, 'mail_recipient_cursors_mutation_guard'),
         (message_idempotency_oid, 'mail_message_idempotency_mutation_guard'),
         (conversation_idempotency_oid, 'mail_conversation_idempotency_mutation_guard'),
-        (nonces_oid, 'mail_request_nonces_mutation_guard')
+        (nonces_oid, 'mail_request_nonces_mutation_guard'),
+        (telegram_claims_oid, 'mail_telegram_claims_mutation_guard'),
+        (telegram_participants_oid, 'mail_telegram_participants_mutation_guard'),
+        (telegram_claim_events_oid, 'mail_telegram_claim_events_mutation_guard')
     ) AS expected(table_oid, trigger_name)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
 ), guards AS (
-    SELECT count(*)=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
+    SELECT count(*)=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND bool_and(trg.tgfoid IN (objects.legacy_guard_oid, objects.cutover_guard_oid) AND trg.tgenabled='O' AND NOT trg.tgisinternal
                     AND trg.tgtype=30 AND trg.tgconstraint=0
                     AND NOT trg.tgdeferrable AND NOT trg.tginitdeferred AND trg.tgnargs=0
@@ -2825,14 +3358,16 @@ WITH objects AS (
 		(roles_oid,'SELECT'),(roles_oid,'INSERT'),(role_memberships_oid,'SELECT'),(role_memberships_oid,'INSERT'),(role_bindings_oid,'SELECT'),(role_bindings_oid,'INSERT'),
         (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
-        (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT')
+        (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT'),
+        (telegram_claims_oid,'SELECT'),(telegram_claims_oid,'INSERT'),(telegram_participants_oid,'SELECT'),(telegram_participants_oid,'INSERT'),(telegram_claim_events_oid,'SELECT'),(telegram_claim_events_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.privilege_type='DELETE'))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
-      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
     CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
     WHERE NOT acl.is_grantable
@@ -2847,15 +3382,17 @@ WITH objects AS (
 		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
-        (cursors_oid,'sequence','UPDATE')
+        (cursors_oid,'sequence','UPDATE'),
+        (telegram_claims_oid,'status','UPDATE'),(telegram_claims_oid,'completed_at','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.column_name='capabilities'))
-      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
+      AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid))
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
      AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
     CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
@@ -2866,6 +3403,7 @@ WITH objects AS (
 )
 SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND memberships_oid IS NOT NULL
 	AND ($1 < 40 OR (roles_oid IS NOT NULL AND role_memberships_oid IS NOT NULL AND role_bindings_oid IS NOT NULL))
+	AND ($1 < 51 OR (telegram_claims_oid IS NOT NULL AND telegram_participants_oid IS NOT NULL AND telegram_claim_events_oid IS NOT NULL))
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
 	   AND endpoints_index_oid IS NOT NULL AND ($1 < 40 OR role_bindings_index_oid IS NOT NULL) AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
@@ -2882,14 +3420,14 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	       SELECT 1 FROM pg_class AS relation
 	       CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )
 	   AND NOT EXISTS (
 	       SELECT 1 FROM pg_attribute AS attribute
 	       CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid])
+	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
 	         AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )
@@ -2910,7 +3448,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND has_table_privilege('punaro_app',conversations_oid,'SELECT') AND has_table_privilege('punaro_app',conversations_oid,'INSERT')
 	   AND NOT has_table_privilege('punaro_app',conversations_oid,'UPDATE')
 	   AND has_column_privilege('punaro_app',conversations_oid,'next_sequence','UPDATE')
-	   AND ($1 < 45 OR has_column_privilege('punaro_app',conversations_oid,'display_name','UPDATE'))
+	   AND ($1 < 50 OR has_column_privilege('punaro_app',conversations_oid,'display_name','UPDATE'))
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'created_at','UPDATE')
    AND has_table_privilege('punaro_app',memberships_oid,'SELECT') AND has_table_privilege('punaro_app',memberships_oid,'INSERT')
@@ -2943,6 +3481,17 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',message_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversation_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND ($1 < 51 OR (
+       has_table_privilege('punaro_app',telegram_claims_oid,'SELECT') AND has_table_privilege('punaro_app',telegram_claims_oid,'INSERT')
+       AND NOT has_table_privilege('punaro_app',telegram_claims_oid,'UPDATE')
+       AND has_column_privilege('punaro_app',telegram_claims_oid,'status','UPDATE')
+       AND has_column_privilege('punaro_app',telegram_claims_oid,'completed_at','UPDATE')
+       AND NOT has_column_privilege('punaro_app',telegram_claims_oid,'conversation_id','UPDATE')
+       AND has_table_privilege('punaro_app',telegram_participants_oid,'SELECT') AND has_table_privilege('punaro_app',telegram_participants_oid,'INSERT')
+       AND NOT has_table_privilege('punaro_app',telegram_participants_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       AND has_table_privilege('punaro_app',telegram_claim_events_oid,'SELECT') AND has_table_privilege('punaro_app',telegram_claim_events_oid,'INSERT')
+       AND NOT has_table_privilege('punaro_app',telegram_claim_events_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   ))
 FROM objects,table_ownership,columns,defaults,constraints,guards,function_safety,index_safety,table_acl,column_acl`, schemaVersion).Scan(&available)
 	return available, err
 }

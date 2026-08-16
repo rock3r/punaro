@@ -37,12 +37,16 @@ func TestPostgresConversationSQLOmitsDisplayNameUntilColumnExists(t *testing.T) 
 }
 
 func TestPostgresExclusiveConversationPredicateRequiresDisplayName(t *testing.T) {
-	if got := postgresExclusiveConversationPredicate("conversation", false); got != "FALSE" {
+	if got := postgresExclusiveConversationPredicate("conversation", false, false); got != "FALSE" {
 		t.Fatalf("pre-045 exclusive predicate=%s", got)
 	}
-	got := postgresExclusiveConversationPredicate("conversation", true)
+	got := postgresExclusiveConversationPredicate("conversation", true, false)
 	if !strings.Contains(got, "conversation.display_name") || strings.Contains(got, "UNIQUE") {
 		t.Fatalf("exclusive predicate=%s", got)
+	}
+	claimed := postgresExclusiveConversationPredicate("conversation", true, true)
+	if !strings.Contains(claimed, "mail_telegram_claims") || !strings.Contains(claimed, "conversation.display_name") {
+		t.Fatalf("claimed exclusive predicate=%s", claimed)
 	}
 }
 
@@ -54,7 +58,7 @@ func TestPostgresOccupancySQLUsesNullableUUIDExclude(t *testing.T) {
 		t.Fatalf("uuid exclude=%v", got)
 	}
 	for _, rolesAvailable := range []bool{false, true} {
-		query := postgresSessionOccupiesOtherExclusiveConversationSQL(true, rolesAvailable)
+		query := postgresSessionOccupiesOtherExclusiveConversationSQL(true, rolesAvailable, true)
 		compact := strings.ReplaceAll(query, " ", "")
 		if strings.Contains(query, "$2 = ''") || strings.Contains(compact, "$2=''") {
 			t.Fatalf("occupancy SQL overloads $2 as text: %s", query)

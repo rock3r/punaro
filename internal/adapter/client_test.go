@@ -929,6 +929,81 @@ func TestHTTPRelayClientOmitsEmptyDisplayNameOnCreate(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientTelegramClaimAndInboundMethods(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string][]byte{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("telegram claim request was not signed")
+		}
+		seen[r.Method+" "+r.URL.Path] = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/conversations/conversation-1/telegram-claim":
+			if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+				t.Fatal("missing claim idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}`))
+		case "/v1/conversations/conversation-1/telegram-claim/complete":
+			if string(body) != "{}" {
+				t.Fatalf("complete body=%s", body)
+			}
+			_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+		case "/v1/telegram/claims/pending":
+			_, _ = w.Write([]byte(`{"claims":[{"conversation_id":"conversation-1","status":"pending","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}]}`))
+		case "/v1/telegram/unclaimed":
+			_, _ = w.Write([]byte(`{"topics":[{"id":"conversation-1","display_name":"Ops"}]}`))
+		case "/v1/sessions/topic":
+			_, _ = w.Write([]byte(`{"id":"conversation-1","display_name":"Ops","claimed":true}`))
+		case "/v1/conversations/conversation-1/telegram-inbound":
+			if r.Header.Get("Idempotency-Key") != "telegram-update:42" {
+				t.Fatal("missing inbound idempotency key")
+			}
+			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"ship it","created_at":"2026-08-16T12:00:00Z"}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "pending" {
+		t.Fatalf("claim=%#v err=%v", claim, err)
+	}
+	completed, err := client.CompleteTelegramClaim(context.Background(), "conversation-1")
+	if err != nil || completed.Status != "complete" {
+		t.Fatalf("complete=%#v err=%v", completed, err)
+	}
+	pending, err := client.PendingTelegramClaims(context.Background(), 1)
+	if err != nil || len(pending) != 1 || pending[0].ConversationID != "conversation-1" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	topics, err := client.ListUnclaimed(context.Background())
+	if err != nil || len(topics) != 1 || topics[0].ID != "conversation-1" {
+		t.Fatalf("unclaimed=%#v err=%v", topics, err)
+	}
+	topic, err := client.GetSessionTopic(context.Background(), "agent/a")
+	if err != nil || !topic.Claimed || topic.ID != "conversation-1" {
+		t.Fatalf("topic=%#v err=%v", topic, err)
+	}
+	message, err := client.SendTelegramInbound(context.Background(), "conversation-1", relay.TelegramGatewayEndpoint, relay.TelegramUserParticipant, "ship it", "", "", 0, "telegram-update:42")
+	if err != nil || message.FromParticipant != relay.TelegramUserParticipant {
+		t.Fatalf("inbound=%#v err=%v", message, err)
+	}
+	if _, ok := seen["POST /v1/conversations/conversation-1/telegram-claim/complete"]; !ok {
+		t.Fatal("complete request was not observed")
+	}
+}
+
 func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
