@@ -34,12 +34,38 @@ func requireTrustedExistingAncestor(path string) error {
 	}
 }
 
+func requireTrustedSeedDirectory(path string) error {
+	return requireTrustedWindowsDirectory(path)
+}
+
 func requireTrustedBootstrapDirectory(path string) error {
+	if err := requireTrustedWindowsDirectory(path); err != nil {
+		return err
+	}
+	return walkTrustedWindowsAncestors(filepath.Dir(filepath.Clean(path)))
+}
+
+func requireTrustedWindowsDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.
 	if err != nil || !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
-	return walkTrustedWindowsAncestors(path)
+	attributes, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(path))
+	if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return errors.New("bootstrap directory is invalid")
+	}
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		return errors.New("bootstrap directory is invalid")
+	}
+	authenticated, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		return errors.New("bootstrap directory is invalid")
+	}
+	if ancestorWritableByBroadSID(path, world, authenticated) {
+		return errors.New("bootstrap directory is invalid")
+	}
+	return nil
 }
 
 func walkTrustedWindowsAncestors(path string) error {

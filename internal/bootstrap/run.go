@@ -494,9 +494,9 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	if directory == "" || !filepath.IsAbs(directory) || adapterPath == "" || !filepath.IsAbs(adapterPath) {
 		return errors.New("bootstrap directory is invalid")
 	}
-	if info, err := os.Lstat(directory); err == nil {
-		if !info.IsDir() {
-			return errors.New("bootstrap directory is invalid")
+	if _, err := os.Lstat(directory); err == nil {
+		if err := requireTrustedSeedDirectory(directory); err != nil {
+			return err
 		}
 	} else if err := prepareDirectory(directory); err != nil {
 		return err

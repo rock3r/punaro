@@ -27,6 +27,18 @@ func requireTrustedExistingAncestor(path string) error {
 	}
 }
 
+func requireTrustedSeedDirectory(path string) error {
+	info, err := os.Lstat(path) // #nosec G703 -- installer-created bootstrap directory.
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("bootstrap directory is invalid")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Getuid() {
+		return errors.New("bootstrap directory is invalid")
+	}
+	return nil
+}
+
 func requireTrustedBootstrapDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
