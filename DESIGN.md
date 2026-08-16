@@ -1495,6 +1495,10 @@ The implementation is not internet-exposure-ready until these cases pass:
 - Go, not Rust, for v1.
 - Versioned OCI images and Docker Compose are the reference production path;
   a dedicated Linux LXC remains a valid OCI host.
+- Client updates pull signed artifacts from the fixed GitHub Releases origin
+  `https://github.com/rock3r/punaro/releases/download`. The gateway names a
+  signed release; it never supplies a URL, command, or unsigned `latest`
+  pointer. `punaro-bootstrap` is not implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.
