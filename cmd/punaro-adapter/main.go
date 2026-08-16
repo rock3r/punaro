@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -70,6 +71,10 @@ func main() {
 		err = run()
 	case os.Args[1] == "send":
 		err = runSend(os.Args[2:])
+	case os.Args[1] == "claim":
+		err = runClaim(os.Args[2:])
+	case os.Args[1] == "get":
+		err = runGet(os.Args[2:])
 	case os.Args[1] == "create":
 		err = runCreate(os.Args[2:])
 	case os.Args[1] == "rename":
@@ -93,7 +98,7 @@ func main() {
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, rename, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, claim, get, create, rename, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		if shouldLogAdapterStop(err) {
@@ -666,10 +671,93 @@ type sendRequest struct {
 	conversationID string
 	fromEndpoint   string
 	targetRole     string
+	to             string
 	toRole         string
 	fromRole       string
 	bodyFile       string
 	idempotencyKey string
+}
+
+type claimRequest struct {
+	conversationID string
+	fromEndpoint   string
+	idempotencyKey string
+}
+
+type getRequest struct {
+	fromEndpoint string
+}
+
+func parseClaimArgs(args []string) (claimRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter claim", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request claimRequest
+	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
+	flags.StringVar(&request.fromEndpoint, "from", "", "attached member session")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable retry key")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		return claimRequest{}, fmt.Errorf("--conversation, --from, and --idempotency-key are required")
+	}
+	return request, nil
+}
+
+func runClaim(args []string) error {
+	request, err := parseClaimArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	if err != nil {
+		return err
+	}
+	claim, err := client.ClaimConversation(context.Background(), request.conversationID, request.fromEndpoint, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	if claim.Status != "pending" && claim.Status != "complete" {
+		return fmt.Errorf("telegram claim was not accepted")
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"conversation_id\":%q,\"status\":%q}\n", claim.ConversationID, claim.Status)
+	return err
+}
+
+func parseGetArgs(args []string) (getRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter get", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request getRequest
+	flags.StringVar(&request.fromEndpoint, "from", "", "attached session endpoint")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(request.fromEndpoint) == "" {
+		return getRequest{}, fmt.Errorf("--from is required")
+	}
+	return request, nil
+}
+
+func runGet(args []string) error {
+	request, err := parseGetArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	if err != nil {
+		return err
+	}
+	topic, err := client.GetSessionTopic(context.Background(), request.fromEndpoint)
+	if err != nil {
+		return mapSessionTopicError(err)
+	}
+	if !topic.Claimed {
+		return errTopicNotClaimed
+	}
+	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"display_name\":%q,\"claimed\":true}\n", topic.ID, topic.DisplayName)
+	return err
 }
 
 func parseSendArgs(args []string) (sendRequest, error) {
@@ -679,27 +767,48 @@ func parseSendArgs(args []string) (sendRequest, error) {
 	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
 	flags.StringVar(&request.fromEndpoint, "from", "", "attached sender endpoint")
 	flags.StringVar(&request.targetRole, "target-role", "", "deliver only to this durable conversation role")
-	flags.StringVar(&request.toRole, "to", "", "canonical destination role")
+	flags.StringVar(&request.to, "to", "", "user-telegram or canonical destination role")
 	flags.StringVar(&request.fromRole, "from-role", "", "canonical source role")
 	flags.StringVar(&request.bodyFile, "body-file", "", "message body file or - for stdin")
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return sendRequest{}, fmt.Errorf("invalid send arguments")
 	}
-	direct := strings.TrimSpace(request.toRole) != "" || strings.TrimSpace(request.fromRole) != ""
-	if direct {
-		if strings.TrimSpace(request.conversationID) != "" || strings.TrimSpace(request.fromEndpoint) != "" || request.targetRole != "" {
-			return sendRequest{}, fmt.Errorf("--to/--from-role cannot be combined with --conversation, --from, or --target-role")
+	to := strings.TrimSpace(request.to)
+	fromRole := strings.TrimSpace(request.fromRole)
+	if to == relay.TelegramUserParticipant {
+		if fromRole != "" {
+			return sendRequest{}, fmt.Errorf("--to user-telegram cannot be combined with --from-role")
 		}
-		if strings.TrimSpace(request.toRole) == "" || strings.TrimSpace(request.fromRole) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
-			return sendRequest{}, fmt.Errorf("--to, --from-role, --body-file, and --idempotency-key are required")
+		if request.targetRole != "" && request.targetRole != relay.TelegramUserParticipant {
+			return sendRequest{}, fmt.Errorf("--to and --target-role do not match")
 		}
-		if !relay.CanonicalRoleHandle(request.toRole) || !relay.CanonicalRoleHandle(request.fromRole) {
-			return sendRequest{}, fmt.Errorf("--to and --from-role must be canonical role handles")
+		request.to = to
+		request.targetRole = relay.TelegramUserParticipant
+		if strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+			return sendRequest{}, fmt.Errorf("--from, --body-file, and --idempotency-key are required")
 		}
 		return request, nil
 	}
-	if strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+	if to != "" || fromRole != "" {
+		if strings.TrimSpace(request.conversationID) != "" || strings.TrimSpace(request.fromEndpoint) != "" || request.targetRole != "" {
+			return sendRequest{}, fmt.Errorf("--to/--from-role cannot be combined with --conversation, --from, or --target-role")
+		}
+		if to == "" || fromRole == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+			return sendRequest{}, fmt.Errorf("--to, --from-role, --body-file, and --idempotency-key are required")
+		}
+		if !relay.CanonicalRoleHandle(to) || !relay.CanonicalRoleHandle(fromRole) {
+			return sendRequest{}, fmt.Errorf("--to and --from-role must be canonical role handles")
+		}
+		request.to = to
+		request.toRole = to
+		request.fromRole = fromRole
+		return request, nil
+	}
+	if strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
+	}
+	if request.targetRole != relay.TelegramUserParticipant && strings.TrimSpace(request.conversationID) == "" {
 		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
 	}
 	if request.targetRole != "" && !relay.ValidRole(request.targetRole) {
@@ -725,14 +834,31 @@ func runSend(args []string) error {
 	if err != nil {
 		return err
 	}
+	conversationID := request.conversationID
+	if request.targetRole == relay.TelegramUserParticipant {
+		topic, err := client.GetSessionTopic(context.Background(), request.fromEndpoint)
+		if err != nil {
+			return mapSessionTopicError(err)
+		}
+		if !topic.Claimed {
+			return errTopicNotClaimed
+		}
+		if conversationID != "" && conversationID != topic.ID {
+			return errConversationMismatch
+		}
+		conversationID = topic.ID
+	}
 	var message relay.Message
 	switch {
 	case request.toRole != "":
 		message, err = client.SendDirectMessage(context.Background(), request.fromRole, request.toRole, string(body), request.idempotencyKey)
 	case request.targetRole == "":
-		message, err = client.Send(context.Background(), request.conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
+		message, err = client.Send(context.Background(), conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
 	default:
-		message, err = client.SendToRole(context.Background(), request.conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
+		message, err = client.SendToRole(context.Background(), conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
+		if err != nil && request.targetRole == relay.TelegramUserParticipant && adapter.RelayHTTPStatus(err) == http.StatusForbidden {
+			return errTopicNotClaimed
+		}
 	}
 	if err != nil {
 		return err
@@ -743,6 +869,23 @@ func runSend(args []string) error {
 	}
 	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"sequence\":%d}\n", message.ID, message.Sequence)
 	return err
+}
+
+var (
+	errTopicNotClaimed      = errors.New("topic is not claimed")
+	errSessionHasNoTopic    = errors.New("session has no topic")
+	errConversationMismatch = errors.New("conversation does not match session topic")
+)
+
+func mapSessionTopicError(err error) error {
+	switch adapter.RelayHTTPStatus(err) {
+	case http.StatusForbidden:
+		return errSessionHasNoTopic
+	case http.StatusConflict:
+		return errors.New("session topic is ambiguous")
+	default:
+		return err
+	}
 }
 
 // attachmentNotifyRequest is intentionally an explicit post-offer handoff:

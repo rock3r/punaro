@@ -90,6 +90,15 @@ func (e *relayHTTPStatusError) PermanentOfferNoticeFailure() bool {
 	return e != nil && (e.status == http.StatusForbidden || e.status == http.StatusNotFound)
 }
 
+// RelayHTTPStatus reports the HTTP status carried by a signed relay error.
+func RelayHTTPStatus(err error) int {
+	var status *relayHTTPStatusError
+	if errors.As(err, &status) {
+		return status.status
+	}
+	return 0
+}
+
 // NewHTTPRelayClient validates and creates a signed client for one machine.
 func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken) (*HTTPRelayClient, error) {
 	return NewHTTPRelayClientWithPolicy(rawURL, machineID, privateKey, client, accessToken, clienttransport.Policy{})
@@ -262,8 +271,11 @@ func (c *HTTPRelayClient) ClaimConversation(ctx context.Context, conversationID,
 		return relay.TelegramClaim{}, fmt.Errorf("conversation, endpoint, and idempotency key are required")
 	}
 	var claim relay.TelegramClaim
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-claim", map[string]any{"endpoint": endpoint}, idempotencyKey, &claim)
-	return claim, err
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-claim", map[string]any{"endpoint": endpoint}, idempotencyKey, &claim)
+	if err != nil {
+		return relay.TelegramClaim{}, &relayHTTPStatusError{status: status, err: err}
+	}
+	return claim, nil
 }
 
 // CompleteTelegramClaim finishes a reserved claim as the live telegram/primary owner.
@@ -303,8 +315,11 @@ func (c *HTTPRelayClient) GetSessionTopic(ctx context.Context, endpoint string) 
 		return relay.SessionTopic{}, fmt.Errorf("endpoint is required")
 	}
 	var topic relay.SessionTopic
-	_, err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/topic", map[string]any{"endpoint": endpoint}, &topic)
-	return topic, err
+	status, err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/topic", map[string]any{"endpoint": endpoint}, &topic)
+	if err != nil {
+		return relay.SessionTopic{}, &relayHTTPStatusError{status: status, err: err}
+	}
+	return topic, nil
 }
 
 // SendTelegramInbound submits gateway inbound mail plus inert reply metadata.

@@ -1004,6 +1004,57 @@ func TestHTTPRelayClientTelegramClaimAndInboundMethods(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientClaimConversationTreatsCompleteAsSuccess(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/telegram-claim" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("Idempotency-Key") != "claim-conversation-1" {
+			t.Fatal("missing claim idempotency key")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"complete","display_name":"Ops","created_at":"2026-08-16T12:00:00Z","completed_at":"2026-08-16T12:00:05Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim, err := client.ClaimConversation(context.Background(), "conversation-1", "agent/a", "claim-conversation-1")
+	if err != nil || claim.Status != "complete" || claim.ConversationID != "conversation-1" {
+		t.Fatalf("complete claim=%#v err=%v", claim, err)
+	}
+}
+
+func TestHTTPRelayClientGetSessionTopicExposesForbiddenStatus(t *testing.T) {
+	t.Parallel()
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/topic" {
+			t.Fatalf("unexpected route %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"authorization denied"}`, http.StatusForbidden)
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.GetSessionTopic(context.Background(), "agent/a")
+	if RelayHTTPStatus(err) != http.StatusForbidden {
+		t.Fatalf("forbidden topic status=%d err=%v", RelayHTTPStatus(err), err)
+	}
+}
+
 func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)
