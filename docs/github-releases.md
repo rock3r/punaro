@@ -71,9 +71,11 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
 ## Cutting a candidate
 
 1. Merge the commit you intend to ship.
-2. Run the `release` workflow (preferred) with an explicit sequence, or push a
-   `vX.Y.Z` tag. Tag pushes assign the next sequence by counting existing `v*`
-   releases; use workflow dispatch when the sequence must be exact.
+2. Run the `release` workflow with an explicit sequence (preferred). A `vX.Y.Z`
+   tag push only works if repo variables `PUNARO_RELEASE_SEQUENCE` and, if
+   different, `PUNARO_CATALOG_SEQUENCE` are already set to the next integers.
+   Advance those variables before every tag. Release publishes are serialized
+   and do not cancel an in-flight run.
 3. Wait for the draft release and the `catalog` prerelease to appear.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
    keep the private file `0600` off this repository:

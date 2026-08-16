@@ -24,6 +24,10 @@ on:
         type: boolean
         default: true
 
+concurrency:
+  group: punaro-github-release
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
