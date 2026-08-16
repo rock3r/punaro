@@ -26,6 +26,8 @@ jobs:
         env:
           MACOS_DEVELOPER_ID_APPLICATION_P12: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12 }}
           MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          MACOS_DEVELOPER_ID_APPLICATION_CER: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_CER }}
+          MACOS_DEVELOPER_ID_APPLICATION_KEY: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_KEY }}
           MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/punaro-signing.keychain-db
           MACOS_KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
         run: ./scripts/import-macos-signing-cert.sh
