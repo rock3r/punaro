@@ -33,7 +33,11 @@ const (
 	recoveryUnhealthy      = "candidate-unhealthy"
 	recoveryPreviousFailed = "previous-unhealthy"
 	recoveryCurrentExited  = "current-exited"
+	directoryKeysFile      = "release.pub"
 )
+
+// ErrRecoveryOnly means normal child restarts are disabled until host-local recovery.
+var ErrRecoveryOnly = errors.New("bootstrap is recovery-only")
 
 // RunRequest starts the current-slot adapter and applies one-shot rollback.
 type RunRequest struct {
@@ -87,7 +91,7 @@ func Run(ctx context.Context, request RunRequest) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	identity, adapter, err := prepareRun(request)
+	identity, adapter, err := prepareRun(&request)
 	if err != nil {
 		return err
 	}
@@ -103,7 +107,7 @@ func Run(ctx context.Context, request RunRequest) error {
 		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	if err := waitHealth(ctx, request, child, request.hasPrevious(identity)); err != nil {
 		_ = child.Kill()
@@ -120,7 +124,7 @@ func Run(ctx context.Context, request RunRequest) error {
 		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	return waitChild(ctx, child)
 }
@@ -150,7 +154,7 @@ func (request *RunRequest) normalizeRun() error {
 	return nil
 }
 
-func prepareRun(request RunRequest) (slotState, string, error) {
+func prepareRun(request *RunRequest) (slotState, string, error) {
 	if err := prepareDirectory(request.Directory); err != nil {
 		return slotState{}, "", err
 	}
@@ -162,10 +166,17 @@ func prepareRun(request RunRequest) (slotState, string, error) {
 	if err := recoverJournal(request.Directory); err != nil {
 		return slotState{}, "", err
 	}
+	if len(request.Keys) == 0 {
+		keys, err := loadDirectoryKeys(request.Directory)
+		if err != nil {
+			return slotState{}, "", err
+		}
+		request.Keys = keys
+	}
 	if recovery, err := loadRecovery(request.Directory); err != nil {
 		return slotState{}, "", err
 	} else if recovery.Mode == recoveryMode {
-		return slotState{}, "", errors.New("bootstrap is recovery-only")
+		return slotState{}, "", ErrRecoveryOnly
 	}
 	current := filepath.Join(request.Directory, currentSlot)
 	if err := requireRealDir(current); err != nil {
@@ -248,14 +259,14 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	adapter, err := adapterBinary(filepath.Join(request.Directory, currentSlot), request.GOOS, request.GOARCH)
 	if err != nil {
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	if err := os.Remove(filepath.Join(request.Directory, readyFile)); err != nil && !os.IsNotExist(err) {
 		return errors.New("bootstrap ready file is invalid")
@@ -265,7 +276,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	if err := waitHealth(ctx, request, child, true); err != nil {
 		_ = child.Kill()
@@ -276,7 +287,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
 			return recErr
 		}
-		return errors.New("bootstrap is recovery-only")
+		return ErrRecoveryOnly
 	}
 	return waitChild(ctx, child)
 }
@@ -412,6 +423,26 @@ func readReadyFile(path string) (string, error) {
 	return record.Status, nil
 }
 
+func loadDirectoryKeys(directory string) (map[string]ed25519.PublicKey, error) {
+	path := filepath.Join(directory, directoryKeysFile)
+	info, err := os.Lstat(path) // #nosec G703 -- keys file is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- keys file is a fixed child of the bootstrap directory.
+	if err != nil {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	keys, err := punarorelease.ParsePublicKeys(body)
+	if err != nil || len(keys) == 0 {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	return keys, nil
+}
+
 func loadRecovery(directory string) (recoveryState, error) {
 	body, err := os.ReadFile(filepath.Join(directory, recoveryFile)) // #nosec G304 -- recovery record is a fixed child of the bootstrap directory.
 	if os.IsNotExist(err) {
@@ -462,7 +493,11 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	if directory == "" || !filepath.IsAbs(directory) || adapterPath == "" || !filepath.IsAbs(adapterPath) {
 		return errors.New("bootstrap directory is invalid")
 	}
-	if err := prepareDirectory(directory); err != nil {
+	if info, err := os.Lstat(directory); err == nil {
+		if !info.IsDir() {
+			return errors.New("bootstrap directory is invalid")
+		}
+	} else if err := prepareDirectory(directory); err != nil {
 		return err
 	}
 	unlock, err := lockDirectory(directory)

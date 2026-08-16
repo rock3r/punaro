@@ -141,6 +141,48 @@ func TestRunRollsBackUnhealthyCurrentWhenCatalogAllowsPrevious(t *testing.T) {
 	}
 }
 
+func TestRunLoadsKeysFromDirectory(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	keys, err := punarorelease.EncodePublicKeys(testKeyID, origin.Keys[testKeyID])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, directoryKeysFile), keys, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var starts int
+	if err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		Origin:        origin.URL,
+		HealthTimeout: 40 * time.Millisecond,
+		Now:           time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			starts++
+			if starts == 1 {
+				return blockingProcess(context.Background()), nil
+			}
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			return finishedProcess(nil), nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" || status.RecoveryOnly {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunEntersRecoveryWhenCatalogDisallowsPrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")

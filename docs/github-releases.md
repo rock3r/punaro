@@ -155,8 +155,11 @@ stale catalog, an unsigned or digest-mismatched document, a sequence
 downgrade, a critical block, and a path outside the origin. Host-local
 rollback swaps the two published slots and does not lower the highest
 accepted sequences. Automatic rollback from `run` still requires a fresh
-catalog listing. Source installers may `seed-checkout` a reviewed local
-adapter as `v0.0.0-local`; that identity is not a signed rollback target.
+catalog listing and loads `{directory}/release.pub` when `--keys-file` is
+omitted. Source installers may `seed-checkout` a reviewed local adapter as
+`v0.0.0-local`; that identity is not a signed rollback target. Recovery-only
+exits successfully so platform services do not restart-loop; a crash after a
+healthy child still fails the supervisor so the service can restart.
 
 ## Still outstanding
 

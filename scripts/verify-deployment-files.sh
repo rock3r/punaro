@@ -46,6 +46,7 @@ for expected in \
 	'<key>Label</key>' \
 	'<string>org.punaro.adapter</string>' \
 	'<key>KeepAlive</key>' \
+	'<key>SuccessfulExit</key>' \
 	'<false/>' \
 	'<key>ProcessType</key>' \
 	'<string>Background</string>' \
@@ -99,8 +100,8 @@ if ! grep -Fqx 'ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.loc
 	printf '%s\n' 'adapter user unit must exec punaro-bootstrap run' >&2
 	exit 1
 fi
-if ! grep -Fqx 'Restart=no' "$unit"; then
-	printf '%s\n' 'adapter user unit must not restart-loop after recovery-only' >&2
+if ! grep -Fqx 'Restart=on-failure' "$unit"; then
+	printf '%s\n' 'adapter user unit must restart after a supervised child crash' >&2
 	exit 1
 fi
 

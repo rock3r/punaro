@@ -144,13 +144,18 @@ func runRun(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	return bootstrap.Run(ctx, bootstrap.RunRequest{
+	err := bootstrap.Run(ctx, bootstrap.RunRequest{
 		Directory:     *directory,
 		Origin:        strings.TrimSpace(*origin),
 		Keys:          keys,
 		HealthTimeout: bootstrap.DefaultHealthTimeout,
 		HealthWindow:  bootstrap.DefaultHealthWindow,
 	})
+	if errors.Is(err, bootstrap.ErrRecoveryOnly) {
+		fmt.Println("recovery-only")
+		return nil
+	}
+	return err
 }
 
 func runSeedCheckout(args []string) error {
