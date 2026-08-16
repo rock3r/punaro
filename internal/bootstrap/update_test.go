@@ -119,6 +119,7 @@ func TestUpdateRepairsCurrentWithoutRotatingPrevious(t *testing.T) {
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
 	}
+	// #nosec G306 -- the regression plants a still-executable damaged artifact.
 	if err := os.WriteFile(filepath.Join(dir, currentSlot, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("damaged"), 0o755); err != nil {
 		t.Fatal(err)
 	}
