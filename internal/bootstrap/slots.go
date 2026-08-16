@@ -343,7 +343,7 @@ func readSlot(directory string) (slotState, error) {
 }
 
 func requireRealDir(path string) error {
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- path is a bootstrap-owned slot or the operator-selected absolute directory.
 	if err != nil {
 		return err
 	}
@@ -354,7 +354,7 @@ func requireRealDir(path string) error {
 }
 
 func existsRealDir(path string) (bool, error) {
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(path) // #nosec G703 -- path is a bootstrap-owned slot or the operator-selected absolute directory.
 	if os.IsNotExist(err) {
 		return false, nil
 	}

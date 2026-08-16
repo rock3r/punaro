@@ -11,7 +11,7 @@ func lockDirectory(directory string) (func(), error) {
 		return nil, errors.New("bootstrap directory is invalid")
 	}
 	path := filepath.Join(directory, lockFile)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304 -- fixed lock child of the bootstrap directory.
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600) // #nosec G304,G703 -- fixed lock child of the bootstrap directory.
 	if err != nil {
 		return nil, errors.New("bootstrap directory is busy")
 	}
