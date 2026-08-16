@@ -72,6 +72,7 @@ build punaro-adapter ./cmd/punaro-adapter
 build punaro-trusted-attachment ./cmd/punaro-trusted-attachment
 build punaro-memory ./cmd/punaro-memory
 build punaro-enroll ./cmd/punaro-enroll
+build punaro-bootstrap ./cmd/punaro-bootstrap
 
 if [ "$goos" = linux ]; then
 	build punaro ./cmd/punaro

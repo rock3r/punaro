@@ -1498,7 +1498,9 @@ The implementation is not internet-exposure-ready until these cases pass:
 - Client updates pull signed artifacts from the fixed GitHub Releases origin
   `https://github.com/rock3r/punaro/releases/download`. The gateway names a
   signed release; it never supplies a URL, command, or unsigned `latest`
-  pointer. `punaro-bootstrap` is not implemented yet.
+  pointer. `punaro-bootstrap update` verifies catalog/manifest signatures and
+  exact artifact digests, then publishes `current`/`previous` slots.
+  `punaro-bootstrap run`, health, and enrollment are not implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.
