@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const windowsAncestorWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE
+const windowsAncestorWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL | windows.GENERIC_WRITE
 
 func requireTrustedBootstrapDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.

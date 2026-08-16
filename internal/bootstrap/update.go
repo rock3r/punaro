@@ -268,7 +268,12 @@ func currentSlotMatches(directory string, artifacts []punarorelease.Artifact) bo
 		if name != artifactName(artifact.Component, artifact.OS, artifact.Arch) {
 			return false
 		}
-		body, err := os.ReadFile(filepath.Join(directory, currentSlot, name)) // #nosec G304 -- name is a verified platform artifact filename.
+		path := filepath.Join(directory, currentSlot, name)
+		info, err := os.Lstat(path) // #nosec G703 -- name is a verified platform artifact filename.
+		if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
+			return false
+		}
+		body, err := os.ReadFile(path) // #nosec G304 -- name is a verified platform artifact filename.
 		if err != nil || int64(len(body)) != artifact.Length {
 			return false
 		}

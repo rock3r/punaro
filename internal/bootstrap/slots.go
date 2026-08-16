@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -308,6 +309,10 @@ func parseAccepted(body []byte) (acceptedState, error) {
 	if err := decoder.Decode(&accepted); err != nil {
 		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
+	}
 	if accepted.Schema != 1 || accepted.Release == "" || accepted.ReleaseSequence < 1 || accepted.CatalogSequence < 1 || !validManifestDigest(accepted.ManifestSHA256) {
 		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
 	}
@@ -393,6 +398,10 @@ func parseSlot(body []byte) (slotState, error) {
 	decoder.DisallowUnknownFields()
 	var slot slotState
 	if err := decoder.Decode(&slot); err != nil {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
 	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || !validManifestDigest(slot.ManifestSHA256) {
