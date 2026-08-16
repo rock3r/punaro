@@ -294,8 +294,21 @@ func loadAccepted(directory string) (acceptedState, error) {
 	if err != nil {
 		return acceptedState{}, err
 	}
+	accepted, err := parseAccepted(body)
+	if err != nil {
+		return acceptedState{}, err
+	}
+	return accepted, nil
+}
+
+func parseAccepted(body []byte) (acceptedState, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
 	var accepted acceptedState
-	if err := json.Unmarshal(body, &accepted); err != nil || accepted.Schema != 1 {
+	if err := decoder.Decode(&accepted); err != nil {
+		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
+	}
+	if accepted.Schema != 1 || accepted.Release == "" || accepted.ReleaseSequence < 1 || accepted.CatalogSequence < 1 || !validManifestDigest(accepted.ManifestSHA256) {
 		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
 	}
 	return accepted, nil
@@ -313,6 +326,17 @@ func saveAccepted(directory string, accepted acceptedState) error {
 func Status(directory string) (State, error) {
 	if directory == "" || !filepath.IsAbs(directory) {
 		return State{}, errors.New("bootstrap directory is invalid")
+	}
+	if _, err := os.Lstat(directory); os.IsNotExist(err) {
+		return State{}, nil
+	}
+	unlock, err := lockDirectory(directory)
+	if err != nil {
+		return State{}, err
+	}
+	defer unlock()
+	if err := recoverJournal(directory); err != nil {
+		return State{}, err
 	}
 	accepted, err := loadAccepted(directory)
 	if err != nil {

@@ -167,19 +167,19 @@ func Update(request Request) (Result, error) {
 		CatalogSequence: catalog.Sequence,
 		ManifestSHA256:  listed.ManifestSHA256,
 	}
+	artifacts := platformArtifacts(manifest.Artifacts, request.GOOS, request.GOARCH)
+	if len(artifacts) == 0 {
+		return Result{}, errors.New("release has no artifacts for this platform")
+	}
 	current, err := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
 	if err != nil {
 		return Result{}, err
 	}
-	if current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256 {
+	if current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256 && currentSlotMatches(request.Directory, artifacts) {
 		if err := finishPublication(request.Directory, published); err != nil {
 			return Result{}, err
 		}
 		return Result{Release: published.Release, Sequence: published.ReleaseSequence, Manifest: published.ManifestSHA256}, nil
-	}
-	artifacts := platformArtifacts(manifest.Artifacts, request.GOOS, request.GOARCH)
-	if len(artifacts) == 0 {
-		return Result{}, errors.New("release has no artifacts for this platform")
 	}
 	candidate := filepath.Join(request.Directory, candidateSlot)
 	if err := os.RemoveAll(candidate); err != nil {
@@ -260,6 +260,24 @@ func verifyDocument(document, signature []byte, keys map[string]ed25519.PublicKe
 		return err
 	}
 	return punarorelease.Verify(document, envelope, keys)
+}
+
+func currentSlotMatches(directory string, artifacts []punarorelease.Artifact) bool {
+	for _, artifact := range artifacts {
+		name := filepath.Base(artifact.Path)
+		if name != artifactName(artifact.Component, artifact.OS, artifact.Arch) {
+			return false
+		}
+		body, err := os.ReadFile(filepath.Join(directory, currentSlot, name)) // #nosec G304 -- name is a verified platform artifact filename.
+		if err != nil || int64(len(body)) != artifact.Length {
+			return false
+		}
+		digest := sha256.Sum256(body)
+		if hex.EncodeToString(digest[:]) != artifact.SHA256 {
+			return false
+		}
+	}
+	return len(artifacts) > 0
 }
 
 func platformArtifacts(artifacts []punarorelease.Artifact, goos, goarch string) []punarorelease.Artifact {
