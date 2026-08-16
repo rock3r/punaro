@@ -246,6 +246,41 @@ func TestUpdateSelectsOnlyRequestedPlatform(t *testing.T) {
 	}
 }
 
+func TestUpdateRejectsWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("writable-ancestor policy is Unix-specific")
+	}
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	parent := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(parent, "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
+		t.Fatal("writable ancestor accepted")
+	}
+}
+
+func TestStatusRejectsCorruptSlot(t *testing.T) {
+	dir := t.TempDir()
+	current := filepath.Join(dir, currentSlot)
+	if err := os.Mkdir(current, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(current, slotRecord), []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Status(dir); err == nil {
+		t.Fatal("corrupt slot accepted")
+	}
+}
+
 func TestUpdateRejectsRelativeDirectory(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	if _, err := Update(Request{Directory: "relative-state", Origin: origin.URL, Keys: origin.Keys, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {

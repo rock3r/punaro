@@ -41,12 +41,13 @@ func prepareDirectory(directory string) error {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return errors.New("bootstrap directory is invalid")
 		}
-		return nil
-	}
-	if !info.IsDir() {
+	} else if !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
-	return nil
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return errors.New("bootstrap directory is invalid")
+	}
+	return requireTrustedBootstrapDirectory(directory)
 }
 
 func publishSlot(directory, release string, sequence int64, manifestSHA256 string) error {
@@ -316,8 +317,14 @@ func Status(directory string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	current, _ := readSlot(filepath.Join(directory, currentSlot))
-	previous, _ := readSlot(filepath.Join(directory, previousSlot))
+	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		return State{}, err
+	}
+	previous, err := readOptionalSlot(filepath.Join(directory, previousSlot))
+	if err != nil {
+		return State{}, err
+	}
 	return State{
 		Current:          current.Release,
 		CurrentSequence:  current.Sequence,
@@ -325,6 +332,17 @@ func Status(directory string) (State, error) {
 		PreviousSequence: previous.Sequence,
 		CatalogSequence:  accepted.CatalogSequence,
 	}, nil
+}
+
+func readOptionalSlot(directory string) (slotState, error) {
+	_, err := os.Lstat(directory) // #nosec G703 -- slot is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return slotState{}, nil
+	}
+	if err != nil {
+		return slotState{}, err
+	}
+	return readSlot(directory)
 }
 
 func readSlot(directory string) (slotState, error) {
