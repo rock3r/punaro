@@ -19,6 +19,7 @@ var _ relay.RoleBindingBackend = (*Database)(nil)
 var _ relay.RoleProfileBackend = (*Database)(nil)
 var _ relay.DirectMessageBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
+var _ relay.DisplayNameBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
 
@@ -925,6 +926,81 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 	return events, nil
 }
 
+// SetConversationDisplayName updates a room label after rechecking a live
+// admin session. A stable retry key returns the original name.
+func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (relay.Conversation, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
+		return relay.Conversation{}, false, relay.ErrForbidden
+	}
+	if _, err := uuid.Parse(input.ConversationID); err != nil {
+		return relay.Conversation{}, false, relay.ErrForbidden
+	}
+	displayName, err := relay.SanitizeConversationDisplayName(input.DisplayName)
+	if err != nil || displayName == "" {
+		return relay.Conversation{}, false, errors.New("invalid conversation display name")
+	}
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.Conversation{}, false, errors.New("display name transaction cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230612))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
+		return relay.Conversation{}, false, errors.New("display name retry lock is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230613))`, input.ConversationID); err != nil {
+		return relay.Conversation{}, false, errors.New("display name conversation lock is unavailable")
+	}
+	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
+		return relay.Conversation{}, false, err
+	}
+	if err := postgresLockSessionRoleBindings(tx, input.ActorMachineID, input.ActorEndpoint, input.Now); err != nil {
+		return relay.Conversation{}, false, err
+	}
+	actorCapabilities, err := postgresSessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return relay.Conversation{}, false, errors.New("display name actor authorization is unavailable")
+	}
+	if actorCapabilities&relay.CapAdmin == 0 {
+		return relay.Conversation{}, false, relay.ErrForbidden
+	}
+	conversation, err := postgresConversationByID(tx, input.ConversationID)
+	if err != nil {
+		return relay.Conversation{}, false, relay.ErrForbidden
+	}
+	if conversation.DisplayName == displayName {
+		if err := tx.Commit(); err != nil {
+			return relay.Conversation{}, false, errors.New("display name retry cannot commit")
+		}
+		return conversation, true, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_conversations SET display_name=$2 WHERE id=$1::uuid`, input.ConversationID, displayName); err != nil {
+		return relay.Conversation{}, false, relayDatabaseError(err, "update conversation display name")
+	}
+	conversation.DisplayName = displayName
+	if err := tx.Commit(); err != nil {
+		return relay.Conversation{}, false, relayDatabaseError(err, "commit display name")
+	}
+	return conversation, false, nil
+}
+
+func postgresConversationByID(tx *sql.Tx, id string) (relay.Conversation, error) {
+	var conversation relay.Conversation
+	var displayName sql.NullString
+	if err := tx.QueryRowContext(context.Background(), `SELECT id::text, display_name FROM relay.mail_conversations WHERE id=$1::uuid`, id).Scan(&conversation.ID, &displayName); err != nil {
+		return relay.Conversation{}, errors.New("conversation is unavailable")
+	}
+	conversation.DisplayName = displayName.String
+	return conversation, nil
+}
+
+func postgresNullableDisplayName(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
 func postgresControlEventByID(tx *sql.Tx, id string) (relay.ControlEvent, error) {
 	var event relay.ControlEvent
 	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,actor_endpoint,operation,member_endpoint,member_capabilities,created_at FROM relay.mail_conversation_controls WHERE id=$1::uuid`, id).Scan(&event.ID, &event.ConversationID, &event.ActorEndpoint, &event.Operation, &event.Member.Endpoint, &event.Member.Capabilities, &event.CreatedAt); err != nil {
@@ -976,6 +1052,10 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	if !creatorAdmin {
 		return relay.Conversation{}, relay.ErrForbidden
 	}
+	displayName, err := relay.SanitizeConversationDisplayName(input.DisplayName)
+	if err != nil {
+		return relay.Conversation{}, err
+	}
 	tx, cancel, err := d.beginRelayTransaction(nil)
 	if err != nil {
 		return relay.Conversation{}, errors.New("conversation transaction cannot start")
@@ -985,7 +1065,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230608))`, input.MachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, errors.New("conversation retry lock is unavailable")
 	}
-	hash := relay.CreateConversationRequestHash(input.CreatorEndpoint, input.Members, input.ProjectID)
+	hash := relay.CreateConversationRequestHash(input.CreatorEndpoint, input.Members, displayName, input.ProjectID)
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id::text,request_hash FROM relay.mail_conversation_idempotency WHERE machine_id=$1 AND key=$2`, input.MachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -1001,10 +1081,14 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 				return relay.Conversation{}, relayDatabaseError(err, "reauthorize conversation project")
 			}
 		}
+		conversation, err := postgresConversationByID(tx, existingID)
+		if err != nil {
+			return relay.Conversation{}, err
+		}
 		if err := tx.Commit(); err != nil {
 			return relay.Conversation{}, errors.New("conversation retry cannot commit")
 		}
-		return relay.Conversation{ID: existingID}, nil
+		return conversation, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Conversation{}, errors.New("conversation retry state is unavailable")
@@ -1055,8 +1139,8 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 			return relay.Conversation{}, relay.ErrForbidden
 		}
 	}
-	conversation := relay.Conversation{ID: uuid.NewString()}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversations(id,created_at) VALUES($1::uuid,$2)`, conversation.ID, input.Now.UTC()); err != nil {
+	conversation := relay.Conversation{ID: uuid.NewString(), DisplayName: displayName}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversations(id,created_at,display_name) VALUES($1::uuid,$2,$3)`, conversation.ID, input.Now.UTC(), postgresNullableDisplayName(displayName)); err != nil {
 		return relay.Conversation{}, relayDatabaseError(err, "create conversation")
 	}
 	for _, member := range input.Members {
@@ -1742,15 +1826,15 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	if err != nil {
 		return nil, errors.New("durable role bindings are unavailable")
 	}
-	query := `SELECT DISTINCT id FROM (
-		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
+	query := `SELECT id, display_name FROM (
+		SELECT conversation.id::text AS id, conversation.display_name FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
 		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2
 	`
 	if rolesAvailable {
 		query += `UNION
-		SELECT conversation.id::text AS id FROM relay.mail_conversations AS conversation
+		SELECT conversation.id::text AS id, conversation.display_name FROM relay.mail_conversations AS conversation
 		JOIN relay.mail_role_memberships AS membership ON membership.conversation_id=conversation.id
 		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
 		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
@@ -1767,9 +1851,11 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	var conversations []relay.Conversation
 	for rows.Next() {
 		var conversation relay.Conversation
-		if err := rows.Scan(&conversation.ID); err != nil {
+		var displayName sql.NullString
+		if err := rows.Scan(&conversation.ID, &displayName); err != nil {
 			return nil, errors.New("machine conversation is malformed")
 		}
+		conversation.DisplayName = displayName.String
 		conversations = append(conversations, conversation)
 	}
 	if err := rows.Err(); err != nil {
@@ -2107,6 +2193,7 @@ WITH objects AS (
         (endpoints_oid,'consumer_id','text'::regtype,false),(endpoints_oid,'consumer_generation','bigint'::regtype,true),
         (endpoints_oid,'consumer_lease_until','timestamptz'::regtype,false),
         (conversations_oid,'id','uuid'::regtype,true),(conversations_oid,'next_sequence','bigint'::regtype,true),(conversations_oid,'created_at','timestamptz'::regtype,true),
+        (conversations_oid,'display_name','text'::regtype,false),
         (memberships_oid,'conversation_id','uuid'::regtype,true),(memberships_oid,'endpoint','text'::regtype,true),(memberships_oid,'capabilities','smallint'::regtype,true),
 		(roles_oid,'role','text'::regtype,true),(roles_oid,'machine_id','text'::regtype,true),
 		(role_memberships_oid,'conversation_id','uuid'::regtype,true),(role_memberships_oid,'role','text'::regtype,true),(role_memberships_oid,'capabilities','smallint'::regtype,true),
@@ -2124,7 +2211,8 @@ WITH objects AS (
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
@@ -2191,14 +2279,15 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,ARRAY[1]::smallint[]),(endpoints_oid,ARRAY[2]::smallint[]),(endpoints_oid,ARRAY[4]::smallint[]),
         (endpoints_oid,ARRAY[5]::smallint[]),(endpoints_oid,ARRAY[6]::smallint[]),(endpoints_oid,ARRAY[5,7]::smallint[]),
-        (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
+        (conversations_oid,ARRAY[2]::smallint[]),(conversations_oid,ARRAY[4]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
 		(roles_oid,ARRAY[1]::smallint[]),(roles_oid,ARRAY[2]::smallint[]),(role_memberships_oid,ARRAY[3]::smallint[]),(role_bindings_oid,ARRAY[4]::smallint[]),
         (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
         (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_keys=ARRAY[4]::smallint[]))
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
@@ -2215,6 +2304,7 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) OR ((char_length(consumer_id) >= 1) AND (char_length(consumer_id) <= 128) AND (octet_length(consumer_id) <= 512) AND (consumer_id !~ ''[[:cntrl:]]''::text)))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey @> ARRAY[5,7]::smallint[] AND conkey <@ ARRAY[5,7]::smallint[] AND pg_get_expr(conbin,conrelid)='((consumer_id IS NULL) = (consumer_lease_until IS NULL))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='(next_sequence >= 0)')
+	   AND ($1 < 45 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=conversations_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='((display_name IS NULL) OR ((char_length(display_name) >= 1) AND (char_length(display_name) <= 128) AND (octet_length(display_name) <= 512) AND (display_name !~ ''[[:cntrl:]]''::text)))'))
 	   AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=memberships_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)=CASE WHEN $1 >= 43 THEN '((capabilities >= 1) AND (capabilities <= 15))' ELSE '((capabilities >= 1) AND (capabilities <= 7))' END)
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(role) >= 1) AND (char_length(role) <= 512) AND (octet_length(role) <= 2048) AND (role !~ ''[[:cntrl:]]''::text))'))
 	   AND ($1 < 40 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=roles_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))'))
@@ -2235,7 +2325,7 @@ WITH objects AS (
     SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
 	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 40 THEN 12 ELSE 10 END
-	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 40 THEN 22 ELSE 18 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 45 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
@@ -2315,7 +2405,7 @@ WITH objects AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'machine_id','UPDATE'),(endpoints_oid,'lease_until','UPDATE'),(endpoints_oid,'ownership_generation','UPDATE'),
         (endpoints_oid,'consumer_id','UPDATE'),(endpoints_oid,'consumer_generation','UPDATE'),(endpoints_oid,'consumer_lease_until','UPDATE'),
-        (conversations_oid,'next_sequence','UPDATE'),(memberships_oid,'capabilities','UPDATE'),
+        (conversations_oid,'next_sequence','UPDATE'),(conversations_oid,'display_name','UPDATE'),(memberships_oid,'capabilities','UPDATE'),
 		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
@@ -2323,6 +2413,7 @@ WITH objects AS (
     ) AS expected(table_oid,column_name,privilege_type)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.column_name='capabilities'))
+      AND ($1 >= 45 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
@@ -2381,6 +2472,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND has_table_privilege('punaro_app',conversations_oid,'SELECT') AND has_table_privilege('punaro_app',conversations_oid,'INSERT')
 	   AND NOT has_table_privilege('punaro_app',conversations_oid,'UPDATE')
 	   AND has_column_privilege('punaro_app',conversations_oid,'next_sequence','UPDATE')
+	   AND ($1 < 45 OR has_column_privilege('punaro_app',conversations_oid,'display_name','UPDATE'))
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',conversations_oid,'created_at','UPDATE')
    AND has_table_privilege('punaro_app',memberships_oid,'SELECT') AND has_table_privilege('punaro_app',memberships_oid,'INSERT')

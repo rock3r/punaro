@@ -416,8 +416,8 @@ var mailCutoverMaterializationStatements = []string{
 	 SELECT payload->>'endpoint',payload->>'machine_id',TIMESTAMPTZ 'epoch'+(payload->>'lease_until')::bigint*INTERVAL '1 millisecond',(payload->>'ownership_generation')::bigint,payload->>'consumer_id',(payload->>'consumer_generation')::bigint,
 	 CASE WHEN payload->>'consumer_lease_until' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'consumer_lease_until')::bigint*INTERVAL '1 millisecond' END
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_endpoints' ORDER BY row_key COLLATE "C"`,
-	`INSERT INTO relay.mail_conversations(id,next_sequence,created_at)
-	 SELECT (payload->>'id')::uuid,(payload->>'next_sequence')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	`INSERT INTO relay.mail_conversations(id,next_sequence,created_at,display_name)
+	 SELECT (payload->>'id')::uuid,(payload->>'next_sequence')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond',NULLIF(payload->>'display_name','')
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversations' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities)
 	 SELECT (payload->>'conversation_id')::uuid,payload->>'endpoint',(payload->>'capabilities')::smallint

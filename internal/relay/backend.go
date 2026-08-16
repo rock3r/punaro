@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/base64"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -151,10 +152,52 @@ func ValidMessageBody(value string) bool {
 // AppendRequestHash binds a message idempotency key to its immutable request.
 func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 
+const (
+	maxConversationDisplayNameRunes = 128
+	maxConversationDisplayNameBytes = 512
+)
+
+// SanitizeConversationDisplayName trims and clamps a room label. Empty input is
+// legal for unnamed test rooms; a provided name must remain non-empty.
+func SanitizeConversationDisplayName(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if !utf8.ValidString(value) || strings.ContainsRune(value, 0) {
+		return "", errInvalidConversationDisplayName
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return "", errInvalidConversationDisplayName
+		}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	if utf8.RuneCountInString(value) > maxConversationDisplayNameRunes {
+		value = string([]rune(value)[:maxConversationDisplayNameRunes])
+	}
+	for len(value) > maxConversationDisplayNameBytes {
+		_, size := utf8.DecodeLastRuneInString(value)
+		if size <= 0 {
+			return "", errInvalidConversationDisplayName
+		}
+		value = value[:len(value)-size]
+	}
+	if value == "" {
+		return "", errInvalidConversationDisplayName
+	}
+	return value, nil
+}
+
+var errInvalidConversationDisplayName = errors.New("invalid conversation display name")
+
 // CreateConversationRequestHash binds a conversation idempotency key to the
-// normalized creator and membership set.
-func CreateConversationRequestHash(creatorEndpoint string, members []Member, projectID ...string) string {
-	digest := createConversationHash(creatorEndpoint, members)
+// normalized creator, membership set, and display name. The display name is
+// always folded in after the membership digest, including when it is empty.
+func CreateConversationRequestHash(creatorEndpoint string, members []Member, displayName string, projectID ...string) string {
+	digest := stableHash(createConversationHash(creatorEndpoint, members), displayName)
 	if len(projectID) == 0 || projectID[0] == "" {
 		return digest
 	}
@@ -195,6 +238,12 @@ type InvocationBackend interface {
 type ControlBackend interface {
 	ApplyControl(ControlInput) (ControlEvent, bool, error)
 	ControlAudit(conversationID, machineID, actorEndpoint string, now time.Time) ([]ControlEvent, error)
+}
+
+// DisplayNameBackend is the explicit admin rename surface. It stays off the
+// message plane and rechecks a live admin session on every mutation.
+type DisplayNameBackend interface {
+	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
 }
 
 // PrincipalEndpointBackend atomically binds advertised endpoint ownership to
@@ -244,3 +293,4 @@ type NonceStore interface {
 var _ Backend = (*Store)(nil)
 var _ RoleProfileBackend = (*Store)(nil)
 var _ DirectMessageBackend = (*Store)(nil)
+var _ DisplayNameBackend = (*Store)(nil)

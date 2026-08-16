@@ -69,11 +69,25 @@ func TestParseAttachmentNotifyArgsRequiresStableOfferHandoff(t *testing.T) {
 
 func TestParseCreateArgsRequiresExplicitMembership(t *testing.T) {
 	request, err := parseCreateArgs([]string{"--creator", "agent/a", "--member", "agent/a:send,receive,admin", "--member", "agent/b:receive", "--idempotency-key", "create-1"})
-	if err != nil || len(request.members) != 2 || request.idempotencyKey != "create-1" {
+	if err != nil || len(request.members) != 2 || request.idempotencyKey != "create-1" || request.displayName != "" {
 		t.Fatalf("create request did not parse")
+	}
+	named, err := parseCreateArgs([]string{"--creator", "agent/a", "--member", "agent/a:send,receive,admin", "--name", "Review room", "--idempotency-key", "create-named"})
+	if err != nil || named.displayName != "Review room" {
+		t.Fatalf("named create request=%#v err=%v", named, err)
 	}
 	if _, err := parseCreateArgs([]string{"--creator", "agent/a", "--idempotency-key", "create-1"}); err == nil {
 		t.Fatal("create without members accepted")
+	}
+}
+
+func TestParseRenameArgsRequiresConversationActorNameAndRetryKey(t *testing.T) {
+	request, err := parseRenameArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--name", "Ops room", "--idempotency-key", "rename-1"})
+	if err != nil || request.conversationID != "conversation-1" || request.actor != "agent/a" || request.displayName != "Ops room" || request.idempotencyKey != "rename-1" {
+		t.Fatalf("rename request=%#v err=%v", request, err)
+	}
+	if _, err := parseRenameArgs([]string{"--conversation", "conversation-1", "--actor", "agent/a", "--name", "Ops room"}); err == nil {
+		t.Fatal("rename without idempotency key was accepted")
 	}
 }
 

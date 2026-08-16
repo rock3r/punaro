@@ -155,6 +155,13 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.controlAudit(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/display-name"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/display-name")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.setConversationDisplayName(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
@@ -426,6 +433,40 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 	writeJSON(w, http.StatusOK, map[string]any{"authorized": true})
 }
 
+func (h *handler) setConversationDisplayName(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(DisplayNameBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "display name plane is unavailable")
+		return
+	}
+	var request struct {
+		ActorEndpoint string `json:"actor_endpoint"`
+		DisplayName   string `json:"display_name"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid display name request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.ActorEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	conversation, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{ConversationID: conversationID, ActorMachineID: machineID, ActorEndpoint: request.ActorEndpoint, DisplayName: request.DisplayName, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, conversation)
+}
+
 func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {
 	conversations, err := h.store.ConversationsForMachine(machineID, now)
 	if err != nil {
@@ -554,6 +595,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	}
 	var request struct {
 		CreatorEndpoint string `json:"creator_endpoint"`
+		DisplayName     string `json:"display_name"`
 		ProjectID       string `json:"project_id"`
 		Members         []struct {
 			Endpoint      string   `json:"endpoint"`
@@ -593,7 +635,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		}
 		members = append(members, Member{Endpoint: member.Endpoint, Role: member.Role, RoleMachineID: member.RoleMachineID, Capabilities: capabilities})
 	}
-	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
+	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, DisplayName: request.DisplayName, Members: members, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return

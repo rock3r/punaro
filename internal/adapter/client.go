@@ -232,7 +232,7 @@ func (c *HTTPRelayClient) ReportInvocation(ctx context.Context, invocation relay
 
 // CreateConversation bootstraps an explicit, membership-scoped room from an
 // attached local endpoint. The relay still verifies endpoint ownership.
-func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, idempotencyKey string) (relay.Conversation, error) {
+func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, displayName, idempotencyKey string) (relay.Conversation, error) {
 	if strings.TrimSpace(creator) == "" || len(members) == 0 || strings.TrimSpace(idempotencyKey) == "" {
 		return relay.Conversation{}, fmt.Errorf("creator, members, and idempotency key are required")
 	}
@@ -248,7 +248,17 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 		encoded = append(encoded, encodedMember)
 	}
 	var conversation relay.Conversation
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "members": encoded}, idempotencyKey, &conversation)
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "display_name": displayName, "members": encoded}, idempotencyKey, &conversation)
+	return conversation, err
+}
+
+// SetConversationDisplayName renames a room through a live admin session.
+func (c *HTTPRelayClient) SetConversationDisplayName(ctx context.Context, conversationID, actor, displayName, idempotencyKey string) (relay.Conversation, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(displayName) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.Conversation{}, fmt.Errorf("conversation, actor, display name, and idempotency key are required")
+	}
+	var conversation relay.Conversation
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/display-name", map[string]any{"actor_endpoint": actor, "display_name": displayName}, idempotencyKey, &conversation)
 	return conversation, err
 }
 

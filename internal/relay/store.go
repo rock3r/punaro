@@ -109,7 +109,8 @@ type ControlEvent struct {
 
 // Conversation is an immutable identifier returned when a room is created.
 type Conversation struct {
-	ID string `json:"id"`
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // Message is immutable accepted message data. Bodies must be treated as
@@ -159,7 +160,8 @@ type AppendInput struct {
 }
 
 // CreateConversationInput identifies one create retry domain. IdempotencyKey
-// is scoped to MachineID and is bound to the creator plus normalized members.
+// is scoped to MachineID and is bound to the creator, normalized members, and
+// display name.
 type CreateConversationInput struct {
 	MachineID            string
 	PrincipalID          string
@@ -168,6 +170,7 @@ type CreateConversationInput struct {
 	ProjectID            string
 	IdempotencyKey       string
 	CreatorEndpoint      string
+	DisplayName          string
 	Members              []Member
 	Now                  time.Time
 }
@@ -261,6 +264,18 @@ type RoleResolveResult struct {
 	MachineID   string             `json:"machine_id,omitempty"`
 	Online      bool               `json:"online"`
 	Matches     []RoleResolveMatch `json:"matches,omitempty"`
+}
+
+// SetDisplayNameInput is one signed-machine retry domain for renaming a room.
+// ActorEndpoint is only an asserted local endpoint; ownership and admin
+// capability are rechecked durably before every mutation.
+type SetDisplayNameInput struct {
+	ConversationID string
+	ActorMachineID string
+	ActorEndpoint  string
+	DisplayName    string
+	IdempotencyKey string
+	Now            time.Time
 }
 
 // InvocationStatus is the durable state of a server-authorized runtime
@@ -673,6 +688,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"relay_migration_control", "last_result_fingerprint", "TEXT"},
 		{"relay_migration_control", "last_cutoff", "INTEGER"},
 		{"relay_migration_control", "last_transition", "TEXT"},
+		{"conversations", "display_name", "TEXT"},
 	} {
 		if err := ensureSQLiteColumn(ctx, s.db, column.table, column.name, column.definition); err != nil {
 			return err
@@ -875,6 +891,51 @@ func (s *Store) ControlAudit(conversationID, machineID, actorEndpoint string, no
 	return events, nil
 }
 
+// SetConversationDisplayName updates a room label after rechecking a live
+// admin session. Repeating the same label is a no-op retry.
+func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversation, bool, error) {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.ActorMachineID) || !ValidEndpoint(input.ActorEndpoint) || !ValidRequestToken(input.IdempotencyKey) {
+		return Conversation{}, false, ErrForbidden
+	}
+	displayName, err := SanitizeConversationDisplayName(input.DisplayName)
+	if err != nil || displayName == "" {
+		return Conversation{}, false, fmt.Errorf("invalid conversation display name")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Conversation{}, false, err
+	}
+	defer rollback(tx)
+	if err := endpointOwnedBy(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
+		return Conversation{}, false, err
+	}
+	actorCapabilities, err := sessionCapabilities(tx, input.ConversationID, input.ActorMachineID, input.ActorEndpoint, input.Now)
+	if err != nil {
+		return Conversation{}, false, fmt.Errorf("authorize display name actor: %w", err)
+	}
+	if actorCapabilities&CapAdmin == 0 {
+		return Conversation{}, false, ErrForbidden
+	}
+	conversation, err := conversationByID(tx, input.ConversationID)
+	if err != nil {
+		return Conversation{}, false, ErrForbidden
+	}
+	if conversation.DisplayName == displayName {
+		if err := tx.Commit(); err != nil {
+			return Conversation{}, false, err
+		}
+		return conversation, true, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", displayName, input.ConversationID); err != nil {
+		return Conversation{}, false, fmt.Errorf("update conversation display name: %w", err)
+	}
+	conversation.DisplayName = displayName
+	if err := tx.Commit(); err != nil {
+		return Conversation{}, false, err
+	}
+	return conversation, false, nil
+}
+
 func validControlOperation(operation ControlOperation) bool {
 	return operation == ControlUpsertMember || operation == ControlRemoveMember
 }
@@ -899,7 +960,7 @@ func controlEventByID(tx *sql.Tx, id string) (ControlEvent, error) {
 }
 
 func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
-	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" {
+	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" && table != "conversations" {
 		return errors.New("invalid relay migration table")
 	}
 	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")") // #nosec G202 -- table is restricted above to fixed internal names.
@@ -1540,6 +1601,10 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 	creatorEndpoint := input.CreatorEndpoint
 	members := input.Members
 	now := input.Now
+	displayName, err := SanitizeConversationDisplayName(input.DisplayName)
+	if err != nil {
+		return Conversation{}, err
+	}
 	if !ValidEndpoint(creatorEndpoint) || len(members) == 0 || len(members) > 256 {
 		return Conversation{}, fmt.Errorf("creator and members are required")
 	}
@@ -1588,7 +1653,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 		}
 	}
 	if input.MachineID != "" {
-		requestHash := createConversationHash(creatorEndpoint, members)
+		requestHash := CreateConversationRequestHash(creatorEndpoint, members, displayName)
 		var existingID, existingHash string
 		err = tx.QueryRowContext(context.Background(), "SELECT conversation_id, request_hash FROM conversation_idempotency WHERE machine_id = ? AND key = ?", input.MachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 		if err == nil {
@@ -1630,8 +1695,8 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 			return Conversation{}, ErrForbidden
 		}
 	}
-	conversation := Conversation{ID: uuid.NewString()}
-	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversations(id, created_at) VALUES (?, ?)", conversation.ID, now.UnixMilli()); err != nil {
+	conversation := Conversation{ID: uuid.NewString(), DisplayName: displayName}
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversations(id, created_at, display_name) VALUES (?, ?, ?)", conversation.ID, now.UnixMilli(), nullableDisplayName(displayName)); err != nil {
 		return Conversation{}, fmt.Errorf("create conversation: %w", err)
 	}
 	for _, member := range members {
@@ -1644,7 +1709,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 		}
 	}
 	if input.MachineID != "" {
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_idempotency(machine_id, key, request_hash, conversation_id, created_at) VALUES (?, ?, ?, ?, ?)", input.MachineID, input.IdempotencyKey, createConversationHash(creatorEndpoint, members), conversation.ID, now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_idempotency(machine_id, key, request_hash, conversation_id, created_at) VALUES (?, ?, ?, ?, ?)", input.MachineID, input.IdempotencyKey, CreateConversationRequestHash(creatorEndpoint, members, displayName), conversation.ID, now.UnixMilli()); err != nil {
 			return Conversation{}, fmt.Errorf("record conversation idempotency key: %w", err)
 		}
 	}
@@ -2193,13 +2258,13 @@ func (s *Store) RecipientMachines(messageID string, now time.Time) ([]string, er
 // attached to the authenticated machine. It deliberately returns opaque IDs;
 // membership and message access remain separately enforced.
 func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conversation, error) {
-	rows, err := s.db.QueryContext(context.Background(), `SELECT DISTINCT id FROM (
-		SELECT c.id, c.created_at FROM conversations c
+	rows, err := s.db.QueryContext(context.Background(), `SELECT id, display_name FROM (
+		SELECT c.id, c.display_name, c.created_at FROM conversations c
 		JOIN memberships m ON m.conversation_id = c.id
 		JOIN endpoints e ON e.endpoint = m.endpoint
 		WHERE e.machine_id = ? AND e.lease_until > ?
 		UNION
-		SELECT c.id, c.created_at FROM conversations c
+		SELECT c.id, c.display_name, c.created_at FROM conversations c
 		JOIN role_memberships rm ON rm.conversation_id = c.id
 		JOIN role_bindings rb ON rb.role = rm.role
 		JOIN endpoints e ON e.endpoint = rb.session_endpoint
@@ -2213,9 +2278,11 @@ func (s *Store) ConversationsForMachine(machineID string, now time.Time) ([]Conv
 	var conversations []Conversation
 	for rows.Next() {
 		var conversation Conversation
-		if err := rows.Scan(&conversation.ID); err != nil {
+		var displayName sql.NullString
+		if err := rows.Scan(&conversation.ID, &displayName); err != nil {
 			return nil, err
 		}
+		conversation.DisplayName = displayName.String
 		conversations = append(conversations, conversation)
 	}
 	if err := rows.Err(); err != nil {
@@ -2372,10 +2439,19 @@ func applyDirectSender(message *Message, fromRole sql.NullString) {
 
 func conversationByID(tx *sql.Tx, conversationID string) (Conversation, error) {
 	var conversation Conversation
-	if err := tx.QueryRowContext(context.Background(), "SELECT id FROM conversations WHERE id = ?", conversationID).Scan(&conversation.ID); err != nil {
+	var displayName sql.NullString
+	if err := tx.QueryRowContext(context.Background(), "SELECT id, display_name FROM conversations WHERE id = ?", conversationID).Scan(&conversation.ID, &displayName); err != nil {
 		return Conversation{}, fmt.Errorf("read idempotent conversation: %w", err)
 	}
+	conversation.DisplayName = displayName.String
 	return conversation, nil
+}
+
+func nullableDisplayName(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func createConversationHash(creatorEndpoint string, members []Member) string {

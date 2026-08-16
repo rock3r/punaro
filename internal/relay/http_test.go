@@ -367,6 +367,94 @@ func TestHTTPCreateConversationDeduplicatesSameMachineIdempotencyKey(t *testing.
 	}
 }
 
+func TestHTTPCreateConversationPersistsDisplayNameAndAllowsUnnamed(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute})
+	serveSigned(t, handler, private, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise", "")
+	named := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"  Review room  ","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named", "create-named")
+	var namedConversation Conversation
+	if named.Code != http.StatusCreated || json.NewDecoder(named.Body).Decode(&namedConversation) != nil || namedConversation.DisplayName != "Review room" {
+		t.Fatalf("named create=%d %s", named.Code, named.Body.String())
+	}
+	unnamed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-unnamed", "create-unnamed")
+	var unnamedConversation Conversation
+	if unnamed.Code != http.StatusCreated || json.NewDecoder(unnamed.Body).Decode(&unnamedConversation) != nil || unnamedConversation.DisplayName != "" {
+		t.Fatalf("unnamed create=%d %s", unnamed.Code, unnamed.Body.String())
+	}
+	listed := serveSigned(t, handler, private, "machine-a", http.MethodGet, "/v1/conversations", "", "list", "")
+	var payload struct {
+		Conversations []Conversation `json:"conversations"`
+	}
+	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&payload) != nil || len(payload.Conversations) != 2 {
+		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
+	}
+	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Other room","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named-conflict", "create-named")
+	if changed.Code != http.StatusConflict {
+		t.Fatalf("changed named create=%d %s", changed.Code, changed.Body.String())
+	}
+}
+
+func TestHTTPSetConversationDisplayNameRequiresAdminAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}, {ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return now }, EndpointLeaseTTL: time.Hour})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", "")
+	created := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "create", "create-1")
+	var conversation Conversation
+	if created.Code != http.StatusCreated || json.NewDecoder(created.Body).Decode(&conversation) != nil {
+		t.Fatalf("create=%d %s", created.Code, created.Body.String())
+	}
+	body := `{"actor_endpoint":"agent/a/session","display_name":"Ops room"}`
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-first", "rename-1")
+	var renamed Conversation
+	if first.Code != http.StatusCreated || json.NewDecoder(first.Body).Decode(&renamed) != nil || renamed.DisplayName != "Ops room" {
+		t.Fatalf("rename=%d %s", first.Code, first.Body.String())
+	}
+	retry := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-retry", "rename-1")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("rename retry=%d %s", retry.Code, retry.Body.String())
+	}
+	denied := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/b/session","display_name":"Hijacked"}`, "rename-denied", "rename-2")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("non-admin rename=%d %s", denied.Code, denied.Body.String())
+	}
+	if missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-missing-key", ""); missing.Code != http.StatusBadRequest {
+		t.Fatalf("rename without idempotency key=%d %s", missing.Code, missing.Body.String())
+	}
+}
+
 func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {
 	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

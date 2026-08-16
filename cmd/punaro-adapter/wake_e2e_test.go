@@ -40,7 +40,7 @@ func TestE2EPayloadFreeWake(t *testing.T) {
 	conversation, err := client.CreateConversation(ctx, sender, []relay.Member{
 		{Endpoint: sender, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 		{Endpoint: receiver, Capabilities: relay.CapReceive},
-	}, "e2e-wake-create-"+uuid.NewString())
+	}, "", "e2e-wake-create-"+uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}

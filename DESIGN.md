@@ -538,6 +538,13 @@ or `punaro-adapter member remove --conversation ... --actor ... --member
 endpoint --idempotency-key ...`. These paths call the typed control endpoint;
 they never interpret local or delivered text as a command.
 
+Optional conversation display names are sanitized UTF-8 labels, not routing
+authority. Create may leave a room unnamed. `POST
+/v1/conversations/{id}/display-name` requires a live admin session and an
+`Idempotency-Key`; repeating the same sanitized label is a no-op. The adapter
+surfaces this as `punaro-adapter create --name ...` and `punaro-adapter rename
+--conversation ... --actor ... --name ... --idempotency-key ...`.
+
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired
 credentials, or a machine no longer owning the endpoint are rejected. The relay
@@ -904,13 +911,14 @@ API client and reaches the relay using its own enrolled machine credential.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
-| `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
+| `POST` | `/v1/conversations` | Create a conversation with explicit members and an optional display name; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/list` | Bounded listing of opted-in addressable roles; no session inventory. |
 | `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
 | `POST` | `/v1/direct-messages` | Create or reuse the unique direct-role conversation and send; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
-| `GET` | `/v1/conversations` | List conversations the caller may discover. |
+| `GET` | `/v1/conversations` | List conversations the caller may discover, including optional display names. |
+| `POST` | `/v1/conversations/{id}/display-name` | Set a conversation display name from a live admin session; idempotent for the same label. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity ceilings; committed idempotent retries do not consume tokens or reserve capacity again. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |

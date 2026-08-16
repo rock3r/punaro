@@ -897,3 +897,176 @@ func TestStoreRenewsRoleBindingOnlyForTheSameLiveSession(t *testing.T) {
 		t.Fatalf("reclaimed session revived role binding page=%#v err=%v", page, err)
 	}
 }
+
+func TestCreateConversationRequestHashAlwaysBindsDisplayName(t *testing.T) {
+	members := []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}
+	membersDigest := createConversationHash("agent/a", members)
+	unnamed := CreateConversationRequestHash("agent/a", members, "")
+	named := CreateConversationRequestHash("agent/a", members, "Review room")
+	if unnamed == membersDigest {
+		t.Fatal("create hash omitted empty display_name after the membership digest")
+	}
+	if unnamed == named {
+		t.Fatal("display name was not bound into the create hash")
+	}
+	if got := CreateConversationRequestHash("agent/a", members, ""); got != unnamed {
+		t.Fatal("empty display name hash was not stable")
+	}
+	withProject := CreateConversationRequestHash("agent/a", members, "Review room", "project-1")
+	if withProject == named || withProject == unnamed {
+		t.Fatal("project digest did not wrap the display-name hash")
+	}
+}
+
+func TestStorePersistsConversationDisplayNameAndAllowsUnnamed(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	members := []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}
+	named, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-room", CreatorEndpoint: "agent/a",
+		DisplayName: "  Review room  ", Members: members, Now: now,
+	})
+	if err != nil || named.ID == "" || named.DisplayName != "Review room" {
+		t.Fatalf("named conversation=%#v err=%v", named, err)
+	}
+	unnamed, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "unnamed-room", CreatorEndpoint: "agent/a",
+		Members: members, Now: now,
+	})
+	if err != nil || unnamed.ID == "" || unnamed.DisplayName != "" {
+		t.Fatalf("unnamed conversation=%#v err=%v", unnamed, err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-room", CreatorEndpoint: "agent/a",
+		DisplayName: "Other room", Members: members, Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed display name retry err=%v", err)
+	}
+	retry, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-room", CreatorEndpoint: "agent/a",
+		DisplayName: "Review room", Members: members, Now: now,
+	})
+	if err != nil || retry != named {
+		t.Fatalf("named retry=%#v err=%v", retry, err)
+	}
+	for _, invalid := range []string{"\x00room", "room\nname", string([]byte{0xff}), "   "} {
+		if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+			MachineID: "machine-a", IdempotencyKey: "invalid-" + invalid, CreatorEndpoint: "agent/a",
+			DisplayName: invalid, Members: members, Now: now,
+		}); err == nil {
+			t.Fatalf("invalid display name %q was accepted", invalid)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	listed, err := reopened.ConversationsForMachine("machine-a", now)
+	if err != nil || len(listed) != 2 {
+		t.Fatalf("reopened list=%#v err=%v", listed, err)
+	}
+	foundNamed, foundUnnamed := false, false
+	for _, conversation := range listed {
+		switch conversation.ID {
+		case named.ID:
+			foundNamed = conversation.DisplayName == "Review room"
+		case unnamed.ID:
+			foundUnnamed = conversation.DisplayName == ""
+		}
+	}
+	if !foundNamed || !foundUnnamed {
+		t.Fatalf("restart did not preserve display names: %#v", listed)
+	}
+}
+
+func TestSanitizeConversationDisplayNameClampsAndRejectsControls(t *testing.T) {
+	if got, err := SanitizeConversationDisplayName(""); err != nil || got != "" {
+		t.Fatalf("empty create name=%q err=%v", got, err)
+	}
+	if got, err := SanitizeConversationDisplayName("  Review room  "); err != nil || got != "Review room" {
+		t.Fatalf("trimmed name=%q err=%v", got, err)
+	}
+	longRunes := strings.Repeat("å", 130)
+	got, err := SanitizeConversationDisplayName(longRunes)
+	if err != nil || got != strings.Repeat("å", 128) {
+		t.Fatalf("clamped runes=%q err=%v", got, err)
+	}
+	longBytes := strings.Repeat("a", 600)
+	got, err = SanitizeConversationDisplayName(longBytes)
+	if err != nil || got != strings.Repeat("a", 128) {
+		t.Fatalf("clamped ascii runes=%q err=%v", got, err)
+	}
+	for _, invalid := range []string{"\x00room", "room\tname", string([]byte{0xff}), "   "} {
+		if _, err := SanitizeConversationDisplayName(invalid); err == nil {
+			t.Fatalf("invalid name %q was accepted", invalid)
+		}
+	}
+}
+
+func TestStoreSetConversationDisplayNameRequiresLiveAdminAndIsIdempotent(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "create", CreatorEndpoint: "agent/a",
+		Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Ops room", IdempotencyKey: "rename-1", Now: now,
+	})
+	if err != nil || duplicate || first.ID != conversation.ID || first.DisplayName != "Ops room" {
+		t.Fatalf("rename=%#v duplicate=%v err=%v", first, duplicate, err)
+	}
+	retry, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Ops room", IdempotencyKey: "rename-1", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || retry != first {
+		t.Fatalf("rename retry=%#v duplicate=%v err=%v", retry, duplicate, err)
+	}
+	if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b",
+		DisplayName: "Hijacked", IdempotencyKey: "rename-2", Now: now,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin rename err=%v", err)
+	}
+	listed, err := store.ConversationsForMachine("machine-a", now)
+	if err != nil || len(listed) != 1 || listed[0].DisplayName != "Ops room" {
+		t.Fatalf("listed after rename=%#v err=%v", listed, err)
+	}
+}

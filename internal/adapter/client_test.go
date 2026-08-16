@@ -654,7 +654,7 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	if err != nil || message.ID != "message-1" {
 		t.Fatalf("send = %#v, %v", message, err)
 	}
-	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "create-1")
+	conversation, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-1")
 	if err != nil || conversation.ID != "conversation-created" {
 		t.Fatalf("create=%#v err=%v", conversation, err)
 	}
@@ -870,7 +870,7 @@ func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t 
 	conversation, err := client.CreateConversation(context.Background(), "agent/a/session", []relay.Member{
 		{Endpoint: "agent/a/session", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 		{Role: "role/plan-reviewer", RoleMachineID: "machine-b", Capabilities: relay.CapReceive},
-	}, "create-role-member")
+	}, "", "create-role-member")
 	if err != nil || conversation.ID != "role-conversation" {
 		t.Fatalf("conversation=%#v err=%v", conversation, err)
 	}
