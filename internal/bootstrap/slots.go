@@ -163,11 +163,14 @@ func recoverJournal(directory string) error {
 	if err != nil {
 		return err
 	}
+	if record.Phase != "" && record.Schema != 1 {
+		return errors.New("bootstrap journal is invalid")
+	}
 	switch record.Phase {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
 	case "publishing", "repairing":
-		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || record.ManifestSHA256 == "" {
+		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return errors.New("bootstrap journal is invalid")
 		}
 		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
@@ -191,7 +194,7 @@ func recoverJournal(directory string) error {
 			ManifestSHA256:  record.ManifestSHA256,
 		})
 	case "rolling-back":
-		if record.Release == "" || record.Sequence < 1 {
+		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return errors.New("bootstrap journal is invalid")
 		}
 		if err := completeRollback(directory, slotState{Release: record.Release, Sequence: record.Sequence, ManifestSHA256: record.ManifestSHA256}); err != nil {
@@ -329,6 +332,9 @@ func loadAccepted(directory string) (acceptedState, error) {
 }
 
 func parseAccepted(body []byte) (acceptedState, error) {
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return acceptedState{}, errors.New("bootstrap accepted state is invalid")
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var accepted acceptedState
@@ -408,7 +414,12 @@ func readSlot(directory string) (slotState, error) {
 	if err := requireRealDir(directory); err != nil {
 		return slotState{}, err
 	}
-	body, err := os.ReadFile(filepath.Join(directory, slotRecord)) // #nosec G304 -- slot record is a fixed child.
+	recordPath := filepath.Join(directory, slotRecord)
+	info, err := os.Lstat(recordPath) // #nosec G703 -- slot record is a fixed child.
+	if err != nil || !info.Mode().IsRegular() {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	body, err := os.ReadFile(recordPath) // #nosec G304 -- slot record is a fixed child.
 	if err != nil {
 		return slotState{}, err
 	}
@@ -420,6 +431,9 @@ func readSlot(directory string) (slotState, error) {
 }
 
 func parseSlot(body []byte) (slotState, error) {
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var slot slotState
@@ -434,6 +448,38 @@ func parseSlot(body []byte) (slotState, error) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
 	return slot, nil
+}
+
+func rejectDuplicateJSONFields(body []byte) error {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok || delim != '{' {
+		return errors.New("bootstrap document is invalid")
+	}
+	seen := map[string]struct{}{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		name, ok := key.(string)
+		if !ok {
+			return errors.New("bootstrap document is invalid")
+		}
+		if _, exists := seen[name]; exists {
+			return errors.New("bootstrap document is invalid")
+		}
+		seen[name] = struct{}{}
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validManifestDigest(value string) bool {
