@@ -79,6 +79,9 @@ func TestParseSendArgsAcceptsToUserTelegramWithoutConversation(t *testing.T) {
 	if _, err := parseSendArgs([]string{"--from", "agent/a", "--body-file", "-", "--idempotency-key", "reply-1"}); err == nil {
 		t.Fatal("send without conversation or --to user-telegram was accepted")
 	}
+	if _, err := parseSendArgs([]string{"--to", relay.TelegramUserParticipant, "--body-file", "-", "--idempotency-key", "reply-1"}); err == nil || !strings.Contains(err.Error(), "--from, --body-file, and --idempotency-key are required") || strings.Contains(err.Error(), "--conversation") {
+		t.Fatalf("user-telegram missing-from err=%v", err)
+	}
 }
 
 func TestParseClaimArgsRequiresConversationFromAndIdempotencyKey(t *testing.T) {
@@ -556,6 +559,63 @@ func TestRunClaimTreatsCompleteReserveAsSuccess(t *testing.T) {
 	}
 }
 
+func TestRunClaimAcceptsPendingReserveAndRejectsUnknownStatus(t *testing.T) {
+	clearAdapterEnvironment(t)
+	status := "pending"
+	code := http.StatusCreated
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-1/telegram-claim" {
+			t.Fatalf("unexpected claim route %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(`{"conversation_id":"conversation-1","status":"` + status + `","display_name":"Ops","created_at":"2026-08-16T12:00:00Z"}`))
+	}))
+	defer server.Close()
+	profile := writeInstallerProfile(t, server.URL)
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
+
+	output, err := captureStdout(t, func() error {
+		return runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+	})
+	if err != nil {
+		t.Fatalf("pending claim failed: %v", err)
+	}
+	if !strings.Contains(output, `"status":"pending"`) || !strings.Contains(output, `"conversation_id":"conversation-1"`) {
+		t.Fatalf("pending claim output=%q", output)
+	}
+
+	status = "reserved"
+	code = http.StatusOK
+	if err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"}); err == nil || err.Error() != "telegram claim was not accepted" {
+		t.Fatalf("unknown claim status err=%v", err)
+	}
+}
+
+func TestRunClaimMapsForbiddenAndConflictWithoutExistenceLeak(t *testing.T) {
+	clearAdapterEnvironment(t)
+	code := http.StatusForbidden
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/conversations/conversation-1/telegram-claim" {
+			t.Fatalf("unexpected claim route %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"authorization denied"}`, code)
+	}))
+	defer server.Close()
+	profile := writeInstallerProfile(t, server.URL)
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
+
+	err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+	if !errors.Is(err, errTelegramClaimForbidden) {
+		t.Fatalf("forbidden claim err=%v", err)
+	}
+	code = http.StatusConflict
+	err = runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+	if !errors.Is(err, errTelegramClaimConflict) {
+		t.Fatalf("conflict claim err=%v", err)
+	}
+}
+
 func TestRunGetRequiresClaimedSessionTopic(t *testing.T) {
 	clearAdapterEnvironment(t)
 	var claimed bool
@@ -709,6 +769,93 @@ func TestRunSendConversationPathDoesNotResolveSessionTopic(t *testing.T) {
 
 	if err := runSend([]string{"--conversation", "conversation-9", "--from", "agent/a", "--body-file", bodyFile, "--idempotency-key", "send-9"}); err != nil {
 		t.Fatalf("conversation send failed: %v", err)
+	}
+}
+
+func TestRunSendTargetRoleDoesNotResolveSessionTopic(t *testing.T) {
+	clearAdapterEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sessions/topic" {
+			t.Fatal("targeted role send resolved a session topic")
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations/conversation-9/messages" {
+			t.Fatalf("unexpected targeted send route %s %s", r.Method, r.URL.Path)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), `"target_role":"role/reviewer"`) {
+			t.Fatalf("targeted send body=%s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"message-9","conversation_id":"conversation-9","sequence":2,"from_endpoint":"agent/a","body":"ignored","created_at":"2026-08-16T12:00:00Z"}`))
+	}))
+	defer server.Close()
+	profile := writeInstallerProfile(t, server.URL)
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
+	bodyFile := filepath.Join(t.TempDir(), "body.txt")
+	if err := os.WriteFile(bodyFile, []byte("review this"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runSend([]string{"--conversation", "conversation-9", "--from", "agent/a", "--target-role", "role/reviewer", "--body-file", bodyFile, "--idempotency-key", "send-role-9"}); err != nil {
+		t.Fatalf("targeted role send failed: %v", err)
+	}
+}
+
+func TestRunSendToUserTelegramFailsClosedOnMissingOrAmbiguousTopic(t *testing.T) {
+	clearAdapterEnvironment(t)
+	code := http.StatusForbidden
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions/topic" {
+			t.Fatalf("pre-append send reached %s %s", r.Method, r.URL.Path)
+		}
+		http.Error(w, `{"error":"authorization denied"}`, code)
+	}))
+	defer server.Close()
+	profile := writeInstallerProfile(t, server.URL)
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
+	bodyFile := filepath.Join(t.TempDir(), "body.txt")
+	if err := os.WriteFile(bodyFile, []byte("too soon"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runSend([]string{"--to", relay.TelegramUserParticipant, "--from", "agent/a", "--body-file", bodyFile, "--idempotency-key", "reply-403"})
+	if !errors.Is(err, errSessionHasNoTopic) {
+		t.Fatalf("missing topic send err=%v", err)
+	}
+	code = http.StatusConflict
+	err = runSend([]string{"--to", relay.TelegramUserParticipant, "--from", "agent/a", "--body-file", bodyFile, "--idempotency-key", "reply-409"})
+	if !errors.Is(err, errSessionTopicAmbiguous) {
+		t.Fatalf("ambiguous topic send err=%v", err)
+	}
+}
+
+func TestRunSendToUserTelegramPreservesAppendForbidden(t *testing.T) {
+	clearAdapterEnvironment(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions/topic":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"conversation-1","display_name":"Ops","claimed":true}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations/conversation-1/messages":
+			http.Error(w, `{"error":"authorization denied"}`, http.StatusForbidden)
+		default:
+			t.Fatalf("unexpected send route %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	profile := writeInstallerProfile(t, server.URL)
+	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
+	bodyFile := filepath.Join(t.TempDir(), "body.txt")
+	if err := os.WriteFile(bodyFile, []byte("no send cap"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runSend([]string{"--to", relay.TelegramUserParticipant, "--from", "agent/a", "--body-file", bodyFile, "--idempotency-key", "reply-forbidden"})
+	if err == nil || errors.Is(err, errTopicNotClaimed) || !strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("append forbidden err=%v", err)
 	}
 }
 

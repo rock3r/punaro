@@ -716,7 +716,7 @@ func runClaim(args []string) error {
 	}
 	claim, err := client.ClaimConversation(context.Background(), request.conversationID, request.fromEndpoint, request.idempotencyKey)
 	if err != nil {
-		return err
+		return mapClaimError(err)
 	}
 	if claim.Status != "pending" && claim.Status != "complete" {
 		return fmt.Errorf("telegram claim was not accepted")
@@ -806,6 +806,9 @@ func parseSendArgs(args []string) (sendRequest, error) {
 		return request, nil
 	}
 	if strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+		if request.targetRole == relay.TelegramUserParticipant {
+			return sendRequest{}, fmt.Errorf("--from, --body-file, and --idempotency-key are required")
+		}
 		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
 	}
 	if request.targetRole != relay.TelegramUserParticipant && strings.TrimSpace(request.conversationID) == "" {
@@ -856,9 +859,6 @@ func runSend(args []string) error {
 		message, err = client.Send(context.Background(), conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
 	default:
 		message, err = client.SendToRole(context.Background(), conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
-		if err != nil && request.targetRole == relay.TelegramUserParticipant && adapter.RelayHTTPStatus(err) == http.StatusForbidden {
-			return errTopicNotClaimed
-		}
 	}
 	if err != nil {
 		return err
@@ -872,9 +872,12 @@ func runSend(args []string) error {
 }
 
 var (
-	errTopicNotClaimed      = errors.New("topic is not claimed")
-	errSessionHasNoTopic    = errors.New("session has no topic")
-	errConversationMismatch = errors.New("conversation does not match session topic")
+	errTopicNotClaimed        = errors.New("topic is not claimed")
+	errSessionHasNoTopic      = errors.New("session has no topic")
+	errConversationMismatch   = errors.New("conversation does not match session topic")
+	errSessionTopicAmbiguous  = errors.New("session topic is ambiguous")
+	errTelegramClaimForbidden = errors.New("telegram claim is not authorized")
+	errTelegramClaimConflict  = errors.New("telegram claim conflicts")
 )
 
 func mapSessionTopicError(err error) error {
@@ -882,7 +885,18 @@ func mapSessionTopicError(err error) error {
 	case http.StatusForbidden:
 		return errSessionHasNoTopic
 	case http.StatusConflict:
-		return errors.New("session topic is ambiguous")
+		return errSessionTopicAmbiguous
+	default:
+		return err
+	}
+}
+
+func mapClaimError(err error) error {
+	switch adapter.RelayHTTPStatus(err) {
+	case http.StatusForbidden:
+		return errTelegramClaimForbidden
+	case http.StatusConflict:
+		return errTelegramClaimConflict
 	default:
 		return err
 	}
