@@ -42,11 +42,11 @@ func prepareDirectory(directory string) error {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return errors.New("bootstrap directory is invalid")
 		}
+		// #nosec G302 -- newly created bootstrap directories are 0700, not 0600 files.
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return errors.New("bootstrap directory is invalid")
+		}
 	} else if !info.IsDir() {
-		return errors.New("bootstrap directory is invalid")
-	}
-	// #nosec G302 -- bootstrap directories are 0700, not 0600 files.
-	if err := os.Chmod(directory, 0o700); err != nil {
 		return errors.New("bootstrap directory is invalid")
 	}
 	return requireTrustedBootstrapDirectory(directory)
@@ -309,8 +309,21 @@ func readJournal(directory string) (journal, error) {
 	if err != nil {
 		return journal{}, err
 	}
+	return parseJournal(body)
+}
+
+func parseJournal(body []byte) (journal, error) {
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return journal{}, errors.New("bootstrap journal is invalid")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
 	var record journal
-	if err := json.Unmarshal(body, &record); err != nil {
+	if err := decoder.Decode(&record); err != nil {
+		return journal{}, errors.New("bootstrap journal is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return journal{}, errors.New("bootstrap journal is invalid")
 	}
 	return record, nil

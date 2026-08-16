@@ -24,9 +24,18 @@ const (
 	testArtifact = "adapter-bytes-for-bootstrap"
 )
 
+func privateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "bootstrap")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func TestUpdateInstallsSignedPlatformArtifacts(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	result, err := Update(Request{
 		Directory: dir,
 		Origin:    origin.URL,
@@ -60,7 +69,7 @@ func TestUpdateInstallsSignedPlatformArtifacts(t *testing.T) {
 
 func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -91,7 +100,7 @@ func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 
 func TestUpdateDoesNotRotateIdenticalCurrent(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -110,7 +119,7 @@ func TestUpdateDoesNotRotateIdenticalCurrent(t *testing.T) {
 
 func TestUpdateRepairsCurrentWithoutRotatingPrevious(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -141,7 +150,7 @@ func TestUpdateRepairsCurrentWithoutRotatingPrevious(t *testing.T) {
 
 func TestRollbackSwapsPublishedSlots(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -177,7 +186,7 @@ func TestRollbackSwapsPublishedSlots(t *testing.T) {
 }
 
 func TestRollbackRequiresPreviousSlot(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Rollback(dir); err == nil {
 		t.Fatal("rollback without slots accepted")
 	}
@@ -186,7 +195,7 @@ func TestRollbackRequiresPreviousSlot(t *testing.T) {
 func TestUpdateRejectsUnsignedCatalog(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	delete(origin.Files, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile)
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("unsigned catalog accepted")
 	}
@@ -195,7 +204,7 @@ func TestUpdateRejectsUnsignedCatalog(t *testing.T) {
 func TestUpdateRejectsUnsignedManifest(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	delete(origin.Files, "v0.1.0/"+punarorelease.ReleaseSignatureFile)
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("unsigned manifest accepted")
 	}
@@ -205,7 +214,7 @@ func TestUpdateRejectsAlteredArtifactBytes(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	name := artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)
 	origin.Files["v0.1.0/"+name] = []byte("tampered-adapter-bytes")
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("altered artifact accepted")
 	}
@@ -213,7 +222,7 @@ func TestUpdateRejectsAlteredArtifactBytes(t *testing.T) {
 
 func TestUpdateRejectsStaleCatalog(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("expired catalog accepted")
 	}
@@ -221,7 +230,7 @@ func TestUpdateRejectsStaleCatalog(t *testing.T) {
 
 func TestUpdateRejectsCriticalBlock(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH, criticalBlocks: []int64{1}})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("critically blocked release accepted")
 	}
@@ -229,7 +238,7 @@ func TestUpdateRejectsCriticalBlock(t *testing.T) {
 
 func TestUpdateRejectsReleaseSequenceDowngrade(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -244,7 +253,7 @@ func TestUpdateRejectsReleaseSequenceDowngrade(t *testing.T) {
 
 func TestUpdateRejectsCatalogSequenceDowngrade(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
 	if _, err := Update(req); err != nil {
 		t.Fatal(err)
@@ -265,7 +274,7 @@ func TestUpdateRejectsPathTraversalAsset(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(origin.Close)
-	dir := t.TempDir()
+	dir := privateDir(t)
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +286,7 @@ func TestUpdateRejectsPathTraversalAsset(t *testing.T) {
 }
 
 func TestUpdateRejectsNonLocalHTTPOrigin(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	_, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -290,7 +299,7 @@ func TestUpdateRejectsNonLocalHTTPOrigin(t *testing.T) {
 
 func TestUpdateSelectsOnlyRequestedPlatform(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: "linux", goarch: "amd64"})
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: "windows", GOARCH: "amd64", Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {
 		t.Fatal("missing platform artifacts accepted")
 	}
@@ -318,7 +327,7 @@ func TestUpdateRejectsWritableAncestor(t *testing.T) {
 }
 
 func TestStatusRejectsCorruptSlot(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
 	if err := os.Mkdir(current, 0o700); err != nil {
 		t.Fatal(err)

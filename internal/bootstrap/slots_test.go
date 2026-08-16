@@ -7,7 +7,7 @@ import (
 )
 
 func TestRecoverJournalDiscardsStagingCandidate(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	candidate := filepath.Join(dir, candidateSlot)
 	if err := os.Mkdir(candidate, 0o700); err != nil {
 		t.Fatal(err)
@@ -27,7 +27,7 @@ func TestRecoverJournalDiscardsStagingCandidate(t *testing.T) {
 }
 
 func TestRecoverJournalCompletesPublishAfterCurrentMoved(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if err := saveAccepted(dir, acceptedState{Schema: 1, Release: "v0.1.0", ReleaseSequence: 1, CatalogSequence: 1, ManifestSHA256: repeatC()}); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRecoverJournalCompletesPublishAfterCurrentMoved(t *testing.T) {
 }
 
 func TestRecoverJournalPersistsAcceptedAfterPublishWithoutCandidate(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
 	if err := os.Mkdir(current, 0o700); err != nil {
 		t.Fatal(err)
@@ -108,7 +108,7 @@ func TestRecoverJournalPersistsAcceptedAfterPublishWithoutCandidate(t *testing.T
 }
 
 func TestRecoverJournalCompletesInterruptedRollback(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	previous := filepath.Join(dir, previousSlot)
 	swap := filepath.Join(dir, swapSlot)
 	if err := os.Mkdir(previous, 0o700); err != nil {
@@ -139,7 +139,7 @@ func TestRecoverJournalCompletesInterruptedRollback(t *testing.T) {
 }
 
 func TestRecoverJournalDoesNotReswapCompletedRollback(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
 	previous := filepath.Join(dir, previousSlot)
 	if err := os.Mkdir(current, 0o700); err != nil {
@@ -176,7 +176,7 @@ func TestParseSlotRejectsEmptyRecord(t *testing.T) {
 }
 
 func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "journal.json.tmp"), []byte("stale"), 0o600); err != nil {
 		t.Fatal(err)
 	}
