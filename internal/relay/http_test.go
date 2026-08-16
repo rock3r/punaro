@@ -595,6 +595,18 @@ func TestHTTPTelegramClaimAPIsAndUserTelegramSend(t *testing.T) {
 	if agentInbound := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/telegram-inbound", `{"from_endpoint":"telegram/primary","from_participant":"user-telegram","body":"nope"}`, "inbound-agent", "telegram-update:8"); agentInbound.Code != http.StatusForbidden {
 		t.Fatalf("agent inbound=%d %s", agentInbound.Code, agentInbound.Body.String())
 	}
+	if agentMeta := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"nope","from_participant":"user-telegram","in_reply_to_punaro_message_id":"`+inboundMessage.ID+`","in_reply_to_endpoint":"agent/a/session","telegram_thread_id":795446}`, "send-meta", "send-meta"); agentMeta.Code != http.StatusBadRequest {
+		t.Fatalf("agent metadata send=%d %s", agentMeta.Code, agentMeta.Body.String())
+	}
+	leased := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/deliveries/lease", `{"endpoint":"agent/b/session","consumer_id":"adapter-b"}`, "lease-inbound", "")
+	var inboundPage DeliveryLeasePage
+	if leased.Code != http.StatusOK || json.NewDecoder(leased.Body).Decode(&inboundPage) != nil || len(inboundPage.Deliveries) != 1 {
+		t.Fatalf("inbound lease=%d %s", leased.Code, leased.Body.String())
+	}
+	got := inboundPage.Deliveries[0].Message
+	if got.ID != inboundMessage.ID || got.FromEndpoint != TelegramGatewayEndpoint || got.FromParticipant != TelegramUserParticipant || got.TelegramThreadID != 795446 {
+		t.Fatalf("leased inbound=%#v", got)
+	}
 }
 
 func TestHTTPInvokeIsAContentFreeOfflineRuntimeHandoff(t *testing.T) {

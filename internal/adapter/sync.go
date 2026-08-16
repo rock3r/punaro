@@ -49,14 +49,18 @@ type Invoker interface {
 // original body remains data, while the stable relay IDs let downstream agents
 // identify duplicate at-least-once deliveries.
 type InboundMessage struct {
-	PunaroMessageID string    `json:"punaro_message_id"`
-	ConversationID  string    `json:"conversation_id"`
-	Sequence        int64     `json:"sequence"`
-	FromEndpoint    string    `json:"from_endpoint,omitempty"`
-	FromRole        string    `json:"from_role,omitempty"`
-	RecipientRole   string    `json:"recipient_role,omitempty"`
-	Body            string    `json:"body"`
-	CreatedAt       time.Time `json:"created_at"`
+	PunaroMessageID          string    `json:"punaro_message_id"`
+	ConversationID           string    `json:"conversation_id"`
+	Sequence                 int64     `json:"sequence"`
+	FromEndpoint             string    `json:"from_endpoint,omitempty"`
+	FromRole                 string    `json:"from_role,omitempty"`
+	FromParticipant          string    `json:"from_participant,omitempty"`
+	RecipientRole            string    `json:"recipient_role,omitempty"`
+	InReplyToEndpoint        string    `json:"in_reply_to_endpoint,omitempty"`
+	InReplyToPunaroMessageID string    `json:"in_reply_to_punaro_message_id,omitempty"`
+	TelegramThreadID         int64     `json:"telegram_thread_id,omitempty"`
+	Body                     string    `json:"body"`
+	CreatedAt                time.Time `json:"created_at"`
 }
 
 // Syncer performs one poll-driven delivery cycle. Polling remains authoritative
@@ -210,7 +214,7 @@ func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, del
 	case deliveryAcknowledged:
 		return nil
 	case deliveryReceived:
-		message := InboundMessage{PunaroMessageID: delivery.Message.ID, ConversationID: delivery.Message.ConversationID, Sequence: delivery.Message.Sequence, FromEndpoint: delivery.Message.FromEndpoint, FromRole: delivery.Message.FromRole, RecipientRole: delivery.RecipientRole, Body: delivery.Message.Body, CreatedAt: delivery.Message.CreatedAt}
+		message := inboundEnvelope(delivery)
 		if err := s.Mailbox.Send(ctx, endpoint, message); err != nil {
 			return fmt.Errorf("inject delivery %q into local mailbox: %w", delivery.ID, err)
 		}
@@ -229,6 +233,28 @@ func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, del
 		return fmt.Errorf("record relay acknowledgement %q: %w", delivery.ID, err)
 	}
 	return nil
+}
+
+func inboundEnvelope(delivery relay.Delivery) InboundMessage {
+	fromEndpoint := delivery.Message.FromEndpoint
+	// Durable from_endpoint stays telegram/primary; the mailbox identity is the participant.
+	if delivery.Message.FromParticipant != "" {
+		fromEndpoint = relay.TelegramUserParticipant
+	}
+	return InboundMessage{
+		PunaroMessageID:          delivery.Message.ID,
+		ConversationID:           delivery.Message.ConversationID,
+		Sequence:                 delivery.Message.Sequence,
+		FromEndpoint:             fromEndpoint,
+		FromRole:                 delivery.Message.FromRole,
+		FromParticipant:          delivery.Message.FromParticipant,
+		RecipientRole:            delivery.RecipientRole,
+		InReplyToEndpoint:        delivery.Message.InReplyToEndpoint,
+		InReplyToPunaroMessageID: delivery.Message.InReplyToPunaroMessageID,
+		TelegramThreadID:         delivery.Message.TelegramThreadID,
+		Body:                     delivery.Message.Body,
+		CreatedAt:                delivery.Message.CreatedAt,
+	}
 }
 
 func uniqueEndpoints(endpoints []string) ([]string, error) {

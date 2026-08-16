@@ -2024,12 +2024,20 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_endpoints SET consumer_id=$1,consumer_generation=$2,consumer_lease_until=$3 WHERE endpoint=$4 AND ownership_generation=$5`, consumerID, consumerGeneration, consumerLeaseUntil, endpoint, ownershipGeneration); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
+	metadataAvailable, err := postgresMessageMetadataAvailable(tx)
+	if err != nil {
+		return relay.DeliveryLeasePage{}, errors.New("message metadata schema is unavailable")
+	}
+	messageColumns := `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role`
+	if metadataAvailable {
+		messageColumns = `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.from_participant,message.in_reply_to_message_id,message.in_reply_to_endpoint,message.telegram_thread_id,message.body,message.created_at,sender.from_role`
+	}
 	query := `SELECT delivery.id::text,delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
-		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role
+		` + messageColumns + `
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		LEFT JOIN relay.mail_message_from_roles AS sender ON sender.message_id=message.id
 		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
-		  AND (delivery.lease_until IS NULL OR delivery.lease_until<=$2 OR delivery.ownership_generation IS NULL OR delivery.ownership_generation<>$3 OR delivery.consumer_generation IS NULL OR delivery.consumer_generation<>$4 OR delivery.lease_machine_id=$5)`
+		  AND (delivery.lease_until IS NULL OR delivery.lease_until<=$2 OR delivery.ownership_generation IS NULL OR delivery.ownership_generation<>$3 OR delivery.consumer_generation IS NULL OR delivery.consumer_generation<>$4 OR delivery.lease_machine_id=$5)` // #nosec G202 -- message columns are a static allowlist selected from schema presence, not caller input.
 	args := []any{string(encodedRecipientIDs), now.UTC(), ownershipGeneration, consumerGeneration, machineID}
 	if conversationID != "" {
 		query += ` AND message.conversation_id=$6::uuid ORDER BY message.sequence,message.id LIMIT $7 FOR UPDATE OF delivery SKIP LOCKED`
@@ -2055,11 +2063,19 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		var row leasedRow
 		var recipientID string
 		row.delivery.RecipientEndpoint = endpoint
-		var fromRole sql.NullString
-		if err := rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt, &fromRole); err != nil {
+		var fromRole, fromParticipant, replyMessage, replyEndpoint sql.NullString
+		var threadID sql.NullInt64
+		var err error
+		if metadataAvailable {
+			err = rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &fromParticipant, &replyMessage, &replyEndpoint, &threadID, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt, &fromRole)
+		} else {
+			err = rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt, &fromRole)
+		}
+		if err != nil {
 			_ = rows.Close()
 			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
 		}
+		applyPostgresMessageMetadata(&row.delivery.Message, fromParticipant, replyMessage, replyEndpoint, threadID)
 		postgresApplyDirectSender(&row.delivery.Message, fromRole)
 		if role, isRole := postgresParseRoleRecipient(recipientID); isRole {
 			row.delivery.RecipientRole = role
@@ -2453,6 +2469,12 @@ func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 		WHERE message.id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &fromParticipant, &replyMessage, &replyEndpoint, &threadID, &message.Body, &message.CreatedAt, &fromRole); err != nil {
 		return relay.Message{}, errors.New("idempotent message is unavailable")
 	}
+	applyPostgresMessageMetadata(&message, fromParticipant, replyMessage, replyEndpoint, threadID)
+	message.CreatedAt = message.CreatedAt.UTC()
+	return message, nil
+}
+
+func applyPostgresMessageMetadata(message *relay.Message, fromParticipant, replyMessage, replyEndpoint sql.NullString, threadID sql.NullInt64) {
 	if fromParticipant.Valid {
 		message.FromParticipant = fromParticipant.String
 	}
@@ -2465,9 +2487,6 @@ func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 	if threadID.Valid {
 		message.TelegramThreadID = threadID.Int64
 	}
-	message.CreatedAt = message.CreatedAt.UTC()
-	postgresApplyDirectSender(&message, fromRole)
-	return message, nil
 }
 
 func postgresApplyDirectSender(message *relay.Message, fromRole sql.NullString) {

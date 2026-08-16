@@ -1870,6 +1870,22 @@ func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 	if err != nil || duplicate || second.InReplyToPunaroMessageID != first.ID || second.InReplyToEndpoint != "agent/a" || second.TelegramThreadID != 795446 {
 		t.Fatalf("second inbound=%#v duplicate=%t err=%v", second, duplicate, err)
 	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now.Add(3*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	page, err := store.LeaseDeliveries("machine-a", "adapter-a", "agent/a", conversation.ID, now.Add(3*time.Second), time.Minute, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leased Message
+	for _, delivery := range page.Deliveries {
+		if delivery.Message.ID == second.ID {
+			leased = delivery.Message
+		}
+	}
+	if leased.ID != second.ID || leased.FromEndpoint != TelegramGatewayEndpoint || leased.FromParticipant != TelegramUserParticipant || leased.InReplyToPunaroMessageID != first.ID || leased.InReplyToEndpoint != "agent/a" || leased.TelegramThreadID != 795446 {
+		t.Fatalf("leased inbound=%#v deliveries=%#v", leased, page.Deliveries)
+	}
 }
 
 func TestStoreSessionTopicPendingAndUnclaimed(t *testing.T) {
