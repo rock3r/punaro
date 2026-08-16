@@ -45,6 +45,21 @@ func TestRunnerSkipsUnboundTopicAndContinuesToLaterRoutedUpdate(t *testing.T) {
 	}
 }
 
+func TestRunnerAdvancesOffsetAfterInertCallback(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	runner := Runner{Poller: fakePoller{updates: []Update{{ID: 20, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: "opaque-token"}}}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { t.Fatal("callback submitted"); return nil }, Notify: notify, Log: func(string, ...any) {}}}
+	next, err := runner.RunOnce(context.Background(), 20)
+	if err != nil || next != 21 || len(notify.answers) != 1 || notify.answers[0].text != callbackFailureText {
+		t.Fatalf("next=%d answers=%#v err=%v", next, notify.answers, err)
+	}
+}
+
 type fakePoller struct{ updates []Update }
 
 func (p fakePoller) Updates(context.Context, int64) ([]Update, error) { return p.updates, nil }

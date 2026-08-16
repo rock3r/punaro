@@ -70,10 +70,26 @@ webhook is configured. Punaro never removes or changes a webhook automatically:
 an operator must intentionally migrate the bot or use a bot dedicated to this
 gateway.
 
-Run `punaro-telegram` with no arguments. The process long-polls only `message`
-updates, checks the numeric user ID itself, renews the gateway endpoint lease,
-and fetches durable relay replies. It does not log tokens, Access headers,
-message text, or Bot API response bodies.
+`PUNARO_TELEGRAM_GATEWAY_ENDPOINT` must be exactly `telegram/primary`. The
+binary rejects any other enrolled name so the env value cannot drift from the
+relay constant.
+
+Run `punaro-telegram` with no arguments. After start it calls `setMyCommands`
+once, then long-polls `message` and `callback_query` updates, checks the
+numeric user ID itself, renews the gateway endpoint lease, and fetches durable
+relay replies. It does not log tokens, Access headers, message text, raw
+`callback_data`, or Bot API response bodies.
+
+Operator commands are recognized only from Telegram `bot_command` entities:
+
+- `/start` replies with a short help sentence that mentions `/list`.
+- `/list` asks the relay for the last 10 unclaimed named topics and replies in
+  the private chat with one inline-keyboard row per topic. Button labels are
+  display names (truncated to 64 characters). `callback_data` is an opaque
+  hashed TTL token; conversation ids never appear in Telegram.
+
+Ordinary main-chat text stays inert. A `/list` tap is answered with a generic
+failure until claim execution is deployed; the token is not consumed.
 
 ## Bind a topic to a conversation
 

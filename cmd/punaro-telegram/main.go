@@ -21,6 +21,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
 
@@ -111,16 +112,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := botClient.SetMyCommands(ctx, telegram.DefaultBotCommands()); err != nil {
+		return fmt.Errorf("register telegram commands: %w", err)
+	}
 	bridge := telegram.Bridge{
 		Relay:    relayClient,
 		Endpoint: cfg.endpoint,
 		State:    state,
 		Poller:   botClient,
-		Gateway:  telegram.Gateway{AllowedUserID: cfg.allowedUserID, State: state, Submit: telegram.SubmitToRelay(relayClient, cfg.endpoint)},
-		Sender:   botClient,
+		Gateway: telegram.Gateway{
+			AllowedUserID: cfg.allowedUserID,
+			State:         state,
+			Submit:        telegram.SubmitToRelay(relayClient, cfg.endpoint),
+			ListUnclaimed: relayClient.ListUnclaimed,
+			Notify:        botClient,
+		},
+		Sender: botClient,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	var offset int64
 	for ctx.Err() == nil {
 		next, err := bridge.SyncOnce(ctx, offset)
@@ -176,6 +186,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.relayURL == "" || cfg.machineID == "" || cfg.botToken == "" || cfg.endpoint == "" || cfg.stateDir == "" {
 		return config{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, Telegram bot token source, PUNARO_TELEGRAM_GATEWAY_ENDPOINT, and PUNARO_TELEGRAM_STATE_DIR are required")
+	}
+	if cfg.endpoint != relay.TelegramGatewayEndpoint {
+		return config{}, fmt.Errorf("PUNARO_TELEGRAM_GATEWAY_ENDPOINT must be %s", relay.TelegramGatewayEndpoint)
 	}
 	accessTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE"))
 	if accessTokenFile != "" {

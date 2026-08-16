@@ -19,8 +19,11 @@ func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 		if r.URL.Query().Get("offset") != "10" {
 			t.Fatal("missing offset")
 		}
+		if r.URL.Query().Get("allowed_updates") != `["message","callback_query"]` {
+			t.Fatalf("allowed_updates=%q", r.URL.Query().Get("allowed_updates"))
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"result":[{"update_id":10,"message":{"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"question"}}]}`))
+		_, _ = w.Write([]byte(`{"ok":true,"result":[{"update_id":10,"message":{"message_id":4,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"question"}}]}`))
 	}))
 	defer server.Close()
 	client, err := NewClient(server.URL, "secret", server.Client())
@@ -31,8 +34,130 @@ func TestClientFetchesMinimalTopicUpdateWithoutLeakingToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(updates) != 1 || updates[0].ID != 10 || updates[0].UserID != 55 || updates[0].ThreadID != 7 || updates[0].Text != "question" {
+	if len(updates) != 1 || updates[0].ID != 10 || updates[0].UserID != 55 || updates[0].ThreadID != 7 || updates[0].MessageID != 4 || updates[0].Text != "question" || updates[0].IsCommand {
 		t.Fatalf("updates=%#v", updates)
+	}
+}
+
+func TestClientPollsCallbackQueriesAndBotCommands(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botsecret/getUpdates" {
+			t.Fatal("unexpected request path")
+		}
+		if r.URL.Query().Get("allowed_updates") != `["message","callback_query"]` {
+			t.Fatalf("allowed_updates=%q", r.URL.Query().Get("allowed_updates"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":[` +
+			`{"update_id":11,"message":{"message_id":5,"from":{"id":55},"chat":{"id":55},"text":"/start@TopicBot extra","entities":[{"offset":0,"length":16,"type":"bot_command"}]}},` +
+			`{"update_id":12,"message":{"message_id":6,"from":{"id":55},"chat":{"id":55},"text":"/list","entities":[{"offset":0,"length":5,"type":"bot_command"}]}},` +
+			`{"update_id":13,"message":{"message_id":7,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"/list"}},` +
+			`{"update_id":14,"callback_query":{"id":"cbq-1","from":{"id":55},"data":"opaque-token","message":{"message_id":8,"chat":{"id":55}}}},` +
+			`{"update_id":15,"message":{"message_id":9,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"hi","reply_to_message":{"message_id":3}}}` +
+			`]}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates, err := client.Updates(context.Background(), 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) != 5 {
+		t.Fatalf("updates=%#v", updates)
+	}
+	if !updates[0].IsCommand || updates[0].Command != "start" || updates[0].ChatID != 55 || updates[0].MessageID != 5 {
+		t.Fatalf("start=%#v", updates[0])
+	}
+	if !updates[1].IsCommand || updates[1].Command != "list" {
+		t.Fatalf("list=%#v", updates[1])
+	}
+	if updates[2].IsCommand || updates[2].Command != "" || updates[2].Text != "/list" {
+		t.Fatalf("slash text without entity was treated as a command: %#v", updates[2])
+	}
+	if updates[3].CallbackID != "cbq-1" || updates[3].CallbackData != "opaque-token" || updates[3].UserID != 55 || updates[3].ChatID != 55 || updates[3].MessageID != 8 {
+		t.Fatalf("callback=%#v", updates[3])
+	}
+	if updates[4].ReplyToID != 3 || updates[4].IsCommand {
+		t.Fatalf("reply=%#v", updates[4])
+	}
+}
+
+func TestClientRegistersCommandsAndSendsOperatorMessages(t *testing.T) {
+	t.Parallel()
+	seen := map[string]int{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() { _ = r.Body.Close() }()
+		seen[r.URL.Path]++
+		switch r.URL.Path {
+		case "/botsecret/setMyCommands":
+			var request struct {
+				Commands []struct {
+					Command     string `json:"command"`
+					Description string `json:"description"`
+				} `json:"commands"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Commands) != 2 || request.Commands[0].Command != "start" || request.Commands[0].Description != "How this bot works" || request.Commands[1].Command != "list" || request.Commands[1].Description != "Claim an unclaimed Punaro topic" {
+				t.Fatalf("commands=%#v", request.Commands)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		case "/botsecret/sendMessage":
+			var request struct {
+				ChatID      int64  `json:"chat_id"`
+				Text        string `json:"text"`
+				ParseMode   string `json:"parse_mode"`
+				ReplyMarkup *struct {
+					InlineKeyboard [][]struct {
+						Text         string `json:"text"`
+						CallbackData string `json:"callback_data"`
+					} `json:"inline_keyboard"`
+				} `json:"reply_markup"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.ChatID != 55 || request.Text != "Tap a topic to claim it." || request.ParseMode != "" || request.ReplyMarkup == nil || len(request.ReplyMarkup.InlineKeyboard) != 1 || request.ReplyMarkup.InlineKeyboard[0][0].Text != "How is it going" || request.ReplyMarkup.InlineKeyboard[0][0].CallbackData != "token-1" {
+				t.Fatalf("sendMessage=%#v", request)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":20}}`))
+		case "/botsecret/answerCallbackQuery":
+			var request struct {
+				CallbackQueryID string `json:"callback_query_id"`
+				Text            string `json:"text"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if request.CallbackQueryID != "cbq-1" || request.Text != callbackFailureText {
+				t.Fatalf("answerCallbackQuery=%#v", request)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetMyCommands(context.Background(), DefaultBotCommands()); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SendMessage(context.Background(), 55, "Tap a topic to claim it.", [][]InlineKeyboardButton{{{Text: "How is it going", CallbackData: "token-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.AnswerCallbackQuery(context.Background(), "cbq-1", callbackFailureText); err != nil {
+		t.Fatal(err)
+	}
+	if seen["/botsecret/setMyCommands"] != 1 || seen["/botsecret/sendMessage"] != 1 || seen["/botsecret/answerCallbackQuery"] != 1 {
+		t.Fatalf("seen=%#v", seen)
 	}
 }
 
@@ -96,6 +221,23 @@ func TestClientOmitsBotTokenFromTransportErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), dummy) {
 		t.Fatalf("send error leaked bot token: %v", err)
+	}
+	for _, name := range []string{"setMyCommands", "sendMessage", "answerCallbackQuery"} {
+		var opErr error
+		switch name {
+		case "setMyCommands":
+			opErr = client.SetMyCommands(context.Background(), DefaultBotCommands())
+		case "sendMessage":
+			opErr = client.SendMessage(context.Background(), 55, "help", nil)
+		case "answerCallbackQuery":
+			opErr = client.AnswerCallbackQuery(context.Background(), "cbq-1", callbackFailureText)
+		}
+		if opErr == nil {
+			t.Fatalf("expected %s transport error", name)
+		}
+		if strings.Contains(opErr.Error(), dummy) || strings.Contains(opErr.Error(), "bot") {
+			t.Fatalf("%s error leaked bot token: %v", name, opErr)
+		}
 	}
 }
 

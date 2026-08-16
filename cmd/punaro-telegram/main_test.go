@@ -39,6 +39,28 @@ func TestLoadConfigRequiresExplicitTelegramGatewayIdentity(t *testing.T) {
 	}
 }
 
+func TestLoadConfigRejectsNonPrimaryGatewayEndpoint(t *testing.T) {
+	_, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	keyFile := filepath.Join(directory, "machine.key")
+	if err := os.WriteFile(keyFile, []byte(base64.RawURLEncoding.EncodeToString(private)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_ADAPTER_RELAY_URL", "https://relay.example")
+	t.Setenv("PUNARO_MACHINE_ID", "telegram-machine")
+	t.Setenv("PUNARO_MACHINE_PRIVATE_KEY_FILE", keyFile)
+	t.Setenv("PUNARO_TELEGRAM_BOT_TOKEN", "test-token")
+	t.Setenv("PUNARO_TELEGRAM_ALLOWED_USER_ID", "55")
+	t.Setenv("PUNARO_TELEGRAM_GATEWAY_ENDPOINT", "telegram/other")
+	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
+	if _, err := loadConfig(); err == nil {
+		t.Fatal("non-primary telegram gateway endpoint accepted")
+	}
+}
+
 func TestLoadPrivateKeyRejectsUnsafeFileModesAndSymlinks(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

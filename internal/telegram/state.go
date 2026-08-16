@@ -4,14 +4,23 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	// sqlite is the content-free Telegram route and replay state driver.
 	_ "modernc.org/sqlite"
+)
+
+const (
+	callbackTokenTTL  = 15 * time.Minute
+	maxCallbackTokens = 100
 )
 
 // State owns durable, content-free Telegram replay and topic routing state.
@@ -34,6 +43,7 @@ func Open(database string) (*State, error) {
 		"CREATE TABLE IF NOT EXISTS processed_updates (update_id INTEGER PRIMARY KEY)",
 		"CREATE TABLE IF NOT EXISTS topic_routes (chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, PRIMARY KEY(chat_id, thread_id))",
 		"CREATE UNIQUE INDEX IF NOT EXISTS topic_routes_conversation ON topic_routes(conversation_id)",
+		"CREATE TABLE IF NOT EXISTS callback_tokens (token_hash TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER)",
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -106,4 +116,68 @@ func (s *State) RouteForConversation(conversationID string) (int64, int64, bool,
 		return 0, 0, false, err
 	}
 	return chatID, threadID, true, nil
+}
+
+// IssueCallbackToken stores only the SHA-256 of a 256-bit random token. The
+// raw value is returned once for Telegram callback_data and is never logged.
+func (s *State) IssueCallbackToken(conversationID string, now time.Time) (string, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return "", fmt.Errorf("conversation ID is required")
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate telegram callback token")
+	}
+	token := hex.EncodeToString(raw[:])
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), "DELETE FROM callback_tokens WHERE expires_at <= ?", now.UnixMilli()); err != nil {
+		return "", err
+	}
+	var outstanding int
+	if err := tx.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM callback_tokens WHERE consumed_at IS NULL AND expires_at > ?", now.UnixMilli()).Scan(&outstanding); err != nil {
+		return "", err
+	}
+	if outstanding >= maxCallbackTokens {
+		rows, err := tx.QueryContext(context.Background(), "SELECT token_hash FROM callback_tokens WHERE consumed_at IS NULL ORDER BY expires_at ASC LIMIT ?", outstanding-maxCallbackTokens+1)
+		if err != nil {
+			return "", err
+		}
+		var evict []string
+		for rows.Next() {
+			var hash string
+			if err := rows.Scan(&hash); err != nil {
+				_ = rows.Close()
+				return "", err
+			}
+			evict = append(evict, hash)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return "", err
+		}
+		if err := rows.Close(); err != nil {
+			return "", err
+		}
+		for _, hash := range evict {
+			if _, err := tx.ExecContext(context.Background(), "DELETE FROM callback_tokens WHERE token_hash = ?", hash); err != nil {
+				return "", err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO callback_tokens(token_hash, conversation_id, expires_at) VALUES (?, ?, ?)", callbackTokenHash(token), conversationID, now.Add(callbackTokenTTL).UnixMilli()); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func callbackTokenHash(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
 }

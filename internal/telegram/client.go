@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 const maxBotResponseBytes = 1 << 20
@@ -37,19 +38,40 @@ func NewClient(rawURL, token string, client *http.Client) (*Client, error) {
 	return &Client{base: base, token: token, http: client}, nil
 }
 
-// Updates returns only text messages and their routing metadata. Unknown Bot
-// API fields are intentionally ignored; bodies remain opaque text.
+// BotCommand is one entry registered with setMyCommands.
+type BotCommand struct {
+	Command     string
+	Description string
+}
+
+// InlineKeyboardButton is one operator-UX button. CallbackData must be an
+// opaque gateway token, never a conversation id or display-name key.
+type InlineKeyboardButton struct {
+	Text         string
+	CallbackData string
+}
+
+// DefaultBotCommands is the menu registered once per gateway process.
+func DefaultBotCommands() []BotCommand {
+	return []BotCommand{
+		{Command: "start", Description: "How this bot works"},
+		{Command: "list", Description: "Claim an unclaimed Punaro topic"},
+	}
+}
+
+// Updates returns text messages, bot_command metadata, and callback queries.
+// Unknown Bot API fields are intentionally ignored; bodies remain opaque text.
 func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	target := *c.base
 	target.Path = strings.TrimRight(target.Path, "/") + "/bot" + c.token + "/getUpdates"
 	query := target.Query()
 	query.Set("offset", strconv.FormatInt(offset, 10))
 	query.Set("timeout", "30")
-	query.Set("allowed_updates", `["message"]`)
+	query.Set("allowed_updates", `["message","callback_query"]`)
 	target.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		return nil, fmt.Errorf("build Telegram poll: %w", err)
+		return nil, fmt.Errorf("telegram poll failed")
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
@@ -66,17 +88,14 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	var decoded struct {
 		OK     bool `json:"ok"`
 		Result []struct {
-			ID      int64 `json:"update_id"`
-			Message *struct {
-				From struct {
-					ID int64 `json:"id"`
-				} `json:"from"`
-				Chat struct {
-					ID int64 `json:"id"`
-				} `json:"chat"`
-				ThreadID int64  `json:"message_thread_id"`
-				Text     string `json:"text"`
-			} `json:"message"`
+			ID            int64          `json:"update_id"`
+			Message       *botAPIMessage `json:"message"`
+			CallbackQuery *struct {
+				ID      string         `json:"id"`
+				Data    string         `json:"data"`
+				From    botAPIUser     `json:"from"`
+				Message *botAPIMessage `json:"message"`
+			} `json:"callback_query"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(body, &decoded); err != nil || !decoded.OK {
@@ -84,11 +103,93 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	}
 	updates := make([]Update, 0, len(decoded.Result))
 	for _, item := range decoded.Result {
+		update := Update{ID: item.ID}
 		if item.Message != nil {
-			updates = append(updates, Update{ID: item.ID, UserID: item.Message.From.ID, ChatID: item.Message.Chat.ID, ThreadID: item.Message.ThreadID, Text: item.Message.Text})
+			applyBotAPIMessage(&update, item.Message)
 		}
+		if item.CallbackQuery != nil {
+			update.CallbackID = item.CallbackQuery.ID
+			update.CallbackData = item.CallbackQuery.Data
+			update.UserID = item.CallbackQuery.From.ID
+			if item.CallbackQuery.Message != nil {
+				update.ChatID = item.CallbackQuery.Message.Chat.ID
+				update.MessageID = item.CallbackQuery.Message.MessageID
+			}
+		}
+		updates = append(updates, update)
 	}
 	return updates, nil
+}
+
+type botAPIUser struct {
+	ID int64 `json:"id"`
+}
+
+type botAPIChat struct {
+	ID int64 `json:"id"`
+}
+
+type botAPIEntity struct {
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+	Type   string `json:"type"`
+}
+
+type botAPIMessage struct {
+	MessageID int64          `json:"message_id"`
+	From      botAPIUser     `json:"from"`
+	Chat      botAPIChat     `json:"chat"`
+	ThreadID  int64          `json:"message_thread_id"`
+	Text      string         `json:"text"`
+	Entities  []botAPIEntity `json:"entities"`
+	ReplyTo   *struct {
+		MessageID int64 `json:"message_id"`
+	} `json:"reply_to_message"`
+}
+
+func applyBotAPIMessage(update *Update, message *botAPIMessage) {
+	update.UserID = message.From.ID
+	update.ChatID = message.Chat.ID
+	update.ThreadID = message.ThreadID
+	update.MessageID = message.MessageID
+	update.Text = message.Text
+	if message.ReplyTo != nil {
+		update.ReplyToID = message.ReplyTo.MessageID
+	}
+	if command, ok := parseBotCommand(message.Text, message.Entities); ok {
+		update.IsCommand = true
+		update.Command = command
+	}
+}
+
+func parseBotCommand(text string, entities []botAPIEntity) (string, bool) {
+	for _, entity := range entities {
+		if entity.Type != "bot_command" {
+			continue
+		}
+		command := normalizeBotCommand(utf16Slice(text, entity.Offset, entity.Length))
+		if command != "" {
+			return command, true
+		}
+	}
+	return "", false
+}
+
+func normalizeBotCommand(raw string) string {
+	command := strings.TrimSpace(raw)
+	command = strings.TrimPrefix(command, "/")
+	if at := strings.IndexByte(command, '@'); at >= 0 {
+		command = command[:at]
+	}
+	return strings.ToLower(command)
+}
+
+func utf16Slice(text string, offset, length int) string {
+	encoded := utf16.Encode([]rune(text))
+	if offset < 0 || length < 0 || offset+length > len(encoded) {
+		return ""
+	}
+	return string(utf16.Decode(encoded[offset : offset+length]))
 }
 
 // SendRichMessage sends trusted, already-rendered HTML to one exact Telegram
@@ -138,6 +239,102 @@ func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, ht
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(&decoded); err != nil || !decoded.OK {
 		return fmt.Errorf("invalid Telegram rich message response")
+	}
+	return nil
+}
+
+// SetMyCommands registers the operator command menu. Call it once per process.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	if len(commands) == 0 {
+		return fmt.Errorf("invalid telegram commands")
+	}
+	encoded := make([]struct {
+		Command     string `json:"command"`
+		Description string `json:"description"`
+	}, 0, len(commands))
+	for _, command := range commands {
+		if strings.TrimSpace(command.Command) == "" || strings.TrimSpace(command.Description) == "" {
+			return fmt.Errorf("invalid telegram commands")
+		}
+		encoded = append(encoded, struct {
+			Command     string `json:"command"`
+			Description string `json:"description"`
+		}{Command: command.Command, Description: command.Description})
+	}
+	return c.postMethod(ctx, "setMyCommands", struct {
+		Commands any `json:"commands"`
+	}{Commands: encoded})
+}
+
+// SendMessage posts operator UX to the private chat. Display names are labels
+// only; the caller must not put conversation ids in text or callback_data.
+func (c *Client) SendMessage(ctx context.Context, chatID int64, text string, keyboard [][]InlineKeyboardButton) error {
+	if chatID == 0 || strings.TrimSpace(text) == "" {
+		return fmt.Errorf("invalid telegram message")
+	}
+	type encodedButton struct {
+		Text         string `json:"text"`
+		CallbackData string `json:"callback_data"`
+	}
+	request := struct {
+		ChatID      int64  `json:"chat_id"`
+		Text        string `json:"text"`
+		ReplyMarkup *struct {
+			InlineKeyboard [][]encodedButton `json:"inline_keyboard"`
+		} `json:"reply_markup,omitempty"`
+	}{ChatID: chatID, Text: text}
+	if len(keyboard) > 0 {
+		markup := struct {
+			InlineKeyboard [][]encodedButton `json:"inline_keyboard"`
+		}{}
+		for _, row := range keyboard {
+			encoded := make([]encodedButton, 0, len(row))
+			for _, button := range row {
+				encoded = append(encoded, encodedButton(button))
+			}
+			markup.InlineKeyboard = append(markup.InlineKeyboard, encoded)
+		}
+		request.ReplyMarkup = &markup
+	}
+	return c.postMethod(ctx, "sendMessage", request)
+}
+
+// AnswerCallbackQuery dismisses a button tap. The notice must stay generic.
+func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID, text string) error {
+	if strings.TrimSpace(callbackID) == "" {
+		return fmt.Errorf("invalid telegram callback")
+	}
+	return c.postMethod(ctx, "answerCallbackQuery", struct {
+		CallbackQueryID string `json:"callback_query_id"`
+		Text            string `json:"text,omitempty"`
+	}{CallbackQueryID: callbackID, Text: text})
+}
+
+func (c *Client) postMethod(ctx context.Context, methodName string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("telegram %s failed", methodName)
+	}
+	target := *c.base
+	target.Path = strings.TrimRight(target.Path, "/") + "/bot" + c.token + "/" + methodName
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram %s failed", methodName)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("telegram %s failed", methodName)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram %s returned HTTP %d", methodName, response.StatusCode)
+	}
+	var decoded struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(&decoded); err != nil || !decoded.OK {
+		return fmt.Errorf("invalid telegram %s response", methodName)
 	}
 	return nil
 }
