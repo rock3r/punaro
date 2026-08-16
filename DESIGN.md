@@ -983,14 +983,27 @@ metadata.
 
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
-conversation from fanning out to multiple topics. The Bot API does not expose a send
-idempotency key, so a crash after an accepted Telegram send and before relay
-acknowledgement is deliberately at-least-once. Agent text is rendered as
-escaped rich HTML with entity detection disabled and content protection set.
+conversation from fanning out to multiple topics. `SendDelivery` stays
+route-based (`topic_routes` only). A missing route fails closed with the
+existing missing-route error and leaves the delivery unacked. Requiring a
+completed claim on that path is a post-adopt soak follow-up. The Bot API does
+not expose a send idempotency key, so a crash after an accepted Telegram send
+and before relay acknowledgement is deliberately at-least-once. Agent text is
+rendered as escaped rich HTML with entity detection disabled and content
+protection set.
 
-An optional major-update adapter action resolves the registered
-conversation/topic and submits a concise milestone or blocker message. It must
-fail closed if there is no explicit thread route.
+Product pings and replies to the human use `punaro-adapter send --to
+user-telegram`. The adapter resolves the session's sole claimed topic and
+sets `target_role=user-telegram`. Agents never pass a Telegram thread or chat
+id. `telegram-major-updates` / `send_major_update.py` is not a production
+sender.
+
+Adopt of the two live routes is fence-legal only in this order: rename the
+keeper while the non-keeper is still unnamed; run `punaro-relay-adopt-prepare
+--drop-role role/telegram-codex --yes` on the non-keeper; then
+`punaro-telegram adopt` on `dae86ecc-05ff-4431-967a-584e2cd82916` (thread
+795446) and `e5c269b6-7e4c-450d-82bb-c25209096c10` (thread 795625). Adopt
+never calls `createForumTopic`.
 
 ## Local adapter boundary
 
@@ -1004,7 +1017,8 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
    and `telegram_thread_id`. When `from_participant` is `user-telegram`, the
    envelope `from_endpoint` is rewritten to `user-telegram`. Agents cannot set
    those metadata fields on `POST /v1/conversations/{id}/messages`.
-4. Watches local replies and major-update events, then submits them to Punaro.
+4. Watches local replies and submits them to Punaro. Pings use
+   `punaro-adapter send --to user-telegram`, not a Bot API side channel.
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.
 
