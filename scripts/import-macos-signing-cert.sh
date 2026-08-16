@@ -17,7 +17,7 @@ p12=$(mktemp)
 cleanup() { rm -f -- "$p12"; }
 trap cleanup EXIT HUP INT TERM
 
-printf '%s' "$MACOS_DEVELOPER_ID_APPLICATION_P12" | base64 --decode >"$p12"
+printf '%s' "$MACOS_DEVELOPER_ID_APPLICATION_P12" | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.standard_b64decode(sys.stdin.read()))' >"$p12"
 [ -s "$p12" ] || fail 'Developer ID PKCS#12 decoded to an empty file'
 
 security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" "$MACOS_KEYCHAIN_PATH"

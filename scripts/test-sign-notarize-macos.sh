@@ -27,3 +27,8 @@ if MACOS_DEVELOPER_ID_APPLICATION_P12= MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWO
 	printf '%s\n' 'import-macos-signing-cert accepted empty credentials' >&2
 	exit 1
 fi
+
+if grep -Fq 'base64 --decode' "$import_script"; then
+	printf '%s\n' 'import-macos-signing-cert uses GNU base64 --decode' >&2
+	exit 1
+fi

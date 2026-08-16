@@ -162,7 +162,7 @@ jobs:
           if [ "$DRAFT" = true ]; then
             set -- --draft "$@"
           fi
-          gh release create "$RELEASE" "$@" dist/*
+          gh release create "$RELEASE" --target "$GITHUB_SHA" "$@" dist/*
           if gh release view catalog >/dev/null 2>&1; then
             gh release upload catalog dist/punaro-catalog.json --clobber
           else
