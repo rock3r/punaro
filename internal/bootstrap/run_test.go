@@ -183,6 +183,34 @@ func TestRunLoadsKeysFromDirectory(t *testing.T) {
 	}
 }
 
+func TestRunRejectsStaleCatalogSequenceOnRollback(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	origin := newSignedOrigin(t, originSpec{payload: "old-catalog", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.1.0", sequence: 1, catalogSequence: 1})
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		Origin:        origin.URL,
+		Keys:          origin.Keys,
+		HealthTimeout: 20 * time.Millisecond,
+		Now:           time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("stale catalog rollback err=%v", err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || !status.RecoveryOnly {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunEntersRecoveryWhenCatalogDisallowsPrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")

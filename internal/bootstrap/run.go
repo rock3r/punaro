@@ -93,13 +93,19 @@ func Run(ctx context.Context, request RunRequest) error {
 		ctx = context.Background()
 	}
 	identity, adapter, err := prepareRun(&request)
+	if errors.Is(err, errNoAdapter) {
+		if request.hasPrevious(identity) {
+			return failOrRollback(ctx, request, startOrDefault(request), identity, recoveryUnhealthy)
+		}
+		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
+			return recErr
+		}
+		return ErrRecoveryOnly
+	}
 	if err != nil {
 		return err
 	}
-	start := request.Start
-	if start == nil {
-		start = startOSProcess
-	}
+	start := startOrDefault(request)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
 		if request.hasPrevious(identity) {
@@ -189,7 +195,7 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	}
 	adapter, err := adapterBinary(current, request.GOOS, request.GOARCH)
 	if err != nil {
-		return slotState{}, "", err
+		return identity, "", errNoAdapter
 	}
 	if err := os.Remove(filepath.Join(request.Directory, readyFile)); err != nil && !os.IsNotExist(err) {
 		return slotState{}, "", errors.New("bootstrap ready file is invalid")
@@ -214,7 +220,17 @@ func startAdapter(ctx context.Context, request RunRequest, start func(context.Co
 	return child, nil
 }
 
-var errChildExited = errors.New("bootstrap child exited")
+var (
+	errChildExited = errors.New("bootstrap child exited")
+	errNoAdapter   = errors.New("bootstrap has no current adapter")
+)
+
+func startOrDefault(request RunRequest) func(context.Context, ChildSpec) (Process, error) {
+	if request.Start != nil {
+		return request.Start
+	}
+	return startOSProcess
+}
 
 func waitHealth(ctx context.Context, request RunRequest, child Process, required bool) error {
 	deadline := time.Now().Add(request.HealthTimeout)
@@ -352,6 +368,10 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 	if len(request.Keys) == 0 {
 		return false, slotState{}, errors.New("bootstrap has no embedded release keys")
 	}
+	accepted, err := loadAccepted(request.Directory)
+	if err != nil {
+		return false, slotState{}, err
+	}
 	catalog, err := fetchVerifiedCatalog(Request{
 		Directory: request.Directory,
 		Origin:    request.Origin,
@@ -361,6 +381,9 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 	})
 	if err != nil {
 		return false, slotState{}, err
+	}
+	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
+		return false, slotState{}, errors.New("release catalog sequence downgrade")
 	}
 	if !catalog.Allows(previous.Release, previous.Sequence, previous.ManifestSHA256) {
 		return false, slotState{}, errors.New("catalog does not allow the release")
