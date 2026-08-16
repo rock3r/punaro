@@ -175,7 +175,8 @@ func Update(request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256 && currentSlotMatches(request.Directory, artifacts) {
+	sameIdentity := current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256
+	if sameIdentity && currentSlotMatches(request.Directory, artifacts) {
 		if err := finishPublication(request.Directory, published); err != nil {
 			return Result{}, err
 		}
@@ -213,9 +214,13 @@ func Update(request Request) (Result, error) {
 		}
 		installed = append(installed, name)
 	}
+	phase := "publishing"
+	if sameIdentity {
+		phase = "repairing"
+	}
 	if err := writeJournal(request.Directory, journal{
 		Schema:          1,
-		Phase:           "publishing",
+		Phase:           phase,
 		Release:         published.Release,
 		Sequence:        published.ReleaseSequence,
 		CatalogSequence: published.CatalogSequence,
@@ -223,7 +228,11 @@ func Update(request Request) (Result, error) {
 	}); err != nil {
 		return Result{}, err
 	}
-	if err := publishSlot(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
+	if sameIdentity {
+		if err := replaceCurrent(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
+			return Result{}, err
+		}
+	} else if err := publishSlot(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
 		return Result{}, err
 	}
 	if err := finishPublication(request.Directory, published); err != nil {

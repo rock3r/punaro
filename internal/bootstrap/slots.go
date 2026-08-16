@@ -87,6 +87,28 @@ func publishSlot(directory, release string, sequence int64, manifestSHA256 strin
 	return syncDir(directory)
 }
 
+func replaceCurrent(directory, release string, sequence int64, manifestSHA256 string) error {
+	candidate := filepath.Join(directory, candidateSlot)
+	current := filepath.Join(directory, currentSlot)
+	if err := requireRealDir(candidate); err != nil {
+		return err
+	}
+	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256})
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(filepath.Join(candidate, slotRecord), record, 0o600); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(current); err != nil {
+		return err
+	}
+	if err := os.Rename(candidate, current); err != nil {
+		return err
+	}
+	return syncDir(directory)
+}
+
 // Rollback swaps the published current and previous slots. It does not lower
 // the highest accepted sequences, so a later automatic update still cannot
 // move backward.
@@ -144,7 +166,7 @@ func recoverJournal(directory string) error {
 	switch record.Phase {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
-	case "publishing":
+	case "publishing", "repairing":
 		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || record.ManifestSHA256 == "" {
 			return errors.New("bootstrap journal is invalid")
 		}
@@ -153,7 +175,11 @@ func recoverJournal(directory string) error {
 			return err
 		}
 		if exists {
-			if err := publishSlot(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
+			if record.Phase == "repairing" {
+				if err := replaceCurrent(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
+					return err
+				}
+			} else if err := publishSlot(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
 				return err
 			}
 		}
