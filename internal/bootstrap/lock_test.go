@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"bufio"
+	"context"
 	"os"
 	"os/exec"
 	"testing"
@@ -19,7 +20,7 @@ func TestLockDirectoryRejectsSecondProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	dir := t.TempDir()
-	helper := exec.Command(os.Args[0], "-test.run=^TestLockDirectoryRejectsSecondProcess$") // #nosec G204,G702 -- same test binary.
+	helper := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestLockDirectoryRejectsSecondProcess$") // #nosec G204,G702 -- same test binary.
 	helper.Env = append(os.Environ(), "PUNARO_BOOTSTRAP_LOCK_DIR="+dir)
 	stdin, err := helper.StdinPipe()
 	if err != nil {
