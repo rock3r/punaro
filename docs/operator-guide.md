@@ -10,7 +10,10 @@ For the supported server/client installation sequence, see the
 [installation guide](installation.md). The server installer creates only the
 loopback systemd relay and its owner-controlled configuration; Cloudflare
 Tunnel, Access, machine enrollment, and attachment release gates remain
-explicit operator actions.
+explicit operator actions. Published native artifacts and the unsigned
+catalog/manifest pair live on GitHub Releases; see
+[github-releases.md](github-releases.md). `punaro-bootstrap` is not
+implemented yet, and unsigned draft assets are not an automatic update source.
 
 ## Run locally
 

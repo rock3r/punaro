@@ -3,6 +3,7 @@
 !.env.example
 data/
 bin/
+/dist/
 /punarod
 coverage.out
 *.pem

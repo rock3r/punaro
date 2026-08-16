@@ -1,0 +1,137 @@
+# GitHub Releases origin
+
+Punaro's public artifact origin is GitHub Releases. This is the fixed source
+`punaro-bootstrap` will pull from. The gateway may name a signed release; it
+never supplies a download URL, installer script, or unsigned `latest` pointer.
+
+This is the release-trust slice of
+[`client-lifecycle-compatibility-recovery-rfc.md`](client-lifecycle-compatibility-recovery-rfc.md).
+It is not yet a signed official release and does not implement bootstrap,
+fleet rollout, or the recovery HTTP surface.
+
+## Fixed origin
+
+```text
+https://github.com/rock3r/punaro/releases/download
+```
+
+Relative paths beneath that origin are the only names bootstrap may request.
+GitHub Release assets are flat; the tag is the first path component.
+
+| Path | Meaning |
+| --- | --- |
+| `catalog/punaro-catalog.json` | Short-lived catalog of currently allowed releases |
+| `catalog/punaro-catalog.sig` | Detached Ed25519 envelope for the catalog |
+| `{release}/punaro-release.json` | Immutable manifest for one named release |
+| `{release}/punaro-release.sig` | Detached Ed25519 envelope for that manifest |
+| `{release}/{component}-{os}-{arch}[.exe]` | Native artifact |
+
+`latest` is a reserved name and is rejected by the parser. There is no
+mutable latest pointer.
+
+A bootstrap honors a gateway-selected release only when a fresh verified
+catalog lists that exact release name, sequence, and manifest digest, and does
+not critically block it. A signed manifest proves artifact identity; the
+catalog proves the release is still allowed for an automatic update.
+
+## macOS signing test
+
+The `macos-notarize` workflow is `workflow_dispatch` only. It builds
+`darwin/arm64` with CGO, imports the Developer ID Application certificate,
+signs each binary under `dev.sebastiano.punaro.<component>`, wraps them in a
+UDZO DMG (the only staple-able container we ship today), notarizes with the
+Apple ID + app-specific password, and staples the ticket. It uploads the DMG
+as a workflow artifact and does not create a GitHub Release.
+
+```sh
+gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
+```
+
+## What CI publishes
+
+The `release` workflow dispatch builds:
+
+- `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`, and
+  `punaro-enroll` for `darwin/arm64`, `linux/amd64`, `linux/arm64`, and
+  `windows/amd64`
+- `punaro` and `punaro-telegram` for Linux
+
+Darwin adapter builds use `CGO_ENABLED=1` so the supported ACL path is compiled
+in. The workflow then writes unsigned `punaro-release.json` and
+`punaro-catalog.json` and creates a **draft** GitHub Release. The private
+release key is not a CI secret and is never placed in this repository.
+
+Unsigned draft bytes are a publication candidate. Bootstrap must fail closed
+until both detached signatures are present and verify against a public key
+embedded in that bootstrap.
+
+The `catalog` prerelease is overwritten with the newest unsigned catalog so
+the origin path stays stable. Replacing it does not make the catalog trusted.
+
+## Cutting a candidate
+
+1. Merge the commit you intend to ship.
+2. Run the `release` workflow with an explicit release name and sequence. Do
+   not publish by pushing a tag; the workflow is dispatch-only so the sequence
+   cannot race a live repo variable. Overlapping dispatch runs queue.
+3. Wait for the draft release and the `catalog` prerelease to appear.
+4. Generate the offline key once, on an air-gapped or owner-only machine, and
+   keep the private file `0600` off this repository:
+
+   ```sh
+   go run ./cmd/punaro-release keygen \
+     --key-id punaro-release-1 \
+     --private-key-file /absolute/private/punaro-release.key \
+     --public-key-file /absolute/private/punaro-release.pub
+   ```
+
+5. Sign the exact published bytes (download them; do not re-encode JSON):
+
+   ```sh
+   go run ./cmd/punaro-release sign \
+     --key-id punaro-release-1 \
+     --key-file /absolute/private/punaro-release.key \
+     --in punaro-release.json \
+     --out punaro-release.sig
+   go run ./cmd/punaro-release sign \
+     --key-id punaro-release-1 \
+     --key-file /absolute/private/punaro-release.key \
+     --in punaro-catalog.json \
+     --out punaro-catalog.sig
+   go run ./cmd/punaro-release verify \
+     --keys-file /absolute/private/punaro-release.pub \
+     --document punaro-release.json \
+     --signature punaro-release.sig
+   ```
+
+6. Upload the two `.sig` files to the versioned release and
+   `punaro-catalog.sig` to the `catalog` prerelease. Commit the public key set
+   into the bootstrap when that binary exists.
+7. An official maintained release still requires the
+   [security release gates](security-release-gates.md) and a
+   [release-evidence record](release-evidence/README.md). This origin does not
+   bypass those gates.
+
+## Local assembly
+
+```sh
+./scripts/build-release-artifacts.sh --output-dir ./dist
+go run ./cmd/punaro-release assemble \
+  --dir ./dist \
+  --release v0.1.0 \
+  --sequence 1 \
+  --catalog-sequence 1
+go run ./cmd/punaro-release validate --dir ./dist
+```
+
+`assemble` hashes `deploy/compose/production.yaml` and the embedded migration
+manifest. A digest-pinned gateway image is optional until GHCR publication
+exists; when present it must be `@sha256:` and `release_sha256` must match.
+
+## Still outstanding
+
+- `punaro-bootstrap` download, slot, health, and rollback
+- embedding the production public key in that bootstrap
+- GHCR image publication and a required `image` digest
+- SBOM, provenance attestations, and offline recovery bundles
+- gateway desired-release store and fleet rollout

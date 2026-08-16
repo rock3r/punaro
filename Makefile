@@ -1,4 +1,4 @@
-.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e plugin-validate vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client
+.PHONY: test test-race test-postgres remote-mcp-e2e memory-onboarding-e2e complete-product-e2e test-real-relay-e2e plugin-validate vet staticcheck golangci windows-build vuln gosec secrets lint security ci fmt dockerfile-lint workflow-lint deployment-lint release-gates fuzz operator-binary trusted-attachment-client memory-client release-artifacts
 
 PUNARO_OPERATOR_OUTPUT ?= ./bin/punaro
 PUNARO_TRUSTED_ATTACHMENT_OUTPUT ?= ./bin/punaro-trusted-attachment
@@ -15,6 +15,9 @@ trusted-attachment-client:
 memory-client:
 	mkdir -p "$$(dirname "$(PUNARO_MEMORY_OUTPUT)")"
 	go build -trimpath -o "$(PUNARO_MEMORY_OUTPUT)" ./cmd/punaro-memory
+
+release-artifacts:
+	./scripts/build-release-artifacts.sh --output-dir ./dist
 
 test:
 	python3 ./scripts/test-agent-plugin.py

@@ -1,0 +1,167 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Product release name (vX.Y.Z)
+        required: true
+        type: string
+      sequence:
+        description: Monotonic release sequence
+        required: true
+        type: string
+      catalog_sequence:
+        description: Monotonic catalog sequence
+        required: true
+        type: string
+      draft:
+        description: Create a draft GitHub Release
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: punaro-github-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: macos-14
+            goos: darwin
+            goarch: arm64
+            cgo: '1'
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            cgo: '0'
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            cgo: '0'
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            cgo: '0'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build native artifacts
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: ./scripts/build-release-artifacts.sh --output-dir dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: punaro-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Assemble catalog and draft GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Resolve release identity
+        id: identity
+        env:
+          INPUT_RELEASE: ${{ inputs.release }}
+          INPUT_SEQUENCE: ${{ inputs.sequence }}
+          INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          release=$INPUT_RELEASE
+          sequence=$INPUT_SEQUENCE
+          catalog_sequence=$INPUT_CATALOG_SEQUENCE
+          case "$release" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) printf '%s\n' "unsupported release name: $release" >&2; exit 2 ;;
+          esac
+          case "$sequence" in
+            ''|*[!0-9]*) printf '%s\n' "sequence must be a positive integer" >&2; exit 2 ;;
+          esac
+          case "$catalog_sequence" in
+            ''|*[!0-9]*) printf '%s\n' "catalog sequence must be a positive integer" >&2; exit 2 ;;
+          esac
+          if [ "$sequence" -lt 1 ] || [ "$catalog_sequence" -lt 1 ]; then
+            printf '%s\n' 'sequences must be at least 1' >&2
+            exit 2
+          fi
+          {
+            printf 'release=%s\n' "$release"
+            printf 'sequence=%s\n' "$sequence"
+            printf 'catalog_sequence=%s\n' "$catalog_sequence"
+          } >>"$GITHUB_OUTPUT"
+      - name: Assemble unsigned catalog and manifest
+        env:
+          RELEASE: ${{ steps.identity.outputs.release }}
+          SEQUENCE: ${{ steps.identity.outputs.sequence }}
+          CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
+        run: |
+          set -eu
+          go run ./cmd/punaro-release assemble \
+            --dir dist \
+            --release "$RELEASE" \
+            --sequence "$SEQUENCE" \
+            --catalog-sequence "$CATALOG_SEQUENCE"
+          go run ./cmd/punaro-release validate --dir dist
+          if grep -Eq 'https?://' dist/punaro-release.json dist/punaro-catalog.json; then
+            printf '%s\n' 'assembled documents contain a URL' >&2
+            exit 2
+          fi
+      - name: Publish GitHub Releases
+        env:
+          RELEASE: ${{ steps.identity.outputs.release }}
+          GH_TOKEN: ${{ github.token }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          set -eu
+          notes=$(mktemp)
+          {
+            printf '%s\n' "Unsigned Punaro $RELEASE candidate from ${GITHUB_SHA}."
+            printf '%s\n' ""
+            printf '%s\n' "Bootstrap must not install these bytes until punaro-release.sig and punaro-catalog.sig are attached by the offline signing step. This workflow never holds the release key."
+            printf '%s\n' ""
+            printf '%s\n' "Fixed origin: https://github.com/rock3r/punaro/releases/download"
+          } >"$notes"
+          if gh release view "$RELEASE" >/dev/null 2>&1; then
+            printf '%s\n' "release $RELEASE already exists" >&2
+            exit 2
+          fi
+          set -- --title "Punaro $RELEASE" --notes-file "$notes"
+          if [ "$DRAFT" = true ]; then
+            set -- --draft "$@"
+          fi
+          gh release create "$RELEASE" --target "$GITHUB_SHA" "$@" dist/*
+          if gh release view catalog >/dev/null 2>&1; then
+            gh release upload catalog dist/punaro-catalog.json --clobber
+          else
+            gh release create catalog --prerelease \
+              --title "Punaro release catalog" \
+              --notes "Short-lived unsigned catalog. Bootstrap requires punaro-catalog.sig from the offline signing key." \
+              dist/punaro-catalog.json
+          fi

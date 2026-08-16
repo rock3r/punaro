@@ -1,0 +1,52 @@
+name: macos-notarize
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-notarize-staple:
+    name: Sign, notarize, and staple Darwin arm64
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Build Darwin arm64 artifacts
+        env:
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: '1'
+        run: ./scripts/build-release-artifacts.sh --output-dir dist
+      - name: Import Developer ID certificate
+        env:
+          MACOS_DEVELOPER_ID_APPLICATION_P12: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12 }}
+          MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+          MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/punaro-signing.keychain-db
+          MACOS_KEYCHAIN_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: ./scripts/import-macos-signing-cert.sh
+      - name: Sign, notarize, and staple
+        env:
+          MACOS_CODESIGN_IDENTITY: ${{ vars.MACOS_CODESIGN_IDENTITY }}
+          MACOS_BUNDLE_ID: ${{ vars.MACOS_BUNDLE_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+        run: ./scripts/sign-notarize-macos.sh --dist-dir dist --dmg dist/punaro-macos-arm64.dmg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: punaro-macos-arm64-stapled
+          path: dist/punaro-macos-arm64.dmg
+          if-no-files-found: error
+      - name: Delete signing keychain
+        if: always()
+        env:
+          MACOS_KEYCHAIN_PATH: ${{ runner.temp }}/punaro-signing.keychain-db
+        run: |
+          if [ -f "$MACOS_KEYCHAIN_PATH" ]; then
+            security delete-keychain "$MACOS_KEYCHAIN_PATH" || true
+          fi

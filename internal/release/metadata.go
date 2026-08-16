@@ -1,6 +1,8 @@
-// Package release validates local target-release metadata. Validation binds
-// exact artifact digests and compatibility boundaries; it does not fetch
-// artifacts, access a network, or claim signature or provenance verification.
+// Package release validates local target-release metadata and the public
+// signed-release catalog/manifest pair. Validation binds exact artifact
+// digests and compatibility boundaries. It does not fetch artifacts or access
+// a network. Detached Ed25519 verification is exact-byte only; it is not a
+// provenance or TUF implementation.
 package release
 
 import (

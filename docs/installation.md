@@ -11,7 +11,9 @@ installers:
 
 The scripts build from the source checkout you run them from. Use a reviewed,
 pinned checkout or a verified release artifact; do not pipe a network download
-into a shell. Neither installer accepts or prints secret values. For the
+into a shell. The future `punaro-bootstrap` pull origin is GitHub Releases,
+documented in [github-releases.md](github-releases.md). Until that bootstrap
+exists and a catalog/manifest pair is signed, install from a reviewed checkout. Neither installer accepts or prints secret values. For the
 supported fresh server path, follow the [production Compose lifecycle](production-compose.md#first-installation).
 It is the sole path that configures relay authority, device authentication,
 trusted attachment storage, memory APIs, ingress, and lifecycle recovery
