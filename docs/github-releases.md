@@ -34,6 +34,19 @@ catalog lists that exact release name, sequence, and manifest digest, and does
 not critically block it. A signed manifest proves artifact identity; the
 catalog proves the release is still allowed for an automatic update.
 
+## macOS signing test
+
+The `macos-notarize` workflow is `workflow_dispatch` only. It builds
+`darwin/arm64` with CGO, imports the Developer ID Application certificate,
+signs each binary under `dev.sebastiano.punaro.<component>`, wraps them in a
+UDZO DMG (the only staple-able container we ship today), notarizes with the
+Apple ID + app-specific password, and staples the ticket. It uploads the DMG
+as a workflow artifact and does not create a GitHub Release.
+
+```sh
+gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
+```
+
 ## What CI publishes
 
 Tag `vX.Y.Z` or the `release` workflow dispatch builds:
