@@ -1,9 +1,6 @@
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       release:
@@ -94,25 +91,12 @@ jobs:
           INPUT_RELEASE: ${{ inputs.release }}
           INPUT_SEQUENCE: ${{ inputs.sequence }}
           INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
-          REF_NAME: ${{ github.ref_name }}
-          TAG_SEQUENCE: ${{ vars.PUNARO_RELEASE_SEQUENCE }}
-          TAG_CATALOG_SEQUENCE: ${{ vars.PUNARO_CATALOG_SEQUENCE }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          if [ -n "${INPUT_RELEASE:-}" ]; then
-            release=$INPUT_RELEASE
-            sequence=$INPUT_SEQUENCE
-            catalog_sequence=$INPUT_CATALOG_SEQUENCE
-          else
-            release=$REF_NAME
-            sequence=$TAG_SEQUENCE
-            catalog_sequence=${TAG_CATALOG_SEQUENCE:-$TAG_SEQUENCE}
-            if [ -z "$sequence" ]; then
-              printf '%s\n' 'tag pushes require repo variable PUNARO_RELEASE_SEQUENCE' >&2
-              exit 2
-            fi
-          fi
+          release=$INPUT_RELEASE
+          sequence=$INPUT_SEQUENCE
+          catalog_sequence=$INPUT_CATALOG_SEQUENCE
           case "$release" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) printf '%s\n' "unsupported release name: $release" >&2; exit 2 ;;
@@ -153,7 +137,7 @@ jobs:
         env:
           RELEASE: ${{ steps.identity.outputs.release }}
           GH_TOKEN: ${{ github.token }}
-          DRAFT: ${{ github.event_name == 'push' || inputs.draft }}
+          DRAFT: ${{ inputs.draft }}
         run: |
           set -eu
           notes=$(mktemp)

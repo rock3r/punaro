@@ -49,7 +49,7 @@ gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
 
 ## What CI publishes
 
-Tag `vX.Y.Z` or the `release` workflow dispatch builds:
+The `release` workflow dispatch builds:
 
 - `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`, and
   `punaro-enroll` for `darwin/arm64`, `linux/amd64`, `linux/arm64`, and
@@ -71,11 +71,9 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
 ## Cutting a candidate
 
 1. Merge the commit you intend to ship.
-2. Run the `release` workflow with an explicit sequence (preferred). A `vX.Y.Z`
-   tag push only works if repo variables `PUNARO_RELEASE_SEQUENCE` and, if
-   different, `PUNARO_CATALOG_SEQUENCE` are already set to the next integers.
-   Advance those variables before every tag. Release publishes are serialized
-   and do not cancel an in-flight run.
+2. Run the `release` workflow with an explicit release name and sequence. Do
+   not publish by pushing a tag; the workflow is dispatch-only so the sequence
+   cannot race a live repo variable. Overlapping dispatch runs queue.
 3. Wait for the draft release and the `catalog` prerelease to appear.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
    keep the private file `0600` off this repository:
