@@ -252,10 +252,10 @@ func TestUpdateRejectsWritableAncestor(t *testing.T) {
 	}
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	parent := filepath.Join(t.TempDir(), "open")
-	if err := os.Mkdir(parent, 0o777); err != nil {
+	if err := os.Mkdir(parent, 0o777); err != nil { // #nosec G301 -- the regression creates a world-writable ancestor.
 		t.Fatal(err)
 	}
-	if err := os.Chmod(parent, 0o777); err != nil {
+	if err := os.Chmod(parent, 0o777); err != nil { // #nosec G302 -- the regression creates a world-writable ancestor.
 		t.Fatal(err)
 	}
 	dir := filepath.Join(parent, "state")
