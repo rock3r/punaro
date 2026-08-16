@@ -330,6 +330,9 @@ func Status(directory string) (State, error) {
 	if _, err := os.Lstat(directory); os.IsNotExist(err) {
 		return State{}, nil
 	}
+	if err := prepareDirectory(directory); err != nil {
+		return State{}, err
+	}
 	unlock, err := lockDirectory(directory)
 	if err != nil {
 		return State{}, err

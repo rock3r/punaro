@@ -57,6 +57,9 @@ func ancestorWritableByBroadSID(path string, world, authenticated *windows.SID) 
 		if windows.GetAce(dacl, i, &ace) != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
 			continue
 		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
+		}
 		if ace.Mask&windows.ACCESS_MASK(windowsAncestorWriteMask) == 0 {
 			continue
 		}
