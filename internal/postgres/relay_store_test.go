@@ -80,3 +80,14 @@ func TestPostgresOccupancyLockSQLUsesForUpdateInStableOrder(t *testing.T) {
 		t.Fatalf("endpoint lock order=%v", endpoints)
 	}
 }
+
+func TestPostgresControlMemberLeaseSQLDoesNotLockEndpoint(t *testing.T) {
+	// Bind locks exclusive conversations then the session. Control must take
+	// occupancy (conversation then endpoint) before any member-lease lock.
+	if strings.Contains(postgresControlMemberLeaseSQL(), "FOR UPDATE") {
+		t.Fatalf("control member lease must not lock the endpoint before occupancy: %s", postgresControlMemberLeaseSQL())
+	}
+	if !strings.Contains(postgresControlMemberLeaseSQL(), "lease_until") {
+		t.Fatalf("control member lease omitted live-lease read: %s", postgresControlMemberLeaseSQL())
+	}
+}
