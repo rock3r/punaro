@@ -36,7 +36,8 @@ type Artifact struct {
 }
 
 // ReleaseManifest is the immutable public document for one named release.
-type ReleaseManifest struct {
+// The name stays distinct from the existing gateway Metadata type.
+type ReleaseManifest struct { //nolint:revive // distinct from postgres Manifest and gateway Metadata.
 	Schema                  int64         `json:"schema"`
 	Sequence                int64         `json:"sequence"`
 	Release                 string        `json:"release"`

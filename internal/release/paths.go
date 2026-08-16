@@ -11,10 +11,14 @@ const (
 	GitHubReleaseOrigin = "https://github.com/rock3r/punaro/releases/download"
 	// CatalogReleaseName is the dedicated GitHub Release tag that holds the
 	// short-lived signed catalog. It is not a product release.
-	CatalogReleaseName   = "catalog"
-	ReleaseManifestFile  = "punaro-release.json"
+	CatalogReleaseName = "catalog"
+	// ReleaseManifestFile is the immutable public manifest asset name.
+	ReleaseManifestFile = "punaro-release.json"
+	// ReleaseSignatureFile is the detached signature for ReleaseManifestFile.
 	ReleaseSignatureFile = "punaro-release.sig"
-	CatalogFile          = "punaro-catalog.json"
+	// CatalogFile is the short-lived public catalog asset name.
+	CatalogFile = "punaro-catalog.json"
+	// CatalogSignatureFile is the detached signature for CatalogFile.
 	CatalogSignatureFile = "punaro-catalog.sig"
 
 	maxPathComponent  = 128

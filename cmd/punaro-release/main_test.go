@@ -13,10 +13,10 @@ import (
 func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	dir := t.TempDir()
 	artifacts := filepath.Join(dir, "artifacts")
-	if err := os.Mkdir(artifacts, 0o755); err != nil {
+	if err := os.Mkdir(artifacts, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(artifacts, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(artifacts, "punaro-adapter-linux-amd64"), []byte("adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	compose := filepath.Join(dir, "production.yaml")
@@ -52,7 +52,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err := run([]string{"verify", "--keys-file", publicPath, "--document", manifestPath, "--signature", signaturePath}); err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := os.ReadFile(manifestPath)
+	manifest, err := os.ReadFile(manifestPath) // #nosec G304 -- assembled file in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if parsed.MinimumBootstrapRelease != "v0.1.0" {
 		t.Fatalf("minimum bootstrap=%q", parsed.MinimumBootstrapRelease)
 	}
-	catalog, err := os.ReadFile(filepath.Join(artifacts, punarorelease.CatalogFile))
+	catalog, err := os.ReadFile(filepath.Join(artifacts, punarorelease.CatalogFile)) // #nosec G304 -- assembled file in t.TempDir.
 	if err != nil {
 		t.Fatal(err)
 	}

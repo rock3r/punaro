@@ -12,11 +12,11 @@ import (
 func TestAssembleWritesCatalogAndManifestForScannedArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	adapter := []byte("adapter-bytes-for-release-assemble")
-	if err := os.WriteFile(filepath.Join(dir, "punaro-adapter-darwin-arm64"), adapter, 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "punaro-adapter-darwin-arm64"), adapter, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	windows := []byte("windows-adapter")
-	if err := os.WriteFile(filepath.Join(dir, "punaro-adapter-windows-amd64.exe"), windows, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "punaro-adapter-windows-amd64.exe"), windows, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	assembled, err := Assemble(AssembleRequest{
@@ -71,7 +71,7 @@ func TestAssembleWritesCatalogAndManifestForScannedArtifacts(t *testing.T) {
 
 func TestAssembleRejectsUnexpectedFilenamesAndAbsoluteArtifactPaths(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "latest"), []byte("nope"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "latest"), []byte("nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Assemble(AssembleRequest{

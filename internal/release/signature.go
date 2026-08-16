@@ -8,6 +8,7 @@ import (
 )
 
 const (
+	// MaximumEnvelopeBytes bounds one detached signature envelope.
 	MaximumEnvelopeBytes = 8 << 10
 	maxSignatures        = 4
 	ed25519SignatureSize = ed25519.SignatureSize

@@ -112,9 +112,11 @@ func Assemble(request AssembleRequest) (Assembled, error) {
 	if err != nil {
 		return Assembled{}, err
 	}
+	// #nosec G306 -- these documents are published next to the artifacts.
 	if err := os.WriteFile(filepath.Join(request.Directory, ReleaseManifestFile), manifestJSON, 0o644); err != nil {
 		return Assembled{}, err
 	}
+	// #nosec G306 -- these documents are published next to the artifacts.
 	if err := os.WriteFile(filepath.Join(request.Directory, CatalogFile), catalogJSON, 0o644); err != nil {
 		return Assembled{}, err
 	}
