@@ -206,7 +206,7 @@ func completeRollback(directory string, target slotState) error {
 		if err != nil {
 			return err
 		}
-		if currentSlotState.Release == target.Release && currentSlotState.Sequence == target.Sequence {
+		if currentSlotState.Release == target.Release && currentSlotState.Sequence == target.Sequence && currentSlotState.ManifestSHA256 == target.ManifestSHA256 {
 			if swapExists && !previousExists {
 				if err := os.Rename(swap, previous); err != nil {
 					return err
@@ -353,11 +353,36 @@ func readSlot(directory string) (slotState, error) {
 	if err != nil {
 		return slotState{}, err
 	}
-	var slot slotState
-	if err := json.Unmarshal(body, &slot); err != nil {
+	slot, err := parseSlot(body)
+	if err != nil {
 		return slotState{}, err
 	}
 	return slot, nil
+}
+
+func parseSlot(body []byte) (slotState, error) {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var slot slotState
+	if err := decoder.Decode(&slot); err != nil {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || !validManifestDigest(slot.ManifestSHA256) {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	return slot, nil
+}
+
+func validManifestDigest(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func requireRealDir(path string) error {
@@ -413,16 +438,17 @@ func writeAtomic(path string, body []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
 	if err := file.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Chmod(tmp, mode); err != nil {
 		_ = os.Remove(tmp)
 		return err
 	}

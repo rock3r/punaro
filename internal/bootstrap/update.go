@@ -157,6 +157,26 @@ func Update(request Request) (Result, error) {
 	if accepted.ReleaseSequence > 0 && manifest.Sequence < accepted.ReleaseSequence {
 		return Result{}, errors.New("release sequence downgrade")
 	}
+	if accepted.ReleaseSequence == manifest.Sequence && accepted.ManifestSHA256 != "" && accepted.ManifestSHA256 != listed.ManifestSHA256 {
+		return Result{}, errors.New("release identity mismatch")
+	}
+	published := acceptedState{
+		Schema:          1,
+		Release:         manifest.Release,
+		ReleaseSequence: manifest.Sequence,
+		CatalogSequence: catalog.Sequence,
+		ManifestSHA256:  listed.ManifestSHA256,
+	}
+	current, err := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
+	if err != nil {
+		return Result{}, err
+	}
+	if current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256 {
+		if err := finishPublication(request.Directory, published); err != nil {
+			return Result{}, err
+		}
+		return Result{Release: published.Release, Sequence: published.ReleaseSequence, Manifest: published.ManifestSHA256}, nil
+	}
 	artifacts := platformArtifacts(manifest.Artifacts, request.GOOS, request.GOARCH)
 	if len(artifacts) == 0 {
 		return Result{}, errors.New("release has no artifacts for this platform")
@@ -192,13 +212,6 @@ func Update(request Request) (Result, error) {
 			return Result{}, err
 		}
 		installed = append(installed, name)
-	}
-	published := acceptedState{
-		Schema:          1,
-		Release:         manifest.Release,
-		ReleaseSequence: manifest.Sequence,
-		CatalogSequence: catalog.Sequence,
-		ManifestSHA256:  listed.ManifestSHA256,
 	}
 	if err := writeJournal(request.Directory, journal{
 		Schema:          1,

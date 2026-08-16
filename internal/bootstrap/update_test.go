@@ -89,6 +89,25 @@ func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	}
 }
 
+func TestUpdateDoesNotRotateIdenticalCurrent(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := t.TempDir()
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" || status.Previous != "" {
+		t.Fatalf("identical update rotated slots: %#v", status)
+	}
+}
+
 func TestRollbackSwapsPublishedSlots(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
 	dir := t.TempDir()

@@ -169,6 +169,12 @@ func TestRecoverJournalDoesNotReswapCompletedRollback(t *testing.T) {
 	}
 }
 
+func TestParseSlotRejectsEmptyRecord(t *testing.T) {
+	if _, err := parseSlot([]byte(`{}`)); err == nil {
+		t.Fatal("empty slot record accepted")
+	}
+}
+
 func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "journal.json.tmp"), []byte("stale"), 0o600); err != nil {

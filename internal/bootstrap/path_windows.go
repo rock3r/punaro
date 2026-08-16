@@ -5,6 +5,9 @@ package bootstrap
 import (
 	"errors"
 	"os"
+	"path/filepath"
+
+	"golang.org/x/sys/windows"
 )
 
 func requireTrustedBootstrapDirectory(path string) error {
@@ -12,5 +15,16 @@ func requireTrustedBootstrapDirectory(path string) error {
 	if err != nil || !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
-	return nil
+	current := filepath.Clean(path)
+	for {
+		attributes, err := windows.GetFileAttributes(windows.StringToUTF16Ptr(current))
+		if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			return errors.New("bootstrap directory is invalid")
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
 }
