@@ -115,7 +115,10 @@ func TestReleaseToolAppendsSecondSignature(t *testing.T) {
 	if err := run([]string{"sign", "--key-id", "punaro-release-1", "--key-file", firstPriv, "--in", document, "--out", firstSig}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"sign", "--key-id", "punaro-release-2", "--key-file", secondPriv, "--in", document, "--signature", firstSig, "--out", bothSig}); err != nil {
+	if err := run([]string{"sign", "--key-id", "punaro-release-2", "--key-file", secondPriv, "--in", document, "--signature", firstSig, "--out", bothSig}); err == nil {
+		t.Fatal("append without verifying keys accepted")
+	}
+	if err := run([]string{"sign", "--key-id", "punaro-release-2", "--key-file", secondPriv, "--in", document, "--signature", firstSig, "--keys-file", firstPub, "--out", bothSig}); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"verify", "--keys-file", firstPub, "--document", document, "--signature", bothSig}); err != nil {

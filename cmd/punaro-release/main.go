@@ -181,11 +181,15 @@ func runSign(args []string) error {
 	keyFile := flags.String("key-file", "", "offline private key file")
 	input := flags.String("in", "", "document to sign")
 	existing := flags.String("signature", "", "existing envelope to append to")
+	keysFile := flags.String("keys-file", "", "public keys that must already verify --signature")
 	output := flags.String("out", "", "detached signature path (must not exist)")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release signing is invalid")
 	}
 	if flags.NArg() != 0 || *keyID == "" || *keyFile == "" || *input == "" || *output == "" {
+		return errors.New("release signing is invalid")
+	}
+	if *existing != "" && *keysFile == "" {
 		return errors.New("release signing is invalid")
 	}
 	privateBody, err := os.ReadFile(*keyFile) // #nosec G304 -- explicit offline signing key path.
@@ -208,6 +212,17 @@ func runSign(args []string) error {
 		}
 		parsed, err := punarorelease.ParseEnvelope(prior)
 		if err != nil {
+			return err
+		}
+		keysBody, err := os.ReadFile(*keysFile) // #nosec G304 -- explicit public key set path.
+		if err != nil {
+			return errors.New("release signing is invalid")
+		}
+		keys, err := punarorelease.ParsePublicKeys(keysBody)
+		if err != nil {
+			return err
+		}
+		if err := punarorelease.Verify(document, parsed, keys); err != nil {
 			return err
 		}
 		envelope, err = punarorelease.AppendSignature(parsed, document, *keyID, private)
@@ -325,7 +340,12 @@ func writeExclusiveFile(path string, body []byte, mode os.FileMode) error {
 	}
 	if _, err := file.Write(body); err != nil {
 		_ = file.Close()
+		_ = os.Remove(path)
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }

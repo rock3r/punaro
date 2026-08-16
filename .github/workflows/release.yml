@@ -91,6 +91,8 @@ jobs:
           INPUT_SEQUENCE: ${{ inputs.sequence }}
           INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
           REF_NAME: ${{ github.ref_name }}
+          TAG_SEQUENCE: ${{ vars.PUNARO_RELEASE_SEQUENCE }}
+          TAG_CATALOG_SEQUENCE: ${{ vars.PUNARO_CATALOG_SEQUENCE }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
@@ -100,8 +102,12 @@ jobs:
             catalog_sequence=$INPUT_CATALOG_SEQUENCE
           else
             release=$REF_NAME
-            sequence=$(gh release list --limit 1000 --json tagName --jq '[.[] | select(.tagName|test("^v[0-9]"))] | length + 1')
-            catalog_sequence=$sequence
+            sequence=$TAG_SEQUENCE
+            catalog_sequence=${TAG_CATALOG_SEQUENCE:-$TAG_SEQUENCE}
+            if [ -z "$sequence" ]; then
+              printf '%s\n' 'tag pushes require repo variable PUNARO_RELEASE_SEQUENCE' >&2
+              exit 2
+            fi
           fi
           case "$release" in
             v[0-9]*.[0-9]*.[0-9]*) ;;
