@@ -989,9 +989,9 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 2. Advertises only currently attached sessions to Punaro with a renewable lease.
 3. Converts inbound Punaro messages to local mailbox messages, preserving
    `punaro_message_id`, conversation ID, `from_participant`, `in_reply_to_*`,
-   and `telegram_thread_id`. When `from_participant` is set, the envelope
-   `from_endpoint` is rewritten to `user-telegram`. Agents cannot set those
-   metadata fields on `POST /v1/conversations/{id}/messages`.
+   and `telegram_thread_id`. When `from_participant` is `user-telegram`, the
+   envelope `from_endpoint` is rewritten to `user-telegram`. Agents cannot set
+   those metadata fields on `POST /v1/conversations/{id}/messages`.
 4. Watches local replies and major-update events, then submits them to Punaro.
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.

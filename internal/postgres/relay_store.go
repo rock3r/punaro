@@ -2028,10 +2028,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if err != nil {
 		return relay.DeliveryLeasePage{}, errors.New("message metadata schema is unavailable")
 	}
-	messageColumns := `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role`
-	if metadataAvailable {
-		messageColumns = `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.from_participant,message.in_reply_to_message_id,message.in_reply_to_endpoint,message.telegram_thread_id,message.body,message.created_at,sender.from_role`
-	}
+	messageColumns := postgresLeaseMessageColumns(metadataAvailable)
 	query := `SELECT delivery.id::text,delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
 		` + messageColumns + `
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
@@ -2496,13 +2493,21 @@ func postgresApplyDirectSender(message *relay.Message, fromRole sql.NullString) 
 	}
 }
 
+func postgresLeaseMessageColumns(metadataAvailable bool) string {
+	if metadataAvailable {
+		return `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.from_participant,message.in_reply_to_message_id,message.in_reply_to_endpoint,message.telegram_thread_id,message.body,message.created_at,sender.from_role`
+	}
+	return `message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role`
+}
+
 func postgresMessageMetadataAvailable(q queryer) (bool, error) {
 	var available bool
-	if err := q.QueryRowContext(context.Background(), `SELECT EXISTS (
-		SELECT 1 FROM pg_attribute
+	if err := q.QueryRowContext(context.Background(), `SELECT (
+		SELECT COUNT(*) FROM pg_attribute
 		WHERE attrelid = to_regclass('relay.mail_messages')
-		  AND attname = 'from_participant' AND attnum > 0 AND NOT attisdropped
-	)`).Scan(&available); err != nil {
+		  AND attname IN ('from_participant','in_reply_to_message_id','in_reply_to_endpoint','telegram_thread_id')
+		  AND attnum > 0 AND NOT attisdropped
+	) = 4`).Scan(&available); err != nil {
 		return false, err
 	}
 	return available, nil

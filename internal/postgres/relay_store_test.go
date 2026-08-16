@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+func TestPostgresLeaseMessageColumnsIncludeMetadataWhenPresent(t *testing.T) {
+	if got := postgresLeaseMessageColumns(false); strings.Contains(got, "from_participant") || strings.Contains(got, "telegram_thread_id") {
+		t.Fatalf("pre-046 lease columns included metadata: %s", got)
+	}
+	got := postgresLeaseMessageColumns(true)
+	last := -1
+	for _, column := range []string{"from_participant", "in_reply_to_message_id", "in_reply_to_endpoint", "telegram_thread_id"} {
+		idx := strings.Index(got, "message."+column)
+		if idx < 0 || idx < last {
+			t.Fatalf("lease columns missing or out of order %s: %s", column, got)
+		}
+		last = idx
+	}
+}
+
 func TestPostgresConversationEndpointLockOrder(t *testing.T) {
 	endpoints := map[string]struct{}{
 		"agent/z": {},

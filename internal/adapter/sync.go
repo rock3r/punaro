@@ -237,8 +237,8 @@ func (s *Syncer) forwardAndAcknowledge(ctx context.Context, endpoint string, del
 
 func inboundEnvelope(delivery relay.Delivery) InboundMessage {
 	fromEndpoint := delivery.Message.FromEndpoint
-	// Durable from_endpoint stays telegram/primary; the mailbox identity is the participant.
-	if delivery.Message.FromParticipant != "" {
+	// Durable from_endpoint stays telegram/primary; only the built-in human label is rewritten.
+	if delivery.Message.FromParticipant == relay.TelegramUserParticipant {
 		fromEndpoint = relay.TelegramUserParticipant
 	}
 	return InboundMessage{

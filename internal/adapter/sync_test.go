@@ -124,6 +124,35 @@ func TestSyncOnceCopiesTelegramInboundMetadataAndRewritesFromEndpoint(t *testing
 	}
 }
 
+func TestSyncOnceDoesNotRewriteFromEndpointForUnknownParticipant(t *testing.T) {
+	t.Parallel()
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{attached: []string{"agent/reviewer"}}
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/reviewer": {{
+		ID: "delivery-1",
+		Message: relay.Message{
+			ID:              "message-1",
+			ConversationID:  "conversation-1",
+			FromEndpoint:    "agent/sender",
+			FromParticipant: "not-a-participant",
+			Body:            "ship it",
+		},
+		LeaseToken:      "lease",
+		LeaseGeneration: 1,
+	}}}}
+	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal}
+	if err := sync.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailbox.sent) != 1 || mailbox.sent[0].FromEndpoint != "agent/sender" || mailbox.sent[0].FromParticipant != "not-a-participant" {
+		t.Fatalf("mailbox sent = %#v", mailbox.sent)
+	}
+}
+
 func TestSyncOnceDoesNotAcknowledgeWhenMailboxInjectionFails(t *testing.T) {
 	t.Parallel()
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
