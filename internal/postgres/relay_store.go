@@ -179,15 +179,30 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	if !rolesAvailable {
 		return relay.ErrForbidden
 	}
-	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
-	if err != nil {
-		return err
-	}
 	var owner string
 	if err := tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1`, role).Scan(&owner); errors.Is(err, sql.ErrNoRows) || owner != machineID {
 		return relay.ErrForbidden
 	} else if err != nil {
 		return errors.New("durable role ownership is unavailable")
+	}
+	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	if err != nil {
+		return errors.New("conversation display name schema is unavailable")
+	}
+	var exclusiveIDs []string
+	if namesAvailable {
+		exclusiveIDs, err = postgresExclusiveConversationIDsForRole(tx, role, namesAvailable)
+		if err != nil {
+			return err
+		}
+	}
+	// Conversations first, then the session, so bind and rename share one lock order.
+	if err := postgresLockOccupancy(tx, exclusiveIDs, map[string]struct{}{endpoint: {}}); err != nil {
+		return err
+	}
+	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
+	if err != nil {
+		return err
 	}
 	var endpointUntil time.Time
 	if err := tx.QueryRowContext(context.Background(), `SELECT lease_until FROM relay.mail_endpoints WHERE endpoint=$1`, endpoint).Scan(&endpointUntil); err != nil {
@@ -761,6 +776,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230610))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.ControlEvent{}, false, errors.New("control retry lock is unavailable")
 	}
+	// Shared with rename so occupancy mutations on one room serialize.
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
 		return relay.ControlEvent{}, false, errors.New("control conversation lock is unavailable")
 	}
@@ -819,14 +835,8 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		if members >= 256 {
 			return relay.ControlEvent{}, false, relay.ErrConflict
 		}
-		exclusive, exclusiveErr := postgresConversationIsExclusive(tx, input.ConversationID)
-		if exclusiveErr != nil {
-			return relay.ControlEvent{}, false, exclusiveErr
-		}
-		if exclusive {
-			if err := postgresSessionOccupiesOtherExclusiveConversation(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
-				return relay.ControlEvent{}, false, err
-			}
+		if err := postgresLockOccupancy(tx, []string{input.ConversationID}, map[string]struct{}{input.Member.Endpoint: {}}); err != nil {
+			return relay.ControlEvent{}, false, err
 		}
 	}
 	if (input.Operation == relay.ControlRemoveMember || (err == nil && previous&relay.CapAdmin != 0 && input.Member.Capabilities&relay.CapAdmin == 0)) && previous&relay.CapAdmin != 0 {
@@ -849,6 +859,17 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		}
 	}
 	if input.Operation == relay.ControlUpsertMember {
+		if errors.Is(err, sql.ErrNoRows) {
+			exclusive, exclusiveErr := postgresConversationIsExclusive(tx, input.ConversationID)
+			if exclusiveErr != nil {
+				return relay.ControlEvent{}, false, exclusiveErr
+			}
+			if exclusive {
+				if occErr := postgresSessionOccupiesOtherExclusiveConversation(tx, input.Member.Endpoint, input.ConversationID, input.Now); occErr != nil {
+					return relay.ControlEvent{}, false, occErr
+				}
+			}
+		}
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3) ON CONFLICT(conversation_id,endpoint) DO UPDATE SET capabilities=excluded.capabilities`, input.ConversationID, input.Member.Endpoint, input.Member.Capabilities); err != nil {
 			return relay.ControlEvent{}, false, relayDatabaseError(err, "upsert conversation member")
 		}
@@ -967,7 +988,8 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230612))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, false, errors.New("display name retry lock is unavailable")
 	}
-	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230613))`, input.ConversationID); err != nil {
+	// Same occupancy conversation fence as control upsert.
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
 		return relay.Conversation{}, false, errors.New("display name conversation lock is unavailable")
 	}
 	if _, err := postgresEndpointOwnershipLocked(tx, input.ActorEndpoint, input.ActorMachineID, input.Now); err != nil {
@@ -1095,6 +1117,88 @@ func postgresExclusiveConversationPredicate(alias string, namesAvailable bool) s
 	return "(" + alias + ".display_name IS NOT NULL AND " + alias + ".display_name <> '')"
 }
 
+func postgresNullableUUID(id string) any {
+	if id == "" {
+		return nil
+	}
+	return id
+}
+
+func postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable bool) string {
+	query := `SELECT EXISTS (
+		SELECT 1 FROM relay.mail_memberships AS membership
+		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
+		WHERE membership.endpoint = $1
+		  AND ($2::uuid IS NULL OR membership.conversation_id <> $2::uuid)
+		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
+	if rolesAvailable {
+		query += `
+		UNION ALL
+		SELECT 1 FROM relay.mail_role_bindings AS binding
+		JOIN relay.mail_role_memberships AS membership ON membership.role = binding.role
+		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
+		JOIN relay.mail_endpoints AS live ON live.endpoint = binding.session_endpoint
+		WHERE binding.session_endpoint = $1
+		  AND binding.lease_until > $3
+		  AND live.machine_id = binding.machine_id
+		  AND live.ownership_generation = binding.ownership_generation
+		  AND live.lease_until > $3
+		  AND ($2::uuid IS NULL OR membership.conversation_id <> $2::uuid)
+		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
+	}
+	return query + `)`
+}
+
+func postgresConversationOccupancyLockSQL() string {
+	return `SELECT id FROM relay.mail_conversations WHERE id=$1::uuid FOR UPDATE`
+}
+
+func postgresEndpointOccupancyLockSQL() string {
+	return `SELECT endpoint FROM relay.mail_endpoints WHERE endpoint=$1 FOR UPDATE`
+}
+
+func postgresOccupancyLockOrder(conversationIDs []string, endpoints map[string]struct{}) ([]string, []string) {
+	seen := make(map[string]struct{}, len(conversationIDs))
+	orderedConversations := make([]string, 0, len(conversationIDs))
+	for _, id := range conversationIDs {
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		orderedConversations = append(orderedConversations, id)
+	}
+	sort.Strings(orderedConversations)
+	return orderedConversations, postgresSortedEndpoints(endpoints)
+}
+
+func postgresLockOccupancy(tx *sql.Tx, conversationIDs []string, endpoints map[string]struct{}) error {
+	orderedConversations, orderedEndpoints := postgresOccupancyLockOrder(conversationIDs, endpoints)
+	for _, conversationID := range orderedConversations {
+		var id string
+		err := tx.QueryRowContext(context.Background(), postgresConversationOccupancyLockSQL(), conversationID).Scan(&id)
+		if errors.Is(err, sql.ErrNoRows) {
+			return relay.ErrForbidden
+		}
+		if err != nil {
+			return errors.New("conversation occupancy lock is unavailable")
+		}
+	}
+	for _, endpoint := range orderedEndpoints {
+		var locked string
+		err := tx.QueryRowContext(context.Background(), postgresEndpointOccupancyLockSQL(), endpoint).Scan(&locked)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return errors.New("endpoint occupancy lock is unavailable")
+		}
+	}
+	return nil
+}
+
 func postgresConversationIsExclusive(tx *sql.Tx, conversationID string) (bool, error) {
 	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
 	if err != nil {
@@ -1129,33 +1233,13 @@ func postgresSessionOccupiesOtherExclusiveConversation(tx *sql.Tx, endpoint, exc
 	if err != nil {
 		return errors.New("durable role bindings are unavailable")
 	}
-	query := `SELECT EXISTS (
-		SELECT 1 FROM relay.mail_memberships AS membership
-		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
-		WHERE membership.endpoint = $1
-		  AND ($2 = '' OR membership.conversation_id <> $2::uuid)
-		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
-	if rolesAvailable {
-		query += `
-		UNION ALL
-		SELECT 1 FROM relay.mail_role_bindings AS binding
-		JOIN relay.mail_role_memberships AS membership ON membership.role = binding.role
-		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
-		JOIN relay.mail_endpoints AS live ON live.endpoint = binding.session_endpoint
-		WHERE binding.session_endpoint = $1
-		  AND binding.lease_until > $3
-		  AND live.machine_id = binding.machine_id
-		  AND live.ownership_generation = binding.ownership_generation
-		  AND live.lease_until > $3
-		  AND ($2 = '' OR membership.conversation_id <> $2::uuid)
-		  AND ` + postgresExclusiveConversationPredicate("conversation", namesAvailable)
-	}
-	query += `)`
+	query := postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable)
+	exclude := postgresNullableUUID(excludeConversationID)
 	var occupied bool
 	if rolesAvailable {
-		err = tx.QueryRowContext(context.Background(), query, endpoint, excludeConversationID, now.UTC()).Scan(&occupied)
+		err = tx.QueryRowContext(context.Background(), query, endpoint, exclude, now.UTC()).Scan(&occupied)
 	} else {
-		err = tx.QueryRowContext(context.Background(), query, endpoint, excludeConversationID).Scan(&occupied)
+		err = tx.QueryRowContext(context.Background(), query, endpoint, exclude).Scan(&occupied)
 	}
 	if err != nil {
 		return errors.New("exclusive conversation occupancy is unavailable")
@@ -1194,6 +1278,9 @@ func postgresRejectExclusiveCreateOccupancy(tx *sql.Tx, endpoints map[string]str
 				sessions[session] = struct{}{}
 			}
 		}
+	}
+	if err := postgresLockOccupancy(tx, nil, sessions); err != nil {
+		return err
 	}
 	for _, session := range postgresSortedEndpoints(sessions) {
 		if err := postgresSessionOccupiesOtherExclusiveConversation(tx, session, "", now); err != nil {
@@ -1242,12 +1329,52 @@ func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, n
 	if err := rows.Err(); err != nil {
 		return errors.New("conversation occupants are unavailable")
 	}
+	occupantSet := make(map[string]struct{}, len(occupants))
 	for _, endpoint := range occupants {
+		occupantSet[endpoint] = struct{}{}
+	}
+	if err := postgresLockOccupancy(tx, []string{conversationID}, occupantSet); err != nil {
+		return err
+	}
+	exclusive, exclusiveErr := postgresConversationIsExclusive(tx, conversationID)
+	if exclusiveErr != nil {
+		return exclusiveErr
+	}
+	if exclusive {
+		return nil
+	}
+	for _, endpoint := range postgresSortedEndpoints(occupantSet) {
 		if err := postgresSessionOccupiesOtherExclusiveConversation(tx, endpoint, conversationID, now); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func postgresExclusiveConversationIDsForRole(tx *sql.Tx, role string, namesAvailable bool) ([]string, error) {
+	if !namesAvailable {
+		return nil, nil
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text
+		FROM relay.mail_role_memberships AS membership
+		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
+		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable), role)
+	if err != nil {
+		return nil, errors.New("role occupancy conversations are unavailable")
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, errors.New("role occupancy conversation is malformed")
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, errors.New("role occupancy conversations are unavailable")
+	}
+	return ids, nil
 }
 
 func postgresRejectExclusiveBindOccupancy(tx *sql.Tx, sessionEndpoint, role string, now time.Time) error {
