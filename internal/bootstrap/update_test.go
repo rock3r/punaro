@@ -340,6 +340,14 @@ func TestStatusRejectsCorruptSlot(t *testing.T) {
 	}
 }
 
+func TestUpdateCreatesNestedDirectory(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := filepath.Join(t.TempDir(), "nested", "bootstrap")
+	if _, err := Update(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpdateRejectsRelativeDirectory(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
 	if _, err := Update(Request{Directory: "relative-state", Origin: origin.URL, Keys: origin.Keys, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}); err == nil {

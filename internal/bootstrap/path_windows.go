@@ -17,7 +17,21 @@ const (
 )
 
 func requireTrustedExistingAncestor(path string) error {
-	return walkTrustedWindowsAncestors(path)
+	current := filepath.Clean(path)
+	for {
+		_, err := os.Lstat(current) // #nosec G703 -- ancestor of the operator-selected bootstrap directory.
+		if err == nil {
+			return walkTrustedWindowsAncestors(current)
+		}
+		if !os.IsNotExist(err) {
+			return errors.New("bootstrap directory is invalid")
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return errors.New("bootstrap directory is invalid")
+		}
+		current = parent
+	}
 }
 
 func requireTrustedBootstrapDirectory(path string) error {
