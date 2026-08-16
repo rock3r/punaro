@@ -127,6 +127,7 @@ An attached member session may instead reserve:
 
 ```sh
 punaro-adapter claim \
+  --conversation CONVERSATION_ID \
   --from agent/workstation/session \
   --idempotency-key claim-<conversation-id>
 ```
