@@ -195,9 +195,9 @@ func utf16Slice(text string, offset, length int) string {
 // SendRichMessage sends trusted, already-rendered HTML to one exact Telegram
 // topic. It disables entity detection and protects content so opaque agent
 // text cannot create accidental mentions, links, or forwarding paths.
-func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, html string) error {
+func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, html string) (int64, error) {
 	if chatID == 0 || threadID <= 0 || strings.TrimSpace(html) == "" || len(html) > maxRichMessageBytes {
-		return fmt.Errorf("invalid Telegram rich message")
+		return 0, fmt.Errorf("invalid Telegram rich message")
 	}
 	body, err := json.Marshal(struct {
 		ChatID          int64 `json:"chat_id"`
@@ -217,30 +217,49 @@ func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, ht
 		ProtectContent: true,
 	})
 	if err != nil {
-		return fmt.Errorf("encode Telegram rich message: %w", err)
-	}
-	target := *c.base
-	target.Path = strings.TrimRight(target.Path, "/") + "/bot" + c.token + "/sendRichMessage"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build Telegram rich message: %w", err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := c.http.Do(request)
-	if err != nil {
-		return fmt.Errorf("telegram rich message failed")
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram rich message returned HTTP %d", response.StatusCode)
+		return 0, fmt.Errorf("telegram sendRichMessage failed")
 	}
 	var decoded struct {
-		OK bool `json:"ok"`
+		OK     bool `json:"ok"`
+		Result struct {
+			MessageID int64 `json:"message_id"`
+		} `json:"result"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(&decoded); err != nil || !decoded.OK {
-		return fmt.Errorf("invalid Telegram rich message response")
+	if err := c.postJSON(ctx, "sendRichMessage", body, &decoded); err != nil {
+		return 0, err
 	}
-	return nil
+	if !decoded.OK || decoded.Result.MessageID <= 0 {
+		return 0, fmt.Errorf("invalid Telegram rich message response")
+	}
+	return decoded.Result.MessageID, nil
+}
+
+// CreateForumTopic creates one private-chat forum topic and returns the Bot API
+// message_thread_id. Callers must persist that id before any later work.
+func (c *Client) CreateForumTopic(ctx context.Context, chatID int64, name string) (int64, error) {
+	if chatID == 0 || strings.TrimSpace(name) == "" {
+		return 0, fmt.Errorf("invalid telegram forum topic")
+	}
+	body, err := json.Marshal(struct {
+		ChatID int64  `json:"chat_id"`
+		Name   string `json:"name"`
+	}{ChatID: chatID, Name: name})
+	if err != nil {
+		return 0, fmt.Errorf("telegram createForumTopic failed")
+	}
+	var decoded struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			MessageThreadID int64 `json:"message_thread_id"`
+		} `json:"result"`
+	}
+	if err := c.postJSON(ctx, "createForumTopic", body, &decoded); err != nil {
+		return 0, err
+	}
+	if !decoded.OK || decoded.Result.MessageThreadID <= 0 {
+		return 0, fmt.Errorf("invalid telegram createForumTopic response")
+	}
+	return decoded.Result.MessageThreadID, nil
 }
 
 // SetMyCommands registers the operator command menu. Call it once per process.
@@ -315,6 +334,19 @@ func (c *Client) postMethod(ctx context.Context, methodName string, payload any)
 	if err != nil {
 		return fmt.Errorf("telegram %s failed", methodName)
 	}
+	var decoded struct {
+		OK bool `json:"ok"`
+	}
+	if err := c.postJSON(ctx, methodName, body, &decoded); err != nil {
+		return err
+	}
+	if !decoded.OK {
+		return fmt.Errorf("invalid telegram %s response", methodName)
+	}
+	return nil
+}
+
+func (c *Client) postJSON(ctx context.Context, methodName string, body []byte, decoded any) error {
 	target := *c.base
 	target.Path = strings.TrimRight(target.Path, "/") + "/bot" + c.token + "/" + methodName
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
@@ -330,10 +362,7 @@ func (c *Client) postMethod(ctx context.Context, methodName string, payload any)
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("telegram %s returned HTTP %d", methodName, response.StatusCode)
 	}
-	var decoded struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(&decoded); err != nil || !decoded.OK {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(decoded); err != nil {
 		return fmt.Errorf("invalid telegram %s response", methodName)
 	}
 	return nil

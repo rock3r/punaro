@@ -12,13 +12,15 @@ type recordedRichSender struct {
 	chat   int64
 	thread int64
 	html   []string
+	lastID int64
 }
 
-func (s *recordedRichSender) SendRichMessage(_ context.Context, chatID, threadID int64, html string) error {
+func (s *recordedRichSender) SendRichMessage(_ context.Context, chatID, threadID int64, html string) (int64, error) {
 	s.chat = chatID
 	s.thread = threadID
 	s.html = append(s.html, html)
-	return nil
+	s.lastID++
+	return s.lastID, nil
 }
 
 func TestSendDeliveryRoutesToExactTopicAndEscapesAgentText(t *testing.T) {
@@ -42,6 +44,27 @@ func TestSendDeliveryRoutesToExactTopicAndEscapesAgentText(t *testing.T) {
 	want := "<p><b>Reply from </b><code>agent/a&lt;unsafe&gt;</code></p><pre>&lt;script&gt;not markup&lt;/script&gt;</pre>"
 	if sender.html[0] != want {
 		t.Fatalf("html=%q\nwant=%q", sender.html[0], want)
+	}
+}
+
+func TestSendDeliveryRecordsTelegramOutboundMap(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordedRichSender{}
+	delivery := relay.Delivery{ID: "delivery-1", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}
+	if err := SendDelivery(context.Background(), state, sender, delivery); err != nil {
+		t.Fatal(err)
+	}
+	ref, found, err := state.LookupOutbound(100, 1)
+	if err != nil || !found || ref.ConversationID != "conversation-1" || ref.PunaroMessageID != "message-1" || ref.FromEndpoint != "agent/a" {
+		t.Fatalf("outbound=%#v found=%v err=%v", ref, found, err)
 	}
 }
 

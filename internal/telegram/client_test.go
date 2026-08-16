@@ -194,8 +194,44 @@ func TestClientSendsThreadBoundRichMessageWithoutAutomaticEntities(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>"); err != nil {
+	messageID, err := client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>")
+	if err != nil || messageID != 9 {
+		t.Fatalf("message_id=%d err=%v", messageID, err)
+	}
+}
+
+func TestClientCreateForumTopicReturnsThreadIDWithoutGetForumTopic(t *testing.T) {
+	t.Parallel()
+	seen := map[string]int{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen[r.URL.Path]++
+		if r.Method != http.MethodPost || r.URL.Path != "/botsecret/createForumTopic" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		defer func() { _ = r.Body.Close() }()
+		var request struct {
+			ChatID int64  `json:"chat_id"`
+			Name   string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ChatID != 55 || request.Name != "How is it going" {
+			t.Fatalf("createForumTopic=%#v", request)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_thread_id":795446,"name":"How is it going"}}`))
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", server.Client())
+	if err != nil {
 		t.Fatal(err)
+	}
+	threadID, err := client.CreateForumTopic(context.Background(), 55, "How is it going")
+	if err != nil || threadID != 795446 {
+		t.Fatalf("thread_id=%d err=%v", threadID, err)
+	}
+	if seen["/botsecret/getForumTopic"] != 0 || seen["/botsecret/createForumTopic"] != 1 {
+		t.Fatalf("seen=%#v", seen)
 	}
 }
 
@@ -219,12 +255,19 @@ func TestClientOmitsBotTokenFromTransportErrors(t *testing.T) {
 	if strings.Contains(err.Error(), dummy) {
 		t.Fatalf("poll error leaked bot token: %v", err)
 	}
-	err = client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>")
+	_, err = client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>")
 	if err == nil {
 		t.Fatal("expected send transport error")
 	}
 	if strings.Contains(err.Error(), dummy) {
 		t.Fatalf("send error leaked bot token: %v", err)
+	}
+	_, err = client.CreateForumTopic(context.Background(), 55, "How is it going")
+	if err == nil {
+		t.Fatal("expected createForumTopic transport error")
+	}
+	if strings.Contains(err.Error(), dummy) || strings.Contains(err.Error(), "bot") {
+		t.Fatalf("createForumTopic error leaked bot token: %v", err)
 	}
 	for _, name := range []string{"setMyCommands", "sendMessage", "answerCallbackQuery"} {
 		var opErr error

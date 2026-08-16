@@ -2,8 +2,10 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -12,6 +14,7 @@ type fakeBridgeRelay struct {
 	advertised []string
 	deliveries []relay.Delivery
 	acked      []string
+	recordingClaimRelay
 }
 
 func (r *fakeBridgeRelay) Advertise(_ context.Context, endpoints []string) error {
@@ -58,5 +61,100 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 	}
 	if next != 11 || submitted != 1 || len(relayClient.advertised) != 1 || relayClient.advertised[0] != "telegram/gateway" || len(relayClient.acked) != 1 || relayClient.acked[0] != "delivery-1" || len(richSender.html) != 1 {
 		t.Fatalf("next=%d submitted=%d advertised=%#v acked=%#v sent=%#v", next, submitted, relayClient.advertised, relayClient.acked, richSender.html)
+	}
+}
+
+func TestBridgeResumesIncompleteClaimAndStartsPendingWithoutLocalRow(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, err := state.InsertPendingExecution("conversation-resume", "Resume room"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-resume", 11); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{recordingClaimRelay: recordingClaimRelay{
+		claim:   relay.TelegramClaim{ConversationID: "conversation-pending", Status: "pending", DisplayName: "Pending room"},
+		pending: []relay.TelegramClaim{{ConversationID: "conversation-pending", Status: "pending", DisplayName: "Pending room"}},
+	}}
+	topics := &recordingTopicCreator{threadID: 22}
+	var logs []string
+	executor := &ClaimExecutor{State: state, Relay: relayClient, Topics: topics, AllowedUserID: 55, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
+	bridge := Bridge{
+		Relay:    relayClient,
+		Endpoint: relay.TelegramGatewayEndpoint,
+		State:    state,
+		Poller:   fakePoller{},
+		Gateway:  Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { return nil }, Log: func(string, ...any) {}},
+		Sender:   &recordedRichSender{},
+		Claims:   executor,
+	}
+	if _, err := bridge.SyncOnce(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	resume, found, err := state.ClaimExecution("conversation-resume")
+	if err != nil || !found || resume.Phase != ClaimPhaseComplete || resume.ThreadID != 11 {
+		t.Fatalf("resume=%#v found=%v err=%v", resume, found, err)
+	}
+	pending, found, err := state.ClaimExecution("conversation-pending")
+	if err != nil || !found || pending.Phase != ClaimPhaseComplete || pending.ThreadID != 22 || !pending.SkipReserve {
+		t.Fatalf("pending=%#v found=%v err=%v", pending, found, err)
+	}
+	if len(relayClient.reserves) != 0 {
+		t.Fatalf("pending poll reserved again: %#v", relayClient.reserves)
+	}
+	if len(topics.names) != 1 || topics.names[0] != "Pending room" {
+		t.Fatalf("pending createForumTopic=%#v", topics.names)
+	}
+}
+
+func TestBridgeCallbackPersistsReservedBeforeConsumingToken(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	raw, err := state.IssueCallbackToken("conversation-1", testCallbackNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{recordingClaimRelay: recordingClaimRelay{
+		claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "Ops"},
+	}}
+	topics := &recordingTopicCreator{threadID: 33}
+	executor := &ClaimExecutor{State: state, Relay: relayClient, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	bridge := Bridge{
+		Relay:    relayClient,
+		Endpoint: relay.TelegramGatewayEndpoint,
+		State:    state,
+		Poller:   fakePoller{updates: []Update{{ID: 20, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: raw}}},
+		Gateway: Gateway{
+			AllowedUserID: 55,
+			State:         state,
+			Submit:        func(context.Context, Submission) error { t.Fatal("callback submitted"); return nil },
+			Notify:        notify,
+			Claims:        executor,
+			Now:           func() time.Time { return testCallbackNow },
+			Log:           func(string, ...any) {},
+		},
+		Sender: &recordedRichSender{},
+		Claims: executor,
+	}
+	next, err := bridge.SyncOnce(context.Background(), 20)
+	if err != nil || next != 21 {
+		t.Fatalf("next=%d err=%v", next, err)
+	}
+	if _, found, consumed, err := state.lookupCallbackToken(raw, testCallbackNow); err != nil || !found || !consumed {
+		t.Fatalf("token found=%v consumed=%v err=%v", found, consumed, err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 33 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
 	}
 }

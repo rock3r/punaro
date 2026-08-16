@@ -1,0 +1,229 @@
+package telegram
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/rock3r/punaro/internal/relay"
+)
+
+// ClaimRelay is the signed relay surface used to reserve, complete, and poll claims.
+type ClaimRelay interface {
+	ClaimConversation(ctx context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error)
+	CompleteTelegramClaim(ctx context.Context, conversationID string) (relay.TelegramClaim, error)
+	PendingTelegramClaims(ctx context.Context, limit int) ([]relay.TelegramClaim, error)
+}
+
+// TopicCreator is the Bot API surface that may create a forum topic. Adopt never uses it.
+type TopicCreator interface {
+	CreateForumTopic(ctx context.Context, chatID int64, name string) (int64, error)
+}
+
+// ClaimExecutor runs local claim_executions through createForumTopic and complete.
+type ClaimExecutor struct {
+	State         *State
+	Relay         ClaimRelay
+	Topics        TopicCreator
+	AllowedUserID int64
+	Log           func(string, ...any)
+}
+
+// GatewayClaimKey is the reserve idempotency key used when the gateway originates the row.
+func GatewayClaimKey(conversationID string) string {
+	return "gateway-claim-" + conversationID
+}
+
+// AdoptClaimKey is the reserve idempotency key used by punaro-telegram adopt.
+func AdoptClaimKey(conversationID string) string {
+	return "adopt-" + conversationID
+}
+
+// Execute advances one local execution. Failures stay retryable on the stored phase.
+func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error {
+	if e.State == nil || e.Relay == nil || strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("telegram claim executor is not configured")
+	}
+	execution, found, err := e.State.ClaimExecution(conversationID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("telegram claim execution is missing")
+	}
+	if execution.Phase == ClaimPhaseComplete {
+		return nil
+	}
+	if execution.Phase == ClaimPhaseReserved {
+		if err := e.ensurePending(ctx, &execution); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+			return err
+		}
+		if execution.ThreadID <= 0 {
+			if e.Topics == nil || e.AllowedUserID == 0 {
+				err := fmt.Errorf("telegram_create_forum_topic_failed")
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+				return err
+			}
+			name, err := relay.SanitizeConversationDisplayName(execution.DisplayName)
+			if err != nil || name == "" {
+				err := fmt.Errorf("telegram_sanitize_failed")
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+				return err
+			}
+			threadID, err := e.Topics.CreateForumTopic(ctx, e.AllowedUserID, name)
+			if err != nil || threadID <= 0 {
+				err := fmt.Errorf("telegram_create_forum_topic_failed")
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+				return err
+			}
+			if err := e.State.PersistClaimThread(conversationID, threadID); err != nil {
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_persist_thread_failed")
+				return err
+			}
+			execution.ThreadID = threadID
+			execution.Phase = ClaimPhaseTopicCreated
+		} else {
+			execution.Phase = ClaimPhaseTopicCreated
+		}
+	}
+	if execution.Phase == ClaimPhaseTopicCreated {
+		if e.AllowedUserID == 0 || execution.ThreadID <= 0 {
+			err := fmt.Errorf("telegram_route_persist_failed")
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseTopicCreated, "err="+err.Error())
+			return err
+		}
+		if err := e.State.PersistClaimRoute(e.AllowedUserID, execution.ThreadID, conversationID); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseTopicCreated, "err=telegram_route_persist_failed")
+			return err
+		}
+		execution.Phase = ClaimPhaseRoutePersisted
+	}
+	if execution.Phase == ClaimPhaseRoutePersisted {
+		if _, err := e.Relay.CompleteTelegramClaim(ctx, conversationID); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseRoutePersisted, "err=telegram_complete_failed")
+			return fmt.Errorf("telegram_complete_failed")
+		}
+		if err := e.State.MarkClaimComplete(conversationID); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseRoutePersisted, "err=telegram_complete_failed")
+			return err
+		}
+		e.logEvent("telegram_claim_completed", "conversation_id="+conversationID)
+	}
+	return nil
+}
+
+func (e ClaimExecutor) ensurePending(ctx context.Context, execution *ClaimExecution) error {
+	if execution.SkipReserve {
+		return nil
+	}
+	claim, err := e.Relay.ClaimConversation(ctx, execution.ConversationID, relay.TelegramGatewayEndpoint, GatewayClaimKey(execution.ConversationID))
+	if err != nil {
+		return fmt.Errorf("telegram_reserve_failed")
+	}
+	if claim.Status != "pending" && claim.Status != "complete" {
+		return fmt.Errorf("telegram_reserve_failed")
+	}
+	if claim.DisplayName != "" {
+		execution.DisplayName = claim.DisplayName
+		if err := e.State.PersistClaimDisplayName(execution.ConversationID, claim.DisplayName); err != nil {
+			return err
+		}
+	}
+	e.logEvent("telegram_claim_reserved", "actor=gateway", "conversation_id="+execution.ConversationID)
+	return nil
+}
+
+// ResumeAll continues every local execution that is not complete.
+func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
+	executions, err := e.State.IncompleteClaimExecutions()
+	if err != nil {
+		return err
+	}
+	for _, execution := range executions {
+		if err := e.Execute(ctx, execution.ConversationID); err != nil {
+			// Keep later claims and outbound mail moving; the row stays retryable.
+			continue
+		}
+	}
+	return nil
+}
+
+// StartPending inserts reserved rows for relay-pending claims with no local execution.
+func (e ClaimExecutor) StartPending(ctx context.Context) error {
+	claims, err := e.Relay.PendingTelegramClaims(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("poll pending telegram claims: %w", err)
+	}
+	for _, claim := range claims {
+		inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			continue
+		}
+		e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
+		if err := e.Execute(ctx, claim.ConversationID); err != nil {
+			continue
+		}
+	}
+	return nil
+}
+
+// Adopt binds an existing topic_routes row to a completed claim. It never creates a topic.
+func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversationID string, logfn func(string, ...any)) error {
+	if state == nil || relayClient == nil || strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("telegram adopt is not configured")
+	}
+	_, threadID, found, err := state.RouteForConversation(conversationID)
+	if err != nil {
+		return err
+	}
+	if !found || threadID <= 0 {
+		return fmt.Errorf("telegram adopt requires an existing topic route")
+	}
+	claim, err := relayClient.ClaimConversation(ctx, conversationID, relay.TelegramGatewayEndpoint, AdoptClaimKey(conversationID))
+	if err != nil {
+		return fmt.Errorf("telegram_reserve_failed")
+	}
+	if strings.TrimSpace(claim.DisplayName) == "" {
+		return fmt.Errorf("telegram adopt requires a display name")
+	}
+	if err := state.AdoptExecution(conversationID, threadID); err != nil {
+		return err
+	}
+	if claim.Status == "complete" {
+		if err := state.MarkClaimComplete(conversationID); err != nil {
+			return err
+		}
+		logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
+		return nil
+	}
+	if _, err := relayClient.CompleteTelegramClaim(ctx, conversationID); err != nil {
+		logClaim(logfn, "telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseRoutePersisted, "err=telegram_complete_failed")
+		return fmt.Errorf("telegram_complete_failed")
+	}
+	if err := state.MarkClaimComplete(conversationID); err != nil {
+		return err
+	}
+	logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
+	return nil
+}
+
+func (e ClaimExecutor) logEvent(class string, fields ...string) {
+	logClaim(e.Log, class, fields...)
+}
+
+func logClaim(logfn func(string, ...any), class string, fields ...string) {
+	line := "telegram event class=" + class
+	if len(fields) > 0 {
+		line += " " + strings.Join(fields, " ")
+	}
+	if logfn != nil {
+		logfn("%s", line)
+		return
+	}
+	log.Printf("%s", line)
+}

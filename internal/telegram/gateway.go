@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	startHelpText       = "This bot lets you claim a Punaro topic. Send /list to see unclaimed topics, then tap one to claim it."
-	listEmptyText       = "There are no unclaimed Punaro topics right now."
-	listPromptText      = "Tap a topic to claim it."
-	callbackFailureText = "Unable to complete this action."
-	maxButtonTextRunes  = 64
+	startHelpText        = "This bot lets you claim a Punaro topic. Send /list to see unclaimed topics, then tap one to claim it."
+	listEmptyText        = "There are no unclaimed Punaro topics right now."
+	listPromptText       = "Tap a topic to claim it."
+	callbackFailureText  = "Unable to complete this action."
+	callbackAcceptedText = "Claim accepted."
+	maxButtonTextRunes   = 64
 )
 
 // Update is the small, untrusted Telegram input surface used by the gateway.
@@ -41,6 +42,7 @@ type Submission struct {
 	Text           string
 	ChatID         int64
 	ThreadID       int64
+	ReplyToID      int64
 }
 
 // OperatorNotify is the Bot API surface for operator UX. It never carries
@@ -58,14 +60,15 @@ type Gateway struct {
 	Submit        func(context.Context, Submission) error
 	ListUnclaimed func(context.Context) ([]relay.UnclaimedTopic, error)
 	Notify        OperatorNotify
+	Claims        *ClaimExecutor
 	Now           func() time.Time
 	Log           func(string, ...any)
 }
 
 // Handle never turns Telegram text into control input. Commands are accepted
-// only from a parsed bot_command entity. Callbacks stay inert until claim
-// execution exists: they are answered with a generic failure and do not
-// consume a token. Main-chat ordinary text stays unbound.
+// only from a parsed bot_command entity. A valid /list tap persists reserved
+// then consumes the token before executeClaim; execute failures stay local.
+// Main-chat ordinary text stays unbound.
 func (g Gateway) Handle(ctx context.Context, update Update) error {
 	if g.State == nil || g.Submit == nil || g.AllowedUserID == 0 {
 		return fmt.Errorf("telegram gateway is not configured")
@@ -106,7 +109,7 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 		}
 		return g.markInert(update.ID)
 	}
-	if err := g.Submit(ctx, Submission{UpdateID: update.ID, ConversationID: conversation, Text: update.Text, ChatID: update.ChatID, ThreadID: update.ThreadID}); err != nil {
+	if err := g.Submit(ctx, Submission{UpdateID: update.ID, ConversationID: conversation, Text: update.Text, ChatID: update.ChatID, ThreadID: update.ThreadID, ReplyToID: update.ReplyToID}); err != nil {
 		return fmt.Errorf("submit telegram message: %w", err)
 	}
 	if err := g.State.MarkProcessed(update.ID); err != nil {
@@ -119,17 +122,36 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 func (g Gateway) handleCallback(ctx context.Context, update Update) error {
 	if update.UserID != g.AllowedUserID || update.ChatID != g.AllowedUserID {
 		g.logEvent("telegram_update_inert", "reason=unauthorized")
-	} else {
+		g.answerCallback(ctx, update.CallbackID, callbackFailureText)
+		return g.markInert(update.ID)
+	}
+	conversation, reserved, err := g.State.ReserveClaimAndConsumeToken(update.CallbackData, g.now())
+	if err != nil {
+		return fmt.Errorf("reserve telegram claim execution: %w", err)
+	}
+	if !reserved {
 		g.logEvent("telegram_update_inert", "reason=callback")
+		g.answerCallback(ctx, update.CallbackID, callbackFailureText)
+		return g.markInert(update.ID)
 	}
-	// 6a has no executeClaim: answer generically, leave the token unused,
-	// and never stall the poll offset on a Bot API toast failure.
-	if g.Notify != nil {
-		if err := g.Notify.AnswerCallbackQuery(ctx, update.CallbackID, callbackFailureText); err != nil {
-			g.logEvent("telegram_update_inert", "reason=callback_answer")
-		}
+	g.answerCallback(ctx, update.CallbackID, callbackAcceptedText)
+	if err := g.State.MarkProcessed(update.ID); err != nil {
+		return fmt.Errorf("record telegram update: %w", err)
 	}
-	return g.markInert(update.ID)
+	g.logEvent("telegram_claim_reserved", "actor=gateway", "conversation_id="+conversation)
+	if g.Claims != nil {
+		_ = g.Claims.Execute(ctx, conversation)
+	}
+	return nil
+}
+
+func (g Gateway) answerCallback(ctx context.Context, callbackID, text string) {
+	if g.Notify == nil || callbackID == "" {
+		return
+	}
+	if err := g.Notify.AnswerCallbackQuery(ctx, callbackID, text); err != nil {
+		g.logEvent("telegram_update_inert", "reason=callback_answer")
+	}
 }
 
 func (g Gateway) handleCommand(ctx context.Context, update Update) error {

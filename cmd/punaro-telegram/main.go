@@ -54,8 +54,15 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "adopt" {
+		if err := runAdopt(os.Args[2:]); err != nil {
+			log.Printf("punaro-telegram stopped: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 {
-		log.Print("punaro-telegram stopped: unknown command (supported: route)")
+		log.Print("punaro-telegram stopped: unknown command (supported: route, adopt)")
 		os.Exit(1)
 	}
 	if err := run(); err != nil {
@@ -84,6 +91,17 @@ func parseRoute(args []string) (routeRequest, error) {
 	return request, nil
 }
 
+func parseAdopt(args []string) (string, error) {
+	flags := flag.NewFlagSet("punaro-telegram adopt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var conversation string
+	flags.StringVar(&conversation, "conversation", "", "Punaro conversation ID")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(conversation) == "" {
+		return "", fmt.Errorf("--conversation is required")
+	}
+	return conversation, nil
+}
+
 func runRoute(args []string) error {
 	request, err := parseRoute(args)
 	if err != nil {
@@ -98,7 +116,31 @@ func runRoute(args []string) error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
+	if err := state.RouteBlocked(request.chatID, request.threadID, request.conversation); err != nil {
+		return err
+	}
 	return state.SetRoute(request.chatID, request.threadID, request.conversation)
+}
+
+func runAdopt(args []string) error {
+	conversation, err := parseAdopt(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	state, err := telegram.Open(filepath.Join(cfg.stateDir, "telegram.db"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = state.Close() }()
+	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+	if err != nil {
+		return err
+	}
+	return telegram.Adopt(context.Background(), state, relayClient, conversation, nil)
 }
 
 func run() error {
@@ -122,6 +164,12 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	registerOperatorCommands(ctx, botClient.SetMyCommands)
+	claims := &telegram.ClaimExecutor{
+		State:         state,
+		Relay:         relayClient,
+		Topics:        botClient,
+		AllowedUserID: cfg.allowedUserID,
+	}
 	bridge := telegram.Bridge{
 		Relay:    relayClient,
 		Endpoint: cfg.endpoint,
@@ -130,11 +178,13 @@ func run() error {
 		Gateway: telegram.Gateway{
 			AllowedUserID: cfg.allowedUserID,
 			State:         state,
-			Submit:        telegram.SubmitToRelay(relayClient, cfg.endpoint),
+			Submit:        telegram.SubmitToRelay(relayClient, cfg.endpoint, state, nil),
 			ListUnclaimed: relayClient.ListUnclaimed,
 			Notify:        botClient,
+			Claims:        claims,
 		},
 		Sender: botClient,
+		Claims: claims,
 	}
 	var offset int64
 	for ctx.Err() == nil {

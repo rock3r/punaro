@@ -89,8 +89,30 @@ Operator commands are recognized only from Telegram `bot_command` entities:
   256-bit hex token; the gateway stores SHA-256(token) with a 15-minute TTL and
   evicts to 100 outstanding. Conversation ids never appear in Telegram.
 
-Ordinary main-chat text stays inert. A `/list` tap is answered with a generic
-failure until claim execution is deployed; the token is not consumed.
+Ordinary main-chat text stays inert. A `/list` tap persists a local
+`claim_executions` row at `reserved`, then consumes the token in the same
+transaction. Invalid, expired, or replayed tokens stay inert and receive a
+generic failure toast. After the reserved row is durable, the gateway answers
+the tap, advances the poll offset, and runs claim execution (resumed on every
+`SyncOnce` if that cycle fails).
+
+Claim execution reserves on the relay as `telegram/primary` with
+`gateway-claim-<conversation-id>` unless the row was pulled from
+`POST /v1/telegram/claims/pending` (already pending). It then calls
+`createForumTopic` once, persists the returned `message_thread_id` immediately,
+writes `topic_routes`, and completes the claim. It never calls `getForumTopic`.
+If the thread id is already stored, it is reused.
+
+Adopt an existing live route without creating a Telegram topic:
+
+```sh
+punaro-telegram adopt --conversation CONVERSATION_ID
+```
+
+Adopt requires a display name on the conversation and an existing
+`topic_routes` row. It reserves as `telegram/primary` with
+`adopt-<conversation-id>`, records the local execution at `route_persisted`,
+and completes. A reserve that already returns `status=complete` is success.
 
 ## Bind a topic to a conversation
 
@@ -115,20 +137,26 @@ punaro-telegram route \
   --conversation CONVERSATION_ID
 ```
 
-The route command rejects missing thread IDs, and durable state rejects mapping
-one conversation to multiple topics. There is no main-chat fallback. Incoming
-questions use the Telegram update ID as the durable relay idempotency key. A
-failed submission is retried; a crash after submission is safely deduplicated
-by the relay. Unauthorized, non-text, or unbound-topic updates are durably
-skipped so they cannot stall the polling offset after a restart. They are never
-routed by inference.
+The route command rejects missing thread IDs, mapping a conversation that
+already has a completed claim, or stealing a `(chat_id, thread_id)` already
+bound to a claimed conversation. Durable state also rejects mapping one
+conversation to multiple topics. There is no main-chat fallback. Incoming
+questions use the Telegram update ID as the durable relay idempotency key and
+are submitted on `telegram-inbound` as `user-telegram`. A failed submission is
+retried; a crash after submission is safely deduplicated by the relay.
+Unauthorized, non-text, or unbound-topic updates are durably skipped so they
+cannot stall the polling offset after a restart. They are never routed by
+inference. Replies resolve `reply_to_message` through a local 10,000-row
+`telegram_outbound` map of Telegram `message_id` to Punaro identities; a miss
+delivers the text without `in_reply_to_*`.
 
 Outgoing agent replies are sent using Telegram's `sendRichMessage` to that
-exact `message_thread_id`. The bridge renders opaque agent content as escaped
-HTML, disables automatic entity detection, and asks Telegram to protect
-content. Telegram has no send-idempotency key, therefore this external boundary
-is explicitly at-least-once: a crash after Telegram accepts a reply but before
-relay acknowledgement can repeat that reply on recovery.
+exact `message_thread_id`. The returned `message_id` is stored in the outbound
+map. The bridge renders opaque agent content as escaped HTML, disables
+automatic entity detection, and asks Telegram to protect content. Telegram has
+no send-idempotency key, therefore this external boundary is explicitly
+at-least-once: a crash after Telegram accepts a reply but before relay
+acknowledgement can repeat that reply on recovery.
 
 Telegram Bot API rich messages support structured HTML and Markdown variants,
 and `sendRichMessage` accepts a `message_thread_id` for a forum topic. Punaro

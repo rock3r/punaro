@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/rock3r/punaro/internal/relay"
@@ -12,7 +13,7 @@ import (
 
 // RichSender posts one already-rendered, topic-bound rich Telegram message.
 type RichSender interface {
-	SendRichMessage(ctx context.Context, chatID, threadID int64, html string) error
+	SendRichMessage(ctx context.Context, chatID, threadID int64, html string) (int64, error)
 }
 
 // SendDelivery renders an opaque agent reply as inert rich HTML and sends it
@@ -36,8 +37,12 @@ func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery
 		return fmt.Errorf("telegram conversation route is missing")
 	}
 	for _, rendered := range renderDelivery(from, delivery.Message.Body) {
-		if err := sender.SendRichMessage(ctx, chatID, threadID, rendered); err != nil {
+		messageID, err := sender.SendRichMessage(ctx, chatID, threadID, rendered)
+		if err != nil {
 			return err
+		}
+		if err := state.RecordOutbound(chatID, messageID, delivery.Message.ConversationID, delivery.Message.ID, delivery.Message.FromEndpoint, time.Now().UTC()); err != nil {
+			return fmt.Errorf("record telegram outbound map: %w", err)
 		}
 	}
 	return nil

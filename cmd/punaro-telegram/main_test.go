@@ -23,6 +23,43 @@ func TestParseRouteRequiresExactTopicAndConversation(t *testing.T) {
 	}
 }
 
+func TestParseAdoptRequiresConversation(t *testing.T) {
+	conversation, err := parseAdopt([]string{"--conversation", "conversation-1"})
+	if err != nil || conversation != "conversation-1" {
+		t.Fatalf("adopt=%q err=%v", conversation, err)
+	}
+	if _, err := parseAdopt([]string{}); err == nil {
+		t.Fatal("adopt without conversation accepted")
+	}
+}
+
+func TestRunRouteRefusesClaimedConversation(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
+	state, err := telegram.Open(filepath.Join(directory, "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runRoute([]string{"--chat-id", "100", "--thread-id", "8", "--conversation", "conversation-1"}); err == nil {
+		t.Fatal("claimed conversation remapped")
+	}
+	if err := runRoute([]string{"--chat-id", "100", "--thread-id", "7", "--conversation", "conversation-2"}); err == nil {
+		t.Fatal("claimed thread stolen")
+	}
+}
+
 func TestLoadConfigRequiresExplicitTelegramGatewayIdentity(t *testing.T) {
 	_, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

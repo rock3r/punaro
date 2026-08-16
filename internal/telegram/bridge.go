@@ -14,6 +14,9 @@ type BridgeRelay interface {
 	Advertise(ctx context.Context, endpoints []string) error
 	Lease(ctx context.Context, endpoint string) ([]relay.Delivery, error)
 	Ack(ctx context.Context, delivery relay.Delivery) error
+	ClaimConversation(ctx context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error)
+	CompleteTelegramClaim(ctx context.Context, conversationID string) (relay.TelegramClaim, error)
+	PendingTelegramClaims(ctx context.Context, limit int) ([]relay.TelegramClaim, error)
 }
 
 // Bridge joins one enrolled gateway endpoint to the Telegram poller and rich
@@ -26,6 +29,8 @@ type Bridge struct {
 	Poller   Poller
 	Gateway  Gateway
 	Sender   RichSender
+	Claims   *ClaimExecutor
+	Log      func(string, ...any)
 }
 
 // SyncOnce renews gateway attachment, processes one inbound Telegram page,
@@ -42,17 +47,31 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	if err != nil {
 		return offset, err
 	}
+	if b.Claims != nil {
+		if err := b.Claims.ResumeAll(ctx); err != nil {
+			return next, err
+		}
+		if err := b.Claims.StartPending(ctx); err != nil {
+			return next, err
+		}
+	}
 	deliveries, err := b.Relay.Lease(ctx, b.Endpoint)
 	if err != nil {
 		return next, fmt.Errorf("lease Telegram gateway deliveries: %w", err)
 	}
 	for _, delivery := range deliveries {
 		if err := SendDelivery(ctx, b.State, b.Sender, delivery); err != nil {
+			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
 			return next, fmt.Errorf("send Telegram delivery %q: %w", delivery.ID, err)
 		}
+		b.logEvent("telegram_send_ok", "delivery_id="+delivery.ID)
 		if err := b.Relay.Ack(ctx, delivery); err != nil {
 			return next, fmt.Errorf("acknowledge Telegram delivery %q: %w", delivery.ID, err)
 		}
 	}
 	return next, nil
+}
+
+func (b Bridge) logEvent(class string, fields ...string) {
+	logClaim(b.Log, class, fields...)
 }

@@ -33,13 +33,13 @@ func TestGatewayAuthorizesClaimsAndRoutesTelegramTextOnce(t *testing.T) {
 	if len(submitted) != 0 {
 		t.Fatal("unauthorized update was submitted")
 	}
-	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, Text: "question"}); err != nil {
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, MessageID: 12, ReplyToID: 9, Text: "question"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, Text: "question"}); err != nil {
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 100, ThreadID: 7, MessageID: 12, ReplyToID: 9, Text: "question"}); err != nil {
 		t.Fatal(err)
 	}
-	if len(submitted) != 1 || submitted[0].UpdateID != 2 || submitted[0].ConversationID != "conversation-1" || submitted[0].Text != "question" {
+	if len(submitted) != 1 || submitted[0].UpdateID != 2 || submitted[0].ConversationID != "conversation-1" || submitted[0].Text != "question" || submitted[0].ChatID != 100 || submitted[0].ThreadID != 7 || submitted[0].ReplyToID != 9 {
 		t.Fatalf("submitted=%#v", submitted)
 	}
 }
@@ -181,7 +181,101 @@ func TestGatewayListEmptyHasNoKeyboard(t *testing.T) {
 	}
 }
 
-func TestGatewayCallbackWithoutClaimExecutionStaysInert(t *testing.T) {
+func TestGatewayCallbackReservesExecutionThenConsumesToken(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	var logs []string
+	topics := &recordingTopicCreator{threadID: 795446}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "Ops"}}
+	executor := &ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
+	gateway := Gateway{
+		AllowedUserID: 55,
+		State:         state,
+		Submit:        func(context.Context, Submission) error { t.Fatal("callback submitted as mail"); return nil },
+		ListUnclaimed: func(context.Context) ([]relay.UnclaimedTopic, error) {
+			return []relay.UnclaimedTopic{{ID: "conversation-1", DisplayName: "Ops"}}, nil
+		},
+		Notify: notify,
+		Claims: executor,
+		Now:    func() time.Time { return testCallbackNow },
+		Log:    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err != nil {
+		t.Fatal(err)
+	}
+	raw := notify.messages[0].keyboard[0][0].CallbackData
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notify.answers) != 1 || notify.answers[0].id != "cbq-1" || notify.answers[0].text != callbackAcceptedText {
+		t.Fatalf("answers=%#v", notify.answers)
+	}
+	if _, found, consumed, err := state.lookupCallbackToken(raw, testCallbackNow); err != nil || !found || !consumed {
+		t.Fatalf("token found=%v consumed=%v err=%v", found, consumed, err)
+	}
+	if len(claims.reserves) != 1 || claims.reserves[0].endpoint != relay.TelegramGatewayEndpoint || claims.reserves[0].key != GatewayClaimKey("conversation-1") {
+		t.Fatalf("reserves=%#v", claims.reserves)
+	}
+	if len(topics.names) != 1 || topics.names[0] != "Ops" || topics.chatIDs[0] != 55 {
+		t.Fatalf("createForumTopic=%#v chats=%#v", topics.names, topics.chatIDs)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if !hasLogClass(logs, "telegram_claim_reserved") || !hasLogClass(logs, "telegram_claim_completed") {
+		t.Fatalf("callback logs=%#v", logs)
+	}
+	if strings.Contains(strings.Join(logs, "\n"), raw) {
+		t.Fatalf("callback token leaked into logs: %#v", logs)
+	}
+}
+
+func TestGatewayCallbackExecuteClaimFailureDoesNotFailHandle(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	var logs []string
+	claims := &recordingClaimRelay{reserveErr: fmt.Errorf("relay rejected request with HTTP 500")}
+	executor := &ClaimExecutor{State: state, Relay: claims, Topics: &recordingTopicCreator{threadID: 1}, AllowedUserID: 55, Log: func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }}
+	gateway := Gateway{
+		AllowedUserID: 55,
+		State:         state,
+		Submit:        func(context.Context, Submission) error { t.Fatal("callback submitted as mail"); return nil },
+		ListUnclaimed: func(context.Context) ([]relay.UnclaimedTopic, error) {
+			return []relay.UnclaimedTopic{{ID: "conversation-1", DisplayName: "Ops"}}, nil
+		},
+		Notify: notify,
+		Claims: executor,
+		Now:    func() time.Time { return testCallbackNow },
+		Log:    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err != nil {
+		t.Fatal(err)
+	}
+	raw := notify.messages[0].keyboard[0][0].CallbackData
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: raw}); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseReserved {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if !hasLogClass(logs, "telegram_claim_failed") || !strings.Contains(strings.Join(logs, "\n"), "phase=reserved") {
+		t.Fatalf("failure logs=%#v", logs)
+	}
+}
+
+func TestGatewayInvalidCallbackStaysInert(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
 	if err != nil {
@@ -194,32 +288,18 @@ func TestGatewayCallbackWithoutClaimExecutionStaysInert(t *testing.T) {
 		AllowedUserID: 55,
 		State:         state,
 		Submit:        func(context.Context, Submission) error { t.Fatal("callback submitted as mail"); return nil },
-		ListUnclaimed: func(context.Context) ([]relay.UnclaimedTopic, error) {
-			return []relay.UnclaimedTopic{{ID: "conversation-1", DisplayName: "Ops"}}, nil
-		},
-		Notify: notify,
-		Now:    func() time.Time { return testCallbackNow },
-		Log:    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+		Notify:        notify,
+		Now:           func() time.Time { return testCallbackNow },
+		Log:           func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
 	}
-	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err != nil {
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: "opaque-token"}); err != nil {
 		t.Fatal(err)
 	}
-	raw := notify.messages[0].keyboard[0][0].CallbackData
-	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 55, ChatID: 55, CallbackID: "cbq-1", CallbackData: raw}); err != nil {
-		t.Fatal(err)
-	}
-	if len(notify.answers) != 1 || notify.answers[0].id != "cbq-1" || notify.answers[0].text != callbackFailureText {
+	if len(notify.answers) != 1 || notify.answers[0].text != callbackFailureText {
 		t.Fatalf("answers=%#v", notify.answers)
 	}
-	if _, found, consumed, err := state.lookupCallbackToken(raw, testCallbackNow); err != nil || !found || consumed {
-		t.Fatalf("6a consumed callback token: found=%v consumed=%v err=%v", found, consumed, err)
-	}
-	var claimExecutions int
-	if err := state.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claim_executions'`).Scan(&claimExecutions); err != nil || claimExecutions != 0 {
-		t.Fatalf("6a inserted claim_executions: count=%d err=%v", claimExecutions, err)
-	}
-	if strings.Contains(strings.Join(logs, "\n"), raw) {
-		t.Fatalf("callback token leaked into logs: %#v", logs)
+	if incomplete, err := state.IncompleteClaimExecutions(); err != nil || len(incomplete) != 0 {
+		t.Fatalf("inert callback created execution: %#v err=%v", incomplete, err)
 	}
 	if !hasLogClass(logs, "telegram_update_inert") {
 		t.Fatalf("callback logs=%#v", logs)

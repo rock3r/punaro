@@ -86,8 +86,135 @@ func TestStateIssuesHashedTTLCallbackTokens(t *testing.T) {
 		t.Fatalf("outstanding=%d err=%v", count, err)
 	}
 	var claimExecutions int
-	if err := state.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claim_executions'`).Scan(&claimExecutions); err != nil || claimExecutions != 0 {
-		t.Fatalf("6a created claim_executions: count=%d err=%v", claimExecutions, err)
+	if err := state.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claim_executions'`).Scan(&claimExecutions); err != nil || claimExecutions != 1 {
+		t.Fatalf("claim_executions missing: count=%d err=%v", claimExecutions, err)
+	}
+}
+
+func TestStateReservesClaimExecutionBeforeConsumingToken(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	now := testCallbackNow
+	raw, err := state.IssueCallbackToken("conversation-1", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, reserved, err := state.ReserveClaimAndConsumeToken(raw, now)
+	if err != nil || !reserved || conversation != "conversation-1" {
+		t.Fatalf("reserved conversation=%q reserved=%v err=%v", conversation, reserved, err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseReserved || execution.ThreadID != 0 || execution.SkipReserve {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if _, found, consumed, err := state.lookupCallbackToken(raw, now); err != nil || !found || !consumed {
+		t.Fatalf("token found=%v consumed=%v err=%v", found, consumed, err)
+	}
+	if _, reserved, err := state.ReserveClaimAndConsumeToken(raw, now); err != nil || reserved {
+		t.Fatalf("replay reserved=%v err=%v", reserved, err)
+	}
+	if _, reserved, err := state.ReserveClaimAndConsumeToken("missing", now); err != nil || reserved {
+		t.Fatalf("missing token reserved=%v err=%v", reserved, err)
+	}
+}
+
+func TestStatePersistsClaimThreadAndOutboundMap(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, err := state.InsertPendingExecution("conversation-1", "How is it going"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-1", 795446); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || !execution.SkipReserve || execution.DisplayName != "How is it going" {
+		t.Fatalf("after thread persist %#v found=%v err=%v", execution, found, err)
+	}
+	if err := state.PersistClaimRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if complete, err := state.ClaimComplete("conversation-1"); err != nil || !complete {
+		t.Fatalf("complete=%v err=%v", complete, err)
+	}
+	if err := state.RecordOutbound(55, 9, "conversation-1", "message-1", "agent/a", testCallbackNow); err != nil {
+		t.Fatal(err)
+	}
+	ref, found, err := state.LookupOutbound(55, 9)
+	if err != nil || !found || ref.ConversationID != "conversation-1" || ref.PunaroMessageID != "message-1" || ref.FromEndpoint != "agent/a" {
+		t.Fatalf("outbound=%#v found=%v err=%v", ref, found, err)
+	}
+	if _, found, err := state.LookupOutbound(55, 10); err != nil || found {
+		t.Fatal("missing outbound was found")
+	}
+}
+
+func TestStateEvictsOldestOutboundAtCap(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	previous := telegramOutboundLimit
+	telegramOutboundLimit = 2
+	t.Cleanup(func() { telegramOutboundLimit = previous })
+	now := testCallbackNow
+	if err := state.RecordOutbound(55, 1, "conversation-1", "message-1", "agent/a", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordOutbound(55, 2, "conversation-1", "message-2", "agent/a", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RecordOutbound(55, 3, "conversation-1", "message-3", "agent/a", now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := state.LookupOutbound(55, 1); err != nil || found {
+		t.Fatal("oldest outbound was not evicted")
+	}
+	if _, found, err := state.LookupOutbound(55, 2); err != nil || !found {
+		t.Fatal("kept outbound is missing")
+	}
+	if _, found, err := state.LookupOutbound(55, 3); err != nil || !found {
+		t.Fatal("newest outbound is missing")
+	}
+}
+
+func TestStateRefusesClaimedRouteRemap(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-claimed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-claimed", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-claimed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-claimed"); err == nil {
+		t.Fatal("claimed conversation remapped")
+	}
+	if err := state.RouteBlocked(55, 7, "conversation-other"); err == nil {
+		t.Fatal("claimed thread stolen")
+	}
+	if err := state.RouteBlocked(55, 9, "conversation-free"); err != nil {
+		t.Fatalf("unclaimed remap blocked: %v", err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,32 @@ const (
 	callbackTokenTTL  = 15 * time.Minute
 	maxCallbackTokens = 100
 )
+
+// Claim execution phases persisted in claim_executions.
+const (
+	ClaimPhaseReserved       = "reserved"
+	ClaimPhaseTopicCreated   = "topic_created"
+	ClaimPhaseRoutePersisted = "route_persisted"
+	ClaimPhaseComplete       = "complete"
+)
+
+var telegramOutboundLimit = 10000
+
+// ClaimExecution is one gateway-local claim phase. It stores no mail bodies.
+type ClaimExecution struct {
+	ConversationID string
+	ThreadID       int64
+	Phase          string
+	DisplayName    string
+	SkipReserve    bool
+}
+
+// OutboundRef maps one Telegram message back to a Punaro delivery identity.
+type OutboundRef struct {
+	ConversationID  string
+	PunaroMessageID string
+	FromEndpoint    string
+}
 
 // State owns durable, content-free Telegram replay and topic routing state.
 type State struct{ db *sql.DB }
@@ -44,6 +71,8 @@ func Open(database string) (*State, error) {
 		"CREATE TABLE IF NOT EXISTS topic_routes (chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, PRIMARY KEY(chat_id, thread_id))",
 		"CREATE UNIQUE INDEX IF NOT EXISTS topic_routes_conversation ON topic_routes(conversation_id)",
 		"CREATE TABLE IF NOT EXISTS callback_tokens (token_hash TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER)",
+		"CREATE TABLE IF NOT EXISTS claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0)",
+		"CREATE TABLE IF NOT EXISTS telegram_outbound (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, punaro_message_id TEXT NOT NULL, from_endpoint TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))",
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -180,4 +209,237 @@ func (s *State) IssueCallbackToken(conversationID string, now time.Time) (string
 func callbackTokenHash(raw string) string {
 	sum := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(sum[:])
+}
+
+// ReserveClaimAndConsumeToken inserts claim_executions reserved, then consumes
+// the token in the same transaction. A failed tx leaves the token reusable.
+func (s *State) ReserveClaimAndConsumeToken(raw string, now time.Time) (string, bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", false, nil
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var conversation string
+	var expiresAt int64
+	var consumedAt sql.NullInt64
+	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id, expires_at, consumed_at FROM callback_tokens WHERE token_hash = ?`, callbackTokenHash(raw)).Scan(&conversation, &expiresAt, &consumedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if consumedAt.Valid || expiresAt <= now.UnixMilli() {
+		return "", false, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, phase, skip_reserve) VALUES (?, ?, 0) ON CONFLICT(conversation_id) DO NOTHING`, conversation, ClaimPhaseReserved); err != nil {
+		return "", false, err
+	}
+	result, err := tx.ExecContext(context.Background(), `UPDATE callback_tokens SET consumed_at = ? WHERE token_hash = ? AND consumed_at IS NULL AND expires_at > ?`, now.UnixMilli(), callbackTokenHash(raw), now.UnixMilli())
+	if err != nil {
+		return "", false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return "", false, err
+	}
+	if affected != 1 {
+		return "", false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return conversation, true, nil
+}
+
+// InsertPendingExecution records a relay-pending claim that must not reserve again.
+func (s *State) InsertPendingExecution(conversationID, displayName string) (bool, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return false, fmt.Errorf("conversation ID is required")
+	}
+	result, err := s.db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, phase, display_name, skip_reserve) VALUES (?, ?, ?, 1) ON CONFLICT(conversation_id) DO NOTHING`, conversationID, ClaimPhaseReserved, displayName)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
+// ClaimExecution returns the local execution row for a conversation.
+func (s *State) ClaimExecution(conversationID string) (ClaimExecution, bool, error) {
+	var execution ClaimExecution
+	var threadID sql.NullInt64
+	var displayName sql.NullString
+	var skip int
+	err := s.db.QueryRowContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClaimExecution{}, false, nil
+	}
+	if err != nil {
+		return ClaimExecution{}, false, err
+	}
+	if threadID.Valid {
+		execution.ThreadID = threadID.Int64
+	}
+	execution.DisplayName = displayName.String
+	execution.SkipReserve = skip == 1
+	return execution, true, nil
+}
+
+// IncompleteClaimExecutions lists every local row that is not complete.
+func (s *State) IncompleteClaimExecutions() ([]ClaimExecution, error) {
+	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE phase != ? ORDER BY conversation_id`, ClaimPhaseComplete)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []ClaimExecution
+	for rows.Next() {
+		var execution ClaimExecution
+		var threadID sql.NullInt64
+		var displayName sql.NullString
+		var skip int
+		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
+			return nil, err
+		}
+		if threadID.Valid {
+			execution.ThreadID = threadID.Int64
+		}
+		execution.DisplayName = displayName.String
+		execution.SkipReserve = skip == 1
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
+// PersistClaimDisplayName stores the snapshotted label used for createForumTopic.
+func (s *State) PersistClaimDisplayName(conversationID, displayName string) error {
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET display_name = ? WHERE conversation_id = ?`, displayName, conversationID)
+	return err
+}
+
+// PersistClaimThread writes the Bot API thread id immediately after createForumTopic.
+func (s *State) PersistClaimThread(conversationID string, threadID int64) error {
+	if strings.TrimSpace(conversationID) == "" || threadID <= 0 {
+		return fmt.Errorf("claim thread is required")
+	}
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, phase = ? WHERE conversation_id = ?`, threadID, ClaimPhaseTopicCreated, conversationID)
+	return err
+}
+
+// PersistClaimRoute binds the stored thread and advances the execution phase.
+func (s *State) PersistClaimRoute(chatID, threadID int64, conversationID string) error {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
+		ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ?`, ClaimPhaseRoutePersisted, conversationID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdoptExecution records an existing topic route at route_persisted.
+func (s *State) AdoptExecution(conversationID string, threadID int64) error {
+	if strings.TrimSpace(conversationID) == "" || threadID <= 0 {
+		return fmt.Errorf("adopt route is required")
+	}
+	_, err := s.db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES (?, ?, ?, 1)
+		ON CONFLICT(conversation_id) DO UPDATE SET thread_id = excluded.thread_id, phase = excluded.phase, skip_reserve = 1`, conversationID, threadID, ClaimPhaseRoutePersisted)
+	return err
+}
+
+// MarkClaimComplete records a finished local execution.
+func (s *State) MarkClaimComplete(conversationID string) error {
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ?`, ClaimPhaseComplete, conversationID)
+	return err
+}
+
+// ClaimComplete reports whether the conversation has a completed local claim.
+func (s *State) ClaimComplete(conversationID string) (bool, error) {
+	var phase string
+	err := s.db.QueryRowContext(context.Background(), `SELECT phase FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&phase)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return phase == ClaimPhaseComplete, nil
+}
+
+// RouteBlocked refuses remapping a claimed conversation or stealing its thread.
+func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) error {
+	complete, err := s.ClaimComplete(conversationID)
+	if err != nil {
+		return err
+	}
+	if complete {
+		return fmt.Errorf("telegram conversation is already claimed")
+	}
+	existing, found, err := s.Route(chatID, threadID)
+	if err != nil {
+		return err
+	}
+	if !found || existing == conversationID {
+		return nil
+	}
+	complete, err = s.ClaimComplete(existing)
+	if err != nil {
+		return err
+	}
+	if complete {
+		return fmt.Errorf("telegram topic is already bound to a claimed conversation")
+	}
+	return nil
+}
+
+// RecordOutbound stores one Telegram message_id to Punaro identity mapping.
+func (s *State) RecordOutbound(chatID, messageID int64, conversationID, punaroMessageID, fromEndpoint string, now time.Time) error {
+	if chatID == 0 || messageID <= 0 || strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("telegram outbound map row is required")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO telegram_outbound(chat_id, message_id, conversation_id, punaro_message_id, from_endpoint, created_at) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(chat_id, message_id) DO UPDATE SET conversation_id = excluded.conversation_id, punaro_message_id = excluded.punaro_message_id, from_endpoint = excluded.from_endpoint, created_at = excluded.created_at`, chatID, messageID, conversationID, punaroMessageID, fromEndpoint, now.UnixMilli()); err != nil {
+		return err
+	}
+	var count int
+	if err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM telegram_outbound`).Scan(&count); err != nil {
+		return err
+	}
+	if count > telegramOutboundLimit {
+		if _, err := tx.ExecContext(context.Background(), `DELETE FROM telegram_outbound WHERE rowid IN (SELECT rowid FROM telegram_outbound ORDER BY created_at ASC, rowid ASC LIMIT ?)`, count-telegramOutboundLimit); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// LookupOutbound resolves a Telegram reply_to_message_id to a Punaro identity.
+func (s *State) LookupOutbound(chatID, messageID int64) (OutboundRef, bool, error) {
+	var ref OutboundRef
+	err := s.db.QueryRowContext(context.Background(), `SELECT conversation_id, punaro_message_id, from_endpoint FROM telegram_outbound WHERE chat_id = ? AND message_id = ?`, chatID, messageID).Scan(&ref.ConversationID, &ref.PunaroMessageID, &ref.FromEndpoint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OutboundRef{}, false, nil
+	}
+	if err != nil {
+		return OutboundRef{}, false, err
+	}
+	return ref, true, nil
 }

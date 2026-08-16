@@ -964,10 +964,22 @@ or transient relay failures do not silently lose user input.
 Operator `/list` is a private-chat topic picker: the gateway polls
 `callback_query` and sends display-name buttons whose `callback_data` is a raw
 256-bit token. Only SHA-256(token) is stored, with a 15-minute TTL and a cap
-of 100 outstanding tokens. Conversation ids never appear in Telegram. Until
-claim execution exists, a tap is answered generically and the token is not
-consumed; `createForumTopic` is not called. Main-chat ordinary text stays
-unbound. There is no main-chat fallback.
+of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
+tap persists `claim_executions` reserved, then consumes the token in the same
+SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
+gateway calls `createForumTopic` once, persists `message_thread_id`
+immediately, and never calls `getForumTopic`. Agent-side pending reservations
+are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
+reserve. `punaro-telegram adopt` completes an existing `topic_routes` row
+without creating a topic. `route` refuses a claimed conversation or a
+`(chat,thread)` already bound to a claimed conversation. Main-chat ordinary
+text stays unbound. There is no main-chat fallback.
+
+Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
+with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
+from each successful `sendRichMessage` `message_id`, resolves `reply_to_message`
+into inert `in_reply_to_*` metadata. A map miss delivers the text without that
+metadata.
 
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
