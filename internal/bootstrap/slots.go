@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type acceptedState struct {
@@ -23,11 +24,12 @@ type slotState struct {
 }
 
 type journal struct {
-	Schema         int64  `json:"schema"`
-	Phase          string `json:"phase"`
-	Release        string `json:"release"`
-	Sequence       int64  `json:"sequence"`
-	ManifestSHA256 string `json:"manifest_sha256,omitempty"`
+	Schema          int64  `json:"schema"`
+	Phase           string `json:"phase"`
+	Release         string `json:"release"`
+	Sequence        int64  `json:"sequence"`
+	CatalogSequence int64  `json:"catalog_sequence,omitempty"`
+	ManifestSHA256  string `json:"manifest_sha256,omitempty"`
 }
 
 func prepareDirectory(directory string) error {
@@ -72,8 +74,14 @@ func publishSlot(directory, release string, sequence int64, manifestSHA256 strin
 		if err := os.Rename(current, previous); err != nil {
 			return err
 		}
+		if err := syncDir(directory); err != nil {
+			return err
+		}
 	}
-	return os.Rename(candidate, current)
+	if err := os.Rename(candidate, current); err != nil {
+		return err
+	}
+	return syncDir(directory)
 }
 
 // Rollback swaps the published current and previous slots. It does not lower
@@ -83,6 +91,14 @@ func Rollback(directory string) (Result, error) {
 	if directory == "" || !filepath.IsAbs(directory) {
 		return Result{}, errors.New("bootstrap directory is invalid")
 	}
+	if err := prepareDirectory(directory); err != nil {
+		return Result{}, err
+	}
+	unlock, err := lockDirectory(directory)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	if err := recoverJournal(directory); err != nil {
 		return Result{}, err
 	}
@@ -94,10 +110,14 @@ func Rollback(directory string) (Result, error) {
 	if err := requireRealDir(previous); err != nil {
 		return Result{}, errors.New("bootstrap has no previous slot")
 	}
-	if err := writeJournal(directory, journal{Schema: 1, Phase: "rolling-back"}); err != nil {
+	target, err := readSlot(previous)
+	if err != nil {
 		return Result{}, err
 	}
-	if err := completeRollback(directory); err != nil {
+	if err := writeJournal(directory, journal{Schema: 1, Phase: "rolling-back", Release: target.Release, Sequence: target.Sequence, ManifestSHA256: target.ManifestSHA256}); err != nil {
+		return Result{}, err
+	}
+	if err := completeRollback(directory, target); err != nil {
 		return Result{}, err
 	}
 	if err := clearJournal(directory); err != nil {
@@ -111,6 +131,9 @@ func Rollback(directory string) (Result, error) {
 }
 
 func recoverJournal(directory string) error {
+	if err := removeAbandonedTemps(directory); err != nil {
+		return err
+	}
 	record, err := readJournal(directory)
 	if err != nil {
 		return err
@@ -119,16 +142,30 @@ func recoverJournal(directory string) error {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
 	case "publishing":
+		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || record.ManifestSHA256 == "" {
+			return errors.New("bootstrap journal is invalid")
+		}
 		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
 		if err != nil {
 			return err
 		}
 		if exists {
-			return publishSlot(directory, record.Release, record.Sequence, record.ManifestSHA256)
+			if err := publishSlot(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
+				return err
+			}
 		}
-		return clearJournal(directory)
+		return finishPublication(directory, acceptedState{
+			Schema:          1,
+			Release:         record.Release,
+			ReleaseSequence: record.Sequence,
+			CatalogSequence: record.CatalogSequence,
+			ManifestSHA256:  record.ManifestSHA256,
+		})
 	case "rolling-back":
-		if err := completeRollback(directory); err != nil {
+		if record.Release == "" || record.Sequence < 1 {
+			return errors.New("bootstrap journal is invalid")
+		}
+		if err := completeRollback(directory, slotState{Release: record.Release, Sequence: record.Sequence, ManifestSHA256: record.ManifestSHA256}); err != nil {
 			return err
 		}
 		return clearJournal(directory)
@@ -137,7 +174,17 @@ func recoverJournal(directory string) error {
 	}
 }
 
-func completeRollback(directory string) error {
+func finishPublication(directory string, accepted acceptedState) error {
+	if accepted.Schema != 1 || accepted.Release == "" || accepted.ReleaseSequence < 1 || accepted.CatalogSequence < 1 || accepted.ManifestSHA256 == "" {
+		return errors.New("bootstrap journal is invalid")
+	}
+	if err := saveAccepted(directory, accepted); err != nil {
+		return err
+	}
+	return clearJournal(directory)
+}
+
+func completeRollback(directory string, target slotState) error {
 	current := filepath.Join(directory, currentSlot)
 	previous := filepath.Join(directory, previousSlot)
 	swap := filepath.Join(directory, swapSlot)
@@ -153,8 +200,32 @@ func completeRollback(directory string) error {
 	if err != nil {
 		return err
 	}
+	if currentExists {
+		currentSlotState, err := readSlot(current)
+		if err != nil {
+			return err
+		}
+		if currentSlotState.Release == target.Release && currentSlotState.Sequence == target.Sequence {
+			if swapExists && !previousExists {
+				if err := os.Rename(swap, previous); err != nil {
+					return err
+				}
+				return syncDir(directory)
+			}
+			if !swapExists {
+				return nil
+			}
+			if err := os.RemoveAll(swap); err != nil {
+				return err
+			}
+			return syncDir(directory)
+		}
+	}
 	if currentExists && previousExists && !swapExists {
 		if err := os.Rename(current, swap); err != nil {
+			return err
+		}
+		if err := syncDir(directory); err != nil {
 			return err
 		}
 		currentExists = false
@@ -164,11 +235,17 @@ func completeRollback(directory string) error {
 		if err := os.Rename(previous, current); err != nil {
 			return err
 		}
+		if err := syncDir(directory); err != nil {
+			return err
+		}
 		previousExists = false
 		currentExists = true
 	}
 	if swapExists && currentExists && !previousExists {
-		return os.Rename(swap, previous)
+		if err := os.Rename(swap, previous); err != nil {
+			return err
+		}
+		return syncDir(directory)
 	}
 	if !swapExists && currentExists && previousExists {
 		return nil
@@ -189,7 +266,7 @@ func clearJournal(directory string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return nil
+	return syncDir(directory)
 }
 
 func readJournal(directory string) (journal, error) {
@@ -290,12 +367,29 @@ func existsRealDir(path string) (bool, error) {
 	return true, nil
 }
 
-func writeAtomic(path string, body []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
-	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode) // #nosec G304,G302 -- tmp is a sibling of a bootstrap-owned path; mode comes from the signed manifest.
+func removeAbandonedTemps(directory string) error {
+	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
 	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAtomic(path string, body []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := file.Name()
 	if _, err := file.Write(body); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmp)
@@ -318,5 +412,5 @@ func writeAtomic(path string, body []byte, mode os.FileMode) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	return syncDir(dir)
 }

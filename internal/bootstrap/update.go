@@ -25,6 +25,7 @@ const (
 	swapSlot      = "swap"
 	slotRecord    = "slot.json"
 	journalFile   = "journal.json"
+	lockFile      = "bootstrap.lock"
 )
 
 // Request is one host-local update from a fixed origin.
@@ -65,6 +66,11 @@ func Update(request Request) (Result, error) {
 	if err := prepareDirectory(request.Directory); err != nil {
 		return Result{}, err
 	}
+	unlock, err := lockDirectory(request.Directory)
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	if err := recoverJournal(request.Directory); err != nil {
 		return Result{}, err
 	}
@@ -187,22 +193,27 @@ func Update(request Request) (Result, error) {
 		}
 		installed = append(installed, name)
 	}
-	if err := writeJournal(request.Directory, journal{Schema: 1, Phase: "publishing", Release: manifest.Release, Sequence: manifest.Sequence, ManifestSHA256: listed.ManifestSHA256}); err != nil {
-		return Result{}, err
-	}
-	if err := publishSlot(request.Directory, manifest.Release, manifest.Sequence, listed.ManifestSHA256); err != nil {
-		return Result{}, err
-	}
-	if err := saveAccepted(request.Directory, acceptedState{
+	published := acceptedState{
 		Schema:          1,
 		Release:         manifest.Release,
 		ReleaseSequence: manifest.Sequence,
 		CatalogSequence: catalog.Sequence,
 		ManifestSHA256:  listed.ManifestSHA256,
+	}
+	if err := writeJournal(request.Directory, journal{
+		Schema:          1,
+		Phase:           "publishing",
+		Release:         published.Release,
+		Sequence:        published.ReleaseSequence,
+		CatalogSequence: published.CatalogSequence,
+		ManifestSHA256:  published.ManifestSHA256,
 	}); err != nil {
 		return Result{}, err
 	}
-	if err := clearJournal(request.Directory); err != nil {
+	if err := publishSlot(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
+		return Result{}, err
+	}
+	if err := finishPublication(request.Directory, published); err != nil {
 		return Result{}, err
 	}
 	return Result{Release: manifest.Release, Sequence: manifest.Sequence, Manifest: listed.ManifestSHA256, Installed: installed}, nil
