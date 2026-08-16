@@ -3,11 +3,14 @@ package relay
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 var canonicalRoleSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -165,6 +168,38 @@ const (
 	// It must occupy every claimed topic, so fencing never applies to it.
 	TelegramPrimaryEndpoint = TelegramGatewayEndpoint
 )
+
+// TelegramGatewayCapabilities is the only membership complete may grant.
+const TelegramGatewayCapabilities = CapSend | CapReceive
+
+// ReservedRelayMember reports labels that cannot be created or member-set.
+// user-telegram is a built-in participant; telegram/primary is claim-owned.
+func ReservedRelayMember(value string) bool {
+	return value == TelegramUserParticipant || value == TelegramGatewayEndpoint
+}
+
+// ValidateTelegramInbound checks gateway inbound fields before a store write.
+func ValidateTelegramInbound(input TelegramInboundInput) error {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || input.FromEndpoint != TelegramGatewayEndpoint || input.FromParticipant != TelegramUserParticipant || !ValidRequestToken(input.IdempotencyKey) {
+		return ErrForbidden
+	}
+	if input.InReplyToEndpoint != "" && !ValidEndpoint(input.InReplyToEndpoint) {
+		return ErrForbidden
+	}
+	if input.InReplyToMessageID != "" && !ValidRequestToken(input.InReplyToMessageID) && uuid.Validate(input.InReplyToMessageID) != nil {
+		return ErrForbidden
+	}
+	if input.TelegramThreadID < 0 {
+		return ErrForbidden
+	}
+	if !ValidMessageBody(input.Body) {
+		return errors.New("message body is not portable UTF-8 text")
+	}
+	if len(input.Body) > maxMessageBodyBytes {
+		return fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
+	}
+	return nil
+}
 
 // SanitizeConversationDisplayName trims and clamps a room label. Empty input is
 // legal for unnamed test rooms; a provided name must remain non-empty.

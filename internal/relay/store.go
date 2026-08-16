@@ -790,7 +790,7 @@ func (s *Store) migrate(ctx context.Context) error {
 // the caller owns a currently attached admin endpoint. A stable retry key
 // returns the original audit event; key reuse for another mutation conflicts.
 func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.ActorMachineID) || !ValidEndpoint(input.ActorEndpoint) || !ValidRequestToken(input.IdempotencyKey) || !validControlOperation(input.Operation) || !ValidEndpoint(input.Member.Endpoint) || input.Member.Endpoint == TelegramUserParticipant {
+	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.ActorMachineID) || !ValidEndpoint(input.ActorEndpoint) || !ValidRequestToken(input.IdempotencyKey) || !validControlOperation(input.Operation) || !ValidEndpoint(input.Member.Endpoint) || ReservedRelayMember(input.Member.Endpoint) {
 		return ControlEvent{}, false, ErrForbidden
 	}
 	if input.Operation == ControlUpsertMember && !validCapabilities(input.Member.Capabilities) {
@@ -1114,7 +1114,7 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 	if !errors.Is(err, sql.ErrNoRows) {
 		return TelegramClaim{}, false, fmt.Errorf("read telegram claim: %w", err)
 	}
-	if err := rejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+	if err := rejectExclusiveClaimOccupancy(tx, input.ConversationID, input.Now); err != nil {
 		return TelegramClaim{}, false, err
 	}
 	createdAt := input.Now.UTC().Truncate(time.Millisecond)
@@ -1155,24 +1155,33 @@ func (s *Store) CompleteTelegramClaim(input TelegramClaimCompleteInput) (Telegra
 	if claim.Status != "pending" {
 		return TelegramClaim{}, false, ErrForbidden
 	}
-	var existing Capability
-	err = tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", input.ConversationID, TelegramGatewayEndpoint).Scan(&existing)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", input.ConversationID, TelegramGatewayEndpoint, CapSend|CapReceive); err != nil {
-			return TelegramClaim{}, false, fmt.Errorf("insert telegram gateway member: %w", err)
-		}
-		if err := advanceRecipientCursor(tx, TelegramGatewayEndpoint, input.ConversationID); err != nil {
-			return TelegramClaim{}, false, err
-		}
-	} else if err != nil {
-		return TelegramClaim{}, false, fmt.Errorf("read telegram gateway member: %w", err)
+	if err := ensureTelegramGatewayMembership(tx, input.ConversationID); err != nil {
+		return TelegramClaim{}, false, err
 	}
 	completedAt := input.Now.UTC().Truncate(time.Millisecond)
 	if _, err := tx.ExecContext(context.Background(), "INSERT INTO telegram_participants(conversation_id, label, created_at) VALUES (?, ?, ?)", input.ConversationID, TelegramUserParticipant, completedAt.UnixMilli()); err != nil {
 		return TelegramClaim{}, false, fmt.Errorf("insert telegram participant: %w", err)
 	}
-	if _, err := tx.ExecContext(context.Background(), "UPDATE telegram_claims SET status='complete', completed_at=? WHERE conversation_id=? AND status='pending'", completedAt.UnixMilli(), input.ConversationID); err != nil {
+	result, err := tx.ExecContext(context.Background(), "UPDATE telegram_claims SET status='complete', completed_at=? WHERE conversation_id=? AND status='pending'", completedAt.UnixMilli(), input.ConversationID)
+	if err != nil {
 		return TelegramClaim{}, false, fmt.Errorf("complete telegram claim: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return TelegramClaim{}, false, fmt.Errorf("complete telegram claim: %w", err)
+	}
+	if updated == 0 {
+		claim, err := telegramClaimByConversation(tx, input.ConversationID)
+		if err != nil {
+			return TelegramClaim{}, false, ErrForbidden
+		}
+		if claim.Status == "complete" {
+			if err := tx.Commit(); err != nil {
+				return TelegramClaim{}, false, err
+			}
+			return claim, true, nil
+		}
+		return TelegramClaim{}, false, ErrForbidden
 	}
 	if _, err := tx.ExecContext(context.Background(), "INSERT INTO telegram_claim_events(id, conversation_id, event, actor_machine, actor_endpoint, created_at) VALUES (?, ?, 'complete', ?, ?, ?)", uuid.NewString(), input.ConversationID, input.MachineID, TelegramGatewayEndpoint, completedAt.UnixMilli()); err != nil {
 		return TelegramClaim{}, false, fmt.Errorf("record telegram claim event: %w", err)
@@ -1342,23 +1351,8 @@ func (s *Store) SessionTopic(machineID, endpoint string, now time.Time) (Session
 // AppendTelegramInbound accepts gateway inbound mail. Metadata is stored but
 // excluded from the append hash so a later reply-map fill cannot conflict.
 func (s *Store) AppendTelegramInbound(input TelegramInboundInput) (Message, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || input.FromEndpoint != TelegramGatewayEndpoint || input.FromParticipant != TelegramUserParticipant || !ValidRequestToken(input.IdempotencyKey) {
-		return Message{}, false, ErrForbidden
-	}
-	if input.InReplyToEndpoint != "" && !ValidEndpoint(input.InReplyToEndpoint) {
-		return Message{}, false, ErrForbidden
-	}
-	if input.InReplyToMessageID != "" && !ValidRequestToken(input.InReplyToMessageID) && uuid.Validate(input.InReplyToMessageID) != nil {
-		return Message{}, false, ErrForbidden
-	}
-	if input.TelegramThreadID < 0 {
-		return Message{}, false, ErrForbidden
-	}
-	if !ValidMessageBody(input.Body) {
-		return Message{}, false, errors.New("message body is not portable UTF-8 text")
-	}
-	if len(input.Body) > maxMessageBodyBytes {
-		return Message{}, false, fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
+	if err := ValidateTelegramInbound(input); err != nil {
+		return Message{}, false, err
 	}
 	requestHash := appendHash(AppendInput{ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body})
 	tx, err := s.db.BeginTx(context.Background(), nil)
@@ -1366,6 +1360,9 @@ func (s *Store) AppendTelegramInbound(input TelegramInboundInput) (Message, bool
 		return Message{}, false, err
 	}
 	defer rollback(tx)
+	if err := requireCompleteTelegramClaim(tx, input.ConversationID); err != nil {
+		return Message{}, false, err
+	}
 	capabilities, err := sessionCapabilities(tx, input.ConversationID, input.SenderMachineID, input.FromEndpoint, input.Now)
 	if err != nil {
 		return Message{}, false, err
@@ -2163,7 +2160,7 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 		}
 		switch {
 		case member.Endpoint != "" && member.Role == "" && member.RoleMachineID == "":
-			if !ValidEndpoint(member.Endpoint) || member.Endpoint == TelegramUserParticipant {
+			if !ValidEndpoint(member.Endpoint) || ReservedRelayMember(member.Endpoint) {
 				return Conversation{}, fmt.Errorf("invalid conversation member")
 			}
 			if _, duplicate := seenEndpoints[member.Endpoint]; duplicate {
@@ -3118,7 +3115,38 @@ func rejectExclusiveCreateOccupancy(tx *sql.Tx, endpoints, roles map[string]stru
 	return nil
 }
 
+func rejectExclusiveClaimOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	return rejectExclusiveOccupants(tx, conversationID, now)
+}
+
 func rejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	return rejectExclusiveOccupants(tx, conversationID, now)
+}
+
+func ensureTelegramGatewayMembership(tx *sql.Tx, conversationID string) error {
+	var previous Capability
+	err := tx.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", conversationID, TelegramGatewayEndpoint).Scan(&previous)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversationID, TelegramGatewayEndpoint, TelegramGatewayCapabilities); err != nil {
+			return fmt.Errorf("insert telegram gateway member: %w", err)
+		}
+		return advanceRecipientCursor(tx, TelegramGatewayEndpoint, conversationID)
+	}
+	if err != nil {
+		return fmt.Errorf("read telegram gateway member: %w", err)
+	}
+	if previous != TelegramGatewayCapabilities {
+		if _, err := tx.ExecContext(context.Background(), "UPDATE memberships SET capabilities=? WHERE conversation_id=? AND endpoint=?", TelegramGatewayCapabilities, conversationID, TelegramGatewayEndpoint); err != nil {
+			return fmt.Errorf("clamp telegram gateway member: %w", err)
+		}
+	}
+	if previous&CapReceive == 0 {
+		return advanceRecipientCursor(tx, TelegramGatewayEndpoint, conversationID)
+	}
+	return nil
+}
+
+func rejectExclusiveOccupants(tx *sql.Tx, conversationID string, now time.Time) error {
 	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM memberships WHERE conversation_id = ?
 		UNION
 		SELECT binding.session_endpoint FROM role_memberships AS membership

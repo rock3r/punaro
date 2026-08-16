@@ -1589,11 +1589,62 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.RunRoleProfiles(t, app, "postgres-profile")
 	contracttest.RunDirectMessages(t, app, "postgres-direct")
 	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
+	testPostgresTelegramClaimReserveOccupancy(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 	testDurableRoleRebindFencesPostgresDelivery(t, app)
 	testDirectSendLocksTargetProfileBeforeCommit(t, app)
+}
+
+func testPostgresTelegramClaimReserveOccupancy(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-occ-a"
+		machineB        = "postgres-claim-occ-b"
+		machineTelegram = "postgres-claim-occ-telegram"
+		endpointA       = "agent/postgres-claim-occ/a"
+		endpointB       = "agent/postgres-claim-occ/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	namedA, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-occ-a", CreatorEndpoint: endpointA,
+		DisplayName: "Room A", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedB, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-occ-b", CreatorEndpoint: endpointB,
+		DisplayName: "Room B", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedA.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now,
+	}); err != nil {
+		t.Fatalf("gateway reserve of unoccupied named room err=%v", err)
+	}
+	if _, err := app.relayPool().ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, namedB.ID, endpointA, relay.CapReceive); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedB.ID, MachineID: machineB, Endpoint: endpointB,
+		IdempotencyKey: "claim-b", Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres claim with occupant of another named room err=%v", err)
+	}
 }
 
 func testPostgresMembershipControls(t *testing.T, app *Database) {

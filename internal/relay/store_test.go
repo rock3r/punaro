@@ -1193,7 +1193,6 @@ func TestStoreTelegramPrimaryIsExemptFromNamedOccupancy(t *testing.T) {
 		MachineID: "machine-a", IdempotencyKey: "named-a", CreatorEndpoint: "agent/a",
 		DisplayName: "Alpha", Members: []Member{
 			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
-			{Endpoint: "telegram/primary", Capabilities: CapSend | CapReceive},
 		}, Now: now,
 	})
 	if err != nil {
@@ -1203,12 +1202,13 @@ func TestStoreTelegramPrimaryIsExemptFromNamedOccupancy(t *testing.T) {
 		MachineID: "machine-b", IdempotencyKey: "named-b", CreatorEndpoint: "agent/b",
 		DisplayName: "Beta", Members: []Member{
 			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
-			{Endpoint: "telegram/primary", Capabilities: CapSend | CapReceive},
 		}, Now: now,
 	})
 	if err != nil || second.ID == first.ID {
-		t.Fatalf("telegram/primary second named=%#v first=%#v err=%v", second, first, err)
+		t.Fatalf("second named=%#v first=%#v err=%v", second, first, err)
 	}
+	mustReserveAndCompleteTelegramClaim(t, store, first.ID, "machine-a", "agent/a", now)
+	mustReserveAndCompleteTelegramClaim(t, store, second.ID, "machine-b", "agent/b", now.Add(time.Second))
 }
 
 func TestStoreRenameToNameChecksOccupancy(t *testing.T) {
@@ -1327,17 +1327,19 @@ func TestStoreControlUpsertFencesNamedOccupancy(t *testing.T) {
 	}
 	if _, _, err := store.ApplyControl(ControlInput{
 		ConversationID: namedA.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
-		Operation: ControlUpsertMember, Member: Member{Endpoint: "telegram/primary", Capabilities: CapReceive},
+		Operation: ControlUpsertMember, Member: Member{Endpoint: TelegramGatewayEndpoint, Capabilities: CapReceive},
 		IdempotencyKey: "upsert-telegram-a", Now: now,
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("member set telegram/primary err=%v", err)
 	}
+	mustReserveAndCompleteTelegramClaim(t, store, namedA.ID, "machine-a", "agent/a", now)
+	mustReserveAndCompleteTelegramClaim(t, store, namedB.ID, "machine-b", "agent/b", now.Add(time.Second))
 	if _, _, err := store.ApplyControl(ControlInput{
-		ConversationID: namedB.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b",
-		Operation: ControlUpsertMember, Member: Member{Endpoint: "telegram/primary", Capabilities: CapReceive},
-		IdempotencyKey: "upsert-telegram-b", Now: now,
-	}); err != nil {
-		t.Fatalf("telegram/primary upsert into second named room err=%v", err)
+		ConversationID: namedA.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		Operation: ControlRemoveMember, Member: Member{Endpoint: TelegramGatewayEndpoint},
+		IdempotencyKey: "remove-telegram-a", Now: now,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("remove telegram/primary after complete err=%v", err)
 	}
 }
 
@@ -1455,6 +1457,108 @@ func TestStoreRejectsUserTelegramAsDurableRoleAndMember(t *testing.T) {
 	}
 	if err := store.BindRoleToSession("machine-a", TelegramUserParticipant, "agent/a", now, time.Hour); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("bind reserved participant err=%v", err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "create-gateway", CreatorEndpoint: "agent/a",
+		DisplayName: "Gateway member", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Endpoint: TelegramGatewayEndpoint, Capabilities: CapSend | CapReceive},
+		}, Now: now,
+	}); err == nil {
+		t.Fatal("created conversation with telegram/primary member")
+	}
+}
+
+func mustReserveAndCompleteTelegramClaim(t *testing.T, store *Store, conversationID, actorMachine, actorEndpoint string, now time.Time) {
+	t.Helper()
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: conversationID, MachineID: actorMachine, Endpoint: actorEndpoint,
+		IdempotencyKey: "claim-" + conversationID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversationID, MachineID: "machine-telegram", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreCompleteClampsTelegramPrimaryCapabilities(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 16, 7, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named", CreatorEndpoint: "agent/a",
+		DisplayName: "Ops", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, TelegramGatewayEndpoint, CapSend|CapReceive|CapAdmin|CapInvoke); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: "machine-a", Endpoint: "agent/a",
+		IdempotencyKey: "claim-" + conversation.ID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: "machine-telegram", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	var capabilities Capability
+	if err := store.db.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", conversation.ID, TelegramGatewayEndpoint).Scan(&capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities != TelegramGatewayCapabilities {
+		t.Fatalf("clamped gateway capabilities=%d", capabilities)
+	}
+}
+
+func TestStoreTelegramInboundRequiresCompleteClaim(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 16, 8, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named", CreatorEndpoint: "agent/a",
+		DisplayName: "Ops", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", conversation.ID, TelegramGatewayEndpoint, CapSend|CapReceive); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "too soon", IdempotencyKey: "telegram-update:1", Now: now,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("inbound before complete err=%v", err)
+	}
+	if err := ValidateTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "ok", InReplyToMessageID: " not-a-token", IdempotencyKey: "telegram-update:2",
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatal("invalid reply-to message id accepted")
 	}
 }
 

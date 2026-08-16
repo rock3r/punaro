@@ -1019,7 +1019,6 @@ func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 		MachineID: machineA, IdempotencyKey: namespace + "-named-1", CreatorEndpoint: endpointA,
 		DisplayName: "Occupancy A", Members: []relay.Member{
 			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-			{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
 		}, Now: now,
 	})
 	if err != nil {
@@ -1037,12 +1036,13 @@ func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 		MachineID: machineB, IdempotencyKey: namespace + "-named-telegram", CreatorEndpoint: endpointB,
 		DisplayName: "Occupancy Telegram", Members: []relay.Member{
 			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-			{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
 		}, Now: now,
 	})
 	if err != nil {
-		t.Fatalf("telegram/primary second named err=%v", err)
+		t.Fatalf("second named room err=%v", err)
 	}
+	mustClaimConversation(t, backend, telegramRoom.ID, machineB, endpointB, machineGateway, now)
+	mustClaimConversation(t, backend, named.ID, machineA, endpointA, machineGateway, now.Add(time.Second))
 	if names, ok := backend.(relay.DisplayNameBackend); ok {
 		if _, _, err := names.SetConversationDisplayName(relay.SetDisplayNameInput{
 			ConversationID: firstUnnamed.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
@@ -1086,8 +1086,8 @@ func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 		ConversationID: named.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
 		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
 		IdempotencyKey: namespace + "-upsert-telegram-existing", Now: now,
-	}); err != nil {
-		t.Fatalf("control upsert existing telegram member err=%v", err)
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("control upsert telegram/primary err=%v", err)
 	}
 	extraNamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
 		MachineID: machineExtra, IdempotencyKey: namespace + "-named-extra", CreatorEndpoint: endpointExtra,
@@ -1098,13 +1098,7 @@ func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := control.ApplyControl(relay.ControlInput{
-		ConversationID: extraNamed.ID, ActorMachineID: machineExtra, ActorEndpoint: endpointExtra,
-		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
-		IdempotencyKey: namespace + "-upsert-telegram-new", Now: now,
-	}); err != nil {
-		t.Fatalf("telegram/primary control upsert into another named room err=%v", err)
-	}
+	mustClaimConversation(t, backend, extraNamed.ID, machineExtra, endpointExtra, machineGateway, now.Add(2*time.Second))
 	roleBackend, ok := backend.(relay.RoleBindingBackend)
 	if !ok {
 		t.Fatal("backend does not implement durable role bindings")
@@ -1169,6 +1163,25 @@ func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 	}
 	if err := roleBackend.BindRoleToSession(machineRole, unnamedRole, endpointRole, now.Add(4*time.Second), time.Hour); err != nil {
 		t.Fatalf("bind unnamed role while occupying one named room err=%v", err)
+	}
+}
+
+func mustClaimConversation(t *testing.T, backend relay.Backend, conversationID, actorMachine, actorEndpoint, gatewayMachine string, now time.Time) {
+	t.Helper()
+	claims, ok := backend.(relay.TelegramClaimBackend)
+	if !ok {
+		t.Fatal("backend does not implement telegram claims")
+	}
+	if _, _, err := claims.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: conversationID, MachineID: actorMachine, Endpoint: actorEndpoint,
+		IdempotencyKey: "claim-" + conversationID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := claims.CompleteTelegramClaim(relay.TelegramClaimCompleteInput{
+		ConversationID: conversationID, MachineID: gatewayMachine, Now: now,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

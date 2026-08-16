@@ -768,7 +768,7 @@ func (d *Database) AssertEndpointOwnership(machineID, endpoint string, now time.
 // ApplyControl mutates membership through the same explicit, server-authorized
 // control plane as SQLite. Controls never enter mail_messages or deliveries.
 func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, bool, error) {
-	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || input.Member.Endpoint == relay.TelegramUserParticipant || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
+	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.ValidEndpoint(input.Member.Endpoint) || relay.ReservedRelayMember(input.Member.Endpoint) || (input.Operation != relay.ControlUpsertMember && input.Operation != relay.ControlRemoveMember) || (input.Operation == relay.ControlUpsertMember && (input.Member.Capabilities == 0 || input.Member.Capabilities&^(relay.CapSend|relay.CapReceive|relay.CapAdmin|relay.CapInvoke) != 0)) || (input.Operation == relay.ControlRemoveMember && input.Member.Capabilities != 0) {
 		return relay.ControlEvent{}, false, relay.ErrForbidden
 	}
 	if _, err := uuid.Parse(input.ConversationID); err != nil {
@@ -1328,9 +1328,40 @@ func postgresRejectExclusiveCreateOccupancy(tx *sql.Tx, endpoints map[string]str
 }
 
 func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	occupants, err := postgresConversationOccupants(tx, conversationID, now)
+	if err != nil {
+		return err
+	}
+	if err := postgresLockOccupancy(tx, []string{conversationID}, occupants); err != nil {
+		return err
+	}
+	exclusive, exclusiveErr := postgresConversationIsExclusive(tx, conversationID)
+	if exclusiveErr != nil {
+		return exclusiveErr
+	}
+	if exclusive {
+		return nil
+	}
+	return postgresRejectOccupantsInOtherExclusiveConversations(tx, conversationID, occupants, now)
+}
+
+func postgresRejectExclusiveClaimOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	// Named rooms are already exclusive. Rename can skip the occupant walk;
+	// reserve cannot — every non-gateway occupant must be fenced.
+	occupants, err := postgresConversationOccupants(tx, conversationID, now)
+	if err != nil {
+		return err
+	}
+	if err := postgresLockOccupancy(tx, []string{conversationID}, occupants); err != nil {
+		return err
+	}
+	return postgresRejectOccupantsInOtherExclusiveConversations(tx, conversationID, occupants, now)
+}
+
+func postgresConversationOccupants(tx *sql.Tx, conversationID string, now time.Time) (map[string]struct{}, error) {
 	rolesAvailable, err := postgresRoleBindingsAvailable(tx)
 	if err != nil {
-		return errors.New("durable role bindings are unavailable")
+		return nil, errors.New("durable role bindings are unavailable")
 	}
 	query := `SELECT endpoint FROM relay.mail_memberships WHERE conversation_id = $1::uuid`
 	if rolesAvailable {
@@ -1352,35 +1383,25 @@ func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, n
 		rows, err = tx.QueryContext(context.Background(), query, conversationID)
 	}
 	if err != nil {
-		return errors.New("conversation occupants are unavailable")
+		return nil, errors.New("conversation occupants are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	var occupants []string
+	occupants := make(map[string]struct{})
 	for rows.Next() {
 		var endpoint string
 		if err := rows.Scan(&endpoint); err != nil {
-			return errors.New("conversation occupant is malformed")
+			return nil, errors.New("conversation occupant is malformed")
 		}
-		occupants = append(occupants, endpoint)
+		occupants[endpoint] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		return errors.New("conversation occupants are unavailable")
+		return nil, errors.New("conversation occupants are unavailable")
 	}
-	occupantSet := make(map[string]struct{}, len(occupants))
-	for _, endpoint := range occupants {
-		occupantSet[endpoint] = struct{}{}
-	}
-	if err := postgresLockOccupancy(tx, []string{conversationID}, occupantSet); err != nil {
-		return err
-	}
-	exclusive, exclusiveErr := postgresConversationIsExclusive(tx, conversationID)
-	if exclusiveErr != nil {
-		return exclusiveErr
-	}
-	if exclusive {
-		return nil
-	}
-	for _, endpoint := range postgresSortedEndpoints(occupantSet) {
+	return occupants, nil
+}
+
+func postgresRejectOccupantsInOtherExclusiveConversations(tx *sql.Tx, conversationID string, occupants map[string]struct{}, now time.Time) error {
+	for _, endpoint := range postgresSortedEndpoints(occupants) {
 		if err := postgresSessionOccupiesOtherExclusiveConversation(tx, endpoint, conversationID, now); err != nil {
 			return err
 		}
@@ -1495,7 +1516,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		}
 		switch {
 		case member.Endpoint != "" && member.Role == "" && member.RoleMachineID == "":
-			if !relay.ValidEndpoint(member.Endpoint) || member.Endpoint == relay.TelegramUserParticipant {
+			if !relay.ValidEndpoint(member.Endpoint) || relay.ReservedRelayMember(member.Endpoint) {
 				return relay.Conversation{}, errors.New("invalid conversation member")
 			}
 			if _, duplicate := seen[member.Endpoint]; duplicate {
@@ -1742,6 +1763,11 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	}
 	if err := postgresRejectDirectConversationAppend(tx, input.ConversationID); err != nil {
 		return relay.Message{}, false, err
+	}
+	if input.FromParticipant == relay.TelegramUserParticipant {
+		if err := postgresRequireCompleteTelegramClaim(tx, input.ConversationID); err != nil {
+			return relay.Message{}, false, err
+		}
 	}
 	if input.TargetRole == relay.TelegramUserParticipant {
 		if err := postgresRequireCompleteTelegramClaim(tx, input.ConversationID); err != nil {
@@ -2575,12 +2601,20 @@ func postgresRequireCompleteTelegramClaim(tx *sql.Tx, conversationID string) err
 }
 
 func postgresTelegramClaimByConversation(tx *sql.Tx, conversationID string) (relay.TelegramClaim, error) {
+	return postgresTelegramClaimByConversationLocked(tx, conversationID, false)
+}
+
+func postgresTelegramClaimByConversationLocked(tx *sql.Tx, conversationID string, lock bool) (relay.TelegramClaim, error) {
 	var claim relay.TelegramClaim
 	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(context.Background(), `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
+	query := `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
 		FROM relay.mail_telegram_claims AS claim
 		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
-		WHERE claim.conversation_id=$1::uuid`, conversationID).Scan(&claim.ConversationID, &claim.Status, &claim.DisplayName, &claim.CreatedAt, &completedAt); err != nil {
+		WHERE claim.conversation_id=$1::uuid`
+	if lock {
+		query += ` FOR UPDATE OF claim`
+	}
+	if err := tx.QueryRowContext(context.Background(), query, conversationID).Scan(&claim.ConversationID, &claim.Status, &claim.DisplayName, &claim.CreatedAt, &completedAt); err != nil {
 		return relay.TelegramClaim{}, err
 	}
 	claim.CreatedAt = claim.CreatedAt.UTC()
@@ -2637,13 +2671,29 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
 	}
-	if err := postgresRejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+	if err := postgresRejectExclusiveClaimOccupancy(tx, input.ConversationID, input.Now); err != nil {
 		return relay.TelegramClaim{}, false, err
 	}
 	createdAt := input.Now.UTC().Truncate(time.Microsecond)
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at)
-		VALUES($1::uuid,'pending',$2,$3,$4,$5,$6)`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, postgresTelegramClaimHash(input.ConversationID), createdAt); err != nil {
+	result, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at)
+		VALUES($1::uuid,'pending',$2,$3,$4,$5,$6)
+		ON CONFLICT (conversation_id) DO NOTHING`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, postgresTelegramClaimHash(input.ConversationID), createdAt)
+	if err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "reserve telegram claim")
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim insert is unavailable")
+	}
+	if inserted == 0 {
+		claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+		if err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim retry cannot commit")
+		}
+		return claim, true, nil
 	}
 	if err := tx.Commit(); err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "commit telegram claim")
@@ -2676,7 +2726,7 @@ func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput)
 	if _, err := postgresEndpointOwnershipLocked(tx, relay.TelegramGatewayEndpoint, input.MachineID, input.Now); err != nil {
 		return relay.TelegramClaim{}, false, err
 	}
-	claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+	claim, err := postgresTelegramClaimByConversationLocked(tx, input.ConversationID, true)
 	if err != nil {
 		return relay.TelegramClaim{}, false, relay.ErrForbidden
 	}
@@ -2689,24 +2739,33 @@ func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput)
 	if claim.Status != "pending" {
 		return relay.TelegramClaim{}, false, relay.ErrForbidden
 	}
-	var existing relay.Capability
-	err = tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2`, input.ConversationID, relay.TelegramGatewayEndpoint).Scan(&existing)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, input.ConversationID, relay.TelegramGatewayEndpoint, relay.CapSend|relay.CapReceive); err != nil {
-			return relay.TelegramClaim{}, false, relayDatabaseError(err, "insert telegram gateway member")
-		}
-		if err := postgresAdvanceRecipientCursor(tx, relay.TelegramGatewayEndpoint, input.ConversationID); err != nil {
-			return relay.TelegramClaim{}, false, err
-		}
-	} else if err != nil {
-		return relay.TelegramClaim{}, false, errors.New("telegram gateway member is unavailable")
+	if err := postgresEnsureTelegramGatewayMembership(tx, input.ConversationID); err != nil {
+		return relay.TelegramClaim{}, false, err
 	}
 	completedAt := input.Now.UTC().Truncate(time.Microsecond)
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_participants(conversation_id,label,created_at) VALUES($1::uuid,$2,$3)`, input.ConversationID, relay.TelegramUserParticipant, completedAt); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_participants(conversation_id,label,created_at) VALUES($1::uuid,$2,$3) ON CONFLICT (conversation_id) DO NOTHING`, input.ConversationID, relay.TelegramUserParticipant, completedAt); err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "insert telegram participant")
 	}
-	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_telegram_claims SET status='complete', completed_at=$2 WHERE conversation_id=$1::uuid AND status='pending'`, input.ConversationID, completedAt); err != nil {
+	result, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_telegram_claims SET status='complete', completed_at=$2 WHERE conversation_id=$1::uuid AND status='pending'`, input.ConversationID, completedAt)
+	if err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "complete telegram claim")
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim complete is unavailable")
+	}
+	if updated == 0 {
+		claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+		if err != nil {
+			return relay.TelegramClaim{}, false, relay.ErrForbidden
+		}
+		if claim.Status == "complete" {
+			if err := tx.Commit(); err != nil {
+				return relay.TelegramClaim{}, false, errors.New("telegram claim complete retry cannot commit")
+			}
+			return claim, true, nil
+		}
+		return relay.TelegramClaim{}, false, relay.ErrForbidden
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claim_events(conversation_id,event,actor_machine,actor_endpoint,created_at) VALUES($1::uuid,'complete',$2,$3,$4)`, input.ConversationID, input.MachineID, relay.TelegramGatewayEndpoint, completedAt); err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "record telegram claim event")
@@ -2877,16 +2936,44 @@ func (d *Database) SessionTopic(machineID, endpoint string, now time.Time) (rela
 	return topics[0], nil
 }
 
+func postgresEnsureTelegramGatewayMembership(tx *sql.Tx, conversationID string) error {
+	var previous relay.Capability
+	err := tx.QueryRowContext(context.Background(), `SELECT capabilities FROM relay.mail_memberships WHERE conversation_id=$1::uuid AND endpoint=$2 FOR UPDATE`, conversationID, relay.TelegramGatewayEndpoint).Scan(&previous)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_memberships(conversation_id,endpoint,capabilities) VALUES($1::uuid,$2,$3)`, conversationID, relay.TelegramGatewayEndpoint, relay.TelegramGatewayCapabilities); err != nil {
+			return relayDatabaseError(err, "insert telegram gateway member")
+		}
+		return postgresAdvanceRecipientCursor(tx, relay.TelegramGatewayEndpoint, conversationID)
+	}
+	if err != nil {
+		return errors.New("telegram gateway member is unavailable")
+	}
+	if previous != relay.TelegramGatewayCapabilities {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_memberships SET capabilities=$3 WHERE conversation_id=$1::uuid AND endpoint=$2`, conversationID, relay.TelegramGatewayEndpoint, relay.TelegramGatewayCapabilities); err != nil {
+			return relayDatabaseError(err, "clamp telegram gateway member")
+		}
+	}
+	if previous&relay.CapReceive == 0 {
+		return postgresAdvanceRecipientCursor(tx, relay.TelegramGatewayEndpoint, conversationID)
+	}
+	return nil
+}
+
 func (d *Database) AppendTelegramInbound(input relay.TelegramInboundInput) (relay.Message, bool, error) {
-	if input.FromEndpoint != relay.TelegramGatewayEndpoint || input.FromParticipant != relay.TelegramUserParticipant {
-		return relay.Message{}, false, relay.ErrForbidden
+	if err := relay.ValidateTelegramInbound(input); err != nil {
+		return relay.Message{}, false, err
 	}
-	if input.InReplyToEndpoint != "" && !relay.ValidEndpoint(input.InReplyToEndpoint) {
-		return relay.Message{}, false, relay.ErrForbidden
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.Message{}, false, errors.New("telegram inbound cannot start")
 	}
-	if input.TelegramThreadID < 0 {
-		return relay.Message{}, false, relay.ErrForbidden
+	if err := postgresRequireCompleteTelegramClaim(tx, input.ConversationID); err != nil {
+		cancel()
+		_ = tx.Rollback()
+		return relay.Message{}, false, err
 	}
+	_ = tx.Rollback()
+	cancel()
 	return d.AppendMessage(relay.AppendInput{
 		ConversationID:           input.ConversationID,
 		SenderMachineID:          input.SenderMachineID,
