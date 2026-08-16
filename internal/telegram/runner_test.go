@@ -45,6 +45,28 @@ func TestRunnerSkipsUnboundTopicAndContinuesToLaterRoutedUpdate(t *testing.T) {
 	}
 }
 
+func TestRunnerAdvancesOffsetWhenCallbackAnswerFails(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &failingCallbackNotify{err: context.DeadlineExceeded}
+	runner := Runner{Poller: fakePoller{updates: []Update{
+		{ID: 20, UserID: 55, ChatID: 55, CallbackID: "cbq-old", CallbackData: "opaque-token"},
+		{ID: 21, UserID: 55, ChatID: 55, ThreadID: 7, Text: "later"},
+	}}, Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error { t.Fatal("callback submitted"); return nil }, Notify: notify, Log: func(string, ...any) {}}}
+	next, err := runner.RunOnce(context.Background(), 20)
+	if err != nil || next != 22 {
+		t.Fatalf("next=%d err=%v", next, err)
+	}
+	processed, err := state.Processed(20)
+	if err != nil || !processed {
+		t.Fatalf("failed callback answer stalled the offset: processed=%v err=%v", processed, err)
+	}
+}
+
 func TestRunnerAdvancesOffsetAfterInertCallback(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

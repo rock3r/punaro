@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/telegram"
 )
 
 func TestParseRouteRequiresExactTopicAndConversation(t *testing.T) {
@@ -58,6 +62,17 @@ func TestLoadConfigRejectsNonPrimaryGatewayEndpoint(t *testing.T) {
 	t.Setenv("PUNARO_TELEGRAM_STATE_DIR", directory)
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("non-primary telegram gateway endpoint accepted")
+	}
+}
+
+func TestRegisterOperatorCommandsContinuesAfterFailure(t *testing.T) {
+	called := false
+	registerOperatorCommands(context.Background(), func(context.Context, []telegram.BotCommand) error {
+		called = true
+		return fmt.Errorf("telegram setMyCommands failed")
+	})
+	if !called {
+		t.Fatal("setMyCommands was not attempted")
 	}
 }
 

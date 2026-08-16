@@ -142,7 +142,7 @@ func (s *State) IssueCallbackToken(conversationID string, now time.Time) (string
 		return "", err
 	}
 	if outstanding >= maxCallbackTokens {
-		rows, err := tx.QueryContext(context.Background(), "SELECT token_hash FROM callback_tokens WHERE consumed_at IS NULL ORDER BY expires_at ASC LIMIT ?", outstanding-maxCallbackTokens+1)
+		rows, err := tx.QueryContext(context.Background(), "SELECT token_hash FROM callback_tokens WHERE consumed_at IS NULL ORDER BY expires_at ASC, rowid ASC LIMIT ?", outstanding-maxCallbackTokens+1)
 		if err != nil {
 			return "", err
 		}

@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -87,6 +88,43 @@ func TestStateIssuesHashedTTLCallbackTokens(t *testing.T) {
 	var claimExecutions int
 	if err := state.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='claim_executions'`).Scan(&claimExecutions); err != nil || claimExecutions != 0 {
 		t.Fatalf("6a created claim_executions: count=%d err=%v", claimExecutions, err)
+	}
+}
+
+func TestStateEvictsOldestCallbackTokenAtCap(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	now := testCallbackNow
+	tokens := make([]string, maxCallbackTokens)
+	for i := range tokens {
+		token, err := state.IssueCallbackToken(fmt.Sprintf("conversation-%d", i), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens[i] = token
+	}
+	newest, err := state.IssueCallbackToken("conversation-new", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _, err := state.lookupCallbackToken(tokens[0], now); err != nil || found {
+		t.Fatal("oldest outstanding token was not evicted")
+	}
+	for i, token := range tokens[1:] {
+		if conversation, found, consumed, err := state.lookupCallbackToken(token, now); err != nil || !found || consumed || conversation != fmt.Sprintf("conversation-%d", i+1) {
+			t.Fatalf("kept token %d missing: found=%v consumed=%v conversation=%q err=%v", i+1, found, consumed, conversation, err)
+		}
+	}
+	if conversation, found, consumed, err := state.lookupCallbackToken(newest, now); err != nil || !found || consumed || conversation != "conversation-new" {
+		t.Fatalf("just-issued token was evicted: found=%v consumed=%v conversation=%q err=%v", found, consumed, conversation, err)
+	}
+	count, err := state.outstandingCallbackTokens(now)
+	if err != nil || count != maxCallbackTokens {
+		t.Fatalf("outstanding=%d err=%v", count, err)
 	}
 }
 

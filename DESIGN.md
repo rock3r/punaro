@@ -956,14 +956,22 @@ requires a completed claim and creates one delivery to `telegram/primary`.
 
 The Telegram gateway converts one explicitly configured topic into one Punaro
 conversation. It verifies the configured allowed Telegram user ID on every
-update. It persists `update_id` only after the relay append succeeds; retrying
-an unrecorded update uses the same relay idempotency key, so crashes or
-transient relay failures do not silently lose user input.
+update, including `callback_query`. It persists `update_id` only after the
+relay append succeeds (or after an inert command/callback is finalized);
+retrying an unrecorded update uses the same relay idempotency key, so crashes
+or transient relay failures do not silently lose user input.
+
+Operator `/list` is a private-chat topic picker: the gateway polls
+`callback_query` and sends display-name buttons whose `callback_data` is a raw
+256-bit token. Only SHA-256(token) is stored, with a 15-minute TTL and a cap
+of 100 outstanding tokens. Conversation ids never appear in Telegram. Until
+claim execution exists, a tap is answered generically and the token is not
+consumed; `createForumTopic` is not called. Main-chat ordinary text stays
+unbound. There is no main-chat fallback.
 
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
-conversation from fanning out to multiple topics. There is no topic picker,
-callback data, or main-chat fallback. The Bot API does not expose a send
+conversation from fanning out to multiple topics. The Bot API does not expose a send
 idempotency key, so a crash after an accepted Telegram send and before relay
 acknowledgement is deliberately at-least-once. Agent text is rendered as
 escaped rich HTML with entity detection disabled and content protection set.

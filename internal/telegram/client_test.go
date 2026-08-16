@@ -54,7 +54,8 @@ func TestClientPollsCallbackQueriesAndBotCommands(t *testing.T) {
 			`{"update_id":12,"message":{"message_id":6,"from":{"id":55},"chat":{"id":55},"text":"/list","entities":[{"offset":0,"length":5,"type":"bot_command"}]}},` +
 			`{"update_id":13,"message":{"message_id":7,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"/list"}},` +
 			`{"update_id":14,"callback_query":{"id":"cbq-1","from":{"id":55},"data":"opaque-token","message":{"message_id":8,"chat":{"id":55}}}},` +
-			`{"update_id":15,"message":{"message_id":9,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"hi","reply_to_message":{"message_id":3}}}` +
+			`{"update_id":15,"message":{"message_id":9,"from":{"id":55},"chat":{"id":100},"message_thread_id":7,"text":"hi","reply_to_message":{"message_id":3}}},` +
+			`{"update_id":16,"message":{"message_id":10,"from":{"id":55},"chat":{"id":55},"text":"please /list the topics","entities":[{"offset":7,"length":5,"type":"bot_command"}]}}` +
 			`]}`))
 	}))
 	defer server.Close()
@@ -66,7 +67,7 @@ func TestClientPollsCallbackQueriesAndBotCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(updates) != 5 {
+	if len(updates) != 6 {
 		t.Fatalf("updates=%#v", updates)
 	}
 	if !updates[0].IsCommand || updates[0].Command != "start" || updates[0].ChatID != 55 || updates[0].MessageID != 5 {
@@ -83,6 +84,9 @@ func TestClientPollsCallbackQueriesAndBotCommands(t *testing.T) {
 	}
 	if updates[4].ReplyToID != 3 || updates[4].IsCommand {
 		t.Fatalf("reply=%#v", updates[4])
+	}
+	if updates[5].IsCommand || updates[5].Command != "" || updates[5].Text != "please /list the topics" {
+		t.Fatalf("mid-text bot_command was treated as a command: %#v", updates[5])
 	}
 }
 

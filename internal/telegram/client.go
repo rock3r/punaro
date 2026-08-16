@@ -164,7 +164,7 @@ func applyBotAPIMessage(update *Update, message *botAPIMessage) {
 
 func parseBotCommand(text string, entities []botAPIEntity) (string, bool) {
 	for _, entity := range entities {
-		if entity.Type != "bot_command" {
+		if entity.Type != "bot_command" || entity.Offset != 0 {
 			continue
 		}
 		command := normalizeBotCommand(utf16Slice(text, entity.Offset, entity.Length))

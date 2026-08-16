@@ -85,8 +85,9 @@ Operator commands are recognized only from Telegram `bot_command` entities:
 - `/start` replies with a short help sentence that mentions `/list`.
 - `/list` asks the relay for the last 10 unclaimed named topics and replies in
   the private chat with one inline-keyboard row per topic. Button labels are
-  display names (truncated to 64 characters). `callback_data` is an opaque
-  hashed TTL token; conversation ids never appear in Telegram.
+  display names (truncated to 64 characters). `callback_data` is a one-time raw
+  256-bit hex token; the gateway stores SHA-256(token) with a 15-minute TTL and
+  evicts to 100 outstanding. Conversation ids never appear in Telegram.
 
 Ordinary main-chat text stays inert. A `/list` tap is answered with a generic
 failure until claim execution is deployed; the token is not consumed.

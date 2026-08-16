@@ -64,6 +64,13 @@ func main() {
 	}
 }
 
+func registerOperatorCommands(ctx context.Context, register func(context.Context, []telegram.BotCommand) error) {
+	if err := register(ctx, telegram.DefaultBotCommands()); err != nil {
+		// Menu registration is operator UX, not a prerequisite for poll/lease.
+		log.Printf("telegram event class=telegram_command cmd=setMyCommands err=register_failed")
+	}
+}
+
 func parseRoute(args []string) (routeRequest, error) {
 	flags := flag.NewFlagSet("punaro-telegram route", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -114,9 +121,7 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	if err := botClient.SetMyCommands(ctx, telegram.DefaultBotCommands()); err != nil {
-		return fmt.Errorf("register telegram commands: %w", err)
-	}
+	registerOperatorCommands(ctx, botClient.SetMyCommands)
 	bridge := telegram.Bridge{
 		Relay:    relayClient,
 		Endpoint: cfg.endpoint,

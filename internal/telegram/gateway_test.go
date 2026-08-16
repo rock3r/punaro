@@ -226,6 +226,44 @@ func TestGatewayCallbackWithoutClaimExecutionStaysInert(t *testing.T) {
 	}
 }
 
+func TestGatewayUnauthorizedCallbackStaysUnconsumed(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	var logs []string
+	gateway := Gateway{
+		AllowedUserID: 55,
+		State:         state,
+		Submit:        func(context.Context, Submission) error { t.Fatal("callback submitted as mail"); return nil },
+		ListUnclaimed: func(context.Context) ([]relay.UnclaimedTopic, error) {
+			return []relay.UnclaimedTopic{{ID: "conversation-1", DisplayName: "Ops"}}, nil
+		},
+		Notify: notify,
+		Now:    func() time.Time { return testCallbackNow },
+		Log:    func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) },
+	}
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err != nil {
+		t.Fatal(err)
+	}
+	raw := notify.messages[0].keyboard[0][0].CallbackData
+	if err := gateway.Handle(context.Background(), Update{ID: 2, UserID: 99, ChatID: 99, CallbackID: "cbq-forwarded", CallbackData: raw}); err != nil {
+		t.Fatal(err)
+	}
+	if len(notify.answers) != 1 || notify.answers[0].id != "cbq-forwarded" || notify.answers[0].text != callbackFailureText {
+		t.Fatalf("answers=%#v", notify.answers)
+	}
+	if _, found, consumed, err := state.lookupCallbackToken(raw, testCallbackNow); err != nil || !found || consumed {
+		t.Fatalf("unauthorized callback consumed token: found=%v consumed=%v err=%v", found, consumed, err)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "reason=unauthorized") {
+		t.Fatalf("unauthorized callback logs=%#v", logs)
+	}
+}
+
 func TestGatewayKeepsMainChatTextAndUnknownCommandsInert(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
@@ -290,6 +328,15 @@ func (n *recordingNotify) SendMessage(_ context.Context, chatID int64, text stri
 func (n *recordingNotify) AnswerCallbackQuery(_ context.Context, callbackID, text string) error {
 	n.answers = append(n.answers, recordedCallbackAnswer{id: callbackID, text: text})
 	return nil
+}
+
+type failingCallbackNotify struct {
+	recordingNotify
+	err error
+}
+
+func (n *failingCallbackNotify) AnswerCallbackQuery(context.Context, string, string) error {
+	return n.err
 }
 
 func hasLogClass(logs []string, class string) bool {

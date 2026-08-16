@@ -117,14 +117,18 @@ func (g Gateway) Handle(ctx context.Context, update Update) error {
 }
 
 func (g Gateway) handleCallback(ctx context.Context, update Update) error {
-	if g.Notify == nil {
-		return fmt.Errorf("telegram gateway is not configured")
+	if update.UserID != g.AllowedUserID || update.ChatID != g.AllowedUserID {
+		g.logEvent("telegram_update_inert", "reason=unauthorized")
+	} else {
+		g.logEvent("telegram_update_inert", "reason=callback")
 	}
-	// 6a has no executeClaim: answer generically and leave the token unused.
-	if err := g.Notify.AnswerCallbackQuery(ctx, update.CallbackID, callbackFailureText); err != nil {
-		return fmt.Errorf("answer telegram callback: %w", err)
+	// 6a has no executeClaim: answer generically, leave the token unused,
+	// and never stall the poll offset on a Bot API toast failure.
+	if g.Notify != nil {
+		if err := g.Notify.AnswerCallbackQuery(ctx, update.CallbackID, callbackFailureText); err != nil {
+			g.logEvent("telegram_update_inert", "reason=callback_answer")
+		}
 	}
-	g.logEvent("telegram_update_inert", "reason=callback")
 	return g.markInert(update.ID)
 }
 
