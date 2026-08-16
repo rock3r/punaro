@@ -402,6 +402,18 @@ func TestHTTPCreateConversationPersistsDisplayNameAndAllowsUnnamed(t *testing.T)
 	if listed.Code != http.StatusOK || json.NewDecoder(listed.Body).Decode(&payload) != nil || len(payload.Conversations) != 2 {
 		t.Fatalf("list=%d %s", listed.Code, listed.Body.String())
 	}
+	foundNamed, foundUnnamed := false, false
+	for _, conversation := range payload.Conversations {
+		switch conversation.ID {
+		case namedConversation.ID:
+			foundNamed = conversation.DisplayName == "Review room"
+		case unnamedConversation.ID:
+			foundUnnamed = conversation.DisplayName == ""
+		}
+	}
+	if !foundNamed || !foundUnnamed {
+		t.Fatalf("list payload missing display names: %#v", payload.Conversations)
+	}
 	changed := serveSigned(t, handler, private, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","display_name":"Other room","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]}]}`, "create-named-conflict", "create-named")
 	if changed.Code != http.StatusConflict {
 		t.Fatalf("changed named create=%d %s", changed.Code, changed.Body.String())
@@ -452,6 +464,18 @@ func TestHTTPSetConversationDisplayNameRequiresAdminAndIsIdempotent(t *testing.T
 	}
 	if missing := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-missing-key", ""); missing.Code != http.StatusBadRequest {
 		t.Fatalf("rename without idempotency key=%d %s", missing.Code, missing.Body.String())
+	}
+	if empty := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":""}`, "rename-empty", "rename-empty"); empty.Code != http.StatusBadRequest {
+		t.Fatalf("empty rename=%d %s", empty.Code, empty.Body.String())
+	}
+	if whitespace := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", `{"actor_endpoint":"agent/a/session","display_name":"   "}`, "rename-whitespace", "rename-whitespace"); whitespace.Code != http.StatusBadRequest {
+		t.Fatalf("whitespace rename=%d %s", whitespace.Code, whitespace.Body.String())
+	}
+	if detach := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":[]}`, "detach-a", ""); detach.Code != http.StatusOK {
+		t.Fatalf("detach=%d %s", detach.Code, detach.Body.String())
+	}
+	if detached := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/display-name", body, "rename-detached", "rename-detached"); detached.Code != http.StatusForbidden {
+		t.Fatalf("detached admin rename=%d %s", detached.Code, detached.Body.String())
 	}
 }
 

@@ -876,6 +876,59 @@ func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t 
 	}
 }
 
+func TestHTTPRelayClientOmitsEmptyDisplayNameOnCreate(t *testing.T) {
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unnamedBody, namedBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/conversations" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("conversation request was not signed")
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("conversation payload=%s err=%v", body, err)
+		}
+		if _, present := payload["display_name"]; present && unnamedBody == nil {
+			t.Fatalf("unnamed create included display_name: %s", body)
+		}
+		if unnamedBody == nil {
+			unnamedBody = append([]byte(nil), body...)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"unnamed-conversation"}`))
+			return
+		}
+		if payload["display_name"] != "Review room" {
+			t.Fatalf("named create payload=%s", body)
+		}
+		namedBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"named-conversation","display_name":"Review room"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "", "create-unnamed")
+	if err != nil || unnamed.ID != "unnamed-conversation" {
+		t.Fatalf("unnamed=%#v err=%v", unnamed, err)
+	}
+	named, err := client.CreateConversation(context.Background(), "agent/a", []relay.Member{{Endpoint: "agent/a", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, "Review room", "create-named")
+	if err != nil || named.ID != "named-conversation" || named.DisplayName != "Review room" {
+		t.Fatalf("named=%#v err=%v", named, err)
+	}
+	if unnamedBody == nil || namedBody == nil {
+		t.Fatal("create requests were not observed")
+	}
+}
+
 func TestHTTPRelayClientReadsPayloadFreeWake(t *testing.T) {
 	t.Parallel()
 	public, private, err := ed25519.GenerateKey(rand.Reader)

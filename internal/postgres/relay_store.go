@@ -945,6 +945,13 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	if err != nil {
+		return relay.Conversation{}, false, errors.New("conversation display name schema is unavailable")
+	}
+	if !namesAvailable {
+		return relay.Conversation{}, false, errors.New("conversation display names are unavailable")
+	}
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230612))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, false, errors.New("display name retry lock is unavailable")
 	}
@@ -984,10 +991,73 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	return conversation, false, nil
 }
 
+func postgresConversationDisplayNameAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT EXISTS (
+		SELECT 1 FROM pg_attribute
+		WHERE attrelid = to_regclass('relay.mail_conversations')
+		  AND attname = 'display_name' AND attnum > 0 AND NOT attisdropped
+	)`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
+}
+
+func postgresConversationInsertSQL(namesAvailable bool) string {
+	if namesAvailable {
+		return `INSERT INTO relay.mail_conversations(id,created_at,display_name) VALUES($1::uuid,$2,$3)`
+	}
+	return `INSERT INTO relay.mail_conversations(id,created_at) VALUES($1::uuid,$2)`
+}
+
+func postgresConversationByIDSQL(namesAvailable bool) string {
+	if namesAvailable {
+		return `SELECT id::text, display_name FROM relay.mail_conversations WHERE id=$1::uuid`
+	}
+	return `SELECT id::text FROM relay.mail_conversations WHERE id=$1::uuid`
+}
+
+func postgresConversationListSQL(rolesAvailable, namesAvailable bool) string {
+	inner := `conversation.id::text AS id`
+	outer := `SELECT id`
+	if namesAvailable {
+		inner += `, conversation.display_name`
+		outer = `SELECT id, display_name`
+	}
+	query := outer + ` FROM (
+		SELECT ` + inner + ` FROM relay.mail_conversations AS conversation
+		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
+		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2
+	`
+	if rolesAvailable {
+		query += `UNION
+		SELECT ` + inner + ` FROM relay.mail_conversations AS conversation
+		JOIN relay.mail_role_memberships AS membership ON membership.conversation_id=conversation.id
+		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+		WHERE binding.machine_id=$1 AND binding.lease_until>$2 AND endpoint.machine_id=$1
+		  AND endpoint.lease_until>$2 AND endpoint.ownership_generation=binding.ownership_generation
+	`
+	}
+	query += `) AS visible ORDER BY id`
+	return query
+}
+
 func postgresConversationByID(tx *sql.Tx, id string) (relay.Conversation, error) {
+	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	if err != nil {
+		return relay.Conversation{}, errors.New("conversation display name schema is unavailable")
+	}
 	var conversation relay.Conversation
+	if !namesAvailable {
+		if err := tx.QueryRowContext(context.Background(), postgresConversationByIDSQL(false), id).Scan(&conversation.ID); err != nil {
+			return relay.Conversation{}, errors.New("conversation is unavailable")
+		}
+		return conversation, nil
+	}
 	var displayName sql.NullString
-	if err := tx.QueryRowContext(context.Background(), `SELECT id::text, display_name FROM relay.mail_conversations WHERE id=$1::uuid`, id).Scan(&conversation.ID, &displayName); err != nil {
+	if err := tx.QueryRowContext(context.Background(), postgresConversationByIDSQL(true), id).Scan(&conversation.ID, &displayName); err != nil {
 		return relay.Conversation{}, errors.New("conversation is unavailable")
 	}
 	conversation.DisplayName = displayName.String
@@ -1062,6 +1132,13 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	if err != nil {
+		return relay.Conversation{}, errors.New("conversation display name schema is unavailable")
+	}
+	if displayName != "" && !namesAvailable {
+		return relay.Conversation{}, errors.New("conversation display names are unavailable")
+	}
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230608))`, input.MachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, errors.New("conversation retry lock is unavailable")
 	}
@@ -1140,7 +1217,11 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 		}
 	}
 	conversation := relay.Conversation{ID: uuid.NewString(), DisplayName: displayName}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversations(id,created_at,display_name) VALUES($1::uuid,$2,$3)`, conversation.ID, input.Now.UTC(), postgresNullableDisplayName(displayName)); err != nil {
+	if namesAvailable {
+		if _, err := tx.ExecContext(context.Background(), postgresConversationInsertSQL(true), conversation.ID, input.Now.UTC(), postgresNullableDisplayName(displayName)); err != nil {
+			return relay.Conversation{}, relayDatabaseError(err, "create conversation")
+		}
+	} else if _, err := tx.ExecContext(context.Background(), postgresConversationInsertSQL(false), conversation.ID, input.Now.UTC()); err != nil {
 		return relay.Conversation{}, relayDatabaseError(err, "create conversation")
 	}
 	for _, member := range input.Members {
@@ -1826,24 +1907,11 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	if err != nil {
 		return nil, errors.New("durable role bindings are unavailable")
 	}
-	query := `SELECT id, display_name FROM (
-		SELECT conversation.id::text AS id, conversation.display_name FROM relay.mail_conversations AS conversation
-		JOIN relay.mail_memberships AS membership ON membership.conversation_id=conversation.id
-		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=membership.endpoint
-		WHERE endpoint.machine_id=$1 AND endpoint.lease_until>$2
-	`
-	if rolesAvailable {
-		query += `UNION
-		SELECT conversation.id::text AS id, conversation.display_name FROM relay.mail_conversations AS conversation
-		JOIN relay.mail_role_memberships AS membership ON membership.conversation_id=conversation.id
-		JOIN relay.mail_role_bindings AS binding ON binding.role=membership.role
-		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
-		WHERE binding.machine_id=$1 AND binding.lease_until>$2 AND endpoint.machine_id=$1
-		  AND endpoint.lease_until>$2 AND endpoint.ownership_generation=binding.ownership_generation
-	`
+	namesAvailable, err := postgresConversationDisplayNameAvailable(d.relayPool())
+	if err != nil {
+		return nil, errors.New("conversation display name schema is unavailable")
 	}
-	query += `) AS visible ORDER BY id`
-	rows, err := d.relayPool().QueryContext(ctx, query, machineID, now.UTC())
+	rows, err := d.relayPool().QueryContext(ctx, postgresConversationListSQL(rolesAvailable, namesAvailable), machineID, now.UTC())
 	if err != nil {
 		return nil, errors.New("machine conversations are unavailable")
 	}
@@ -1851,11 +1919,15 @@ func (d *Database) ConversationsForMachine(machineID string, now time.Time) ([]r
 	var conversations []relay.Conversation
 	for rows.Next() {
 		var conversation relay.Conversation
-		var displayName sql.NullString
-		if err := rows.Scan(&conversation.ID, &displayName); err != nil {
+		if namesAvailable {
+			var displayName sql.NullString
+			if err := rows.Scan(&conversation.ID, &displayName); err != nil {
+				return nil, errors.New("machine conversation is malformed")
+			}
+			conversation.DisplayName = displayName.String
+		} else if err := rows.Scan(&conversation.ID); err != nil {
 			return nil, errors.New("machine conversation is malformed")
 		}
-		conversation.DisplayName = displayName.String
 		conversations = append(conversations, conversation)
 	}
 	if err := rows.Err(); err != nil {

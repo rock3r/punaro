@@ -247,8 +247,12 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 		}
 		encoded = append(encoded, encodedMember)
 	}
+	request := map[string]any{"creator_endpoint": creator, "members": encoded}
+	if displayName != "" {
+		request["display_name"] = displayName
+	}
 	var conversation relay.Conversation
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "display_name": displayName, "members": encoded}, idempotencyKey, &conversation)
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", request, idempotencyKey, &conversation)
 	return conversation, err
 }
 

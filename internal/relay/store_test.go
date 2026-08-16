@@ -1065,6 +1065,20 @@ func TestStoreSetConversationDisplayNameRequiresLiveAdminAndIsIdempotent(t *test
 	}); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("non-admin rename err=%v", err)
 	}
+	for _, invalid := range []string{"", "   "} {
+		if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+			ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+			DisplayName: invalid, IdempotencyKey: "rename-empty", Now: now,
+		}); err == nil {
+			t.Fatalf("empty rename %q was accepted", invalid)
+		}
+	}
+	if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Expired", IdempotencyKey: "rename-expired", Now: now.Add(2 * time.Hour),
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("expired admin rename err=%v", err)
+	}
 	listed, err := store.ConversationsForMachine("machine-a", now)
 	if err != nil || len(listed) != 1 || listed[0].DisplayName != "Ops room" {
 		t.Fatalf("listed after rename=%#v err=%v", listed, err)
