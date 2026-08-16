@@ -2009,6 +2009,16 @@ func TestStorePrepareTelegramAdoptDropsSharedRoleFromUnnamedNonKeeper(t *testing
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID:  keeper.ID,
+		SenderMachineID: "machine-telegram",
+		FromEndpoint:    TelegramPrimaryEndpoint,
+		Body:            "pending on the keeper",
+		IdempotencyKey:  "keeper-role-delivery",
+		Now:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	var pending int
 	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deliveries
 		WHERE recipient_endpoint=? AND acked_at IS NULL
@@ -2038,6 +2048,22 @@ func TestStorePrepareTelegramAdoptDropsSharedRoleFromUnnamedNonKeeper(t *testing
 		WHERE recipient_endpoint=? AND acked_at IS NULL
 		  AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)`, roleRecipient(TelegramCodexRole), nonKeeper.ID).Scan(&unacked); err != nil || unacked != 0 {
 		t.Fatalf("leftover role deliveries still unacked count=%d err=%v", unacked, err)
+	}
+	var keeperUnacked int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deliveries
+		WHERE recipient_endpoint=? AND acked_at IS NULL
+		  AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)`, roleRecipient(TelegramCodexRole), keeper.ID).Scan(&keeperUnacked); err != nil || keeperUnacked != 1 {
+		t.Fatalf("keeper role delivery unacked=%d err=%v", keeperUnacked, err)
+	}
+	var cursor, nextSequence int64
+	if err := store.db.QueryRowContext(context.Background(), "SELECT sequence FROM recipient_cursors WHERE recipient_endpoint=? AND conversation_id=?", roleRecipient(TelegramCodexRole), nonKeeper.ID).Scan(&cursor); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(context.Background(), "SELECT next_sequence FROM conversations WHERE id=?", nonKeeper.ID).Scan(&nextSequence); err != nil {
+		t.Fatal(err)
+	}
+	if cursor != nextSequence {
+		t.Fatalf("non-keeper role cursor=%d next_sequence=%d", cursor, nextSequence)
 	}
 	var capabilities Capability
 	if err := store.db.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", nonKeeper.ID, TelegramPrimaryEndpoint).Scan(&capabilities); err != nil {
@@ -2074,6 +2100,92 @@ func TestStorePrepareTelegramAdoptRejectsExtraOccupant(t *testing.T) {
 	}
 	if len(rooms) != 2 {
 		t.Fatalf("failed prepare mutated role occupancy=%#v", rooms)
+	}
+	assertNonKeeperUnnamed(t, store, nonKeeper.ID)
+}
+
+func TestStorePrepareTelegramAdoptRejectsUnsafeState(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		setup     func(*testing.T, *Store, Conversation, Conversation)
+		wantErr   error
+		wantErrIn string
+	}{
+		{
+			name: "keeper unnamed",
+			setup: func(t *testing.T, store *Store, keeper, _ Conversation) {
+				t.Helper()
+				if _, err := store.db.ExecContext(context.Background(), "UPDATE conversations SET display_name=NULL WHERE id=?", keeper.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErrIn: "keeper conversation is unnamed",
+		},
+		{
+			name: "non-keeper already named",
+			setup: func(t *testing.T, store *Store, _, nonKeeper Conversation) {
+				t.Helper()
+				if _, err := store.db.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", "Already named", nonKeeper.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErrIn: "non-keeper conversation is already named",
+		},
+		{
+			name: "role gone",
+			setup: func(t *testing.T, store *Store, _, nonKeeper Conversation) {
+				t.Helper()
+				if _, err := store.db.ExecContext(context.Background(), "DELETE FROM role_memberships WHERE conversation_id=? AND role=?", nonKeeper.ID, TelegramCodexRole); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrConflict,
+		},
+		{
+			name: "no telegram/primary",
+			setup: func(t *testing.T, store *Store, _, nonKeeper Conversation) {
+				t.Helper()
+				if _, err := store.db.ExecContext(context.Background(), "DELETE FROM memberships WHERE conversation_id=? AND endpoint=?", nonKeeper.ID, TelegramPrimaryEndpoint); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: ErrConflict,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			keeper, nonKeeper := createSharedTelegramRolePair(t, store, now)
+			test.setup(t, store, keeper, nonKeeper)
+			err = store.PrepareTelegramAdopt(AdoptPrepareInput{
+				KeeperID: keeper.ID, NonKeeperID: nonKeeper.ID, NonKeeperName: "Non-keeper topic", Now: now,
+			})
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("err=%v want %v", err, test.wantErr)
+			}
+			if test.wantErrIn != "" && (err == nil || !strings.Contains(err.Error(), test.wantErrIn)) {
+				t.Fatalf("err=%v want %q", err, test.wantErrIn)
+			}
+			assertPrepareDidNotNameNonKeeper(t, store, nonKeeper.ID, test.name == "non-keeper already named")
+			if test.name != "role gone" {
+				assertRoleOnBothRooms(t, store, keeper.ID, nonKeeper.ID)
+			} else {
+				rooms, err := roleConversationIDs(store, TelegramCodexRole)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rooms) != 1 || rooms[0] != keeper.ID {
+					t.Fatalf("role occupancy after rejected prepare=%#v", rooms)
+				}
+			}
+		})
 	}
 }
 
@@ -2154,4 +2266,37 @@ func conversationByIDViaStore(store *Store, conversationID string) (Conversation
 		return Conversation{}, err
 	}
 	return conversation, nil
+}
+
+func assertNonKeeperUnnamed(t *testing.T, store *Store, conversationID string) {
+	t.Helper()
+	assertPrepareDidNotNameNonKeeper(t, store, conversationID, false)
+}
+
+func assertPrepareDidNotNameNonKeeper(t *testing.T, store *Store, conversationID string, alreadyNamed bool) {
+	t.Helper()
+	got, err := conversationByIDViaStore(store, conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alreadyNamed {
+		if got.DisplayName == "" || got.DisplayName == "Non-keeper topic" {
+			t.Fatalf("rejected prepare changed already-named non-keeper=%#v", got)
+		}
+		return
+	}
+	if got.DisplayName != "" {
+		t.Fatalf("rejected prepare named non-keeper=%#v", got)
+	}
+}
+
+func assertRoleOnBothRooms(t *testing.T, store *Store, keeperID, nonKeeperID string) {
+	t.Helper()
+	rooms, err := roleConversationIDs(store, TelegramCodexRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rooms) != 2 || !containsString(rooms, keeperID) || !containsString(rooms, nonKeeperID) {
+		t.Fatalf("role occupancy after rejected prepare=%#v", rooms)
+	}
 }

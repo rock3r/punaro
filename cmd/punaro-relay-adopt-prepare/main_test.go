@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ func TestRunRequiresYesAndCompleteFlags(t *testing.T) {
 		"--keeper", "keeper-id",
 		"--non-keeper", "non-keeper-id",
 		"--non-keeper-name", "Non-keeper topic",
+		"--drop-role", relay.TelegramCodexRole,
 		"--yes",
 	}
 	tests := []struct {
@@ -33,6 +35,8 @@ func TestRunRequiresYesAndCompleteFlags(t *testing.T) {
 		{name: "missing keeper", args: withoutFlag(valid, "--keeper")},
 		{name: "missing non-keeper", args: withoutFlag(valid, "--non-keeper")},
 		{name: "missing non-keeper-name", args: withoutFlag(valid, "--non-keeper-name")},
+		{name: "missing drop-role", args: withoutFlag(valid, "--drop-role")},
+		{name: "wrong drop-role", args: withFlag(valid, "--drop-role", "role/other")},
 		{name: "trailing argument", args: append(append([]string{}, valid...), "unexpected")},
 	}
 	for _, test := range tests {
@@ -65,6 +69,16 @@ func TestRunPreparesSharedRoleUnnamedPair(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, _, err := store.AppendMessage(relay.AppendInput{
+		ConversationID:  keeper.ID,
+		SenderMachineID: "machine-telegram",
+		FromEndpoint:    relay.TelegramPrimaryEndpoint,
+		Body:            "pending on the keeper",
+		IdempotencyKey:  "keeper-role-delivery",
+		Now:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +89,7 @@ func TestRunPreparesSharedRoleUnnamedPair(t *testing.T) {
 		"--keeper", keeper.ID,
 		"--non-keeper", nonKeeper.ID,
 		"--non-keeper-name", "Non-keeper topic",
+		"--drop-role", relay.TelegramCodexRole,
 		"--yes",
 	}, &stdout, &stderr)
 	if code != 0 {
@@ -103,6 +118,12 @@ func TestRunPreparesSharedRoleUnnamedPair(t *testing.T) {
 	if unacked, err := unackedRoleDeliveries(database, nonKeeper.ID); err != nil || unacked != 0 {
 		t.Fatalf("leftover role deliveries still unacked count=%d err=%v", unacked, err)
 	}
+	if keeperUnacked, err := unackedRoleDeliveries(database, keeper.ID); err != nil || keeperUnacked != 1 {
+		t.Fatalf("keeper role delivery unacked=%d err=%v", keeperUnacked, err)
+	}
+	if cursor, nextSequence, err := roleCursorAndNextSequence(database, nonKeeper.ID); err != nil || cursor != nextSequence {
+		t.Fatalf("non-keeper role cursor=%d next_sequence=%d err=%v", cursor, nextSequence, err)
+	}
 	if capabilities, err := telegramPrimaryCapabilities(database, nonKeeper.ID); err != nil || capabilities != relay.CapSend|relay.CapReceive {
 		t.Fatalf("telegram/primary capabilities=%d err=%v, want send|receive only", capabilities, err)
 	}
@@ -116,10 +137,37 @@ func TestRunDoesNotTalkToRelayHTTP(t *testing.T) {
 		"--keeper", "keeper-id",
 		"--non-keeper", "non-keeper-id",
 		"--non-keeper-name", "Non-keeper topic",
+		"--drop-role", relay.TelegramCodexRole,
 		"--relay-url", "http://127.0.0.1:1",
 		"--yes",
 	}, &bytes.Buffer{}, &stderr); code != 2 {
 		t.Fatalf("run()=%d want 2 for unknown HTTP flag; stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRunRefusesMissingRelayDBAndPrintsOpenError(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing", "relay.db")
+	var stderr bytes.Buffer
+	code := run([]string{
+		"--relay-db", missing,
+		"--keeper", "keeper-id",
+		"--non-keeper", "non-keeper-id",
+		"--non-keeper-name", "Non-keeper topic",
+		"--drop-role", relay.TelegramCodexRole,
+		"--yes",
+	}, &bytes.Buffer{}, &stderr)
+	if code != 1 {
+		t.Fatalf("run()=%d want 1; stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "failed:") || !strings.Contains(stderr.String(), "missing") {
+		t.Fatalf("stderr=%q, want printed open/missing error", stderr.String())
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing --relay-db created %s err=%v", missing, err)
+	}
+	if _, err := os.Stat(filepath.Dir(missing)); !os.IsNotExist(err) {
+		t.Fatalf("missing --relay-db created parent directory err=%v", err)
 	}
 }
 
@@ -191,6 +239,22 @@ func unackedRoleDeliveries(database, conversationID string) (int, error) {
 	return count, err
 }
 
+func roleCursorAndNextSequence(database, conversationID string) (int64, int64, error) {
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = db.Close() }()
+	var cursor, nextSequence int64
+	if err := db.QueryRowContext(context.Background(), "SELECT sequence FROM recipient_cursors WHERE recipient_endpoint=? AND conversation_id=?", "\x1erole:"+relay.TelegramCodexRole, conversationID).Scan(&cursor); err != nil {
+		return 0, 0, err
+	}
+	if err := db.QueryRowContext(context.Background(), "SELECT next_sequence FROM conversations WHERE id=?", conversationID).Scan(&nextSequence); err != nil {
+		return 0, 0, err
+	}
+	return cursor, nextSequence, nil
+}
+
 func telegramPrimaryCapabilities(database, conversationID string) (relay.Capability, error) {
 	db, err := sql.Open("sqlite", database)
 	if err != nil {
@@ -214,4 +278,15 @@ func withoutFlag(arguments []string, flagName string) []string {
 		result = append(result, arguments[index])
 	}
 	return result
+}
+
+func withFlag(arguments []string, flagName, value string) []string {
+	result := append([]string{}, arguments...)
+	for index := 0; index < len(result); index++ {
+		if result[index] == flagName && index+1 < len(result) {
+			result[index+1] = value
+			return result
+		}
+	}
+	return append(result, flagName, value)
 }
