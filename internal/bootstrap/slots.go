@@ -44,7 +44,8 @@ func prepareDirectory(directory string) error {
 	} else if !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
-	if err := os.Chmod(directory, 0o700); err != nil { // #nosec G302 -- bootstrap directories are 0700, not 0600 files.
+	// #nosec G302 -- bootstrap directories are 0700, not 0600 files.
+	if err := os.Chmod(directory, 0o700); err != nil {
 		return errors.New("bootstrap directory is invalid")
 	}
 	return requireTrustedBootstrapDirectory(directory)
