@@ -334,15 +334,40 @@ func (s *State) PersistClaimThread(conversationID string, threadID int64) error 
 }
 
 // PersistClaimRoute binds the stored thread and advances the execution phase.
+// An existing route for this conversation is reused. Another conversation's
+// thread is never overwritten.
 func (s *State) PersistClaimRoute(chatID, threadID int64, conversationID string) error {
+	if strings.TrimSpace(conversationID) == "" || chatID == 0 || threadID <= 0 {
+		return fmt.Errorf("telegram route persist is required")
+	}
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
-		ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID); err != nil {
+	var existingThread sql.NullInt64
+	err = tx.QueryRowContext(context.Background(), `SELECT thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&existingThread)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if err == nil && existingThread.Valid && existingThread.Int64 > 0 {
+		if _, err := tx.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, phase = ? WHERE conversation_id = ?`, existingThread.Int64, ClaimPhaseRoutePersisted, conversationID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	var bound string
+	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id FROM topic_routes WHERE chat_id = ? AND thread_id = ?`, chatID, threadID).Scan(&bound)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil && bound != conversationID {
+		return fmt.Errorf("telegram topic is already bound")
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)`, chatID, threadID, conversationID); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ?`, ClaimPhaseRoutePersisted, conversationID); err != nil {
 		return err
@@ -351,12 +376,16 @@ func (s *State) PersistClaimRoute(chatID, threadID int64, conversationID string)
 }
 
 // AdoptExecution records an existing topic route at route_persisted.
+// A complete row is never downgraded, and its thread_id is kept unless it already matches.
 func (s *State) AdoptExecution(conversationID string, threadID int64) error {
 	if strings.TrimSpace(conversationID) == "" || threadID <= 0 {
 		return fmt.Errorf("adopt route is required")
 	}
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES (?, ?, ?, 1)
-		ON CONFLICT(conversation_id) DO UPDATE SET thread_id = excluded.thread_id, phase = excluded.phase, skip_reserve = 1`, conversationID, threadID, ClaimPhaseRoutePersisted)
+		ON CONFLICT(conversation_id) DO UPDATE SET
+			thread_id = CASE WHEN claim_executions.phase = ? THEN claim_executions.thread_id ELSE excluded.thread_id END,
+			phase = CASE WHEN claim_executions.phase = ? THEN claim_executions.phase ELSE excluded.phase END,
+			skip_reserve = 1`, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete)
 	return err
 }
 
@@ -368,6 +397,21 @@ func (s *State) MarkClaimComplete(conversationID string) error {
 
 // ClaimComplete reports whether the conversation has a completed local claim.
 func (s *State) ClaimComplete(conversationID string) (bool, error) {
+	protected, err := s.claimProtectsRoute(conversationID)
+	if err != nil {
+		return false, err
+	}
+	if !protected {
+		return false, nil
+	}
+	execution, found, err := s.ClaimExecution(conversationID)
+	if err != nil || !found {
+		return false, err
+	}
+	return execution.Phase == ClaimPhaseComplete, nil
+}
+
+func (s *State) claimProtectsRoute(conversationID string) (bool, error) {
 	var phase string
 	err := s.db.QueryRowContext(context.Background(), `SELECT phase FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&phase)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -376,16 +420,17 @@ func (s *State) ClaimComplete(conversationID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return phase == ClaimPhaseComplete, nil
+	return phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
 }
 
 // RouteBlocked refuses remapping a claimed conversation or stealing its thread.
+// A route is claimed once claim_executions has persisted it (route_persisted or complete).
 func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) error {
-	complete, err := s.ClaimComplete(conversationID)
+	protected, err := s.claimProtectsRoute(conversationID)
 	if err != nil {
 		return err
 	}
-	if complete {
+	if protected {
 		return fmt.Errorf("telegram conversation is already claimed")
 	}
 	existing, found, err := s.Route(chatID, threadID)
@@ -395,11 +440,11 @@ func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) erro
 	if !found || existing == conversationID {
 		return nil
 	}
-	complete, err = s.ClaimComplete(existing)
+	protected, err = s.claimProtectsRoute(existing)
 	if err != nil {
 		return err
 	}
-	if complete {
+	if protected {
 		return fmt.Errorf("telegram topic is already bound to a claimed conversation")
 	}
 	return nil

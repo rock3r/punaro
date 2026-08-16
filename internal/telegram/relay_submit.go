@@ -27,7 +27,7 @@ func SubmitToRelay(sender InboundRelaySender, endpoint string, state *State, log
 			if err != nil {
 				return fmt.Errorf("lookup telegram outbound map: %w", err)
 			}
-			if !found {
+			if !found || ref.ConversationID != submission.ConversationID || (submission.ThreadID > 0 && submission.ReplyToID == submission.ThreadID) {
 				logClaim(logfn, "telegram_outbound_map_miss", "conversation_id="+submission.ConversationID)
 			} else {
 				replyMessageID = ref.PunaroMessageID

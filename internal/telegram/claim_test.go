@@ -16,13 +16,14 @@ type claimReserveCall struct {
 }
 
 type recordingClaimRelay struct {
-	reserves   []claimReserveCall
-	completes  []string
-	pending    []relay.TelegramClaim
-	claim      relay.TelegramClaim
-	reserveErr error
-	complete   relay.TelegramClaim
-	pendingErr error
+	reserves         []claimReserveCall
+	completes        []string
+	pending          []relay.TelegramClaim
+	claim            relay.TelegramClaim
+	reserveErr       error
+	complete         relay.TelegramClaim
+	pendingErr       error
+	lastPendingLimit int
 }
 
 func (r *recordingClaimRelay) ClaimConversation(_ context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error) {
@@ -48,11 +49,15 @@ func (r *recordingClaimRelay) CompleteTelegramClaim(_ context.Context, conversat
 	return relay.TelegramClaim{ConversationID: conversationID, Status: "complete", DisplayName: r.claim.DisplayName}, nil
 }
 
-func (r *recordingClaimRelay) PendingTelegramClaims(context.Context, int) ([]relay.TelegramClaim, error) {
+func (r *recordingClaimRelay) PendingTelegramClaims(_ context.Context, limit int) ([]relay.TelegramClaim, error) {
+	r.lastPendingLimit = limit
 	if r.pendingErr != nil {
 		return nil, r.pendingErr
 	}
-	return r.pending, nil
+	if limit < 1 || len(r.pending) <= limit {
+		return r.pending, nil
+	}
+	return r.pending[:limit], nil
 }
 
 type recordingTopicCreator struct {
@@ -236,6 +241,137 @@ func TestAdoptAlreadyCompleteIsNoopSuccess(t *testing.T) {
 	execution, found, err := state.ClaimExecution("conversation-2")
 	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795625 {
 		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
+func TestExecuteClaimReusesExistingTopicRouteWithoutCreateForumTopic(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 1}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic on already-routed conversation: %#v", topics.names)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+	conversation, found, err := state.Route(55, 795446)
+	if err != nil || !found || conversation != "conversation-1" {
+		t.Fatalf("route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+}
+
+func TestExecuteClaimReusesRouteWhenRelayClaimAlreadyComplete(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795625, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 99}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "Already"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after complete+route: %#v", topics.names)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795625 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
+func TestAdoptDoesNotDowngradeCompleteExecution(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-1", 795446); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("AdoptExecution downgraded complete: %#v found=%v err=%v", execution, found, err)
+	}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "How is it going"}}
+	if err := Adopt(context.Background(), state, claims, "conversation-1", func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.completes) != 0 {
+		t.Fatalf("complete adopt retried complete: %#v", claims.completes)
+	}
+	execution, found, err = state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("downgraded execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
+func TestStartPendingSkipsLocalRowAndStartsLaterClaim(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, err := state.InsertPendingExecution("conversation-stuck", "Stuck"); err != nil {
+		t.Fatal(err)
+	}
+	claims := &recordingClaimRelay{
+		claim: relay.TelegramClaim{Status: "pending", DisplayName: "Next room"},
+		pending: []relay.TelegramClaim{
+			{ConversationID: "conversation-stuck", Status: "pending", DisplayName: "Stuck"},
+			{ConversationID: "conversation-next", Status: "pending", DisplayName: "Next room"},
+		},
+	}
+	topics := &recordingTopicCreator{threadID: 44}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.StartPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if claims.lastPendingLimit < 2 {
+		t.Fatalf("pending poll limit=%d, want >= 2 so later rows are visible", claims.lastPendingLimit)
+	}
+	next, found, err := state.ClaimExecution("conversation-next")
+	if err != nil || !found || next.Phase != ClaimPhaseComplete || next.ThreadID != 44 {
+		t.Fatalf("later pending was not started: %#v found=%v err=%v", next, found, err)
+	}
+	stuck, found, err := state.ClaimExecution("conversation-stuck")
+	if err != nil || !found || stuck.Phase != ClaimPhaseReserved {
+		t.Fatalf("stuck local row was rewritten: %#v found=%v err=%v", stuck, found, err)
 	}
 }
 

@@ -61,6 +61,19 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 			return err
 		}
 		if execution.ThreadID <= 0 {
+			if _, threadID, found, err := e.State.RouteForConversation(conversationID); err != nil {
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_route_persist_failed")
+				return err
+			} else if found && threadID > 0 {
+				if err := e.State.PersistClaimThread(conversationID, threadID); err != nil {
+					e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_persist_thread_failed")
+					return err
+				}
+				execution.ThreadID = threadID
+				execution.Phase = ClaimPhaseTopicCreated
+			}
+		}
+		if execution.ThreadID <= 0 {
 			if e.Topics == nil || e.AllowedUserID == 0 {
 				err := fmt.Errorf("telegram_create_forum_topic_failed")
 				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
@@ -150,13 +163,20 @@ func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
 	return nil
 }
 
+const pendingClaimPollLimit = 10
+
 // StartPending inserts reserved rows for relay-pending claims with no local execution.
 func (e ClaimExecutor) StartPending(ctx context.Context) error {
-	claims, err := e.Relay.PendingTelegramClaims(ctx, 1)
+	claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit)
 	if err != nil {
 		return fmt.Errorf("poll pending telegram claims: %w", err)
 	}
 	for _, claim := range claims {
+		if _, found, err := e.State.ClaimExecution(claim.ConversationID); err != nil {
+			return err
+		} else if found {
+			continue
+		}
 		inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
 		if err != nil {
 			return err
@@ -190,6 +210,12 @@ func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversati
 	}
 	if strings.TrimSpace(claim.DisplayName) == "" {
 		return fmt.Errorf("telegram adopt requires a display name")
+	}
+	if existing, found, err := state.ClaimExecution(conversationID); err != nil {
+		return err
+	} else if found && existing.Phase == ClaimPhaseComplete && claim.Status == "complete" {
+		logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
+		return nil
 	}
 	if err := state.AdoptExecution(conversationID, threadID); err != nil {
 		return err

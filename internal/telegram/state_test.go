@@ -218,6 +218,96 @@ func TestStateRefusesClaimedRouteRemap(t *testing.T) {
 	}
 }
 
+func TestStateRouteBlockedTreatsRoutePersistedAsClaimed(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-claimed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-claimed", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimRoute(55, 7, "conversation-claimed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-claimed"); err == nil {
+		t.Fatal("route_persisted conversation remapped")
+	}
+	if err := state.RouteBlocked(55, 7, "conversation-other"); err == nil {
+		t.Fatal("route_persisted thread stolen")
+	}
+	if err := state.RouteBlocked(55, 9, "conversation-free"); err != nil {
+		t.Fatalf("unclaimed remap blocked: %v", err)
+	}
+}
+
+func TestStatePersistClaimRouteDoesNotStealAnotherConversationThread(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-owner", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-thief"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-thief", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimRoute(55, 7, "conversation-thief"); err == nil {
+		t.Fatal("PersistClaimRoute stole another conversation's thread")
+	}
+	conversation, found, err := state.Route(55, 7)
+	if err != nil || !found || conversation != "conversation-owner" {
+		t.Fatalf("stolen route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+}
+
+func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimRoute(55, 1, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseRoutePersisted || execution.ThreadID != 795446 {
+		t.Fatalf("reuse execution=%#v found=%v err=%v", execution, found, err)
+	}
+	conversation, found, err := state.Route(55, 795446)
+	if err != nil || !found || conversation != "conversation-1" {
+		t.Fatalf("kept route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+	if _, found, err := state.Route(55, 1); err != nil || found {
+		t.Fatal("second thread was inserted for the same conversation")
+	}
+}
+
 func TestStateEvictsOldestCallbackTokenAtCap(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

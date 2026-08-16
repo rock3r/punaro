@@ -73,6 +73,30 @@ func TestSubmitToRelayOmitsReplyMetadataOnMapMiss(t *testing.T) {
 	}
 }
 
+func TestSubmitToRelayOmitsReplyMetadataFromAnotherConversation(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.RecordOutbound(100, 9, "conversation-other", "punaro-other", "agent/b", testCallbackNow); err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordedInboundSender{}
+	var logs []string
+	submit := SubmitToRelay(sender, relay.TelegramGatewayEndpoint, state, func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) })
+	if err := submit(context.Background(), Submission{UpdateID: 42, ConversationID: "conversation-1", Text: "question", ChatID: 100, ThreadID: 7, ReplyToID: 9}); err != nil {
+		t.Fatal(err)
+	}
+	if sender.replyMessageID != "" || sender.replyEndpoint != "" {
+		t.Fatalf("cross-conversation reply metadata attached: %#v", sender)
+	}
+	if !hasLogClass(logs, "telegram_outbound_map_miss") {
+		t.Fatalf("logs=%#v", logs)
+	}
+}
+
 func TestSubmitToRelayRejectsMissingUpdateIdentity(t *testing.T) {
 	t.Parallel()
 	if err := SubmitToRelay(&recordedInboundSender{}, relay.TelegramGatewayEndpoint, nil, nil)(context.Background(), Submission{ConversationID: "conversation-1", Text: "question"}); err == nil {
