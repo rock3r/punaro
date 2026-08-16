@@ -3,8 +3,10 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +67,35 @@ func TestClientSendsThreadBoundRichMessageWithoutAutomaticEntities(t *testing.T)
 	}
 	if err := client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type urlErrorTransport struct{}
+
+func (urlErrorTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf(`Get %q: connection refused`, req.URL.String())
+}
+
+func TestClientOmitsBotTokenFromTransportErrors(t *testing.T) {
+	t.Parallel()
+	const dummy = "dummy-bot-token-do-not-leak" // #nosec G101 -- non-secret leak-suppression fixture.
+	client, err := NewClient("https://api.telegram.org", dummy, &http.Client{Transport: urlErrorTransport{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Updates(context.Background(), 0)
+	if err == nil {
+		t.Fatal("expected poll transport error")
+	}
+	if strings.Contains(err.Error(), dummy) {
+		t.Fatalf("poll error leaked bot token: %v", err)
+	}
+	err = client.SendRichMessage(context.Background(), 100, 7, "<p>safe</p>")
+	if err == nil {
+		t.Fatal("expected send transport error")
+	}
+	if strings.Contains(err.Error(), dummy) {
+		t.Fatalf("send error leaked bot token: %v", err)
 	}
 }
 

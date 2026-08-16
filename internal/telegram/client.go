@@ -53,7 +53,7 @@ func (c *Client) Updates(ctx context.Context, offset int64) ([]Update, error) {
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("telegram poll failed: %w", err)
+		return nil, fmt.Errorf("telegram poll failed")
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
@@ -127,7 +127,7 @@ func (c *Client) SendRichMessage(ctx context.Context, chatID, threadID int64, ht
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("telegram rich message failed: %w", err)
+		return fmt.Errorf("telegram rich message failed")
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
