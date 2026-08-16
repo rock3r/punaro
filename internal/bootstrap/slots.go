@@ -39,6 +39,9 @@ func prepareDirectory(directory string) error {
 		if !os.IsNotExist(err) {
 			return errors.New("bootstrap directory is invalid")
 		}
+		if err := requireTrustedExistingAncestor(filepath.Dir(filepath.Clean(directory))); err != nil {
+			return err
+		}
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			return errors.New("bootstrap directory is invalid")
 		}

@@ -78,6 +78,15 @@ func Update(request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if accepted.ReleaseSequence < 1 {
+		exists, slotErr := existsRealDir(filepath.Join(request.Directory, currentSlot))
+		if slotErr != nil {
+			return Result{}, slotErr
+		}
+		if exists {
+			return Result{}, errors.New("bootstrap accepted state is invalid")
+		}
+	}
 	client := request.HTTP
 	if client == nil {
 		transport, err := newFetcher(request.Origin)

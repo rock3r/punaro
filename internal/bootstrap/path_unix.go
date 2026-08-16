@@ -9,6 +9,10 @@ import (
 	"syscall"
 )
 
+func requireTrustedExistingAncestor(path string) error {
+	return requireTrustedAncestors(path)
+}
+
 func requireTrustedBootstrapDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {

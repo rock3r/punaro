@@ -16,11 +16,19 @@ const (
 	windowsAncestorWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL | windows.GENERIC_WRITE
 )
 
+func requireTrustedExistingAncestor(path string) error {
+	return walkTrustedWindowsAncestors(path)
+}
+
 func requireTrustedBootstrapDirectory(path string) error {
 	info, err := os.Lstat(path) // #nosec G703 -- operator-selected absolute bootstrap directory.
 	if err != nil || !info.IsDir() {
 		return errors.New("bootstrap directory is invalid")
 	}
+	return walkTrustedWindowsAncestors(path)
+}
+
+func walkTrustedWindowsAncestors(path string) error {
 	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
 	if err != nil {
 		return errors.New("bootstrap directory is invalid")
