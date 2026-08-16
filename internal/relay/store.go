@@ -340,6 +340,16 @@ type TelegramInboundInput struct {
 	Now                time.Time
 }
 
+// AdoptPrepareInput is the host-local one-shot that drops TelegramCodexRole
+// from a still-unnamed non-keeper and then names that room. It never talks to
+// HTTP or Telegram and never grants telegram/primary CapAdmin.
+type AdoptPrepareInput struct {
+	KeeperID      string
+	NonKeeperID   string
+	NonKeeperName string
+	Now           time.Time
+}
+
 // InvocationStatus is the durable state of a server-authorized runtime
 // handoff. A runtime receives no message body: it attaches the endpoint and
 // then obtains pending delivery through the normal path.
@@ -1035,6 +1045,102 @@ func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversat
 		return Conversation{}, false, err
 	}
 	return conversation, false, nil
+}
+
+// PrepareTelegramAdopt drops TelegramCodexRole from the still-unnamed
+// non-keeper, retires that role recipient's pending deliveries and cursor
+// using the same SQL as a receive revoke, occupancy-checks the remainder
+// (only telegram/primary is legal), and then sets the non-keeper display
+// name. The keeper must already be named and still hold the role.
+func (s *Store) PrepareTelegramAdopt(input AdoptPrepareInput) error {
+	if strings.TrimSpace(input.KeeperID) == "" || strings.TrimSpace(input.NonKeeperID) == "" || input.KeeperID == input.NonKeeperID {
+		return fmt.Errorf("keeper and non-keeper conversations are required")
+	}
+	displayName, err := SanitizeConversationDisplayName(input.NonKeeperName)
+	if err != nil || displayName == "" {
+		return fmt.Errorf("invalid conversation display name")
+	}
+	now := input.Now
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	keeper, err := conversationByID(tx, input.KeeperID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if keeper.DisplayName == "" {
+		return fmt.Errorf("keeper conversation is unnamed")
+	}
+	nonKeeper, err := conversationByID(tx, input.NonKeeperID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrForbidden
+	}
+	if err != nil {
+		return err
+	}
+	if nonKeeper.DisplayName != "" {
+		return fmt.Errorf("non-keeper conversation is already named")
+	}
+	if err := requireRoleMembership(tx, keeper.ID, TelegramCodexRole); err != nil {
+		return err
+	}
+	if err := requireRoleMembership(tx, nonKeeper.ID, TelegramCodexRole); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), "DELETE FROM role_memberships WHERE conversation_id=? AND role=?", nonKeeper.ID, TelegramCodexRole); err != nil {
+		return fmt.Errorf("drop durable role member: %w", err)
+	}
+	recipient := roleRecipient(TelegramCodexRole)
+	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), recipient, nonKeeper.ID); err != nil {
+		return fmt.Errorf("retire revoked deliveries: %w", err)
+	}
+	if err := advanceRecipientCursor(tx, recipient, nonKeeper.ID); err != nil {
+		return err
+	}
+	if err := rejectAdoptPrepareOccupancy(tx, nonKeeper.ID, now); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", displayName, nonKeeper.ID); err != nil {
+		return fmt.Errorf("update conversation display name: %w", err)
+	}
+	return tx.Commit()
+}
+
+func requireRoleMembership(tx *sql.Tx, conversationID, role string) error {
+	var present bool
+	if err := tx.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM role_memberships WHERE conversation_id=? AND role=?)", conversationID, role).Scan(&present); err != nil {
+		return fmt.Errorf("read durable role membership: %w", err)
+	}
+	if !present {
+		return ErrConflict
+	}
+	return nil
+}
+
+func rejectAdoptPrepareOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	var extra int
+	if err := tx.QueryRowContext(context.Background(), `SELECT (SELECT COUNT(*) FROM memberships WHERE conversation_id=? AND endpoint<>?) + (SELECT COUNT(*) FROM role_memberships WHERE conversation_id=?)`, conversationID, TelegramPrimaryEndpoint, conversationID).Scan(&extra); err != nil {
+		return fmt.Errorf("count remaining occupants: %w", err)
+	}
+	if extra != 0 {
+		return ErrConflict
+	}
+	var gateway bool
+	if err := tx.QueryRowContext(context.Background(), "SELECT EXISTS(SELECT 1 FROM memberships WHERE conversation_id=? AND endpoint=?)", conversationID, TelegramPrimaryEndpoint).Scan(&gateway); err != nil {
+		return fmt.Errorf("read gateway membership: %w", err)
+	}
+	if !gateway {
+		return ErrConflict
+	}
+	return rejectExclusiveRenameOccupancy(tx, conversationID, now)
 }
 
 func telegramClaimRequestHash(conversationID string) string {

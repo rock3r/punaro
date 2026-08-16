@@ -1988,3 +1988,170 @@ func TestStoreOpenIsIdempotentWithClaimSchema(t *testing.T) {
 		t.Fatalf("reopen mutated claim tables claims=%d participants=%d events=%d", claims, participants, events)
 	}
 }
+
+func TestStorePrepareTelegramAdoptDropsSharedRoleFromUnnamedNonKeeper(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
+	keeper, nonKeeper := createSharedTelegramRolePair(t, store, now)
+
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID:  nonKeeper.ID,
+		SenderMachineID: "machine-telegram",
+		FromEndpoint:    TelegramPrimaryEndpoint,
+		Body:            "pending for the shared role",
+		IdempotencyKey:  "role-delivery",
+		Now:             now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deliveries
+		WHERE recipient_endpoint=? AND acked_at IS NULL
+		  AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)`, roleRecipient(TelegramCodexRole), nonKeeper.ID).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("leftover role delivery pending=%d err=%v", pending, err)
+	}
+
+	if err := store.PrepareTelegramAdopt(AdoptPrepareInput{
+		KeeperID: keeper.ID, NonKeeperID: nonKeeper.ID, NonKeeperName: "Non-keeper topic", Now: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rooms, err := roleConversationIDs(store, TelegramCodexRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rooms) != 1 || rooms[0] != keeper.ID {
+		t.Fatalf("role occupancy after prepare=%#v keeper=%s", rooms, keeper.ID)
+	}
+	prepared, err := conversationByIDViaStore(store, nonKeeper.ID)
+	if err != nil || prepared.DisplayName != "Non-keeper topic" {
+		t.Fatalf("non-keeper after prepare=%#v err=%v", prepared, err)
+	}
+	var unacked int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM deliveries
+		WHERE recipient_endpoint=? AND acked_at IS NULL
+		  AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)`, roleRecipient(TelegramCodexRole), nonKeeper.ID).Scan(&unacked); err != nil || unacked != 0 {
+		t.Fatalf("leftover role deliveries still unacked count=%d err=%v", unacked, err)
+	}
+	var capabilities Capability
+	if err := store.db.QueryRowContext(context.Background(), "SELECT capabilities FROM memberships WHERE conversation_id=? AND endpoint=?", nonKeeper.ID, TelegramPrimaryEndpoint).Scan(&capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities != CapSend|CapReceive {
+		t.Fatalf("telegram/primary capabilities=%d, want send|receive only", capabilities)
+	}
+}
+
+func TestStorePrepareTelegramAdoptRejectsExtraOccupant(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
+	keeper, nonKeeper := createSharedTelegramRolePair(t, store, now)
+	if err := store.AdvertiseEndpoints("machine-extra", []string{"agent/extra"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", nonKeeper.ID, "agent/extra", CapReceive); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PrepareTelegramAdopt(AdoptPrepareInput{
+		KeeperID: keeper.ID, NonKeeperID: nonKeeper.ID, NonKeeperName: "Non-keeper topic", Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("extra occupant err=%v", err)
+	}
+	rooms, err := roleConversationIDs(store, TelegramCodexRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rooms) != 2 {
+		t.Fatalf("failed prepare mutated role occupancy=%#v", rooms)
+	}
+}
+
+func createSharedTelegramRolePair(t *testing.T, store *Store, now time.Time) (Conversation, Conversation) {
+	t.Helper()
+	for machine, endpoint := range map[string]string{
+		"machine-creator":   "agent/creator",
+		"machine-telegram":  TelegramPrimaryEndpoint,
+		"studio-validation": "agent/punaro-studio/validation",
+	} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members := []Member{
+		{Endpoint: "agent/creator", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: TelegramPrimaryEndpoint, Capabilities: CapSend | CapReceive},
+		{Role: TelegramCodexRole, RoleMachineID: "studio-validation", Capabilities: CapSend | CapReceive | CapAdmin},
+	}
+	keeper, err := store.CreateConversation("agent/creator", members, now)
+	if err != nil || keeper.DisplayName != "" {
+		t.Fatalf("keeper unnamed=%#v err=%v", keeper, err)
+	}
+	nonKeeper, err := store.CreateConversation("agent/creator", members, now)
+	if err != nil || nonKeeper.DisplayName != "" || nonKeeper.ID == keeper.ID {
+		t.Fatalf("non-keeper unnamed=%#v keeper=%#v err=%v", nonKeeper, keeper, err)
+	}
+	for i, id := range []string{keeper.ID, nonKeeper.ID} {
+		if _, _, err := store.ApplyControl(ControlInput{
+			ConversationID: id, ActorMachineID: "machine-creator", ActorEndpoint: "agent/creator",
+			Operation: ControlRemoveMember, Member: Member{Endpoint: "agent/creator"},
+			IdempotencyKey: fmt.Sprintf("remove-creator-%d", i), Now: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.BindRoleToSession("studio-validation", TelegramCodexRole, "agent/punaro-studio/validation", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	renamed, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: keeper.ID, ActorMachineID: "studio-validation", ActorEndpoint: "agent/punaro-studio/validation",
+		DisplayName: "Keeper topic", IdempotencyKey: "rename-keeper", Now: now,
+	})
+	if err != nil || renamed.DisplayName != "Keeper topic" {
+		t.Fatalf("rename keeper=%#v err=%v", renamed, err)
+	}
+	return keeper, nonKeeper
+}
+
+func roleConversationIDs(store *Store, role string) ([]string, error) {
+	rows, err := store.db.QueryContext(context.Background(), "SELECT conversation_id FROM role_memberships WHERE role=? ORDER BY conversation_id", role)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var rooms []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		rooms = append(rooms, id)
+	}
+	return rooms, rows.Err()
+}
+
+func conversationByIDViaStore(store *Store, conversationID string) (Conversation, error) {
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Conversation{}, err
+	}
+	defer rollback(tx)
+	conversation, err := conversationByID(tx, conversationID)
+	if err != nil {
+		return Conversation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Conversation{}, err
+	}
+	return conversation, nil
+}

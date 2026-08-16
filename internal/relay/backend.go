@@ -167,6 +167,10 @@ const (
 	// TelegramPrimaryEndpoint is the occupancy-fence name for the gateway.
 	// It must occupy every claimed topic, so fencing never applies to it.
 	TelegramPrimaryEndpoint = TelegramGatewayEndpoint
+	// TelegramCodexRole is the durable role the host-local adopt-prepare
+	// one-shot drops from the still-unnamed non-keeper. It is an ordinary
+	// role, not a reserved participant label.
+	TelegramCodexRole = "role/telegram-codex"
 )
 
 // TelegramGatewayCapabilities is the only membership complete may grant.
