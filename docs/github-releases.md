@@ -1,12 +1,12 @@
 # GitHub Releases origin
 
 Punaro's public artifact origin is GitHub Releases. This is the fixed source
-`punaro-bootstrap` will pull from. The gateway may name a signed release; it
+`punaro-bootstrap` pulls from. The gateway may name a signed release; it
 never supplies a download URL, installer script, or unsigned `latest` pointer.
 
 This is the release-trust slice of
 [`client-lifecycle-compatibility-recovery-rfc.md`](client-lifecycle-compatibility-recovery-rfc.md).
-It is not yet a signed official release and does not implement bootstrap,
+It is not yet a signed official release and does not implement `run`/health,
 fleet rollout, or the recovery HTTP surface.
 
 ## Fixed origin
@@ -51,9 +51,9 @@ gh workflow run macos-notarize.yml --repo rock3r/punaro --ref <branch>
 
 The `release` workflow dispatch builds:
 
-- `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`, and
-  `punaro-enroll` for `darwin/arm64`, `linux/amd64`, `linux/arm64`, and
-  `windows/amd64`
+- `punaro-adapter`, `punaro-trusted-attachment`, `punaro-memory`,
+  `punaro-enroll`, and `punaro-bootstrap` for `darwin/arm64`, `linux/amd64`,
+  `linux/arm64`, and `windows/amd64`
 - `punaro` and `punaro-telegram` for Linux
 
 Darwin adapter builds use `CGO_ENABLED=1` so the supported ACL path is compiled
@@ -105,8 +105,9 @@ the origin path stays stable. Replacing it does not make the catalog trusted.
    ```
 
 6. Upload the two `.sig` files to the versioned release and
-   `punaro-catalog.sig` to the `catalog` prerelease. Commit the public key set
-   into the bootstrap when that binary exists.
+   `punaro-catalog.sig` to the `catalog` prerelease. Pass that public key set
+   to `punaro-bootstrap update --keys-file`. Do not embed a production key
+   until the first official signed release exists.
 7. An official maintained release still requires the
    [security release gates](security-release-gates.md) and a
    [release-evidence record](release-evidence/README.md). This origin does not
@@ -128,9 +129,29 @@ go run ./cmd/punaro-release validate --dir ./dist
 manifest. A digest-pinned gateway image is optional until GHCR publication
 exists; when present it must be `@sha256:` and `release_sha256` must match.
 
+## Bootstrap pull
+
+`punaro-bootstrap` fetches only two-component paths beneath the fixed origin,
+verifies the catalog and manifest signatures, checks exact length/digest, and
+publishes `current` / `previous` slots. It does not run children, enroll, or
+open PostgreSQL. HTTPS is required except for loopback test origins.
+
+```sh
+punaro-bootstrap update \
+  --directory /absolute/private/bootstrap \
+  --keys-file /absolute/punaro-release.pub
+punaro-bootstrap status --directory /absolute/private/bootstrap
+punaro-bootstrap rollback --directory /absolute/private/bootstrap
+```
+
+`--release` may name a catalog-listed release. Automatic update refuses a
+stale catalog, an unsigned or digest-mismatched document, a sequence
+downgrade, a critical block, and a path outside the origin. Rollback swaps
+the two published slots and does not lower the highest accepted sequences.
+
 ## Still outstanding
 
-- `punaro-bootstrap` download, slot, health, and rollback
+- `punaro-bootstrap run`, candidate health, and platform service handoff
 - embedding the production public key in that bootstrap
 - GHCR image publication and a required `image` digest
 - SBOM, provenance attestations, and offline recovery bundles
