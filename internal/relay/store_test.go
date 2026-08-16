@@ -1084,3 +1084,335 @@ func TestStoreSetConversationDisplayNameRequiresLiveAdminAndIsIdempotent(t *test
 		t.Fatalf("listed after rename=%#v err=%v", listed, err)
 	}
 }
+
+func TestStoreUnnamedConversationsRemainManyToMany(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	members := []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}
+	first, err := store.CreateConversation("agent/a", members, now)
+	if err != nil || first.DisplayName != "" {
+		t.Fatalf("first unnamed=%#v err=%v", first, err)
+	}
+	second, err := store.CreateConversation("agent/a", members, now)
+	if err != nil || second.ID == first.ID || second.DisplayName != "" {
+		t.Fatalf("second unnamed=%#v first=%#v err=%v", second, first, err)
+	}
+}
+
+func TestStoreFencesOneSessionToOneNamedConversation(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{"machine-a": "agent/a", "machine-b": "agent/b", "machine-c": "agent/c"} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "shared-named", CreatorEndpoint: "agent/a",
+		DisplayName: "Shared room", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive},
+		}, Now: now,
+	})
+	if err != nil || shared.DisplayName != "Shared room" {
+		t.Fatalf("shared named=%#v err=%v", shared, err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "second-named-a", CreatorEndpoint: "agent/a",
+		DisplayName: "Second room", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("second named join for agent/a err=%v", err)
+	}
+	unnamed, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/c", Capabilities: CapReceive},
+	}, now)
+	if err != nil || unnamed.DisplayName != "" {
+		t.Fatalf("unnamed alongside named=%#v err=%v", unnamed, err)
+	}
+	other, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-c", IdempotencyKey: "other-named", CreatorEndpoint: "agent/c",
+		DisplayName: "Other room", Members: []Member{
+			{Endpoint: "agent/c", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	})
+	if err != nil || other.DisplayName != "Other room" {
+		t.Fatalf("distinct session named=%#v err=%v", other, err)
+	}
+	retry, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "shared-named", CreatorEndpoint: "agent/a",
+		DisplayName: "Shared room", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive},
+		}, Now: now,
+	})
+	if err != nil || retry != shared {
+		t.Fatalf("named retry=%#v err=%v", retry, err)
+	}
+}
+
+func TestStoreTelegramPrimaryIsExemptFromNamedOccupancy(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{"telegram/primary"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-a", CreatorEndpoint: "agent/a",
+		DisplayName: "Alpha", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Endpoint: "telegram/primary", Capabilities: CapSend | CapReceive},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "named-b", CreatorEndpoint: "agent/b",
+		DisplayName: "Beta", Members: []Member{
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Endpoint: "telegram/primary", Capabilities: CapSend | CapReceive},
+		}, Now: now,
+	})
+	if err != nil || second.ID == first.ID {
+		t.Fatalf("telegram/primary second named=%#v first=%#v err=%v", second, first, err)
+	}
+}
+
+func TestStoreRenameToNameChecksOccupancy(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	named, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "already-named", CreatorEndpoint: "agent/a",
+		DisplayName: "Occupied", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unnamed, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: unnamed.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Second name", IdempotencyKey: "rename-conflict", Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("rename while occupying another named room err=%v", err)
+	}
+	if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: named.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Occupied still", IdempotencyKey: "rename-already-named", Now: now,
+	}); err != nil {
+		t.Fatalf("rename of already-named room err=%v", err)
+	}
+	free, err := store.CreateConversation("agent/b", []Member{
+		{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: free.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b",
+		DisplayName: "Free room", IdempotencyKey: "rename-free", Now: now,
+	})
+	if err != nil || duplicate || renamed.DisplayName != "Free room" {
+		t.Fatalf("rename of unoccupied room=%#v duplicate=%v err=%v", renamed, duplicate, err)
+	}
+}
+
+func TestStoreControlUpsertFencesNamedOccupancy(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	for machine, endpoint := range map[string]string{
+		"machine-a":        "agent/a",
+		"machine-b":        "agent/b",
+		"machine-c":        "agent/c",
+		"machine-telegram": "telegram/primary",
+	} {
+		if err := store.AdvertiseEndpoints(machine, []string{endpoint}, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	namedA, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-a", CreatorEndpoint: "agent/a",
+		DisplayName: "Room A", Members: []Member{
+			{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedB, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "named-b", CreatorEndpoint: "agent/b",
+		DisplayName: "Room B", Members: []Member{
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{
+		ConversationID: namedB.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b",
+		Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/a", Capabilities: CapReceive},
+		IdempotencyKey: "upsert-occupied", Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("upsert into second named room err=%v", err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{
+		ConversationID: namedA.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		IdempotencyKey: "upsert-same-room", Now: now,
+	}); err != nil {
+		t.Fatalf("upsert existing named member err=%v", err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{
+		ConversationID: namedA.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		Operation: ControlUpsertMember, Member: Member{Endpoint: "agent/c", Capabilities: CapReceive},
+		IdempotencyKey: "upsert-free", Now: now,
+	}); err != nil {
+		t.Fatalf("upsert unoccupied session err=%v", err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{
+		ConversationID: namedA.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		Operation: ControlUpsertMember, Member: Member{Endpoint: "telegram/primary", Capabilities: CapReceive},
+		IdempotencyKey: "upsert-telegram-a", Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ApplyControl(ControlInput{
+		ConversationID: namedB.ID, ActorMachineID: "machine-b", ActorEndpoint: "agent/b",
+		Operation: ControlUpsertMember, Member: Member{Endpoint: "telegram/primary", Capabilities: CapReceive},
+		IdempotencyKey: "upsert-telegram-b", Now: now,
+	}); err != nil {
+		t.Fatalf("telegram/primary upsert into second named room err=%v", err)
+	}
+}
+
+func TestStoreBindRoleAndRoleMembershipFenceNamedOccupancy(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 16, 14, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a", "agent/a2"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-creator", []string{"agent/creator"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-creator", IdempotencyKey: "named-role-a", CreatorEndpoint: "agent/creator",
+		DisplayName: "Role room A", Members: []Member{
+			{Endpoint: "agent/creator", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/reviewer", RoleMachineID: "machine-a", Capabilities: CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-a2", CreatorEndpoint: "agent/a2",
+		DisplayName: "Session room A2", Members: []Member{
+			{Endpoint: "agent/a2", Capabilities: CapSend | CapReceive | CapAdmin},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/reviewer", "agent/a", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/reviewer", "agent/a", now.Add(time.Second), time.Hour); err != nil {
+		t.Fatalf("renew bind onto the same named room err=%v", err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/reviewer", "agent/a2", now.Add(2*time.Second), time.Hour); !errors.Is(err, ErrConflict) {
+		t.Fatalf("bind named role onto session occupying another named room err=%v", err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "named-role-conflict", CreatorEndpoint: "agent/b",
+		DisplayName: "Role room B", Members: []Member{
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/reviewer", RoleMachineID: "machine-a", Capabilities: CapReceive},
+		}, Now: now,
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("named role membership for occupied session err=%v", err)
+	}
+	if _, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "named-other-role", CreatorEndpoint: "agent/b",
+		DisplayName: "Other role room", Members: []Member{
+			{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin},
+			{Role: "role/other", RoleMachineID: "machine-a", Capabilities: CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/other", "agent/a", now.Add(3*time.Second), time.Hour); !errors.Is(err, ErrConflict) {
+		t.Fatalf("bind role into second named room err=%v", err)
+	}
+	unnamed, err := store.CreateConversation("agent/creator", []Member{
+		{Endpoint: "agent/creator", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Role: "role/unnamed", RoleMachineID: "machine-a", Capabilities: CapReceive},
+	}, now)
+	if err != nil || unnamed.DisplayName != "" {
+		t.Fatalf("unnamed role room=%#v err=%v", unnamed, err)
+	}
+	if err := store.BindRoleToSession("machine-a", "role/unnamed", "agent/a", now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatalf("bind unnamed role while occupying one named room err=%v", err)
+	}
+}

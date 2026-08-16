@@ -985,6 +985,75 @@ func sameRoleProfile(got, want relay.RoleProfile) bool {
 	return got.Role == want.Role && got.DisplayName == want.DisplayName && got.DirectAddressable == want.DirectAddressable && got.UpdatedAt.Equal(want.UpdatedAt)
 }
 
+
+func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	now := time.Date(2026, time.August, 16, 15, 0, 0, 0, time.UTC)
+	machineA, machineB, machineGateway := namespace+"-occ-a", namespace+"-occ-b", namespace+"-occ-telegram"
+	endpointA, endpointB := "agent/"+namespace+"/occ-a", "agent/"+namespace+"/occ-b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineGateway, []string{relay.TelegramPrimaryEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	unnamedMembers := []relay.Member{
+		{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: endpointB, Capabilities: relay.CapReceive},
+	}
+	firstUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-1", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || firstUnnamed.DisplayName != "" {
+		t.Fatalf("first unnamed=%#v err=%v", firstUnnamed, err)
+	}
+	secondUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-2", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || secondUnnamed.ID == firstUnnamed.ID {
+		t.Fatalf("second unnamed=%#v first=%#v err=%v", secondUnnamed, firstUnnamed, err)
+	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-1", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy A", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-2", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy B", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("second named join err=%v", err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-named-telegram", CreatorEndpoint: endpointB,
+		DisplayName: "Occupancy Telegram", Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatalf("telegram/primary second named err=%v", err)
+	}
+	if names, ok := backend.(relay.DisplayNameBackend); ok {
+		if _, _, err := names.SetConversationDisplayName(relay.SetDisplayNameInput{
+			ConversationID: firstUnnamed.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+			DisplayName: "Should conflict", IdempotencyKey: namespace + "-rename-occupied", Now: now,
+		}); !errors.Is(err, relay.ErrConflict) {
+			t.Fatalf("rename while occupying named room err=%v", err)
+		}
+	}
+	_ = named
+}
+
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
 	t.Helper()
 	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"

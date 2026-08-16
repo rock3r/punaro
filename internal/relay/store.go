@@ -762,6 +762,13 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			if members >= 256 {
 				return ControlEvent{}, false, ErrConflict
 			}
+			if exclusive, exclusiveErr := conversationIsExclusive(tx, input.ConversationID); exclusiveErr != nil {
+				return ControlEvent{}, false, exclusiveErr
+			} else if exclusive {
+				if err := sessionOccupiesOtherExclusiveConversation(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+					return ControlEvent{}, false, err
+				}
+			}
 		}
 		if err == nil && previous&CapAdmin != 0 && input.Member.Capabilities&CapAdmin == 0 {
 			var remaining int
@@ -925,6 +932,11 @@ func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversat
 			return Conversation{}, false, err
 		}
 		return conversation, true, nil
+	}
+	if conversation.DisplayName == "" {
+		if err := rejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+			return Conversation{}, false, err
+		}
 	}
 	if _, err := tx.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", displayName, input.ConversationID); err != nil {
 		return Conversation{}, false, fmt.Errorf("update conversation display name: %w", err)
@@ -1133,6 +1145,9 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 	}
 	if activeRoles >= MaxActiveRolesPerSession {
 		return ErrConflict
+	}
+	if err := rejectExclusiveBindOccupancy(tx, sessionEndpoint, role, now); err != nil {
+		return err
 	}
 	var previousSession string
 	var previousGeneration, previousLeaseUntil int64
@@ -1675,6 +1690,11 @@ func (s *Store) createConversation(input CreateConversationInput) (Conversation,
 	}
 	for endpoint := range seenEndpoints {
 		if err := endpointActive(tx, endpoint, now); err != nil {
+			return Conversation{}, err
+		}
+	}
+	if displayName != "" {
+		if err := rejectExclusiveCreateOccupancy(tx, seenEndpoints, seenRoles, now); err != nil {
 			return Conversation{}, err
 		}
 	}
@@ -2445,6 +2465,157 @@ func conversationByID(tx *sql.Tx, conversationID string) (Conversation, error) {
 	}
 	conversation.DisplayName = displayName.String
 	return conversation, nil
+}
+
+func exclusiveConversationPredicate(alias string) string {
+	// Named rooms occupy a session. Claimed occupancy uses the same fence once
+	// a claimed flag exists; claim-reserve APIs are intentionally out of scope.
+	return "(" + alias + ".display_name IS NOT NULL AND " + alias + ".display_name <> '')"
+}
+
+func conversationIsExclusive(tx *sql.Tx, conversationID string) (bool, error) {
+	var displayName sql.NullString
+	err := tx.QueryRowContext(context.Background(), "SELECT display_name FROM conversations WHERE id = ?", conversationID).Scan(&displayName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrForbidden
+	}
+	if err != nil {
+		return false, fmt.Errorf("read conversation occupancy: %w", err)
+	}
+	return displayName.Valid && displayName.String != "", nil
+}
+
+func sessionOccupiesOtherExclusiveConversation(tx *sql.Tx, endpoint, excludeConversationID string, now time.Time) error {
+	if endpoint == TelegramPrimaryEndpoint {
+		return nil
+	}
+	var occupied bool
+	err := tx.QueryRowContext(context.Background(), `SELECT EXISTS (
+		SELECT 1 FROM memberships AS membership
+		JOIN conversations AS conversation ON conversation.id = membership.conversation_id
+		WHERE membership.endpoint = ?
+		  AND membership.conversation_id <> ?
+		  AND `+exclusiveConversationPredicate("conversation")+`
+		UNION ALL
+		SELECT 1 FROM role_bindings AS binding
+		JOIN role_memberships AS membership ON membership.role = binding.role
+		JOIN conversations AS conversation ON conversation.id = membership.conversation_id
+		JOIN endpoints AS live ON live.endpoint = binding.session_endpoint
+		WHERE binding.session_endpoint = ?
+		  AND binding.lease_until > ?
+		  AND live.machine_id = binding.machine_id
+		  AND live.ownership_generation = binding.ownership_generation
+		  AND live.lease_until > ?
+		  AND membership.conversation_id <> ?
+		  AND `+exclusiveConversationPredicate("conversation")+`
+	)`, endpoint, excludeConversationID, endpoint, now.UnixMilli(), now.UnixMilli(), excludeConversationID).Scan(&occupied)
+	if err != nil {
+		return fmt.Errorf("inspect exclusive conversation occupancy: %w", err)
+	}
+	if occupied {
+		return ErrConflict
+	}
+	return nil
+}
+
+func rejectExclusiveCreateOccupancy(tx *sql.Tx, endpoints, roles map[string]struct{}, now time.Time) error {
+	sessions := make(map[string]struct{}, len(endpoints)+len(roles))
+	for endpoint := range endpoints {
+		sessions[endpoint] = struct{}{}
+	}
+	for role := range roles {
+		var session string
+		err := tx.QueryRowContext(context.Background(), `SELECT binding.session_endpoint FROM role_bindings AS binding
+			JOIN endpoints AS live ON live.endpoint = binding.session_endpoint
+			WHERE binding.role = ? AND binding.lease_until > ?
+			  AND live.machine_id = binding.machine_id
+			  AND live.ownership_generation = binding.ownership_generation
+			  AND live.lease_until > ?`, role, now.UnixMilli(), now.UnixMilli()).Scan(&session)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read live role occupancy: %w", err)
+		}
+		sessions[session] = struct{}{}
+	}
+	for session := range sessions {
+		if err := sessionOccupiesOtherExclusiveConversation(tx, session, "", now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT endpoint FROM memberships WHERE conversation_id = ?
+		UNION
+		SELECT binding.session_endpoint FROM role_memberships AS membership
+		JOIN role_bindings AS binding ON binding.role = membership.role
+		JOIN endpoints AS live ON live.endpoint = binding.session_endpoint
+		WHERE membership.conversation_id = ?
+		  AND binding.lease_until > ?
+		  AND live.machine_id = binding.machine_id
+		  AND live.ownership_generation = binding.ownership_generation
+		  AND live.lease_until > ?`, conversationID, conversationID, now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return fmt.Errorf("list conversation occupants: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var occupants []string
+	for rows.Next() {
+		var endpoint string
+		if err := rows.Scan(&endpoint); err != nil {
+			return fmt.Errorf("read conversation occupant: %w", err)
+		}
+		occupants = append(occupants, endpoint)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list conversation occupants: %w", err)
+	}
+	for _, endpoint := range occupants {
+		if err := sessionOccupiesOtherExclusiveConversation(tx, endpoint, conversationID, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectExclusiveBindOccupancy(tx *sql.Tx, sessionEndpoint, role string, now time.Time) error {
+	if sessionEndpoint == TelegramPrimaryEndpoint {
+		return nil
+	}
+	var count int
+	err := tx.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM (
+		SELECT membership.conversation_id AS id FROM memberships AS membership
+		JOIN conversations AS conversation ON conversation.id = membership.conversation_id
+		WHERE membership.endpoint = ?
+		  AND `+exclusiveConversationPredicate("conversation")+`
+		UNION
+		SELECT membership.conversation_id FROM role_memberships AS membership
+		JOIN conversations AS conversation ON conversation.id = membership.conversation_id
+		JOIN role_bindings AS binding ON binding.role = membership.role
+		JOIN endpoints AS live ON live.endpoint = binding.session_endpoint
+		WHERE binding.session_endpoint = ?
+		  AND binding.role <> ?
+		  AND binding.lease_until > ?
+		  AND live.machine_id = binding.machine_id
+		  AND live.ownership_generation = binding.ownership_generation
+		  AND live.lease_until > ?
+		  AND `+exclusiveConversationPredicate("conversation")+`
+		UNION
+		SELECT membership.conversation_id FROM role_memberships AS membership
+		JOIN conversations AS conversation ON conversation.id = membership.conversation_id
+		WHERE membership.role = ?
+		  AND `+exclusiveConversationPredicate("conversation")+`
+	)`, sessionEndpoint, sessionEndpoint, role, now.UnixMilli(), now.UnixMilli(), role).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("inspect role-binding occupancy: %w", err)
+	}
+	if count > 1 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func nullableDisplayName(value string) any {

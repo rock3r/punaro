@@ -541,9 +541,19 @@ they never interpret local or delivered text as a command.
 Optional conversation display names are sanitized UTF-8 labels, not routing
 authority. Create may leave a room unnamed. `POST
 /v1/conversations/{id}/display-name` requires a live admin session and an
-`Idempotency-Key`; repeating the same sanitized label is a no-op. The adapter
-surfaces this as `punaro-adapter create --name ...` and `punaro-adapter rename
---conversation ... --actor ... --name ... --idempotency-key ...`.
+`Idempotency-Key`; repeating the same sanitized label is a no-op. Once a room
+has a name it cannot be unnamed again. The adapter surfaces this as
+`punaro-adapter create --name ...` and `punaro-adapter rename --conversation
+... --actor ... --name ... --idempotency-key ...`.
+
+An agent session may occupy at most one conversation that is named or claimed.
+Occupancy is a direct membership or a live role binding to a role member of
+such a room. Joining a second named or claimed room is a conflict. Several
+sessions may share one topic. Unnamed, unclaimed rooms stay many-to-many.
+Exactly `telegram/primary` is exempt so the gateway can occupy every claimed
+topic. The fence is enforced on create, control upsert, role membership,
+bind-role, and the first rename that assigns a name. Memberships stay
+keyed by `(conversation, endpoint)` and are not unique on endpoint.
 
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired

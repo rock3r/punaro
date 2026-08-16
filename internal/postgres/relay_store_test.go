@@ -35,3 +35,13 @@ func TestPostgresConversationSQLOmitsDisplayNameUntilColumnExists(t *testing.T) 
 		t.Fatalf("v45 list omitted display_name: %s", got)
 	}
 }
+
+func TestPostgresExclusiveConversationPredicateRequiresDisplayName(t *testing.T) {
+	if got := postgresExclusiveConversationPredicate("conversation", false); got != "FALSE" {
+		t.Fatalf("pre-045 exclusive predicate=%s", got)
+	}
+	got := postgresExclusiveConversationPredicate("conversation", true)
+	if !strings.Contains(got, "conversation.display_name") || strings.Contains(got, "UNIQUE") {
+		t.Fatalf("exclusive predicate=%s", got)
+	}
+}

@@ -155,6 +155,9 @@ func AppendRequestHash(input AppendInput) string { return appendHash(input) }
 const (
 	maxConversationDisplayNameRunes = 128
 	maxConversationDisplayNameBytes = 512
+	// TelegramPrimaryEndpoint is the gateway mailbox. It must occupy every
+	// claimed topic, so one-session occupancy fencing never applies to it.
+	TelegramPrimaryEndpoint = "telegram/primary"
 )
 
 // SanitizeConversationDisplayName trims and clamps a room label. Empty input is
