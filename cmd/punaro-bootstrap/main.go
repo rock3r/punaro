@@ -1,16 +1,19 @@
-// punaro-bootstrap installs signed Punaro artifacts from GitHub Releases.
-// It verifies catalog and manifest signatures and exact artifact digests.
+// punaro-bootstrap installs signed Punaro artifacts from GitHub Releases
+// and supervises the current-slot adapter.
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/rock3r/punaro/internal/bootstrap"
 	punarorelease "github.com/rock3r/punaro/internal/release"
@@ -25,7 +28,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-bootstrap update|status|rollback")
+		return errors.New("usage: punaro-bootstrap update|status|rollback|run|seed-checkout")
 	}
 	switch args[0] {
 	case "update":
@@ -34,8 +37,12 @@ func run(args []string) error {
 		return runStatus(args[1:])
 	case "rollback":
 		return runRollback(args[1:])
+	case "run":
+		return runRun(args[1:])
+	case "seed-checkout":
+		return runSeedCheckout(args[1:])
 	default:
-		return errors.New("usage: punaro-bootstrap update|status|rollback")
+		return errors.New("usage: punaro-bootstrap update|status|rollback|run|seed-checkout")
 	}
 }
 
@@ -91,6 +98,9 @@ func runStatus(args []string) error {
 	if state.Previous != "" {
 		fmt.Printf("previous %s sequence %d\n", state.Previous, state.PreviousSequence)
 	}
+	if state.RecoveryOnly {
+		fmt.Println("recovery-only")
+	}
 	return nil
 }
 
@@ -110,6 +120,51 @@ func runRollback(args []string) error {
 	}
 	fmt.Printf("rolled back to %s sequence %d\n", result.Release, result.Sequence)
 	return nil
+}
+
+func runRun(args []string) error {
+	flags := flag.NewFlagSet("punaro-bootstrap run", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "absolute private bootstrap directory")
+	keysFile := flags.String("keys-file", "", "release public key set")
+	origin := flags.String("origin", punarorelease.GitHubReleaseOrigin, "fixed HTTPS release origin")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("bootstrap run is invalid")
+	}
+	if flags.NArg() != 0 || *directory == "" {
+		return errors.New("bootstrap run is invalid")
+	}
+	var keys map[string]ed25519.PublicKey
+	if *keysFile != "" {
+		loaded, err := loadKeys(*keysFile)
+		if err != nil {
+			return err
+		}
+		keys = loaded
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	return bootstrap.Run(ctx, bootstrap.RunRequest{
+		Directory:     *directory,
+		Origin:        strings.TrimSpace(*origin),
+		Keys:          keys,
+		HealthTimeout: bootstrap.DefaultHealthTimeout,
+		HealthWindow:  bootstrap.DefaultHealthWindow,
+	})
+}
+
+func runSeedCheckout(args []string) error {
+	flags := flag.NewFlagSet("punaro-bootstrap seed-checkout", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	directory := flags.String("directory", "", "absolute private bootstrap directory")
+	adapter := flags.String("adapter", "", "absolute checkout adapter binary")
+	if err := flags.Parse(args); err != nil {
+		return errors.New("bootstrap seed-checkout is invalid")
+	}
+	if flags.NArg() != 0 || *directory == "" || *adapter == "" {
+		return errors.New("bootstrap seed-checkout is invalid")
+	}
+	return bootstrap.SeedLocalCheckout(*directory, *adapter)
 }
 
 func loadKeys(path string) (map[string]ed25519.PublicKey, error) {

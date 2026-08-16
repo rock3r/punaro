@@ -406,12 +406,17 @@ func Status(directory string) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
+	recovery, err := loadRecovery(directory)
+	if err != nil {
+		return State{}, err
+	}
 	return State{
 		Current:          current.Release,
 		CurrentSequence:  current.Sequence,
 		Previous:         previous.Release,
 		PreviousSequence: previous.Sequence,
 		CatalogSequence:  accepted.CatalogSequence,
+		RecoveryOnly:     recovery.Mode == recoveryMode,
 	}, nil
 }
 

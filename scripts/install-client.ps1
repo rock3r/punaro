@@ -164,11 +164,12 @@ $root = Join-Path $env:LOCALAPPDATA 'Punaro'
 $binDir = Join-Path $root 'bin'
 $configDir = Join-Path $root 'config'
 $stateDir = Join-Path $root 'state'
+$bootstrapDir = Join-Path $root 'bootstrap'
 $configFile = Join-Path $configDir 'adapter.env'
 $keyFile = Join-Path $configDir 'machine.key'
 $enrollmentFile = Join-Path $configDir 'enrollment.json'
 $runner = Join-Path $root 'Run-PunaroAdapter.ps1'
-foreach ($directory in @($root, $binDir, $configDir, $stateDir)) { Ensure-PrivateDirectory -Path $directory }
+foreach ($directory in @($root, $binDir, $configDir, $stateDir, $bootstrapDir)) { Ensure-PrivateDirectory -Path $directory }
 foreach ($retiredPath in @(
     (Join-Path $binDir 'punaro-attachment.exe'),
     (Join-Path $binDir 'punaro-directory.exe'),
@@ -188,10 +189,12 @@ try {
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
+Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-memory') -Output (Join-Path $binDir 'punaro-memory.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-enroll') -Output (Join-Path $binDir 'punaro-enroll.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-keygen') -Output (Join-Path $binDir 'punaro-keygen.exe')
+Invoke-Program -Program (Join-Path $binDir 'punaro-bootstrap.exe') -Arguments @('seed-checkout', '--directory', $bootstrapDir, '--adapter', (Join-Path $binDir 'punaro-adapter.exe')) -Description 'bootstrap checkout seed'
 foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {
     $source = Join-Path $repoDir "deploy\windows\$name"
     $destination = Join-Path $root $name

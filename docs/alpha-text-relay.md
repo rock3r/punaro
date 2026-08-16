@@ -103,13 +103,15 @@ For a Linux agent machine that should keep its attachment active after logout,
 use the supplied user-level `deploy/systemd/user/punaro-adapter.service`
 profile. It deliberately runs as the same unprivileged account that owns the
 agent and its mailbox state; a privileged system service must never be pointed
-at an interactive user's mailbox database. Install the reviewed adapter as
-`~/.local/bin/punaro-adapter`, copy the non-secret example to
+at an interactive user's mailbox database. Install the reviewed bootstrap as
+`~/.local/bin/punaro-bootstrap` and seed a current slot under
+`~/.local/state/punaro-bootstrap`. Copy the non-secret example to
 `~/.config/punaro/adapter.env`, and set both that file and its machine-key file
 to mode `0600`. Add that machine's distinct Access client ID and secret only to
-the private environment file. The unit limits writable paths to its private
-adapter journal and the explicit `agent-mailbox` state path, then starts from
-the same session identity as the attached aliases. Install it under
+the private environment file. The unit launches `punaro-bootstrap run` and
+limits writable paths to its private adapter journal, bootstrap slots, and the
+explicit `agent-mailbox` state path, then starts from the same session identity
+as the attached aliases. Install it under
 `~/.config/systemd/user/`, run `systemctl --user daemon-reload`, enable it, and
 start it with `systemctl --user enable --now punaro-adapter.service`. Use
 `loginctl enable-linger <user>` before logout only if the machine should

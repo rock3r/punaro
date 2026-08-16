@@ -597,6 +597,7 @@ func run() error {
 	defer stop()
 	wake := make(chan struct{}, 1)
 	go runNotifications(ctx, relayClient, wake)
+	reportedReady := false
 	for {
 		if err := offerOutbox.Flush(ctx, relayClient); err != nil && !errors.Is(err, context.Canceled) {
 			// Durable rows remain for the next poll; never log their offer body.
@@ -605,6 +606,12 @@ func run() error {
 		if err := syncer.SyncOnce(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			// Errors deliberately omit remote and mailbox output bodies.
 			log.Printf("synchronization failed: %v", err)
+		} else if err == nil && !reportedReady {
+			if readyErr := writeBootstrapReady(); readyErr != nil {
+				log.Printf("bootstrap ready file is invalid: %v", readyErr)
+			} else {
+				reportedReady = true
+			}
 		}
 		timer := time.NewTimer(config.pollInterval)
 		select {
@@ -787,6 +794,64 @@ func loadAdapterProfile() (map[string]string, error) {
 		settings[name] = strings.TrimSpace(value)
 	}
 	return settings, nil
+}
+
+const (
+	bootstrapReadyEnv  = "PUNARO_BOOTSTRAP_READY_FILE"
+	bootstrapReadyBody = `{"schema":1,"status":"healthy"}`
+)
+
+func writeBootstrapReady() error {
+	path := strings.TrimSpace(os.Getenv(bootstrapReadyEnv))
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	// #nosec G703 -- ready path is the absolute bootstrap-owned file passed by the local supervisor.
+	info, err := os.Lstat(path)
+	if err == nil && !info.Mode().IsRegular() {
+		return errors.New("bootstrap ready file is invalid")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	dir := filepath.Dir(path)
+	file, err := os.CreateTemp(dir, ".health-*.tmp")
+	if err != nil {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	tmp := file.Name()
+	if _, err := file.WriteString(bootstrapReadyBody); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	if err := file.Close(); err != nil {
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	// #nosec G703 -- ready path is the absolute bootstrap-owned file passed by the local supervisor.
+	if err := os.Rename(tmp, path); err != nil {
+		removeReadyTemp(tmp)
+		return errors.New("bootstrap ready file is invalid")
+	}
+	return nil
+}
+
+func removeReadyTemp(tmp string) {
+	// #nosec G703 -- tmp is the sibling CreateTemp file beside the supervisor-owned ready path.
+	_ = os.Remove(tmp)
 }
 
 func loadPrivateKey(path string) (ed25519.PrivateKey, error) {

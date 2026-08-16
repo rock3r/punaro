@@ -48,6 +48,7 @@ run_install() {
 run_install >"$fixture_dir/first.out"
 
 adapter="$home/.local/bin/punaro-adapter"
+bootstrap="$home/.local/bin/punaro-bootstrap"
 attachment="$home/.local/bin/punaro-trusted-attachment"
 memory="$home/.local/bin/punaro-memory"
 enroll="$home/.local/bin/punaro-enroll"
@@ -65,6 +66,8 @@ file_mode() {
 }
 
 [ -x "$adapter" ] || { printf '%s\n' 'adapter binary was not installed' >&2; exit 1; }
+[ -x "$bootstrap" ] || { printf '%s\n' 'bootstrap binary was not installed' >&2; exit 1; }
+[ -d "$home/.local/state/punaro-bootstrap/current" ] || { printf '%s\n' 'bootstrap current slot was not seeded' >&2; exit 1; }
 [ -x "$attachment" ] || { printf '%s\n' 'attachment binary was not installed' >&2; exit 1; }
 [ -x "$memory" ] || { printf '%s\n' 'memory binary was not installed' >&2; exit 1; }
 [ -x "$enroll" ] || { printf '%s\n' 'enrollment binary was not installed' >&2; exit 1; }
@@ -74,9 +77,11 @@ file_mode() {
 [ -f "$guidance_project/AGENTS.md" ] || { printf '%s\n' 'opt-in agent guidance was not installed' >&2; exit 1; }
 if [ "$(uname -s)" = Darwin ]; then
 	[ -f "$plist" ] || { printf '%s\n' 'LaunchAgent was not installed' >&2; exit 1; }
+	grep -Fq 'punaro-bootstrap" run --directory' "$plist" || { printf '%s\n' 'LaunchAgent does not launch punaro-bootstrap run' >&2; exit 1; }
 else
 	[ -f "$home/.config/systemd/user/punaro-adapter.service" ] || { printf '%s\n' 'user systemd unit was not installed' >&2; exit 1; }
-	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state" "$home/.config/systemd/user/punaro-adapter.service"
+	grep -Fq 'punaro-bootstrap run --directory' "$home/.config/systemd/user/punaro-adapter.service" || { printf '%s\n' 'user unit does not launch punaro-bootstrap run' >&2; exit 1; }
 fi
 [ "$(file_mode "$key")" = 600 ] || { printf '%s\n' 'machine key permissions are not 0600' >&2; exit 1; }
 [ "$(file_mode "$config")" = 600 ] || { printf '%s\n' 'adapter environment permissions are not 0600' >&2; exit 1; }

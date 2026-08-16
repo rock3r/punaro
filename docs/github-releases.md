@@ -6,7 +6,7 @@ never supplies a download URL, installer script, or unsigned `latest` pointer.
 
 This is the release-trust slice of
 [`client-lifecycle-compatibility-recovery-rfc.md`](client-lifecycle-compatibility-recovery-rfc.md).
-It is not yet a signed official release and does not implement `run`/health,
+It is not yet a signed official release and does not implement enrollment,
 fleet rollout, or the recovery HTTP surface.
 
 ## Fixed origin
@@ -133,8 +133,13 @@ exists; when present it must be `@sha256:` and `release_sha256` must match.
 
 `punaro-bootstrap` fetches only two-component paths beneath the fixed origin,
 verifies the catalog and manifest signatures, checks exact length/digest, and
-publishes `current` / `previous` slots. It does not run children, enroll, or
-open PostgreSQL. HTTPS is required except for loopback test origins.
+publishes `current` / `previous` slots. Platform services launch
+`punaro-bootstrap run`, which starts the current-slot adapter with the
+existing host-local profile. After a previous slot exists, the new current
+must write a content-free ready file within 60 seconds; otherwise run rolls
+back once when the fresh catalog still lists that previous release, or enters
+recovery-only. It does not enroll or open PostgreSQL. HTTPS is required
+except for loopback test origins.
 
 ```sh
 punaro-bootstrap update \
@@ -142,16 +147,19 @@ punaro-bootstrap update \
   --keys-file /absolute/punaro-release.pub
 punaro-bootstrap status --directory /absolute/private/bootstrap
 punaro-bootstrap rollback --directory /absolute/private/bootstrap
+punaro-bootstrap run --directory /absolute/private/bootstrap
 ```
 
 `--release` may name a catalog-listed release. Automatic update refuses a
 stale catalog, an unsigned or digest-mismatched document, a sequence
-downgrade, a critical block, and a path outside the origin. Rollback swaps
-the two published slots and does not lower the highest accepted sequences.
+downgrade, a critical block, and a path outside the origin. Host-local
+rollback swaps the two published slots and does not lower the highest
+accepted sequences. Automatic rollback from `run` still requires a fresh
+catalog listing. Source installers may `seed-checkout` a reviewed local
+adapter as `v0.0.0-local`; that identity is not a signed rollback target.
 
 ## Still outstanding
 
-- `punaro-bootstrap run`, candidate health, and platform service handoff
 - embedding the production public key in that bootstrap
 - GHCR image publication and a required `image` digest
 - SBOM, provenance attestations, and offline recovery bundles

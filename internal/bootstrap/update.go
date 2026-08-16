@@ -1,7 +1,8 @@
 // Package bootstrap installs signed Punaro client artifacts from the fixed
 // GitHub Releases origin. It verifies catalog and manifest signatures and
-// exact artifact length/digest. It does not run children, open PostgreSQL, or
-// read Punaro message content.
+// exact artifact length/digest, supervises the current-slot adapter, and
+// rolls back once when a candidate is unhealthy. It does not open PostgreSQL
+// or read Punaro message content.
 package bootstrap
 
 import (
@@ -55,6 +56,7 @@ type State struct {
 	Previous         string
 	PreviousSequence int64
 	CatalogSequence  int64
+	RecoveryOnly     bool
 }
 
 // Update fetches the signed catalog, honors only a listed release, and
@@ -78,14 +80,30 @@ func Update(request Request) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	if accepted.Release == localCheckoutRelease {
+		accepted = acceptedState{}
+	}
 	if accepted.ReleaseSequence < 1 {
 		exists, slotErr := existsRealDir(filepath.Join(request.Directory, currentSlot))
 		if slotErr != nil {
 			return Result{}, slotErr
 		}
 		if exists {
-			return Result{}, errors.New("bootstrap accepted state is invalid")
+			slot, readErr := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
+			if readErr != nil {
+				return Result{}, readErr
+			}
+			if slot.Release != localCheckoutRelease {
+				return Result{}, errors.New("bootstrap accepted state is invalid")
+			}
 		}
+	}
+	catalog, err := fetchVerifiedCatalog(request)
+	if err != nil {
+		return Result{}, err
+	}
+	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
+		return Result{}, errors.New("release catalog sequence downgrade")
 	}
 	client := request.HTTP
 	if client == nil {
@@ -94,27 +112,6 @@ func Update(request Request) (Result, error) {
 			return Result{}, err
 		}
 		client = transport
-	}
-	catalogBody, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
-	if err != nil {
-		return Result{}, err
-	}
-	catalogSig, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
-	if err != nil {
-		return Result{}, err
-	}
-	if err := verifyDocument(catalogBody, catalogSig, request.Keys); err != nil {
-		return Result{}, err
-	}
-	catalog, err := punarorelease.ParseCatalog(catalogBody)
-	if err != nil {
-		return Result{}, err
-	}
-	if !catalog.Fresh(request.Now) {
-		return Result{}, errors.New("release catalog is stale")
-	}
-	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
-		return Result{}, errors.New("release catalog sequence downgrade")
 	}
 	wanted := request.Release
 	if wanted == "" {
@@ -270,6 +267,36 @@ func (request *Request) normalize() error {
 		request.Now = time.Now().UTC()
 	}
 	return nil
+}
+
+func fetchVerifiedCatalog(request Request) (punarorelease.Catalog, error) {
+	client := request.HTTP
+	if client == nil {
+		transport, err := newFetcher(request.Origin)
+		if err != nil {
+			return punarorelease.Catalog{}, err
+		}
+		client = transport
+	}
+	catalogBody, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	catalogSig, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	if err := verifyDocument(catalogBody, catalogSig, request.Keys); err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	catalog, err := punarorelease.ParseCatalog(catalogBody)
+	if err != nil {
+		return punarorelease.Catalog{}, err
+	}
+	if !catalog.Fresh(request.Now) {
+		return punarorelease.Catalog{}, errors.New("release catalog is stale")
+	}
+	return catalog, nil
 }
 
 func verifyDocument(document, signature []byte, keys map[string]ed25519.PublicKey) error {

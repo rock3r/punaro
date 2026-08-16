@@ -14,7 +14,9 @@ explicit operator actions. Published native artifacts and the unsigned
 catalog/manifest pair live on GitHub Releases; see
 [github-releases.md](github-releases.md). `punaro-bootstrap` installs only
 signed catalog/manifest pairs; unsigned draft assets are not an automatic
-update source.
+update source. Platform services launch `punaro-bootstrap run` against the
+current slot. An unhealthy candidate rolls back once when the fresh catalog
+still lists the previous release; otherwise the host stays recovery-only.
 
 ## Run locally
 

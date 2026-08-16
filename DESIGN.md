@@ -1500,7 +1500,11 @@ The implementation is not internet-exposure-ready until these cases pass:
   signed release; it never supplies a URL, command, or unsigned `latest`
   pointer. `punaro-bootstrap update` verifies catalog/manifest signatures and
   exact artifact digests, then publishes `current`/`previous` slots.
-  `punaro-bootstrap run`, health, and enrollment are not implemented yet.
+  Platform services launch `punaro-bootstrap run`, which supervises the
+  current-slot adapter, requires a local ready signal within 60 seconds when a
+  previous slot exists, rolls back once if the fresh catalog still allows that
+  previous release, and otherwise enters recovery-only. Enrollment is not
+  implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.

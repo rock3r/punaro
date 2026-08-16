@@ -120,7 +120,7 @@ if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trus
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
+[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-bootstrap" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
 if [ "$allow_lan_http" = true ]; then
 	(
@@ -143,14 +143,15 @@ mailbox_bin="$mailbox_bin_dir/$(basename -- "$mailbox_bin")"
 
 config_dir="$HOME/.config/punaro"
 state_dir="$HOME/.local/state/punaro-adapter"
+bootstrap_dir="$HOME/.local/state/punaro-bootstrap"
 bin_dir="$HOME/.local/bin"
 key_file="$config_dir/machine.key"
 enrollment_file="$config_dir/enrollment.json"
 config_file="$config_dir/adapter.env"
 endpoint_prefix="agent/$machine_id/"
 
-mkdir -p "$config_dir" "$state_dir" "$bin_dir"
-chmod 700 "$config_dir" "$state_dir"
+mkdir -p "$config_dir" "$state_dir" "$bootstrap_dir" "$bin_dir"
+chmod 700 "$config_dir" "$state_dir" "$bootstrap_dir"
 
 for retired_path in \
 	"$bin_dir/punaro-attachment" \
@@ -229,12 +230,15 @@ fi
 (
 	cd "$repo_dir"
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
+install -m 700 "$build_dir/punaro-bootstrap" "$bin_dir/punaro-bootstrap"
+"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter"
 install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
 install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
 install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"
@@ -308,10 +312,10 @@ if [ "$enable" -eq 1 ]; then
 		if [ "$mailbox_state_dir" = "$HOME/.local/state/ai-agent/mailbox" ]; then
 			install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
 		else
-			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir|" \
+			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir|" \
 				"$repo_dir/deploy/systemd/user/punaro-adapter.service" >"$service_file"
 			chmod 600 "$service_file"
-			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
 		fi
 		if [ "$enable" -eq 1 ]; then
 			systemctl --user daemon-reload
