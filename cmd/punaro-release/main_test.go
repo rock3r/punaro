@@ -20,7 +20,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	compose := filepath.Join(dir, "production.yaml")
-	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o644); err != nil {
+	if err := os.WriteFile(compose, []byte("services: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{
@@ -83,7 +83,7 @@ func TestReleaseToolRefusesExistingPublicKeyWithoutWritingPrivate(t *testing.T) 
 	dir := t.TempDir()
 	privatePath := filepath.Join(dir, "release.key")
 	publicPath := filepath.Join(dir, "release.pub")
-	if err := os.WriteFile(publicPath, []byte("existing"), 0o644); err != nil {
+	if err := os.WriteFile(publicPath, []byte("existing"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"keygen", "--key-id", "punaro-release-1", "--private-key-file", privatePath, "--public-key-file", publicPath}); err == nil {
@@ -97,7 +97,7 @@ func TestReleaseToolRefusesExistingPublicKeyWithoutWritingPrivate(t *testing.T) 
 func TestReleaseToolAppendsSecondSignature(t *testing.T) {
 	dir := t.TempDir()
 	document := filepath.Join(dir, "doc.json")
-	if err := os.WriteFile(document, []byte(`{"schema":1}`), 0o644); err != nil {
+	if err := os.WriteFile(document, []byte(`{"schema":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	firstPriv := filepath.Join(dir, "first.key")
@@ -148,7 +148,7 @@ func TestVerifyRejectsTamperedManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	document := []byte(`{"schema":1}`)
-	if err := os.WriteFile(filepath.Join(dir, "doc.json"), document, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "doc.json"), document, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "release.key"), punarorelease.EncodePrivateKey(private), 0o600); err != nil {
@@ -158,13 +158,13 @@ func TestVerifyRejectsTamperedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "release.pub"), public, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "release.pub"), public, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"sign", "--key-id", "punaro-release-1", "--key-file", filepath.Join(dir, "release.key"), "--in", filepath.Join(dir, "doc.json"), "--out", filepath.Join(dir, "doc.sig")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "doc.json"), []byte(`{"schema":2}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "doc.json"), []byte(`{"schema":2}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"verify", "--keys-file", filepath.Join(dir, "release.pub"), "--document", filepath.Join(dir, "doc.json"), "--signature", filepath.Join(dir, "doc.sig")}); err == nil {
