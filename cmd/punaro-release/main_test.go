@@ -32,6 +32,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 		"--published-at", "2026-08-16T12:00:00Z",
 		"--expires-at", "2026-08-23T12:00:00Z",
 		"--compose-file", compose,
+		"--minimum-bootstrap-release", "v0.1.0",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +56,12 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := punarorelease.ParseReleaseManifest(manifest); err != nil {
+	parsed, err := punarorelease.ParseReleaseManifest(manifest)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if parsed.MinimumBootstrapRelease != "v0.1.0" {
+		t.Fatalf("minimum bootstrap=%q", parsed.MinimumBootstrapRelease)
 	}
 	catalog, err := os.ReadFile(filepath.Join(artifacts, punarorelease.CatalogFile))
 	if err != nil {
@@ -71,6 +76,53 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("private key permissions=%v", info.Mode())
+	}
+}
+
+func TestReleaseToolRefusesExistingPublicKeyWithoutWritingPrivate(t *testing.T) {
+	dir := t.TempDir()
+	privatePath := filepath.Join(dir, "release.key")
+	publicPath := filepath.Join(dir, "release.pub")
+	if err := os.WriteFile(publicPath, []byte("existing"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"keygen", "--key-id", "punaro-release-1", "--private-key-file", privatePath, "--public-key-file", publicPath}); err == nil {
+		t.Fatal("existing public key overwritten")
+	}
+	if _, err := os.Stat(privatePath); !os.IsNotExist(err) {
+		t.Fatal("private key written after public-key preflight failure")
+	}
+}
+
+func TestReleaseToolAppendsSecondSignature(t *testing.T) {
+	dir := t.TempDir()
+	document := filepath.Join(dir, "doc.json")
+	if err := os.WriteFile(document, []byte(`{"schema":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firstPriv := filepath.Join(dir, "first.key")
+	firstPub := filepath.Join(dir, "first.pub")
+	secondPriv := filepath.Join(dir, "second.key")
+	secondPub := filepath.Join(dir, "second.pub")
+	firstSig := filepath.Join(dir, "first.sig")
+	bothSig := filepath.Join(dir, "both.sig")
+	if err := run([]string{"keygen", "--key-id", "punaro-release-1", "--private-key-file", firstPriv, "--public-key-file", firstPub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"keygen", "--key-id", "punaro-release-2", "--private-key-file", secondPriv, "--public-key-file", secondPub}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"sign", "--key-id", "punaro-release-1", "--key-file", firstPriv, "--in", document, "--out", firstSig}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"sign", "--key-id", "punaro-release-2", "--key-file", secondPriv, "--in", document, "--signature", firstSig, "--out", bothSig}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"verify", "--keys-file", firstPub, "--document", document, "--signature", bothSig}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"verify", "--keys-file", secondPub, "--document", document, "--signature", bothSig}); err != nil {
+		t.Fatal(err)
 	}
 }
 

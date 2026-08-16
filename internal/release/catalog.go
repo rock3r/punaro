@@ -104,8 +104,9 @@ func (entry CatalogRelease) validate() error {
 
 // Fresh reports whether the catalog is still inside its signed lifetime.
 func (catalog Catalog) Fresh(now time.Time) bool {
-	expires, ok := parseCanonicalUTC(catalog.ExpiresAt)
-	return ok && now.Before(expires)
+	published, publishedOK := parseCanonicalUTC(catalog.PublishedAt)
+	expires, expiresOK := parseCanonicalUTC(catalog.ExpiresAt)
+	return publishedOK && expiresOK && !now.Before(published) && now.Before(expires)
 }
 
 // Allows reports whether a gateway-selected release is listed, digest-matched,

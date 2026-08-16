@@ -60,6 +60,7 @@ func runAssemble(args []string) error {
 	composeFile := flags.String("compose-file", "deploy/compose/production.yaml", "compose source to hash")
 	image := flags.String("image", "", "optional digest-pinned gateway image")
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
+	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release assembly is invalid")
 	}
@@ -79,6 +80,10 @@ func runAssemble(args []string) error {
 	if minimumSafe == 0 {
 		minimumSafe = *sequence
 	}
+	bootstrapRelease := *minBootstrap
+	if bootstrapRelease == "" {
+		bootstrapRelease = *releaseName
+	}
 	_, err = punarorelease.Assemble(punarorelease.AssembleRequest{
 		Directory:               *dir,
 		Release:                 *releaseName,
@@ -95,7 +100,7 @@ func runAssemble(args []string) error {
 		GatewayProtocol:         punarorelease.ProtocolRange{Min: 1, Max: 1},
 		ClientProtocol:          punarorelease.ProtocolRange{Min: 1, Max: 1},
 		MinimumRecoveryProtocol: 1,
-		MinimumBootstrapRelease: *releaseName,
+		MinimumBootstrapRelease: bootstrapRelease,
 	})
 	return err
 }
@@ -145,6 +150,12 @@ func runKeygen(args []string) error {
 	if flags.NArg() != 0 || *keyID == "" || *privateFile == "" || *publicFile == "" {
 		return errors.New("release keygen is invalid")
 	}
+	if err := requireAbsentFile(*privateFile); err != nil {
+		return err
+	}
+	if err := requireAbsentFile(*publicFile); err != nil {
+		return err
+	}
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return err
@@ -156,7 +167,11 @@ func runKeygen(args []string) error {
 	if err := writeExclusiveFile(*privateFile, punarorelease.EncodePrivateKey(private), 0o600); err != nil {
 		return err
 	}
-	return writeExclusiveFile(*publicFile, publicBody, 0o644)
+	if err := writeExclusiveFile(*publicFile, publicBody, 0o644); err != nil {
+		_ = os.Remove(*privateFile)
+		return err
+	}
+	return nil
 }
 
 func runSign(args []string) error {
@@ -165,6 +180,7 @@ func runSign(args []string) error {
 	keyID := flags.String("key-id", "", "release key ID")
 	keyFile := flags.String("key-file", "", "offline private key file")
 	input := flags.String("in", "", "document to sign")
+	existing := flags.String("signature", "", "existing envelope to append to")
 	output := flags.String("out", "", "detached signature path (must not exist)")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release signing is invalid")
@@ -184,9 +200,25 @@ func runSign(args []string) error {
 	if err != nil {
 		return errors.New("release signing is invalid")
 	}
-	envelope, err := punarorelease.Sign(document, *keyID, private)
-	if err != nil {
-		return err
+	var envelope punarorelease.Envelope
+	if *existing != "" {
+		prior, err := os.ReadFile(*existing) // #nosec G304 -- explicit local signature path.
+		if err != nil {
+			return errors.New("release signing is invalid")
+		}
+		parsed, err := punarorelease.ParseEnvelope(prior)
+		if err != nil {
+			return err
+		}
+		envelope, err = punarorelease.AppendSignature(parsed, document, *keyID, private)
+		if err != nil {
+			return err
+		}
+	} else {
+		envelope, err = punarorelease.Sign(document, *keyID, private)
+		if err != nil {
+			return err
+		}
 	}
 	body, err := punarorelease.EncodeEnvelope(envelope)
 	if err != nil {
@@ -272,6 +304,17 @@ func hashFile(path string) (string, error) {
 		return "", errors.New("release assembly is invalid")
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func requireAbsentFile(path string) error {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return errors.New("release output already exists")
+	}
+	if !os.IsNotExist(err) {
+		return errors.New("release keygen is invalid")
+	}
+	return nil
 }
 
 func writeExclusiveFile(path string, body []byte, mode os.FileMode) error {

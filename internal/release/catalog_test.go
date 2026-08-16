@@ -60,6 +60,9 @@ func TestCatalogFreshnessIsSeparateFromParse(t *testing.T) {
 	if catalog.Fresh(time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)) {
 		t.Fatal("expired catalog reported fresh")
 	}
+	if catalog.Fresh(time.Date(2026, 8, 16, 11, 59, 59, 0, time.UTC)) {
+		t.Fatal("pre-publication catalog reported fresh")
+	}
 }
 
 func TestParseCatalogRejectsMalformedAndNonCanonicalDocuments(t *testing.T) {
