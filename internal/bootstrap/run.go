@@ -424,6 +424,17 @@ func readReadyFile(path string) (string, error) {
 	return record.Status, nil
 }
 
+func persistDirectoryKeys(directory string, keys map[string]ed25519.PublicKey) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	body, err := punarorelease.EncodePublicKeySet(keys)
+	if err != nil {
+		return errors.New("bootstrap keys file is invalid")
+	}
+	return writeAtomic(filepath.Join(directory, directoryKeysFile), body, 0o600)
+}
+
 func loadDirectoryKeys(directory string) (map[string]ed25519.PublicKey, error) {
 	path := filepath.Join(directory, directoryKeysFile)
 	info, err := os.Lstat(path) // #nosec G703 -- keys file is a fixed child of the bootstrap directory.

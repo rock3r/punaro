@@ -189,6 +189,9 @@ func Update(request Request) (Result, error) {
 		if err := finishPublication(request.Directory, published); err != nil {
 			return Result{}, err
 		}
+		if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+			return Result{}, err
+		}
 		return Result{Release: published.Release, Sequence: published.ReleaseSequence, Manifest: published.ManifestSHA256}, nil
 	}
 	candidate := filepath.Join(request.Directory, candidateSlot)
@@ -245,6 +248,9 @@ func Update(request Request) (Result, error) {
 		return Result{}, err
 	}
 	if err := finishPublication(request.Directory, published); err != nil {
+		return Result{}, err
+	}
+	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
 		return Result{}, err
 	}
 	return Result{Release: manifest.Release, Sequence: manifest.Sequence, Manifest: listed.ManifestSHA256, Installed: installed}, nil

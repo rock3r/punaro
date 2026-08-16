@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"sort"
 )
 
 // PublicKeysFile is the committed or operator-held set of release-verifying keys.
@@ -43,16 +44,31 @@ func ParsePublicKeys(body []byte) (map[string]ed25519.PublicKey, error) {
 
 // EncodePublicKeys writes one verifying key in the public key-set format.
 func EncodePublicKeys(keyID string, public ed25519.PublicKey) ([]byte, error) {
-	if !keyIDPattern.MatchString(keyID) || len(public) != ed25519.PublicKeySize {
+	return EncodePublicKeySet(map[string]ed25519.PublicKey{keyID: public})
+}
+
+// EncodePublicKeySet writes the full verifying key set.
+func EncodePublicKeySet(keys map[string]ed25519.PublicKey) ([]byte, error) {
+	if len(keys) == 0 || len(keys) > maxSignatures {
 		return nil, errors.New("release public keys are invalid")
 	}
-	return encodeDocument(PublicKeysFile{
-		Schema: releaseDocumentSchema,
-		Keys: []PublicKeyRecord{{
+	ids := make([]string, 0, len(keys))
+	for keyID := range keys {
+		ids = append(ids, keyID)
+	}
+	sort.Strings(ids)
+	records := make([]PublicKeyRecord, 0, len(ids))
+	for _, keyID := range ids {
+		public := keys[keyID]
+		if !keyIDPattern.MatchString(keyID) || len(public) != ed25519.PublicKeySize {
+			return nil, errors.New("release public keys are invalid")
+		}
+		records = append(records, PublicKeyRecord{
 			KeyID:         keyID,
 			PublicEd25519: base64.RawURLEncoding.EncodeToString(public),
-		}},
-	})
+		})
+	}
+	return encodeDocument(PublicKeysFile{Schema: releaseDocumentSchema, Keys: records})
 }
 
 // EncodePrivateKey encodes one 64-byte Ed25519 private key as raw base64url.

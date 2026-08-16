@@ -198,7 +198,11 @@ Invoke-Program -Program (Join-Path $binDir 'punaro-bootstrap.exe') -Arguments @(
 foreach ($name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironment.ps1')) {
     $source = Join-Path $repoDir "deploy\windows\$name"
     $destination = Join-Path $root $name
-    if (-not (Test-Path -LiteralPath $destination)) { [System.IO.File]::Copy($source, $destination) }
+    Get-RegularFile -Path $source -Label 'Windows runner template' | Out-Null
+    if (Test-Path -LiteralPath $destination) {
+        Get-RegularFile -Path $destination -Label 'installed Windows runner' | Out-Null
+    }
+    [System.IO.File]::Copy($source, $destination, $true)
     Protect-PunaroPath -Path $destination
 }
 
