@@ -166,15 +166,16 @@ func hashRegularFile(path string) (int64, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
+		_ = file.Close()
 		return 0, "", errors.New("release assembly is invalid")
 	}
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
-	if err != nil {
-		return 0, "", err
+	written, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
+		return 0, "", errors.New("release assembly is invalid")
 	}
 	return written, hex.EncodeToString(hash.Sum(nil)), nil
 }

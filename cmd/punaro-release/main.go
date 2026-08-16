@@ -298,9 +298,10 @@ func hashFile(path string) (string, error) {
 	if err != nil {
 		return "", errors.New("release assembly is invalid")
 	}
-	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	_, copyErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if copyErr != nil || closeErr != nil {
 		return "", errors.New("release assembly is invalid")
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
