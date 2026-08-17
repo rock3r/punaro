@@ -188,7 +188,7 @@ func TestRunRejectsStaleCatalogSequenceOnRollback(t *testing.T) {
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
 	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
-	origin := newSignedOrigin(t, originSpec{payload: "old-catalog", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.1.0", sequence: 1, catalogSequence: 1})
+	origin := newSignedOrigin(t, originSpec{payload: "previous-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.1.0", sequence: 1, catalogSequence: 1})
 	err := Run(context.Background(), RunRequest{
 		Directory:     dir,
 		Origin:        origin.URL,
