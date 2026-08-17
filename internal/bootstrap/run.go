@@ -117,11 +117,11 @@ func Run(ctx context.Context, request RunRequest) error {
 		return ErrRecoveryOnly
 	}
 	if err := waitHealth(ctx, request, child, request.hasPrevious(identity)); err != nil {
-		_ = child.Kill()
-		<-child.Done()
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
+		_ = child.Kill()
+		<-child.Done()
 		if request.hasPrevious(identity) {
 			return failOrRollback(ctx, request, start, identity, recoveryUnhealthy)
 		}
@@ -241,7 +241,6 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, required
 	defer ticker.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
-			_ = child.Kill()
 			return err
 		}
 		status, err := readReadyFile(filepath.Join(request.Directory, readyFile))
@@ -264,7 +263,6 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, required
 		}
 		select {
 		case <-ctx.Done():
-			_ = child.Kill()
 			return ctx.Err()
 		case <-child.Done():
 			return errChildExited
@@ -299,11 +297,11 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		return ErrRecoveryOnly
 	}
 	if err := waitHealth(ctx, request, child, true); err != nil {
-		_ = child.Kill()
-		<-child.Done()
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
+		_ = child.Kill()
+		<-child.Done()
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
 			return recErr
 		}
@@ -328,7 +326,6 @@ func waitHealthWindow(ctx context.Context, request RunRequest, child Process) er
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		_ = child.Kill()
 		return ctx.Err()
 	case <-child.Done():
 		return errChildExited
@@ -570,10 +567,7 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 		return err
 	} else if exists {
 		slot, err := readSlot(current)
-		if err != nil {
-			return err
-		}
-		if slot.Release != localCheckoutRelease {
+		if err == nil && slot.Release != localCheckoutRelease {
 			return nil
 		}
 	}
@@ -587,37 +581,55 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	}
 	sum := sha256.Sum256(body)
 	digest := hex.EncodeToString(sum[:])
-	if err := os.RemoveAll(current); err != nil {
+	candidate := filepath.Join(directory, candidateSlot)
+	if err := os.RemoveAll(candidate); err != nil {
 		return err
 	}
-	if err := os.Mkdir(current, 0o700); err != nil {
+	if err := os.Mkdir(candidate, 0o700); err != nil {
 		return err
 	}
 	name := artifactName(adapterComponent, runtime.GOOS, runtime.GOARCH)
-	if err := writeAtomic(filepath.Join(current, name), body, 0o755); err != nil {
+	if err := writeAtomic(filepath.Join(candidate, name), body, 0o755); err != nil {
 		return err
 	}
 	record, err := json.Marshal(slotState{Schema: 1, Release: localCheckoutRelease, Sequence: 1, ManifestSHA256: digest})
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(current, slotRecord), record, 0o600); err != nil {
+	if err := writeAtomic(filepath.Join(candidate, slotRecord), record, 0o600); err != nil {
+		return err
+	}
+	if err := writeJournal(directory, journal{
+		Schema:         1,
+		Phase:          "seeding",
+		Release:        localCheckoutRelease,
+		Sequence:       1,
+		ManifestSHA256: digest,
+	}); err != nil {
+		return err
+	}
+	if err := replaceCurrent(directory, localCheckoutRelease, 1, digest); err != nil {
 		return err
 	}
 	accepted, err := loadAccepted(directory)
 	if err != nil {
 		return err
 	}
-	if accepted.Release != "" && accepted.Release != localCheckoutRelease {
-		return nil
+	if accepted.Release == "" || accepted.Release == localCheckoutRelease {
+		if err := saveAccepted(directory, acceptedState{
+			Schema:          1,
+			Release:         localCheckoutRelease,
+			ReleaseSequence: 1,
+			CatalogSequence: 1,
+			ManifestSHA256:  digest,
+		}); err != nil {
+			return err
+		}
 	}
-	return saveAccepted(directory, acceptedState{
-		Schema:          1,
-		Release:         localCheckoutRelease,
-		ReleaseSequence: 1,
-		CatalogSequence: 1,
-		ManifestSHA256:  digest,
-	})
+	if err := clearRecovery(directory); err != nil {
+		return err
+	}
+	return clearJournal(directory)
 }
 
 func withReadyEnv(ready string) []string {

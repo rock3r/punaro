@@ -175,6 +175,20 @@ func recoverJournal(directory string) error {
 	switch record.Phase {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
+	case "seeding":
+		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+			return errors.New("bootstrap journal is invalid")
+		}
+		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
+		if err != nil {
+			return err
+		}
+		if exists {
+			if err := replaceCurrent(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
+				return err
+			}
+		}
+		return clearJournal(directory)
 	case "publishing", "repairing":
 		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return errors.New("bootstrap journal is invalid")

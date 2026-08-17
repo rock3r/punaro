@@ -313,6 +313,21 @@ func TestRunRejectsReadySymlink(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutClearsRecoveryOnly(t *testing.T) {
+	dir := privateDir(t)
+	writeRecoveryOnly(t, dir)
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("seed left recovery-only")
+	}
+}
+
 func TestSeedLocalCheckoutLeavesSignedHistoryUnblocked(t *testing.T) {
 	dir := privateDir(t)
 	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
