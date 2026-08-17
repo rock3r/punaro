@@ -191,7 +191,10 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	}
 	identity, err := readSlot(current)
 	if err != nil {
-		return slotState{}, "", err
+		if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
+			return slotState{}, "", recErr
+		}
+		return slotState{}, "", ErrRecoveryOnly
 	}
 	adapter, err := adapterBinary(current, request.GOOS, request.GOARCH)
 	if err != nil {
@@ -389,16 +392,23 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 		return false, slotState{}, errors.New("catalog does not allow the release")
 	}
 	if err := writeJournal(request.Directory, journal{
-		Schema:         1,
-		Phase:          "rolling-back",
-		Release:        previous.Release,
-		Sequence:       previous.Sequence,
-		ManifestSHA256: previous.ManifestSHA256,
+		Schema:          1,
+		Phase:           "rolling-back",
+		Release:         previous.Release,
+		Sequence:        previous.Sequence,
+		CatalogSequence: catalog.Sequence,
+		ManifestSHA256:  previous.ManifestSHA256,
 	}); err != nil {
 		return false, slotState{}, err
 	}
 	if err := completeRollback(request.Directory, previous); err != nil {
 		return false, slotState{}, err
+	}
+	if catalog.Sequence > accepted.CatalogSequence {
+		accepted.CatalogSequence = catalog.Sequence
+		if err := saveAccepted(request.Directory, accepted); err != nil {
+			return false, slotState{}, err
+		}
 	}
 	if err := clearJournal(request.Directory); err != nil {
 		return false, slotState{}, err
@@ -513,6 +523,14 @@ func clearRecovery(directory string) error {
 	return syncDir(directory)
 }
 
+func writeRecoveryRecord(directory, reason string) error {
+	body, err := json.Marshal(recoveryState{Schema: 1, Mode: recoveryMode, Reason: reason})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, recoveryFile), body, 0o600)
+}
+
 func enterRecoveryOnly(directory, reason string) error {
 	if err := prepareDirectory(directory); err != nil {
 		return err
@@ -522,11 +540,7 @@ func enterRecoveryOnly(directory, reason string) error {
 		return err
 	}
 	defer unlock()
-	body, err := json.Marshal(recoveryState{Schema: 1, Mode: recoveryMode, Reason: reason})
-	if err != nil {
-		return err
-	}
-	return writeAtomic(filepath.Join(directory, recoveryFile), body, 0o600)
+	return writeRecoveryRecord(directory, reason)
 }
 
 // SeedLocalCheckout publishes a host-local adapter from a reviewed checkout

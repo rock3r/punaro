@@ -186,10 +186,10 @@ func Update(request Request) (Result, error) {
 	}
 	sameIdentity := current.Release == published.Release && current.Sequence == published.ReleaseSequence && current.ManifestSHA256 == published.ManifestSHA256
 	if sameIdentity && currentSlotMatches(request.Directory, artifacts) {
-		if err := finishPublication(request.Directory, published); err != nil {
+		if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
 			return Result{}, err
 		}
-		if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+		if err := finishPublication(request.Directory, published); err != nil {
 			return Result{}, err
 		}
 		return Result{Release: published.Release, Sequence: published.ReleaseSequence, Manifest: published.ManifestSHA256}, nil
@@ -247,10 +247,10 @@ func Update(request Request) (Result, error) {
 	} else if err := publishSlot(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
 		return Result{}, err
 	}
-	if err := finishPublication(request.Directory, published); err != nil {
+	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
 		return Result{}, err
 	}
-	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+	if err := finishPublication(request.Directory, published); err != nil {
 		return Result{}, err
 	}
 	return Result{Release: manifest.Release, Sequence: manifest.Sequence, Manifest: listed.ManifestSHA256, Installed: installed}, nil
