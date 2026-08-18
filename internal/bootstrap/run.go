@@ -330,7 +330,10 @@ func startAdapter(ctx context.Context, request RunRequest, start func(context.Co
 		return nil, err
 	}
 	if proc, ok := child.(*osProcess); ok && proc.cmd != nil && proc.cmd.Process != nil {
-		_ = writeRunPID(request.Directory, proc.cmd.Process.Pid, adapter)
+		if err := writeRunPID(request.Directory, proc.cmd.Process.Pid, adapter); err != nil {
+			_ = stopChild(child)
+			return nil, err
+		}
 	}
 	return child, nil
 }

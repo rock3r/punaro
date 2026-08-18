@@ -149,6 +149,24 @@ func startSleepProcess(t *testing.T) (*exec.Cmd, string) {
 	return cmd, image
 }
 
+func TestStartAdapterStopsChildWhenPIDCannotBeRecorded(t *testing.T) {
+	dir := privateDir(t)
+	image := filepath.Join(dir, "adapter")
+	if err := os.WriteFile(image, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil { // #nosec G306 -- test helper adapter script.
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, runPIDFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child, err := startAdapter(context.Background(), RunRequest{Directory: dir}, startOSProcess, image)
+	if err == nil {
+		t.Fatal("pid write failure was ignored")
+	}
+	if child != nil {
+		t.Fatal("child returned after pid write failure")
+	}
+}
+
 func TestRunLeaseRejectsSecondProcessAndLeavesTransactionLockFree(t *testing.T) {
 	if dir := os.Getenv("PUNARO_BOOTSTRAP_RUN_LEASE_DIR"); dir != "" {
 		unlock, err := acquireRunLease(dir)

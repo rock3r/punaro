@@ -1,10 +1,12 @@
 package bootstrap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -95,6 +97,52 @@ func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	}
 	if string(current) != "second" || string(previous) != "first" {
 		t.Fatalf("current=%q previous=%q", current, previous)
+	}
+}
+
+func TestUpdateSameIdentityQuarantinesCorruptPrevious(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	origin.republish(t, originSpec{payload: "second", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, previousSlot, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryOnly(t, dir)
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, previousSlot)); !os.IsNotExist(err) {
+		t.Fatal("same-identity update left a corrupt previous slot")
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("same-identity update left recovery-only")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
+				if err := writeReady(spec.Env); err != nil {
+					return nil, err
+				}
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; errors.Is(err, ErrRecoveryOnly) {
+		t.Fatal("quarantined previous still entered recovery-only")
 	}
 }
 
