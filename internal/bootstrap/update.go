@@ -24,6 +24,7 @@ const (
 	previousSlot     = "previous"
 	candidateSlot    = "candidate"
 	swapSlot         = "swap"
+	runningSlot      = "running"
 	slotRecord       = "slot.json"
 	journalFile      = "journal.json"
 	lockFile         = "bootstrap.lock"

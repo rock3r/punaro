@@ -48,7 +48,7 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 			HealthTimeout: 20 * time.Millisecond,
 			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
 				close(started)
-				if spec.Path != adapterPath(dir, currentSlot) {
+				if spec.Path != runningAdapterPath(dir) {
 					t.Errorf("started %s", spec.Path)
 				}
 				if readyPathFromEnv(spec.Env) != filepath.Join(dir, readyFile) {
@@ -72,6 +72,46 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("unenrolled current entered recovery-only")
+	}
+}
+
+func TestRunEntersRecoveryWhenCurrentSlotMissing(t *testing.T) {
+	dir := privateDir(t)
+	err := Run(context.Background(), RunRequest{Directory: dir, HealthTimeout: time.Millisecond})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("missing current err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("missing current did not enter recovery-only")
+	}
+}
+
+func TestRunStartsSnapshotWhenCurrentSlotChanges(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	var startedPath string
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		afterPrepare: func() {
+			if err := os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot)); err != nil {
+				t.Fatal(err)
+			}
+			writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "next-adapter")
+		},
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			startedPath = spec.Path
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("snapshot after publish err=%v", err)
+	}
+	if startedPath != "" {
+		t.Fatalf("started %s after current changed", startedPath)
 	}
 }
 
@@ -721,8 +761,8 @@ func recoveryOnly(t *testing.T, directory string) bool {
 	return status.RecoveryOnly
 }
 
-func adapterPath(directory, slot string) string {
-	return filepath.Join(directory, slot, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH))
+func runningAdapterPath(directory string) string {
+	return filepath.Join(directory, runningSlot, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH))
 }
 
 func payloadDigest(payload string) string {

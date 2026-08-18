@@ -174,7 +174,10 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	}
 	current := filepath.Join(request.Directory, currentSlot)
 	if err := requireRealDir(current); err != nil {
-		return slotState{}, "", errors.New("bootstrap has no current adapter")
+		if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
+			return slotState{}, "", recErr
+		}
+		return slotState{}, "", ErrRecoveryOnly
 	}
 	identity, err := readSlot(current)
 	if err != nil {
@@ -183,14 +186,37 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 		}
 		return slotState{}, "", ErrRecoveryOnly
 	}
-	adapter, err := adapterBinary(current, request.GOOS, request.GOARCH)
+	adapter, err := snapshotAdapter(request.Directory, current, request.GOOS, request.GOARCH)
 	if err != nil {
-		return identity, "", errNoAdapter
+		return identity, "", err
 	}
 	if err := os.Remove(filepath.Join(request.Directory, readyFile)); err != nil && !os.IsNotExist(err) {
 		return slotState{}, "", errors.New("bootstrap ready file is invalid")
 	}
 	return identity, adapter, nil
+}
+
+func snapshotAdapter(directory, slotDir, goos, goarch string) (string, error) {
+	src, err := adapterBinary(slotDir, goos, goarch)
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(src) // #nosec G304 -- snapshot is copied from the locked current slot.
+	if err != nil {
+		return "", errors.New("bootstrap has no current adapter")
+	}
+	running := filepath.Join(directory, runningSlot)
+	if err := os.RemoveAll(running); err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(running, 0o700); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(running, artifactName(adapterComponent, goos, goarch))
+	if err := writeAtomic(dest, body, 0o755); err != nil {
+		return "", err
+	}
+	return dest, nil
 }
 
 func (request RunRequest) hasPrevious(current slotState) bool {
@@ -273,6 +299,21 @@ func failCurrent(ctx context.Context, request RunRequest, start func(context.Con
 	return ErrRecoveryOnly
 }
 
+func snapshotRolledAdapter(request RunRequest, rolled slotState) (string, error) {
+	if err := prepareDirectory(request.Directory); err != nil {
+		return "", err
+	}
+	unlock, err := lockDirectory(request.Directory)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	if err := failIfSlotChanged(request.Directory, rolled); err != nil {
+		return "", err
+	}
+	return snapshotAdapter(request.Directory, filepath.Join(request.Directory, currentSlot), request.GOOS, request.GOARCH)
+}
+
 func failIfSlotChanged(directory string, started slotState) error {
 	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
 	if err != nil {
@@ -298,7 +339,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	adapter, err := adapterBinary(filepath.Join(request.Directory, currentSlot), request.GOOS, request.GOARCH)
+	adapter, err := snapshotRolledAdapter(request, rolled)
 	if err != nil {
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
