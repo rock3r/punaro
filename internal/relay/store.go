@@ -710,6 +710,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if actorCapabilities&CapAdmin == 0 {
 		return ControlEvent{}, false, ErrForbidden
 	}
+	revoked := 0
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT control_id,request_hash FROM conversation_control_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -756,9 +757,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			}
 		}
 		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
-			if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now, s.metrics); err != nil {
+			n, err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now)
+			if err != nil {
 				return ControlEvent{}, false, err
 			}
+			revoked += n
 			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 				return ControlEvent{}, false, err
 			}
@@ -792,9 +795,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
-		if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now, s.metrics); err != nil {
+		n, err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now)
+		if err != nil {
 			return ControlEvent{}, false, err
 		}
+		revoked += n
 		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 			return ControlEvent{}, false, err
 		}
@@ -823,6 +828,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if err := tx.Commit(); err != nil {
 		return ControlEvent{}, false, err
 	}
+	s.metrics.ObserveTerminals(ClosedRevoked, revoked)
 	s.refreshPendingMetrics()
 	return event, false, nil
 }
@@ -2067,6 +2073,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 		WHERE delivery.id = ?`, deliveryID).Scan(&conversationID, &bodyBytes); err != nil {
 		return fmt.Errorf("read delivery conversation: %w", err)
 	}
+	acked := 0
 	if affected == 1 {
 		if err := releaseQuota(tx, recipient.String, bodyBytes); err != nil {
 			return err
@@ -2074,7 +2081,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 		if err := recordAckedTerminal(tx, deliveryID, now); err != nil {
 			return err
 		}
-		s.metrics.ObserveTerminal(ClosedAcked)
+		acked = 1
 	}
 	if err := advanceRecipientCursor(tx, recipient.String, conversationID); err != nil {
 		return err
@@ -2082,6 +2089,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.metrics.ObserveTerminals(ClosedAcked, acked)
 	s.refreshPendingMetrics()
 	return nil
 }

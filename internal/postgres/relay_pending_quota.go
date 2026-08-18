@@ -151,32 +151,37 @@ func postgresAppendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, 
 	return recipients, nil
 }
 
-func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time, metrics *relay.Metrics) error {
+func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id::text, delivery.recipient_endpoint, message.id::text, message.conversation_id::text, message.sequence, delivery.lease_generation, `+postgresPendingBodyBytes+`, message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint=$1 AND delivery.acked_at IS NULL AND message.conversation_id=$2::uuid
 		FOR UPDATE OF delivery`, recipient, conversationID)
 	if err != nil {
-		return errors.New("revoked deliveries cannot be inspected")
+		return 0, errors.New("revoked deliveries cannot be inspected")
 	}
 	var retired []postgresPendingClose
 	for rows.Next() {
 		var row postgresPendingClose
 		if err := rows.Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt); err != nil {
 			_ = rows.Close()
-			return errors.New("revoked deliveries cannot be inspected")
+			return 0, errors.New("revoked deliveries cannot be inspected")
 		}
 		retired = append(retired, row)
 	}
 	if err := rows.Close(); err != nil || rows.Err() != nil {
-		return errors.New("revoked deliveries cannot be inspected")
+		return 0, errors.New("revoked deliveries cannot be inspected")
 	}
+	closed := 0
 	for _, row := range retired {
-		if _, err := postgresClosePendingDelivery(tx, row, relay.ClosedRevoked, now, metrics); err != nil {
-			return err
+		ok, err := postgresClosePendingDelivery(tx, row, relay.ClosedRevoked, now)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			closed++
 		}
 	}
-	return nil
+	return closed, nil
 }
 
 func (d *Database) refreshPendingMetrics(ctx context.Context) {

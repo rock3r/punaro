@@ -76,7 +76,7 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 	var result relay.MaintenanceResult
 	result.Scanned = len(pending)
 	for _, row := range pending {
-		closed, err := postgresClosePendingDelivery(tx, row, relay.ClosedExpired, now, d.metrics)
+		closed, err := postgresClosePendingDelivery(tx, row, relay.ClosedExpired, now)
 		if err != nil {
 			return relay.MaintenanceResult{}, err
 		}
@@ -114,6 +114,7 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 	if err := tx.Commit(); err != nil {
 		return relay.MaintenanceResult{}, relayDatabaseError(err, "commit delivery maintenance")
 	}
+	d.metrics.ObserveTerminals(relay.ClosedExpired, result.Expired)
 	d.refreshPendingMetrics(context.Background())
 	return result, nil
 }
@@ -160,7 +161,7 @@ func (d *Database) ListTerminalDeliveries(after string, limit int) (relay.Termin
 	return page, nil
 }
 
-func postgresClosePendingDelivery(tx *sql.Tx, row postgresPendingClose, reason string, now time.Time, metrics *relay.Metrics) (bool, error) {
+func postgresClosePendingDelivery(tx *sql.Tx, row postgresPendingClose, reason string, now time.Time) (bool, error) {
 	closedAt := now.UTC()
 	result, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$1, lease_machine_id=NULL, lease_token=NULL, ownership_generation=NULL, consumer_generation=NULL, lease_until=NULL
 		WHERE id=$2::uuid AND acked_at IS NULL`, closedAt, row.ID)
@@ -184,7 +185,6 @@ func postgresClosePendingDelivery(tx *sql.Tx, row postgresPendingClose, reason s
 	if err := postgresAdvanceRecipientCursor(tx, row.Recipient, row.ConversationID); err != nil {
 		return false, err
 	}
-	metrics.ObserveTerminal(reason)
 	return true, nil
 }
 

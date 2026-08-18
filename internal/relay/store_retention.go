@@ -75,7 +75,7 @@ func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 	var result MaintenanceResult
 	result.Scanned = len(pending)
 	for _, row := range pending {
-		closed, err := closePendingDelivery(tx, row, ClosedExpired, now, s.metrics)
+		closed, err := closePendingDelivery(tx, row, ClosedExpired, now)
 		if err != nil {
 			return MaintenanceResult{}, err
 		}
@@ -113,6 +113,7 @@ func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 	if err := tx.Commit(); err != nil {
 		return MaintenanceResult{}, err
 	}
+	s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
 	s.refreshPendingMetrics()
 	return result, nil
 }
@@ -157,7 +158,7 @@ func (s *Store) ListTerminalDeliveries(after string, limit int) (TerminalPage, e
 	return page, nil
 }
 
-func closePendingDelivery(tx *sql.Tx, row pendingClose, reason string, now time.Time, metrics *Metrics) (bool, error) {
+func closePendingDelivery(tx *sql.Tx, row pendingClose, reason string, now time.Time) (bool, error) {
 	if !validClosedReason(reason) || row.ID == "" || row.Recipient == "" {
 		return false, fmt.Errorf("invalid terminal close")
 	}
@@ -184,7 +185,6 @@ func closePendingDelivery(tx *sql.Tx, row pendingClose, reason string, now time.
 	if err := advanceRecipientCursor(tx, row.Recipient, row.ConversationID); err != nil {
 		return false, err
 	}
-	metrics.ObserveTerminal(reason)
 	return true, nil
 }
 

@@ -154,34 +154,39 @@ func releaseQuota(tx *sql.Tx, recipient string, bodyBytes int64) error {
 	return nil
 }
 
-func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time, metrics *Metrics) error {
+func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, delivery.recipient_endpoint, message.id, message.conversation_id, message.sequence, delivery.lease_generation, `+sqlitePendingBodyBytes+`, message.created_at
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
 		WHERE delivery.recipient_endpoint = ? AND delivery.acked_at IS NULL AND message.conversation_id = ?`, recipient, conversationID)
 	if err != nil {
-		return fmt.Errorf("find revoked deliveries: %w", err)
+		return 0, fmt.Errorf("find revoked deliveries: %w", err)
 	}
 	var retired []pendingClose
 	for rows.Next() {
 		var row pendingClose
 		if err := rows.Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt); err != nil {
 			_ = rows.Close()
-			return err
+			return 0, err
 		}
 		retired = append(retired, row)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
+	closed := 0
 	for _, row := range retired {
-		if _, err := closePendingDelivery(tx, row, ClosedRevoked, now, metrics); err != nil {
-			return err
+		ok, err := closePendingDelivery(tx, row, ClosedRevoked, now)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			closed++
 		}
 	}
-	return nil
+	return closed, nil
 }
 
 func (s *Store) refreshPendingMetrics() {

@@ -239,16 +239,21 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 
 // ObserveTerminal increments one closed-reason transition counter.
 func (m *Metrics) ObserveTerminal(reason string) {
-	if m == nil {
+	m.ObserveTerminals(reason, 1)
+}
+
+// ObserveTerminals increments one closed-reason transition counter after a durable commit.
+func (m *Metrics) ObserveTerminals(reason string, count int) {
+	if m == nil || count <= 0 {
 		return
 	}
 	switch reason {
 	case ClosedAcked:
-		m.terminalTransitionsAcked.Add(1)
+		m.terminalTransitionsAcked.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
 	case ClosedExpired:
-		m.terminalTransitionsExpired.Add(1)
+		m.terminalTransitionsExpired.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
 	case ClosedRevoked:
-		m.terminalTransitionsRevoked.Add(1)
+		m.terminalTransitionsRevoked.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
 	}
 }
 

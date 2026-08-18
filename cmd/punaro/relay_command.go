@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
@@ -179,12 +180,30 @@ func maintainRelayDeliveries(directory string) (relay.MaintenanceResult, error) 
 		return relay.MaintenanceResult{}, err
 	}
 	defer closer()
+	if err := applyInstallationRetention(directory, store); err != nil {
+		return relay.MaintenanceResult{}, err
+	}
 	return store.MaintainDeliveries(time.Now().UTC())
 }
 
 type operatorRelayStore interface {
 	ListTerminalDeliveries(string, int) (relay.TerminalPage, error)
 	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+	SetRetentionPolicy(relay.RetentionConfig) error
+}
+
+func applyInstallationRetention(directory string, store interface {
+	SetRetentionPolicy(relay.RetentionConfig) error
+}) error {
+	cfg, err := config.Load(operator.EnvFile(directory))
+	if err != nil {
+		return err
+	}
+	policy := cfg.RelayRetentionPolicy()
+	if policy == (relay.RetentionConfig{}) {
+		policy = relay.DefaultRetentionConfig()
+	}
+	return store.SetRetentionPolicy(policy)
 }
 
 func openRelayOperatorStore(directory string) (operatorRelayStore, func(), error) {

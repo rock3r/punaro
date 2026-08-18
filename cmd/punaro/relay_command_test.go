@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/rock3r/punaro/internal/operator"
@@ -117,4 +119,46 @@ func TestRelayMaintainDeliveriesRequiresConfirmation(t *testing.T) {
 	}); code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"deliveries_maintained"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"expired": 1`)) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
+}
+
+func TestApplyInstallationRetentionHonorsDaemonEnvFile(t *testing.T) {
+	directory := t.TempDir()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(operator.EnvFile(directory), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"PUNARO_RELAY_PENDING_MAX_AGE_SECONDS",
+		"PUNARO_RELAY_TERMINAL_RETENTION_SECONDS",
+		"PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH",
+	} {
+		previous, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, previous)
+				return
+			}
+			_ = os.Unsetenv(key)
+		})
+	}
+	store := &recordingOperatorStore{}
+	if err := applyInstallationRetention(directory, store); err != nil {
+		t.Fatal(err)
+	}
+	if store.policy != want {
+		t.Fatalf("policy=%#v want=%#v env=%s", store.policy, want, filepath.Base(operator.EnvFile(directory)))
+	}
+}
+
+type recordingOperatorStore struct {
+	policy relay.RetentionConfig
+}
+
+func (s *recordingOperatorStore) SetRetentionPolicy(cfg relay.RetentionConfig) error {
+	s.policy = cfg
+	return nil
 }

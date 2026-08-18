@@ -244,7 +244,9 @@ func TestStoreExpiryDoesNotAdvanceAnotherRecipient(t *testing.T) {
 
 func TestStoreRevocationWritesTerminalAndReleasesOnce(t *testing.T) {
 	t.Parallel()
+	metrics := &Metrics{}
 	store := openRetentionStore(t, tightRetention(60, 3600, 10))
+	store.SetMetrics(metrics)
 	now := retentionNow()
 	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
 	if _, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", "one", "send-1", now)); err != nil {
@@ -258,6 +260,10 @@ func TestStoreRevocationWritesTerminalAndReleasesOnce(t *testing.T) {
 	}
 	if pending := quotaInstallCounters(t, store); pending != (QuotaCounters{}) {
 		t.Fatalf("quota after revoke=%#v", pending)
+	}
+	snap := metrics.Snapshot()
+	if snap.RelayTerminalTransitionsRevoked != 1 || snap.RelayPendingDeliveries != 0 {
+		t.Fatalf("revoked metrics=%#v", snap)
 	}
 	page, err := store.ListTerminalDeliveries("", 10)
 	if err != nil || len(page.Terminals) != 1 || page.Terminals[0].ClosedReason != ClosedRevoked {
