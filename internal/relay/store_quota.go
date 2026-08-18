@@ -196,7 +196,7 @@ func (s *Store) refreshPendingMetrics() {
 	if err != nil {
 		return
 	}
-	s.metrics.SetPending(uint64(counters.Count), uint64(counters.Bytes))
+	s.metrics.SetPending(counters.Count, counters.Bytes)
 }
 
 func readInstallQuota(ctx context.Context, q interface {
@@ -210,6 +210,7 @@ func readInstallQuota(ctx context.Context, q interface {
 	return counters, err
 }
 
+// VerifyPendingQuota fails closed when explicit counters disagree with pending deliveries.
 func (s *Store) VerifyPendingQuota() error {
 	return verifySQLitePendingQuota(context.Background(), s.db)
 }
@@ -319,7 +320,7 @@ func ReconcilePendingQuota(store *Store) (QuotaCounters, error) {
 	if err := tx.Commit(); err != nil {
 		return QuotaCounters{}, err
 	}
-	store.metrics.SetPending(uint64(install.Count), uint64(install.Bytes))
+	store.metrics.SetPending(install.Count, install.Bytes)
 	return install, nil
 }
 

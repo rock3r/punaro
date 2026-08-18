@@ -141,10 +141,17 @@ func (m *Metrics) ObserveCapacityExceeded() {
 }
 
 // SetPending replaces the unlabeled current pending gauges.
-func (m *Metrics) SetPending(count, bytes uint64) {
+func (m *Metrics) SetPending(count, bytes int64) {
 	if m == nil {
 		return
 	}
-	m.pendingDeliveries.Store(count)
-	m.pendingBytes.Store(bytes)
+	m.pendingDeliveries.Store(unsignedPending(count))
+	m.pendingBytes.Store(unsignedPending(bytes))
+}
+
+func unsignedPending(value int64) uint64 {
+	if value < 0 {
+		return 0
+	}
+	return uint64(value) // #nosec G115 -- pending counters are CHECK-constrained to non-negative values.
 }

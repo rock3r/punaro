@@ -186,7 +186,7 @@ func (d *Database) refreshPendingMetrics(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	d.metrics.SetPending(uint64(counters.Count), uint64(counters.Bytes))
+	d.metrics.SetPending(counters.Count, counters.Bytes)
 }
 
 func postgresReadInstallQuota(ctx context.Context, q interface {
@@ -284,7 +284,7 @@ func (d *Database) ReconcilePendingQuota(ctx context.Context) (relay.QuotaCounte
 	if err := tx.Commit(); err != nil {
 		return relay.QuotaCounters{}, errors.New("pending quota reconciliation cannot commit")
 	}
-	d.metrics.SetPending(uint64(install.Count), uint64(install.Bytes))
+	d.metrics.SetPending(install.Count, install.Bytes)
 	return install, nil
 }
 
