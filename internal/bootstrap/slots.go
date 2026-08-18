@@ -275,7 +275,7 @@ func failInvalidJournal(directory string) error {
 	if err := writeRecoveryRecord(directory, recoveryCurrentExited); err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(directory, journalFile)); err != nil && !os.IsNotExist(err) {
+	if err := os.RemoveAll(filepath.Join(directory, journalFile)); err != nil {
 		return err
 	}
 	if err := syncDir(directory); err != nil {
@@ -499,10 +499,18 @@ func clearJournal(directory string) error {
 }
 
 func readJournal(directory string) (journal, error) {
-	body, err := os.ReadFile(filepath.Join(directory, journalFile)) // #nosec G304 -- journal is a fixed child of the bootstrap directory.
+	path := filepath.Join(directory, journalFile)
+	info, err := os.Lstat(path) // #nosec G703 -- journal is a fixed child of the bootstrap directory.
 	if os.IsNotExist(err) {
 		return journal{}, nil
 	}
+	if err != nil {
+		return journal{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return journal{}, errInvalidJournal
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- journal is a fixed child of the bootstrap directory.
 	if err != nil {
 		return journal{}, err
 	}

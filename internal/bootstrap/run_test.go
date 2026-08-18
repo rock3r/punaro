@@ -689,6 +689,28 @@ func TestStatusQuarantinesMalformedJournalIntoRecovery(t *testing.T) {
 	}
 }
 
+func TestUpdateSucceedsAfterJournalDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(filepath.Join(dir, journalFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(dir, journalFile))
+	if err == nil && info.IsDir() {
+		t.Fatal("journal directory node survived a signed update")
+	}
+}
+
 func TestUpdateSucceedsAfterMalformedJournalRecovery(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {
