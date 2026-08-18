@@ -1163,6 +1163,19 @@ func (s *Store) SendDirectMessage(input DirectMessageInput) (Message, bool, erro
 	if err != nil {
 		return Message{}, false, err
 	}
+	// Hold the target profile write lock through commit so a concurrent opt-out
+	// cannot revoke addressability after this read and still land a message.
+	locked, err := tx.ExecContext(context.Background(), `UPDATE role_profiles SET updated_at = updated_at WHERE role = ?`, input.ToRole)
+	if err != nil {
+		return Message{}, false, fmt.Errorf("lock target role profile: %w", err)
+	}
+	affected, err := locked.RowsAffected()
+	if err != nil {
+		return Message{}, false, fmt.Errorf("lock target role profile: %w", err)
+	}
+	if affected == 0 {
+		return Message{}, false, ErrForbidden
+	}
 	var addressable int
 	err = tx.QueryRowContext(context.Background(), `SELECT direct_addressable FROM role_profiles WHERE role = ?`, input.ToRole).Scan(&addressable)
 	if errors.Is(err, sql.ErrNoRows) || addressable != 1 {
