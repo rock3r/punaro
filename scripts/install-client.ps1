@@ -382,12 +382,15 @@ try {
     if ([string]::IsNullOrWhiteSpace($windowsPowerShell)) { Stop-Install 'Windows PowerShell is required to register the adapter task' }
 } catch { Stop-Install 'Windows PowerShell is required to register the adapter task' }
 $action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $runner)
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+# RestartCount is an unsignedByte (max 255). A one-minute repeating trigger
+# re-arms the task after that budget so a later signed repair can start it.
+$repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval ([TimeSpan]::FromMinutes(1)) -RepetitionDuration ([TimeSpan]::FromDays(3650))
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.RestartCount = 255
 $settings.RestartInterval = [TimeSpan]::FromMinutes(1)
-Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
+Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger @($logonTrigger, $repeatTrigger) -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
 if ($Enable -or $adapterTaskWasRunning) {
     Start-ScheduledTask -TaskName $adapterTaskName
     $adapterTaskRestored = $true

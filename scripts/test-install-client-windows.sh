@@ -16,6 +16,8 @@ for expected in \
 	'LogonType Interactive' \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
 	'RestartCount = 255' \
+	'RepetitionInterval' \
+	'RepetitionDuration' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \
