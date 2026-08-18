@@ -348,10 +348,50 @@ func failInvalidJournal(directory string) error {
 	if err := os.RemoveAll(filepath.Join(directory, journalFile)); err != nil {
 		return err
 	}
+	if err := repairOrphanSwap(directory); err != nil {
+		return err
+	}
 	if err := syncDir(directory); err != nil {
 		return err
 	}
 	return errInvalidJournal
+}
+
+func repairOrphanSwap(directory string) error {
+	current := filepath.Join(directory, currentSlot)
+	previous := filepath.Join(directory, previousSlot)
+	swap := filepath.Join(directory, swapSlot)
+	currentExists, err := existsRealDir(current)
+	if err != nil {
+		return err
+	}
+	previousExists, err := existsRealDir(previous)
+	if err != nil {
+		return err
+	}
+	swapExists, err := existsRealDir(swap)
+	if err != nil || !swapExists {
+		return err
+	}
+	if previousExists && !currentExists {
+		if err := os.Rename(previous, current); err != nil {
+			return err
+		}
+		if err := os.Rename(swap, previous); err != nil {
+			return err
+		}
+		return syncDir(directory)
+	}
+	if currentExists && !previousExists {
+		if err := os.Rename(swap, previous); err != nil {
+			return err
+		}
+		return syncDir(directory)
+	}
+	if err := os.RemoveAll(swap); err != nil {
+		return err
+	}
+	return syncDir(directory)
 }
 
 func recordRolledAwayCurrent(directory string) error {

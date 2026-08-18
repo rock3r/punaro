@@ -212,6 +212,34 @@ func TestRecoverJournalAppliesRollbackCatalogSequence(t *testing.T) {
 	}
 }
 
+func TestRecoverRepairableJournalCompletesPartialRollback(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	if err := os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, swapSlot)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverRepairableJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" || status.Previous != "v0.2.0" {
+		t.Fatalf("status=%#v", status)
+	}
+	if exists, err := existsRealDir(filepath.Join(dir, swapSlot)); err != nil || exists {
+		t.Fatalf("swap leftover exists=%v err=%v", exists, err)
+	}
+	if _, err := Rollback(dir); err != nil {
+		t.Fatalf("rollback after repaired journal: %v", err)
+	}
+}
+
 func TestRecoverJournalDoesNotReswapCompletedRollback(t *testing.T) {
 	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
