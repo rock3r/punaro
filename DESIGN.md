@@ -1518,8 +1518,8 @@ The implementation is not internet-exposure-ready until these cases pass:
   ready file; the transaction lock stays free for `update`. A crash-safe
   `run.pid` records the child's pid and image path. A starting marker is written
   before the child is launched so a crash in that window cannot leave an
-  untracked adapter; the next supervisor identity-checks matching images and
-  takes the lease only when they are gone. The next supervisor kills
+  untracked adapter; the next supervisor identity-checks matching images on
+  Linux, macOS, and Windows and takes the lease only when they are gone. The next supervisor kills
   that process only when the live image still matches, and it removes the file
   when the child or supervisor exits. If the image cannot be verified, the
   next supervisor refuses the run lease instead of launching a second adapter. A later publish stops the old adapter

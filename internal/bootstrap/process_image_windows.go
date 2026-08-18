@@ -4,12 +4,46 @@ package bootstrap
 
 import (
 	"errors"
+	"os"
 
 	"golang.org/x/sys/windows"
 )
 
-func pidsMatchingImage(string) ([]int, error) {
-	return nil, errProcessImageUnknown
+func pidsMatchingImage(path string) ([]int, error) {
+	if path == "" {
+		return nil, errProcessImageUnknown
+	}
+	buf := make([]uint32, 1024)
+	for {
+		var bytes uint32
+		if err := windows.EnumProcesses(buf, &bytes); err != nil {
+			return nil, errProcessImageUnknown
+		}
+		count := int(bytes / 4)
+		if count == 0 {
+			return nil, errProcessImageUnknown
+		}
+		if count < len(buf) {
+			buf = buf[:count]
+			break
+		}
+		if len(buf) >= 1<<20 {
+			return nil, errProcessImageUnknown
+		}
+		buf = make([]uint32, len(buf)*2)
+	}
+	var pids []int
+	self := os.Getpid()
+	for _, raw := range buf {
+		pid := int(raw)
+		if pid <= 0 || pid == self {
+			continue
+		}
+		if matchProcessImage(pid, path) == processImageMatch {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
 }
 
 func processImagePath(pid int) (string, error) {

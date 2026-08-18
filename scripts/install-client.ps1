@@ -17,6 +17,33 @@ $ErrorActionPreference = 'Stop'
 
 function Stop-Install([string]$Message) { throw "punaro installer: $Message" }
 
+function Get-PunaroProcessImage($Process) {
+    $image = $null
+    try { $image = $Process.Path } catch { }
+    if ([string]::IsNullOrWhiteSpace($image)) {
+        try { $image = $Process.MainModule.FileName } catch { }
+    }
+    return $image
+}
+
+function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath) {
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { return }
+    $image = Get-PunaroProcessImage $proc
+    if ([string]::IsNullOrWhiteSpace($image)) { return }
+    $got = [System.IO.Path]::GetFullPath($image)
+    if (-not $WantPath.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 200
+        $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    } while ($null -ne $proc -and (Get-Date) -lt $deadline)
+    if ($null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        Stop-Install 'could not stop a matching Punaro adapter'
+    }
+}
+
 function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $pidFile = Join-Path $BootstrapDirectory 'run.pid'
     if (-not (Test-Path -LiteralPath $pidFile)) { return }
@@ -27,33 +54,29 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $schema = $null
     $orphanPid = 0
     $orphanPath = ''
+    $starting = $false
     try {
         $schemaProp = $record.PSObject.Properties['schema']
         $pidProp = $record.PSObject.Properties['pid']
         $pathProp = $record.PSObject.Properties['path']
+        $startingProp = $record.PSObject.Properties['starting']
         if ($null -eq $schemaProp -or $null -eq $pidProp -or $null -eq $pathProp) { Stop-Install 'run.pid is invalid' }
         $schema = $schemaProp.Value
         $orphanPid = [int]$pidProp.Value
         $orphanPath = [string]$pathProp.Value
+        if ($null -ne $startingProp) { $starting = [bool]$startingProp.Value }
     } catch { Stop-Install 'run.pid is invalid' }
-    if ($schema -ne 1 -or $orphanPid -le 0 -or [string]::IsNullOrWhiteSpace($orphanPath)) { Stop-Install 'run.pid is invalid' }
-    $proc = Get-Process -Id $orphanPid -ErrorAction SilentlyContinue
-    if ($null -eq $proc) { return }
-    $image = $null
-    try { $image = $proc.Path } catch { }
-    if ([string]::IsNullOrWhiteSpace($image)) {
-        try { $image = $proc.MainModule.FileName } catch { }
-    }
-    if ([string]::IsNullOrWhiteSpace($image)) { return }
+    if ($schema -ne 1 -or [string]::IsNullOrWhiteSpace($orphanPath)) { Stop-Install 'run.pid is invalid' }
+    if ($orphanPid -le 0 -and -not $starting) { Stop-Install 'run.pid is invalid' }
     $want = [System.IO.Path]::GetFullPath($orphanPath)
-    $got = [System.IO.Path]::GetFullPath($image)
-    if (-not $want.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
-    Stop-Process -Id $orphanPid -Force -ErrorAction SilentlyContinue
-    $deadline = (Get-Date).AddSeconds(5)
-    do {
-        Start-Sleep -Milliseconds 200
-        $proc = Get-Process -Id $orphanPid -ErrorAction SilentlyContinue
-    } while ($null -ne $proc -and (Get-Date) -lt $deadline)
+    # A starting marker (pid 0) is recovered by identity-killing matching adapter images.
+    if ($starting -and $orphanPid -le 0) {
+        foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
+            Stop-PunaroMatchingAdapter $proc.Id $want
+        }
+        return
+    }
+    Stop-PunaroMatchingAdapter $orphanPid $want
 }
 
 function Wait-PunaroReplaceableBinary([string]$Path) {

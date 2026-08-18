@@ -38,6 +38,8 @@ for expected in \
 	'Stop-PunaroOrphanAdapter' \
 	'run.pid is invalid' \
 	'PathType Leaf' \
+	'starting marker' \
+	'could not stop a matching Punaro adapter' \
 	'run.pid' \
 	'FileShare]::None' \
 	'adapterTaskRestored'; do

@@ -532,12 +532,18 @@ func matchProcessImage(pid int, recorded string) processImageResult {
 
 func sameImagePath(live, recorded string) bool {
 	live = strings.TrimSuffix(live, " (deleted)")
-	if filepath.Clean(live) == filepath.Clean(recorded) {
+	live = filepath.Clean(live)
+	recorded = filepath.Clean(recorded)
+	if live == recorded {
+		return true
+	}
+	if runtime.GOOS == "windows" && strings.EqualFold(live, recorded) {
 		return true
 	}
 	liveEval, liveErr := filepath.EvalSymlinks(live)
 	recordedEval, recordedErr := filepath.EvalSymlinks(recorded)
-	if liveErr == nil && recordedErr == nil && liveEval == recordedEval {
+	if liveErr == nil && recordedErr == nil && (liveEval == recordedEval ||
+		runtime.GOOS == "windows" && strings.EqualFold(liveEval, recordedEval)) {
 		return true
 	}
 	liveInfo, liveStatErr := os.Lstat(live)             // #nosec G703 -- compared recorded adapter image.

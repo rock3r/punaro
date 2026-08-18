@@ -6,11 +6,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("PUNARO_BOOTSTRAP_UNIQUE_SLEEP") == "1" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func TestLockDirectoryRejectsSecondProcess(t *testing.T) {
 	if dir := os.Getenv("PUNARO_BOOTSTRAP_LOCK_DIR"); dir != "" {
@@ -110,6 +119,7 @@ func TestAcquireRunLeaseClearsAbandonedStartingMarker(t *testing.T) {
 func TestAcquireRunLeaseTerminatesStartingChild(t *testing.T) {
 	dir := privateDir(t)
 	cmd, image := startUniqueSleepProcess(t, dir)
+	waitMatchingImage(t, cmd.Process.Pid, image)
 	if err := writeRunStarting(dir, image); err != nil {
 		t.Fatal(err)
 	}
@@ -193,19 +203,49 @@ func startSleepProcess(t *testing.T) (*exec.Cmd, string) {
 
 func startUniqueSleepProcess(t *testing.T, directory string) (*exec.Cmd, string) {
 	t.Helper()
-	src, err := exec.LookPath("sleep")
+	src, err := os.Executable()
 	if err != nil {
-		t.Skip(err)
+		t.Fatal(err)
 	}
 	image := filepath.Join(directory, "unique-sleep")
-	body, err := os.ReadFile(src) // #nosec G304 -- local test helper copies sleep.
+	if runtime.GOOS == "windows" {
+		image += ".exe"
+	}
+	body, err := os.ReadFile(src) // #nosec G304 -- local test helper copies this test binary.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(image, body, 0o700); err != nil { // #nosec G306,G703 -- copied sleep helper must be executable.
+	if err := os.WriteFile(image, body, 0o700); err != nil { // #nosec G306,G703 -- copied helper must be executable.
 		t.Fatal(err)
 	}
-	return startImageProcess(t, image)
+	cmd := exec.CommandContext(context.Background(), image) // #nosec G204,G702 -- local test helper.
+	cmd.Env = append(os.Environ(), "PUNARO_BOOTSTRAP_UNIQUE_SLEEP=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	return cmd, image
+}
+
+func waitMatchingImage(t *testing.T, pid int, image string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		pids, err := pidsMatchingImage(image)
+		if err == nil {
+			for _, got := range pids {
+				if got == pid {
+					return
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("live image pid %d was not matchable", pid)
 }
 
 func startImageProcess(t *testing.T, image string) (*exec.Cmd, string) {
