@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/rock3r/punaro/internal/operator"
@@ -85,6 +86,81 @@ func TestRelayReconcileCapacityPublishesContentFreeOutcome(t *testing.T) {
 	}
 	if code := runRelayReconcileCapacity([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.QuotaCounters, error) {
 		return relay.QuotaCounters{}, errors.New("unsafe")
+	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRelayListTerminalsIsReadOnlyAndContentFree(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	list := func(directory string, input relay.TerminalListInput) (relay.TerminalListPage, error) {
+		called = directory == "/install" && input.Limit == 2 && input.Cursor == "next"
+		return relay.TerminalListPage{
+			Terminals: []relay.DeliveryTerminal{{
+				DeliveryID:     "delivery-1",
+				MessageID:      "message-1",
+				ConversationID: "conversation-1",
+				RecipientID:    "agent/b",
+				Sequence:       1,
+				ClosedReason:   relay.ClosedReasonExpired,
+			}},
+			NextCursor: "later",
+		}, nil
+	}
+	if code := runRelayListTerminals([]string{"--directory", "/install", "--limit", "2", "--cursor", "next", "--yes"}, &stdout, &stderr, list); code != 2 || called {
+		t.Fatalf("unexpected --yes code=%d called=%t", code, called)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runRelayListTerminals([]string{"--directory", "/install", "--limit", "2", "--cursor", "next"}, &stdout, &stderr, list); code != 0 || !called {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	body := stdout.String()
+	if !bytes.Contains(stdout.Bytes(), []byte(`"terminals_listed"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"closed_reason": "expired"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"next_cursor": "later"`)) {
+		t.Fatalf("stdout=%q", body)
+	}
+	if strings.Contains(body, "body") || strings.Contains(body, "secret") {
+		t.Fatalf("operator list leaked content: %s", body)
+	}
+	if code := runRelayListTerminals([]string{"--directory", "/install"}, &stdout, &stderr, func(string, relay.TerminalListInput) (relay.TerminalListPage, error) {
+		return relay.TerminalListPage{}, errors.New("unsafe")
+	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRelayMaintainDeliveriesRequiresConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(string) (relay.MaintenanceResult, error) {
+		called = true
+		return relay.MaintenanceResult{}, nil
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install"}, &stdout, &stderr, maintain); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+}
+
+func TestRelayMaintainDeliveriesPublishesContentFreeOutcome(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(directory string) (relay.MaintenanceResult, error) {
+		called = directory == "/install"
+		return relay.MaintenanceResult{Expired: 2, Pruned: 1, Continuation: true}, nil
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, maintain); code != 0 || !called {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	body := stdout.String()
+	if !bytes.Contains(stdout.Bytes(), []byte(`"deliveries_maintained"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"expired": 2`)) || !bytes.Contains(stdout.Bytes(), []byte(`"continuation": true`)) {
+		t.Fatalf("stdout=%q", body)
+	}
+	if strings.Contains(body, "body") {
+		t.Fatalf("operator maintain leaked content: %s", body)
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.MaintenanceResult, error) {
+		return relay.MaintenanceResult{}, errors.New("unsafe")
 	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}

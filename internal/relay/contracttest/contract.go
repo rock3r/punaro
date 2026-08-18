@@ -3,6 +3,7 @@
 package contracttest
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -245,6 +246,7 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	runLeasePageContract(t, backend, namespace, now)
 	RunRateLimits(t, backend, namespace+"-rate")
 	RunPendingQuota(t, backend, namespace+"-quota")
+	RunTerminalRetention(t, backend, namespace+"-retain")
 }
 
 // RateLimitSetter is implemented by durable stores that keep token-bucket
@@ -567,6 +569,156 @@ func RunPendingQuota(t *testing.T, backend relay.Backend, namespace string) {
 	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// RetentionSetter is implemented by durable stores that keep pending-age and
+// terminal-retention policy in process and closed metadata in the database.
+type RetentionSetter interface {
+	relay.Backend
+	SetRetentionPolicy(relay.RetentionConfig) error
+	SetQuotaLimits(relay.QuotaConfig) error
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+	ListDeliveryTerminals(relay.TerminalListInput) (relay.TerminalListPage, error)
+}
+
+// RunTerminalRetention proves pending-age expiry, once-only capacity release,
+// recipient-local cursor advancement, and content-free terminal inspection
+// against every backend. Other namespaces stay untouched because this page uses
+// a historical clock so the inclusive cutoff cannot select later contract rows.
+func RunTerminalRetention(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	limiter, ok := backend.(RetentionSetter)
+	if !ok {
+		t.Fatal("backend does not expose terminal retention")
+	}
+	if err := limiter.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.SetRetentionPolicy(relay.DefaultRetentionConfig())
+		_ = limiter.SetQuotaLimits(relay.DefaultQuotaConfig())
+	})
+	cfg := relay.RetentionConfig{PendingMaxAgeSeconds: 60, TerminalRetentionSeconds: 3600, MaintenanceBatch: 10}
+	if err := limiter.SetRetentionPolicy(cfg); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2024, time.January, 2, 12, 0, 0, 0, time.UTC)
+	machineA, machineB, machineC := namespace+"-a", namespace+"-b", namespace+"-c"
+	endpointA, endpointB, endpointC := "agent/"+namespace+"/a", "agent/"+namespace+"/b", "agent/"+namespace+"/c"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineC, []string{endpointC}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := namespace + "-secret-body"
+	message, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: secret, IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil || duplicate {
+		t.Fatalf("append message=%#v duplicate=%t err=%v", message, duplicate, err)
+	}
+	pageB, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-b", endpointB, conversation.ID, now, time.Hour, 10)
+	if err != nil || len(pageB.Deliveries) != 1 {
+		t.Fatalf("lease b=%#v err=%v", pageB, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, pageB.Deliveries[0].ID, pageB.Deliveries[0].LeaseToken, pageB.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	before := now.Add(60*time.Second - time.Millisecond)
+	if result, err := limiter.MaintainDeliveries(before); err != nil || result.Expired != 0 {
+		t.Fatalf("just before expiry result=%#v err=%v", result, err)
+	}
+	at := now.Add(60 * time.Second)
+	if result, err := limiter.MaintainDeliveries(at); err != nil || result.Expired != 1 {
+		t.Fatalf("at expiry result=%#v err=%v", result, err)
+	}
+	if result, err := limiter.MaintainDeliveries(at); err != nil || result.Expired != 0 {
+		t.Fatalf("repeat expiry result=%#v err=%v", result, err)
+	}
+	if cursor, err := backend.RecipientCursor(machineB, endpointB, conversation.ID, at); err != nil || cursor != message.Sequence {
+		t.Fatalf("acked recipient cursor=%d err=%v", cursor, err)
+	}
+	if cursor, err := backend.RecipientCursor(machineC, endpointC, conversation.ID, at); err != nil || cursor != message.Sequence {
+		t.Fatalf("expired recipient cursor=%d err=%v", cursor, err)
+	}
+	pageC, err := backend.LeaseDeliveries(machineC, namespace+"-consumer-c", endpointC, conversation.ID, at, time.Hour, 10)
+	if err != nil || len(pageC.Deliveries) != 0 {
+		t.Fatalf("expired recipient still pending=%#v err=%v", pageC, err)
+	}
+	found := listTerminalsForMessage(t, limiter, message.ID)
+	if len(found) != 2 {
+		t.Fatalf("terminals for expired fan-out=%#v", found)
+	}
+	reasons := map[string]int{}
+	encoded, err := json.Marshal(found)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), `"body"`) {
+		t.Fatalf("terminal inventory leaked body: %s", encoded)
+	}
+	for _, terminal := range found {
+		reasons[terminal.ClosedReason]++
+		if terminal.RecipientID == "" || terminal.ConversationID != conversation.ID || terminal.Sequence != message.Sequence {
+			t.Fatalf("terminal=%#v", terminal)
+		}
+	}
+	if reasons[relay.ClosedReasonAcked] != 1 || reasons[relay.ClosedReasonExpired] != 1 {
+		t.Fatalf("reasons=%v", reasons)
+	}
+
+	quota := relay.QuotaConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 10_000_000, InstallationBytes: 64 << 30, RetryAfterSeconds: 9}
+	if err := limiter.SetQuotaLimits(quota); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "after-expiry", IdempotencyKey: namespace + "-2", Now: at}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "over-capacity", IdempotencyKey: namespace + "-3", Now: at})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("capacity after exact-once release err=%v", err)
+	}
+	if err := limiter.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
+		t.Fatal(err)
+	}
+	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func listTerminalsForMessage(t *testing.T, backend RetentionSetter, messageID string) []relay.DeliveryTerminal {
+	t.Helper()
+	var found []relay.DeliveryTerminal
+	cursor := ""
+	for {
+		page, err := backend.ListDeliveryTerminals(relay.TerminalListInput{Cursor: cursor, Limit: relay.MaxTerminalListLimit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, terminal := range page.Terminals {
+			if terminal.MessageID == messageID {
+				found = append(found, terminal)
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	return found
 }
 
 // RunRoleTargeting proves the same targeted-role and compatible-broadcast

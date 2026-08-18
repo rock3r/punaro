@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,6 +44,9 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 	if got, want := cfg.RelayQuotaLimits(), relay.DefaultQuotaConfig(); got != want {
 		t.Fatalf("unexpected default pending quota: %#v", got)
+	}
+	if got, want := cfg.RelayRetentionPolicy(), relay.DefaultRetentionConfig(); got != want {
+		t.Fatalf("unexpected default retention policy: %#v", got)
 	}
 }
 
@@ -587,5 +591,37 @@ func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
 	want := relay.QuotaConfig{RecipientCount: 2, RecipientBytes: 64, InstallationCount: 8, InstallationBytes: 256, RetryAfterSeconds: 9}
 	if got != want {
 		t.Fatalf("quota limits=%#v want %#v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidRelayRetentionPolicy(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending max age was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(relay.RetentionKeepMaxSeconds+1))
+	if _, err := Load(""); err == nil {
+		t.Fatal("oversized terminal retention was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2592000")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer delivery maintenance batch was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRetentionPolicy(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "60")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "120")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "7")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRetentionPolicy()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 60, TerminalRetentionSeconds: 120, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention policy=%#v want %#v", got, want)
 	}
 }

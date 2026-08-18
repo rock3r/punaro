@@ -501,6 +501,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
 	testRelayRateLimitSchemaDrift(ctx, t, app, ownerDB)
 	testRelayPendingQuotaSchemaDrift(ctx, t, app, ownerDB)
+	testRelayDeliveryTerminalsSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1703,6 +1704,22 @@ func testRelayPendingQuotaSchemaDrift(ctx context.Context, t *testing.T, app *Da
 	}
 	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
 		t.Fatalf("restored pending-quota count constraint state=%#v err=%v", restored, err)
+	}
+}
+
+func testRelayDeliveryTerminalsSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_delivery_terminals DROP CONSTRAINT mail_delivery_terminals_closed_reason_check; ALTER TABLE relay.mail_delivery_terminals ADD CONSTRAINT mail_delivery_terminals_closed_reason_check CHECK (closed_reason IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive delivery-terminal closed-reason constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_delivery_terminals DROP CONSTRAINT mail_delivery_terminals_closed_reason_check; ALTER TABLE relay.mail_delivery_terminals ADD CONSTRAINT mail_delivery_terminals_closed_reason_check CHECK (closed_reason = ANY (ARRAY['acked'::text, 'expired'::text, 'revoked'::text]))`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored delivery-terminal closed-reason constraint state=%#v err=%v", restored, err)
 	}
 }
 

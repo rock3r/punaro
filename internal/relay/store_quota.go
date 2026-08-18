@@ -154,12 +154,12 @@ func releaseQuota(tx *sql.Tx, recipient string, bodyBytes int64) error {
 	return nil
 }
 
-func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) error {
+func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) (int, error) {
 	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, `+sqlitePendingBodyBytes+`
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
 		WHERE delivery.recipient_endpoint = ? AND delivery.acked_at IS NULL AND message.conversation_id = ?`, recipient, conversationID)
 	if err != nil {
-		return fmt.Errorf("find revoked deliveries: %w", err)
+		return 0, fmt.Errorf("find revoked deliveries: %w", err)
 	}
 	type pending struct {
 		id    string
@@ -170,25 +170,28 @@ func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now
 		var row pending
 		if err := rows.Scan(&row.id, &row.bytes); err != nil {
 			_ = rows.Close()
-			return err
+			return 0, err
 		}
 		retired = append(retired, row)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, row := range retired {
 		if err := releaseQuota(tx, recipient, row.bytes); err != nil {
-			return err
+			return 0, err
+		}
+		if err := recordDeliveryTerminal(tx, row.id, ClosedReasonRevoked, now); err != nil {
+			return 0, err
 		}
 	}
 	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), recipient, conversationID); err != nil {
-		return fmt.Errorf("retire revoked deliveries: %w", err)
+		return 0, fmt.Errorf("retire revoked deliveries: %w", err)
 	}
-	return nil
+	return len(retired), nil
 }
 
 func (s *Store) refreshPendingMetrics() {
@@ -335,12 +338,12 @@ func ReconcilePendingQuota(store *Store) (QuotaCounters, error) {
 	if err := tx.Commit(); err != nil {
 		return QuotaCounters{}, err
 	}
-	store.refreshPendingMetrics()
+	store.refreshDeliveryMetrics(time.Now().UTC())
 	return install, nil
 }
 
 func isOperationalQuotaTable(name string) bool {
-	return name == "pending_quota_recipients" || name == "pending_quota_install"
+	return name == "pending_quota_recipients" || name == "pending_quota_install" || name == "delivery_terminals"
 }
 
 func filterOperationalQuotaTables(names []string) []string {

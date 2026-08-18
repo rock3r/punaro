@@ -213,6 +213,13 @@ func run(args []string, stderr io.Writer) int {
 	if relayStore != nil {
 		defer func() { _ = relayStore.Close() }()
 	}
+	maintainCtx, maintainCancel := context.WithCancel(context.Background())
+	defer maintainCancel()
+	if maintainer := relayDeliveryMaintainer(relayStore, postgresRelay); maintainer != nil {
+		ticker := time.NewTicker(deliveryMaintenanceInterval)
+		defer ticker.Stop()
+		go runDeliveryMaintenance(maintainCtx, maintainer, ticker.C)
+	}
 	relayMetricsSnapshot := func() relay.MetricsSnapshot { return relay.MetricsSnapshot{} }
 	if provider, ok := relayHandler.(interface{ MetricsSnapshot() relay.MetricsSnapshot }); ok {
 		relayMetricsSnapshot = provider.MetricsSnapshot
@@ -764,6 +771,20 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 			return nil, nil, err
 		}
 	}
+	if setter, ok := backend.(interface {
+		SetRetentionPolicy(relay.RetentionConfig) error
+	}); ok {
+		policy := cfg.RelayRetentionPolicy()
+		if policy == (relay.RetentionConfig{}) {
+			policy = relay.DefaultRetentionConfig()
+		}
+		if err := setter.SetRetentionPolicy(policy); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {
@@ -805,6 +826,39 @@ type relayMetricsHandler struct {
 
 func (h relayMetricsHandler) MetricsSnapshot() relay.MetricsSnapshot {
 	return h.metrics.Snapshot()
+}
+
+const deliveryMaintenanceInterval = time.Minute
+
+type deliveryMaintainer interface {
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+}
+
+func relayDeliveryMaintainer(store *relay.Store, postgresBackend relay.Backend) deliveryMaintainer {
+	if store != nil {
+		return store
+	}
+	if maintainer, ok := postgresBackend.(deliveryMaintainer); ok {
+		return maintainer
+	}
+	return nil
+}
+
+func runDeliveryMaintenance(ctx context.Context, maintainer deliveryMaintainer, ticks <-chan time.Time) {
+	if maintainer == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now, ok := <-ticks:
+			if !ok {
+				return
+			}
+			_, _ = maintainer.MaintainDeliveries(now.UTC())
+		}
+	}
 }
 
 func newAccessVerifier(cfg config.Config) (*access.Verifier, error) {

@@ -430,7 +430,20 @@ message, delivery, idempotency, or audit row. Explicit counters are updated in
 the append transaction; the send path does not scan pending deliveries.
 Startup and readiness verify counter consistency or fail closed. The operator
 `punaro relay reconcile-capacity` command uses a repair opener that preserves
-that fail-closed path while rebuilding drifted counters. Bodies are
+that fail-closed path while rebuilding drifted counters. Pending deliveries
+older than a startup-validated maximum age (default seven days) transition
+atomically from pending to terminal `expired`, release that capacity once, and
+advance only that recipient's contiguous cursor. Closed metadata is retained
+for a separate bounded window (default thirty days) and pruned in bounded
+pages. Retained rows contain only opaque message, conversation, and recipient
+IDs, sequence, closed reason (`acked`, `expired`, or `revoked`), lease
+generation, and timestamps. They never duplicate bodies or credentials.
+Maintenance uses injected or database time and a startup-validated page size.
+Host-local `punaro relay list-terminals` lists one bounded page;
+`punaro relay maintain-deliveries --yes` runs one expire-then-prune page using
+the installation `punarod.env` policy so the CLI cannot silently undercut the
+daemon. Ordinary agent APIs do not expose dead-letter inventory or delivery
+receipts; sender-facing append remains accepted/queued or rejected. Bodies are
 never hashed, compared, or parsed for loop detection.
 
 The guarantee is **at-least-once delivery**: a crash after a
@@ -490,7 +503,10 @@ deliveries plus a map of conversation IDs to the recipient's highest contiguous
 acknowledged sequence. Every recipient has an independent
 delivery stream; a delivery has a short server-enforced lease, lease generation,
 and lease token. A lease that expires without an acknowledgement becomes
-available again. The recipient must tolerate duplicate delivery by durably
+available again. An aged pending delivery that maintenance marks `expired` is
+no longer pending, so it advances only that recipient's contiguous cursor and
+cannot be acknowledged with a prior lease token. Expiry never mutates another
+recipient's cursor or creates a hole behind an earlier still-pending delivery. The recipient must tolerate duplicate delivery by durably
 recording the Punaro message UUID before local injection, or by using it as the
 local mailbox idempotency key.
 
@@ -1466,7 +1482,11 @@ adds explicit pending-delivery capacity counters per recipient identity and
 installation-wide. Quota tables are derived operational
 state, not cutover content: inspect and fingerprint ignore them, and activation
 rebuilds them from pending deliveries. Capacity denial is distinct from rate
-limiting. Expiry and dead-letter policies remain later slices.
+limiting. Schema version 49 adds content-free `mail_delivery_terminals` rows
+for acked, expired, and revoked deliveries. That inventory is operational
+state, not cutover content: inspect requires the table, fingerprint ignores it,
+and abort deletes it before deliveries because of the foreign key. Pending-age
+and terminal-retention bounds are startup-validated daemon configuration.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the

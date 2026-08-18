@@ -524,3 +524,95 @@ func TestBuildDirectoryHandlerRequiresValidPrivateSnapshot(t *testing.T) {
 		t.Fatal("missing snapshot source accepted")
 	}
 }
+
+func TestBuildRelayHandlerRejectsInvalidRetentionPolicy(t *testing.T) {
+	_, store, err := buildRelayHandler(config.Config{
+		DataDir:                       t.TempDir(),
+		RelayEnabled:                  true,
+		RelayMachinesJSON:             `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]}]`,
+		RelayPendingMaxAgeSeconds:     0,
+		RelayTerminalRetentionSeconds: 30,
+		RelayDeliveryMaintenanceBatch: 10,
+	})
+	if err == nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("invalid retention policy enabled relay routes")
+	}
+}
+
+func TestBuildRelayHandlerAppliesRetentionPolicy(t *testing.T) {
+	_, store, err := buildRelayHandler(config.Config{
+		DataDir:                       t.TempDir(),
+		RelayEnabled:                  true,
+		RelayMachinesJSON:             `[{"id":"machine-a","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","endpoint_prefixes":["agent/a/"]},{"id":"machine-b","public_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI","endpoint_prefixes":["agent/b/"]}]`,
+		RelayPendingMaxAgeSeconds:     60,
+		RelayTerminalRetentionSeconds: 3600,
+		RelayDeliveryMaintenanceBatch: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 18, 21, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b/session"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversation("agent/a/session", []relay.Member{
+		{Endpoint: "agent/a/session", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: "agent/b/session", Capabilities: relay.CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a/session", Body: "aged", IdempotencyKey: "aged-1", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.MaintainDeliveries(now.Add(60*time.Second - time.Millisecond)); err != nil || result.Expired != 0 {
+		t.Fatalf("default policy would not expire this early: result=%#v err=%v", result, err)
+	}
+	if result, err := store.MaintainDeliveries(now.Add(60 * time.Second)); err != nil || result.Expired != 1 {
+		t.Fatalf("configured max age did not expire result=%#v err=%v", result, err)
+	}
+}
+
+type deliveryMaintainerStub struct {
+	calls chan time.Time
+}
+
+func (s *deliveryMaintainerStub) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, error) {
+	s.calls <- now
+	return relay.MaintenanceResult{}, nil
+}
+
+func TestDeliveryMaintenanceTickInvokesMaintainer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stub := &deliveryMaintainerStub{calls: make(chan time.Time, 1)}
+	ticks := make(chan time.Time, 1)
+	done := make(chan struct{})
+	go func() {
+		runDeliveryMaintenance(ctx, stub, ticks)
+		close(done)
+	}()
+	tick := time.Date(2026, time.August, 18, 21, 1, 0, 0, time.UTC)
+	ticks <- tick
+	select {
+	case got := <-stub.calls:
+		if !got.Equal(tick.UTC()) {
+			t.Fatalf("maintainer now=%s want %s", got, tick.UTC())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("maintenance tick was not delivered")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("maintenance loop did not stop")
+	}
+}

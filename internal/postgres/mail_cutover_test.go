@@ -19,7 +19,7 @@ func (f mailCutoverScannerFunc) Scan(destinations ...any) error { return f(desti
 
 func TestMailCutoverEmptyTargetIgnoresDerivedQuotaTables(t *testing.T) {
 	t.Parallel()
-	if strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_recipients") || strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_install") {
+	if strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_recipients") || strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_pending_install") || strings.Contains(mailCutoverEmptyTargetCountSQL, "mail_delivery_terminals") {
 		t.Fatal("pending quota tables are derived operational state and must not fence an empty cutover target")
 	}
 }
