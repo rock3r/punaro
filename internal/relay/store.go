@@ -170,6 +170,26 @@ type CreateConversationInput struct {
 	Now                  time.Time
 }
 
+// RegisterRoleInput is one signed-machine retry domain for opt-in role identity.
+// The authenticated machine is the owner; callers never supply a machine field.
+type RegisterRoleInput struct {
+	MachineID         string
+	Role              string
+	DisplayName       string
+	DirectAddressable bool
+	IdempotencyKey    string
+	Now               time.Time
+}
+
+// RoleProfile is the public addressable identity of one durable role.
+// It never includes bindings, endpoints, credentials, or memberships.
+type RoleProfile struct {
+	Role              string    `json:"role"`
+	DisplayName       string    `json:"display_name,omitempty"`
+	DirectAddressable bool      `json:"direct_addressable"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
 // InvocationStatus is the durable state of a server-authorized runtime
 // handoff. A runtime receives no message body: it attaches the endpoint and
 // then obtains pending delivery through the normal path.
@@ -361,6 +381,23 @@ func (s *Store) migrate(ctx context.Context) error {
 			ownership_generation INTEGER NOT NULL,
 			lease_until INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS role_profiles (
+			role TEXT PRIMARY KEY REFERENCES roles(role) ON DELETE CASCADE,
+			display_name TEXT,
+			direct_addressable INTEGER NOT NULL DEFAULT 0 CHECK (direct_addressable IN (0, 1)),
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS role_profile_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			role TEXT NOT NULL REFERENCES role_profiles(role) ON DELETE CASCADE,
+			display_name TEXT,
+			direct_addressable INTEGER NOT NULL CHECK (direct_addressable IN (0, 1)),
+			updated_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
 			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
@@ -460,7 +497,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -900,6 +937,115 @@ func (s *Store) BindRoleToSession(machineID, role, sessionEndpoint string, now t
 		}
 	}
 	return tx.Commit()
+}
+
+// RegisterRoleProfile creates or updates one machine-owned canonical role
+// profile. Exact retries return the first result; later calls may change only
+// display name and addressability.
+func (s *Store) RegisterRoleProfile(input RegisterRoleInput) (RoleProfile, bool, error) {
+	displayName, ok := NormalizeRoleDisplayName(input.DisplayName)
+	if !ok || !ValidMachineID(input.MachineID) || !ValidRequestToken(input.IdempotencyKey) || !CanonicalRoleForMachine(input.Role, input.MachineID) {
+		return RoleProfile{}, false, fmt.Errorf("invalid role registration")
+	}
+	requestHash := RegisterRoleRequestHash(input.Role, displayName, input.DirectAddressable)
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return RoleProfile{}, false, err
+	}
+	defer rollback(tx)
+	existing, _, err := readRoleProfileIdempotency(tx, input.MachineID, input.IdempotencyKey)
+	if err == nil {
+		if existing.requestHash != requestHash {
+			return RoleProfile{}, false, ErrConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return RoleProfile{}, false, err
+		}
+		return existing.profile, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return RoleProfile{}, false, err
+	}
+	var owner string
+	err = tx.QueryRowContext(context.Background(), "SELECT machine_id FROM roles WHERE role = ?", input.Role).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := tx.ExecContext(context.Background(), "INSERT INTO roles(role, machine_id) VALUES (?, ?)", input.Role, input.MachineID); err != nil {
+			return RoleProfile{}, false, fmt.Errorf("create durable role: %w", err)
+		}
+		owner = input.MachineID
+	case err != nil:
+		return RoleProfile{}, false, fmt.Errorf("read durable role owner: %w", err)
+	case owner != input.MachineID:
+		return RoleProfile{}, false, ErrForbidden
+	}
+	var existingUpdatedAt int64
+	err = tx.QueryRowContext(context.Background(), "SELECT updated_at FROM role_profiles WHERE role = ?", input.Role).Scan(&existingUpdatedAt)
+	created := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !created {
+		return RoleProfile{}, false, fmt.Errorf("read role profile: %w", err)
+	}
+	addressable := 0
+	if input.DirectAddressable {
+		addressable = 1
+	}
+	var display any
+	if displayName != "" {
+		display = displayName
+	}
+	if created {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profiles(role, display_name, direct_addressable, updated_at) VALUES (?, ?, ?, ?)`, input.Role, display, addressable, input.Now.UnixMilli()); err != nil {
+			return RoleProfile{}, false, fmt.Errorf("create role profile: %w", err)
+		}
+	} else if _, err := tx.ExecContext(context.Background(), `UPDATE role_profiles SET display_name = ?, direct_addressable = ?, updated_at = ? WHERE role = ?`, display, addressable, input.Now.UnixMilli(), input.Role); err != nil {
+		return RoleProfile{}, false, fmt.Errorf("update role profile: %w", err)
+	}
+	profile := RoleProfile{Role: input.Role, DisplayName: displayName, DirectAddressable: input.DirectAddressable, UpdatedAt: input.Now.UTC()}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profile_idempotency(machine_id, key, request_hash, role, display_name, direct_addressable, updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, addressable, profile.UpdatedAt.UnixMilli(), input.Now.UnixMilli()); err != nil {
+		return RoleProfile{}, false, fmt.Errorf("record role profile idempotency key: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return RoleProfile{}, false, err
+	}
+	return profile, created, nil
+}
+
+// RoleProfile returns one registered profile. Unregistered and legacy roles are
+// indistinguishable from missing.
+func (s *Store) RoleProfile(role string) (RoleProfile, error) {
+	if !ValidRole(role) {
+		return RoleProfile{}, ErrForbidden
+	}
+	var display sql.NullString
+	var addressable int
+	var updatedAt int64
+	err := s.db.QueryRowContext(context.Background(), `SELECT display_name, direct_addressable, updated_at FROM role_profiles WHERE role = ?`, role).Scan(&display, &addressable, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RoleProfile{}, ErrForbidden
+	}
+	if err != nil {
+		return RoleProfile{}, fmt.Errorf("read role profile: %w", err)
+	}
+	return RoleProfile{Role: role, DisplayName: display.String, DirectAddressable: addressable == 1, UpdatedAt: fromMillis(updatedAt)}, nil
+}
+
+type roleProfileIdempotency struct {
+	requestHash string
+	profile     RoleProfile
+}
+
+func readRoleProfileIdempotency(tx *sql.Tx, machineID, key string) (roleProfileIdempotency, bool, error) {
+	var record roleProfileIdempotency
+	var display sql.NullString
+	var addressable, updatedAt int64
+	err := tx.QueryRowContext(context.Background(), `SELECT request_hash, role, display_name, direct_addressable, updated_at FROM role_profile_idempotency WHERE machine_id = ? AND key = ?`, machineID, key).Scan(&record.requestHash, &record.profile.Role, &display, &addressable, &updatedAt)
+	if err != nil {
+		return roleProfileIdempotency{}, false, err
+	}
+	record.profile.DisplayName = display.String
+	record.profile.DirectAddressable = addressable == 1
+	record.profile.UpdatedAt = fromMillis(updatedAt)
+	return record, true, nil
 }
 
 // CreateConversation creates a room only if its creator and every initial

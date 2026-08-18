@@ -278,7 +278,7 @@ Punaro separates four principals:
 | --- | --- | --- |
 | Machine | `workstation-a` | A single enrolled adapter installation. |
 | Endpoint | `agent/build-review` | A locally attached agent session advertised by one machine. |
-| Role | `role/plan-reviewer` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. |
+| Role | `role/plan-reviewer` or `role/<machine>/<slug>` | A durable conversation identity owned by one enrolled machine and bound to one live endpoint at a time. Canonical `role/<machine>/<slug>` handles are opt-in public addresses; legacy names remain valid conversation members until explicitly registered. |
 | Conversation | `conv_01…` | The durable room/thread which has members and messages. |
 
 An endpoint belongs to exactly one currently connected machine lease. A machine
@@ -293,6 +293,20 @@ not an alias or prefix rule for an endpoint. Conversation creation may name a
 role with `role_machine_id`; the server rejects an unknown machine and rejects
 any later attempt to reuse that role for another machine. A role may be a member
 of many conversations, but it has one active session binding at a time.
+
+Canonical public addresses use `role/<machine>/<slug>`, where `<machine>` is the
+authenticated owner and `<slug>` is lowercase ASCII matching
+`[a-z0-9][a-z0-9-]{0,62}`. The handle is immutable and unique in the
+installation. An optional display name is portable UTF-8, trimmed, and at most
+128 bytes; it is never authorization. `direct_addressable` defaults to false.
+Owning machines register or update that profile with `POST /v1/roles/register`
+and a required `Idempotency-Key`. The first call may create the durable role;
+later calls may change only display name and addressability. Exact retries
+return the first result. Legacy roles such as `role/plan-reviewer` stay valid
+conversation members and are not silently renamed; they remain hidden from
+addressable identity until explicitly registered under a canonical handle.
+Registration never returns bindings, endpoints, credentials, or membership.
+Listing and direct send remain separate operations.
 
 The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
 the role and one of its currently advertised endpoints. The server verifies the
@@ -820,6 +834,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
+| `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. |

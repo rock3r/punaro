@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -327,6 +328,144 @@ func RunRoleTargeting(t *testing.T, backend relay.Backend, namespace string) {
 	if roles[""] != 1 || roles[reviewerRole] != 1 || roles[implementerRole] != 1 || len(roles) != 3 {
 		t.Fatalf("broadcast recipient roles=%v", roles)
 	}
+}
+
+// RunRoleProfiles proves opt-in canonical role registration, idempotency,
+// ownership, and hidden legacy roles against every durable backend.
+func RunRoleProfiles(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	role := "role/" + machineA + "/reviewer"
+	input := relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DisplayName: "  Reviewer  ", IdempotencyKey: namespace + "-register", Now: now,
+	}
+	first, created, err := store.RegisterRoleProfile(input)
+	if err != nil || !created {
+		t.Fatalf("first register=%#v created=%t err=%v", first, created, err)
+	}
+	if first.Role != role || first.DisplayName != "Reviewer" || first.DirectAddressable || !first.UpdatedAt.Equal(now) {
+		t.Fatalf("first profile=%#v", first)
+	}
+	retry, created, err := store.RegisterRoleProfile(input)
+	if err != nil || created || !sameRoleProfile(retry, first) {
+		t.Fatalf("retry=%#v created=%t err=%v", retry, created, err)
+	}
+	changed := input
+	changed.DisplayName = "Other"
+	if _, _, err := store.RegisterRoleProfile(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed-body retry err=%v", err)
+	}
+	read, err := store.RoleProfile(role)
+	if err != nil || !sameRoleProfile(read, first) {
+		t.Fatalf("read=%#v err=%v", read, err)
+	}
+	for _, invalid := range []relay.RegisterRoleInput{
+		{MachineID: machineA, Role: "role/" + machineB + "/reviewer", IdempotencyKey: namespace + "-prefix", Now: now},
+		{MachineID: machineA, Role: "role/plan-reviewer", IdempotencyKey: namespace + "-legacy", Now: now},
+		{MachineID: machineA, Role: "role/" + machineA + "/Reviewer", IdempotencyKey: namespace + "-slug", Now: now},
+		{MachineID: machineA, Role: "role/" + machineA + "/_bad", IdempotencyKey: namespace + "-invalid", Now: now},
+		{MachineID: machineA, Role: role, DisplayName: strings.Repeat("n", 129), IdempotencyKey: namespace + "-display", Now: now},
+	} {
+		if _, _, err := store.RegisterRoleProfile(invalid); err == nil || errors.Is(err, relay.ErrForbidden) || errors.Is(err, relay.ErrConflict) {
+			t.Fatalf("invalid register %q err=%v", invalid.Role, err)
+		}
+	}
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	takeoverRole := "role/" + machineA + "/taken"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-takeover-create", Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: takeoverRole, RoleMachineID: machineB, Capabilities: relay.CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: takeoverRole, IdempotencyKey: namespace + "-takeover", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("takeover err=%v", err)
+	}
+	if _, err := store.RoleProfile(takeoverRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("unregistered takeover target was visible: %v", err)
+	}
+	later := now.Add(time.Minute)
+	updated, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DisplayName: "Lead Reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-update", Now: later,
+	})
+	if err != nil || created {
+		t.Fatalf("update=%#v created=%t err=%v", updated, created, err)
+	}
+	if updated.Role != first.Role || updated.DisplayName != "Lead Reviewer" || !updated.DirectAddressable || !updated.UpdatedAt.Equal(later) {
+		t.Fatalf("updated=%#v first=%#v", updated, first)
+	}
+	disabled, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DirectAddressable: false, IdempotencyKey: namespace + "-disable", Now: later.Add(time.Second),
+	})
+	if err != nil || disabled.DirectAddressable {
+		t.Fatalf("disabled=%#v err=%v", disabled, err)
+	}
+	legacyRole := "role/" + namespace + "-legacy"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-legacy-create", Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: legacyRole, RoleMachineID: machineB, Capabilities: relay.CapReceive},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RoleProfile(legacyRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("legacy role was visible before registration: %v", err)
+	}
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	if err := roleBackend.BindRoleToSession(machineB, legacyRole, endpointB, now, time.Hour); err != nil {
+		t.Fatalf("legacy role binding: %v", err)
+	}
+	canonical, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineB, Role: "role/" + machineB + "/reviewer", DirectAddressable: true, IdempotencyKey: namespace + "-canonical", Now: now,
+	})
+	if err != nil || !created || canonical.Role != "role/"+machineB+"/reviewer" {
+		t.Fatalf("canonical register=%#v created=%t err=%v", canonical, created, err)
+	}
+	if _, err := store.RoleProfile(legacyRole); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("legacy role was renamed or exposed: %v", err)
+	}
+	bodyConversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, CreatorEndpoint: endpointA, IdempotencyKey: namespace + "-body-create", Now: now,
+		Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invented := "role/" + machineA + "/from-body"
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: bodyConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+		Body: "register " + invented, IdempotencyKey: namespace + "-body", Now: now.Add(2 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RoleProfile(invented); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("message body created a role profile: %v", err)
+	}
+}
+
+func sameRoleProfile(got, want relay.RoleProfile) bool {
+	return got.Role == want.Role && got.DisplayName == want.DisplayName && got.DirectAddressable == want.DirectAddressable && got.UpdatedAt.Equal(want.UpdatedAt)
 }
 
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {

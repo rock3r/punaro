@@ -16,6 +16,7 @@ import (
 
 var _ relay.Backend = (*Database)(nil)
 var _ relay.RoleBindingBackend = (*Database)(nil)
+var _ relay.RoleProfileBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
@@ -226,6 +227,133 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 		return relayDatabaseError(err, "commit durable role binding")
 	}
 	return nil
+}
+
+// RegisterRoleProfile creates or updates one machine-owned canonical role
+// profile. Exact retries return the first result; later calls may change only
+// display name and addressability.
+func (d *Database) RegisterRoleProfile(input relay.RegisterRoleInput) (relay.RoleProfile, bool, error) {
+	displayName, ok := relay.NormalizeRoleDisplayName(input.DisplayName)
+	if !ok || !relay.ValidMachineID(input.MachineID) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.CanonicalRoleForMachine(input.Role, input.MachineID) {
+		return relay.RoleProfile{}, false, fmt.Errorf("invalid role registration")
+	}
+	requestHash := relay.RegisterRoleRequestHash(input.Role, displayName, input.DirectAddressable)
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.RoleProfile{}, false, errors.New("role registration cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	profilesAvailable, err := postgresRoleProfilesAvailable(tx)
+	if err != nil {
+		return relay.RoleProfile{}, false, errors.New("durable role profiles are unavailable")
+	}
+	if !profilesAvailable {
+		return relay.RoleProfile{}, false, relay.ErrForbidden
+	}
+	var existingHash string
+	var existingRole string
+	var existingDisplay sql.NullString
+	var existingAddressable bool
+	var existingUpdatedAt time.Time
+	err = tx.QueryRowContext(context.Background(), `SELECT request_hash,role,display_name,direct_addressable,updated_at FROM relay.mail_role_profile_idempotency WHERE machine_id=$1 AND key=$2`, input.MachineID, input.IdempotencyKey).Scan(&existingHash, &existingRole, &existingDisplay, &existingAddressable, &existingUpdatedAt)
+	if err == nil {
+		if existingHash != requestHash {
+			return relay.RoleProfile{}, false, relay.ErrConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.RoleProfile{}, false, errors.New("role registration retry cannot commit")
+		}
+		return relay.RoleProfile{Role: existingRole, DisplayName: existingDisplay.String, DirectAddressable: existingAddressable, UpdatedAt: existingUpdatedAt.UTC()}, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.RoleProfile{}, false, errors.New("role registration retry state is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, input.Role); err != nil {
+		return relay.RoleProfile{}, false, errors.New("durable role creation lock is unavailable")
+	}
+	var owner string
+	err = tx.QueryRowContext(context.Background(), `SELECT machine_id FROM relay.mail_roles WHERE role=$1`, input.Role).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_roles(role,machine_id) VALUES($1,$2)`, input.Role, input.MachineID); err != nil {
+			return relay.RoleProfile{}, false, relayDatabaseError(err, "create durable role")
+		}
+		owner = input.MachineID
+	case err != nil:
+		return relay.RoleProfile{}, false, errors.New("durable role ownership is unavailable")
+	case owner != input.MachineID:
+		return relay.RoleProfile{}, false, relay.ErrForbidden
+	}
+	var existingUpdated time.Time
+	err = tx.QueryRowContext(context.Background(), `SELECT updated_at FROM relay.mail_role_profiles WHERE role=$1 FOR UPDATE`, input.Role).Scan(&existingUpdated)
+	created := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !created {
+		return relay.RoleProfile{}, false, errors.New("role profile is unavailable")
+	}
+	var display any
+	if displayName != "" {
+		display = displayName
+	}
+	updatedAt := input.Now.UTC()
+	if created {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_profiles(role,display_name,direct_addressable,updated_at) VALUES($1,$2,$3,$4)`, input.Role, display, input.DirectAddressable, updatedAt); err != nil {
+			return relay.RoleProfile{}, false, relayDatabaseError(err, "create role profile")
+		}
+	} else if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_role_profiles SET display_name=$1,direct_addressable=$2,updated_at=$3 WHERE role=$4`, display, input.DirectAddressable, updatedAt, input.Role); err != nil {
+		return relay.RoleProfile{}, false, relayDatabaseError(err, "update role profile")
+	}
+	profile := relay.RoleProfile{Role: input.Role, DisplayName: displayName, DirectAddressable: input.DirectAddressable, UpdatedAt: updatedAt}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_profile_idempotency(machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, input.DirectAddressable, profile.UpdatedAt, input.Now.UTC()); err != nil {
+		return relay.RoleProfile{}, false, relayDatabaseError(err, "record role profile retry")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.RoleProfile{}, false, relayDatabaseError(err, "commit role registration")
+	}
+	return profile, created, nil
+}
+
+// RoleProfile returns one registered profile. Unregistered and legacy roles are
+// indistinguishable from missing.
+func (d *Database) RoleProfile(role string) (relay.RoleProfile, error) {
+	if !relay.ValidRole(role) {
+		return relay.RoleProfile{}, relay.ErrForbidden
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return relay.RoleProfile{}, errors.New("role profile cannot be inspected")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	profilesAvailable, err := postgresRoleProfilesAvailable(tx)
+	if err != nil {
+		return relay.RoleProfile{}, errors.New("durable role profiles are unavailable")
+	}
+	if !profilesAvailable {
+		return relay.RoleProfile{}, relay.ErrForbidden
+	}
+	var display sql.NullString
+	var addressable bool
+	var updatedAt time.Time
+	err = tx.QueryRowContext(context.Background(), `SELECT display_name,direct_addressable,updated_at FROM relay.mail_role_profiles WHERE role=$1`, role).Scan(&display, &addressable, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return relay.RoleProfile{}, relay.ErrForbidden
+	}
+	if err != nil {
+		return relay.RoleProfile{}, errors.New("role profile is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.RoleProfile{}, errors.New("role profile cannot commit")
+	}
+	return relay.RoleProfile{Role: role, DisplayName: display.String, DirectAddressable: addressable, UpdatedAt: updatedAt.UTC()}, nil
+}
+
+func postgresRoleProfilesAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_profiles') IS NOT NULL AND to_regclass('relay.mail_role_profile_idempotency') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
 }
 
 // AssertEndpointOwnership verifies one live PostgreSQL endpoint lease.

@@ -663,6 +663,61 @@ func TestHTTPRelayClientSignsBoundedProtocolRequests(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientRegistersCanonicalRoleAndExactRetry(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/roles/register" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("role register request was not signed")
+		}
+		if r.Header.Get("Idempotency-Key") != "register-1" {
+			t.Fatalf("idempotency key=%q", r.Header.Get("Idempotency-Key"))
+		}
+		var payload struct {
+			Role              string `json:"role"`
+			DisplayName       string `json:"display_name"`
+			DirectAddressable bool   `json:"direct_addressable"`
+			Machine           string `json:"machine"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.Role != "role/machine-a/reviewer" || payload.DisplayName != "  Reviewer  " || payload.DirectAddressable || payload.Machine != "" {
+			t.Fatalf("payload=%s err=%v", body, err)
+		}
+		seen = append(seen, string(body))
+		status := http.StatusCreated
+		if len(seen) > 1 {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"role":"role/machine-a/reviewer","display_name":"Reviewer","direct_addressable":false,"updated_at":"2026-08-18T16:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := client.RegisterRole(context.Background(), "role/machine-a/reviewer", "  Reviewer  ", false, "register-1")
+	if err != nil || first.Role != "role/machine-a/reviewer" || first.DisplayName != "Reviewer" || first.DirectAddressable {
+		t.Fatalf("register=%#v err=%v", first, err)
+	}
+	retry, err := client.RegisterRole(context.Background(), "role/machine-a/reviewer", "  Reviewer  ", false, "register-1")
+	if err != nil || retry != first || len(seen) != 2 {
+		t.Fatalf("retry=%#v seen=%d err=%v", retry, len(seen), err)
+	}
+	if _, err := client.RegisterRole(context.Background(), "role/plan-reviewer", "", false, "register-legacy"); err == nil {
+		t.Fatal("legacy role was accepted by client")
+	}
+}
+
 func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

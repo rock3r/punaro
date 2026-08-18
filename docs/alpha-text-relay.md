@@ -240,6 +240,23 @@ restart, advertise the new session and bind the role again. No membership edit
 is needed, but a stale session can neither send, receive, nor acknowledge as
 the role.
 
+To make a durable role a collision-safe public address, register a canonical
+handle owned by this machine. The slug must be lowercase ASCII
+`[a-z0-9][a-z0-9-]{0,62}`. Display names are labels only. Addressability
+defaults to off and does not by itself list or deliver messages:
+
+```sh
+punaro-adapter register-role \
+  --role role/workstation-review/reviewer \
+  --display-name "Plan Reviewer" \
+  --idempotency-key register-reviewer-1
+```
+
+Pass `--direct-addressable` when a later discovery slice should be allowed to
+name this role. Exact retries reuse the same idempotency key. Legacy names such
+as `role/plan-reviewer` remain conversation members until you register a
+canonical handle; registration does not rename them.
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production

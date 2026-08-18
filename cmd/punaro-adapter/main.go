@@ -74,6 +74,8 @@ func main() {
 		err = runCreate(os.Args[2:])
 	case os.Args[1] == "bind-role":
 		err = runBindRole(os.Args[2:])
+	case os.Args[1] == "register-role":
+		err = runRegisterRole(os.Args[2:])
 	case os.Args[1] == "invoke":
 		err = runInvoke(os.Args[2:])
 	case os.Args[1] == "member" && len(os.Args) > 2 && os.Args[2] == "set":
@@ -87,7 +89,7 @@ func main() {
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, register-role, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
@@ -424,6 +426,60 @@ func runBindRole(args []string) error {
 		return err
 	}
 	return client.BindRole(context.Background(), request.role, request.session)
+}
+
+type registerRoleRequest struct {
+	role              string
+	displayName       string
+	directAddressable bool
+	idempotencyKey    string
+}
+
+func parseRegisterRoleArgs(args []string) (registerRoleRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter register-role", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request registerRoleRequest
+	flags.StringVar(&request.role, "role", "", "canonical role handle role/<machine>/<slug>")
+	flags.StringVar(&request.displayName, "display-name", "", "optional portable display name")
+	flags.BoolVar(&request.directAddressable, "direct-addressable", false, "opt the role into later discovery")
+	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !relay.CanonicalRoleHandle(request.role) || !relay.ValidRequestToken(request.idempotencyKey) {
+		return registerRoleRequest{}, fmt.Errorf("--role and --idempotency-key are required")
+	}
+	if request.displayName != "" {
+		if _, ok := relay.NormalizeRoleDisplayName(request.displayName); !ok {
+			return registerRoleRequest{}, fmt.Errorf("--display-name is invalid")
+		}
+	}
+	return request, nil
+}
+
+func runRegisterRole(args []string) error {
+	request, err := parseRegisterRoleArgs(args)
+	if err != nil {
+		return err
+	}
+	config, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	if !relay.CanonicalRoleForMachine(request.role, config.machineID) {
+		return fmt.Errorf("role must be owned by this machine")
+	}
+	client, err := adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+	if err != nil {
+		return err
+	}
+	profile, err := client.RegisterRole(context.Background(), request.role, request.displayName, request.directAddressable, request.idempotencyKey)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.Marshal(profile)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "%s\n", encoded)
+	return err
 }
 
 type sendRequest struct {
