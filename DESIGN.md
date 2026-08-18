@@ -413,7 +413,9 @@ exhaustion returns HTTP `429` with a bounded integer `Retry-After` and the
 stable error `capacity exceeded`. A rejected request creates no sequence,
 message, delivery, idempotency, or audit row. Explicit counters are updated in
 the append transaction; the send path does not scan pending deliveries.
-Startup and readiness verify counter consistency or fail closed. Bodies are
+Startup and readiness verify counter consistency or fail closed. The operator
+`punaro relay reconcile-capacity` command uses a repair opener that preserves
+that fail-closed path while rebuilding drifted counters. Bodies are
 never hashed, compared, or parsed for loop detection.
 
 The guarantee is **at-least-once delivery**: a crash after a

@@ -119,7 +119,7 @@ func reconcileRelayCapacity(directory string) (relay.QuotaCounters, error) {
 	if _, err := os.Stat(path); err != nil {
 		return relay.QuotaCounters{}, errors.New("relay capacity store is unavailable")
 	}
-	store, err := relay.Open(path)
+	store, err := relay.OpenForCapacityRepair(path)
 	if err != nil {
 		return relay.QuotaCounters{}, err
 	}

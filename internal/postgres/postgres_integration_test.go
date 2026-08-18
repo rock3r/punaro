@@ -1861,6 +1861,9 @@ func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Databas
 	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, messageID, endpointB); err != nil {
 		t.Fatal(err)
 	}
+	if err := app.consumeQuota(appendTx, []string{endpointB}, int64(len("must remain pending"))); err != nil {
+		t.Fatal(err)
+	}
 	cursorTx, cursorCancel, err := app.beginRelayTransaction(nil)
 	if err != nil {
 		t.Fatal(err)

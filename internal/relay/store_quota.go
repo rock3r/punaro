@@ -192,6 +192,8 @@ func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now
 }
 
 func (s *Store) refreshPendingMetrics() {
+	s.pendingMetricsMu.Lock()
+	defer s.pendingMetricsMu.Unlock()
 	counters, err := readInstallQuota(context.Background(), s.db)
 	if err != nil {
 		return
@@ -212,10 +214,23 @@ func readInstallQuota(ctx context.Context, q interface {
 
 // VerifyPendingQuota fails closed when explicit counters disagree with pending deliveries.
 func (s *Store) VerifyPendingQuota() error {
-	return verifySQLitePendingQuota(context.Background(), s.db)
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer rollback(tx)
+	if err := verifySQLitePendingQuota(context.Background(), tx); err != nil {
+		return err
+	}
+	return tx.Rollback()
 }
 
-func verifySQLitePendingQuota(ctx context.Context, db *sql.DB) error {
+type quotaQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func verifySQLitePendingQuota(ctx context.Context, db quotaQueryer) error {
 	var actualCount, actualBytes int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(`+sqlitePendingBodyBytes+`), 0)
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
@@ -320,7 +335,7 @@ func ReconcilePendingQuota(store *Store) (QuotaCounters, error) {
 	if err := tx.Commit(); err != nil {
 		return QuotaCounters{}, err
 	}
-	store.metrics.SetPending(install.Count, install.Bytes)
+	store.refreshPendingMetrics()
 	return install, nil
 }
 

@@ -37,6 +37,7 @@ type Database struct {
 	rateLimits                relay.RateLimitConfig
 	quotaMu                   sync.Mutex
 	quota                     relay.QuotaConfig
+	pendingMetricsMu          sync.Mutex
 	metrics                   *relay.Metrics
 }
 

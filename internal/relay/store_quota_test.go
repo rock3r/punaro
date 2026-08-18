@@ -359,6 +359,86 @@ func TestStoreQuotaSurvivesRestartAndReadiness(t *testing.T) {
 	}
 }
 
+func TestStoreOpenRejectsDriftedQuotaAndRepairOpenerCanReconcile(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := quotaNow()
+	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	if _, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", "one", "send-1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), "UPDATE pending_quota_install SET pending_count = 99"); err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	if _, err := Open(database); err == nil {
+		t.Fatal("ordinary open accepted drifted counters")
+	}
+	repair, err := OpenForCapacityRepair(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repair.VerifyPendingQuota(); err == nil {
+		t.Fatal("repair opener skipped verification by also skipping the drifted counters")
+	}
+	if _, err := ReconcilePendingQuota(repair); err != nil {
+		t.Fatal(err)
+	}
+	if err := repair.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	if err := reopened.VerifyPendingQuota(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreVerifyPendingQuotaIgnoresConcurrentCommits(t *testing.T) {
+	store := openQuotaStore(t, tightQuota(32, 4096, 32, 8192))
+	now := quotaNow()
+	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			body := "b"
+			_, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", body, "send-"+itoa(i), now.Add(time.Duration(i)*time.Millisecond)))
+			if err != nil {
+				continue
+			}
+			page, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", conversation.ID, now.Add(time.Duration(i)*time.Millisecond), time.Minute, 10)
+			if err != nil || len(page.Deliveries) == 0 {
+				continue
+			}
+			_ = store.AckDelivery("machine-b", "agent/b", page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now.Add(time.Duration(i)*time.Millisecond))
+		}
+	}()
+	for i := 0; i < 40; i++ {
+		if err := store.VerifyPendingQuota(); err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("verify under concurrent traffic: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestStoreConcurrentAckCannotUnderflow(t *testing.T) {
 	store := openQuotaStore(t, tightQuota(8, 1024, 8, 4096))
 	now := quotaNow()

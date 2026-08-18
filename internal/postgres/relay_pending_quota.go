@@ -182,6 +182,8 @@ func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID 
 }
 
 func (d *Database) refreshPendingMetrics(ctx context.Context) {
+	d.pendingMetricsMu.Lock()
+	defer d.pendingMetricsMu.Unlock()
 	counters, err := postgresReadInstallQuota(ctx, d.relayPool())
 	if err != nil {
 		return
@@ -202,20 +204,33 @@ func postgresReadInstallQuota(ctx context.Context, q interface {
 
 // VerifyPendingQuota fails closed when explicit counters disagree with pending deliveries.
 func (d *Database) VerifyPendingQuota(ctx context.Context) error {
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return errors.New("pending quota verification cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	return verifyPostgresPendingQuota(ctx, tx)
+}
+
+func verifyPostgresPendingQuota(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) error {
 	var actualCount, actualBytes int64
-	if err := d.relayPool().QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(`+postgresPendingBodyBytes+`),0)
+	if err := q.QueryRowContext(ctx, `SELECT count(*), COALESCE(sum(`+postgresPendingBodyBytes+`),0)
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.acked_at IS NULL`).Scan(&actualCount, &actualBytes); err != nil {
 		return errors.New("pending deliveries cannot be measured")
 	}
-	install, err := postgresReadInstallQuota(ctx, d.relayPool())
+	install, err := postgresReadInstallQuota(ctx, q)
 	if err != nil {
 		return errors.New("installation quota cannot be read")
 	}
 	if install != (relay.QuotaCounters{Count: actualCount, Bytes: actualBytes}) {
 		return errors.New("relay pending quota is inconsistent")
 	}
-	rows, err := d.relayPool().QueryContext(ctx, `SELECT delivery.recipient_endpoint, count(*), COALESCE(sum(`+postgresPendingBodyBytes+`),0)
+	rows, err := q.QueryContext(ctx, `SELECT delivery.recipient_endpoint, count(*), COALESCE(sum(`+postgresPendingBodyBytes+`),0)
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.acked_at IS NULL
 		GROUP BY delivery.recipient_endpoint`)
@@ -238,7 +253,7 @@ func (d *Database) VerifyPendingQuota(ctx context.Context) error {
 	if err := rows.Err(); err != nil || summed != install {
 		return errors.New("relay pending quota is inconsistent")
 	}
-	counterRows, err := d.relayPool().QueryContext(ctx, `SELECT recipient_endpoint,pending_count,pending_bytes FROM relay.mail_pending_recipients`)
+	counterRows, err := q.QueryContext(ctx, `SELECT recipient_endpoint,pending_count,pending_bytes FROM relay.mail_pending_recipients`)
 	if err != nil {
 		return errors.New("recipient quota cannot be read")
 	}
@@ -284,7 +299,7 @@ func (d *Database) ReconcilePendingQuota(ctx context.Context) (relay.QuotaCounte
 	if err := tx.Commit(); err != nil {
 		return relay.QuotaCounters{}, errors.New("pending quota reconciliation cannot commit")
 	}
-	d.metrics.SetPending(install.Count, install.Bytes)
+	d.refreshPendingMetrics(ctx)
 	return install, nil
 }
 

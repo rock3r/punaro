@@ -170,7 +170,9 @@ migration 45 adds opt-in canonical role profiles, migration 46 adds durable
 mail rate-limit buckets, and migration 47 adds explicit pending-delivery
 capacity counters. After migration 47, `punaro relay reconcile-capacity
 --directory DIR --yes` rebuilds those counters from pending deliveries if
-startup readiness reports inconsistency.
+startup readiness reports inconsistency. Ordinary SQLite `Open` and PostgreSQL
+`Ready` still fail closed on drift; the reconcile command is the only supported
+repair path.
 Migration 44 invalidates unredeemed legacy enrollment invitations while
 converting existing device credentials into lifecycle-managed client records,
 so it must not be applied as an ad hoc repair. The host wrapper's one-shot

@@ -302,17 +302,28 @@ type InvocationAuditEvent struct {
 
 // Store owns SQLite-backed relay state.
 type Store struct {
-	db         *sql.DB
-	rateMu     sync.Mutex
-	rateLimits RateLimitConfig
-	quotaMu    sync.Mutex
-	quota      QuotaConfig
-	metrics    *Metrics
+	db               *sql.DB
+	rateMu           sync.Mutex
+	rateLimits       RateLimitConfig
+	quotaMu          sync.Mutex
+	quota            QuotaConfig
+	pendingMetricsMu sync.Mutex
+	metrics          *Metrics
 }
 
 // Open creates or opens a SQLite WAL database with the full durable delivery
 // schema. The database directory is private to the service account.
 func Open(database string) (*Store, error) {
+	return openStore(database, true)
+}
+
+// OpenForCapacityRepair opens a SQLite relay without the fail-closed quota
+// consistency check so a confirmed operator reconcile can rebuild counters.
+func OpenForCapacityRepair(database string) (*Store, error) {
+	return openStore(database, false)
+}
+
+func openStore(database string, verifyQuota bool) (*Store, error) {
 	if strings.TrimSpace(database) == "" {
 		return nil, fmt.Errorf("relay database path is required")
 	}
@@ -374,9 +385,11 @@ func Open(database string) (*Store, error) {
 		_ = db.Close()
 		return nil, errors.New("relay migration source control is invalid")
 	}
-	if err := store.VerifyPendingQuota(); err != nil {
-		_ = db.Close()
-		return nil, err
+	if verifyQuota {
+		if err := store.VerifyPendingQuota(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return store, nil
 }
