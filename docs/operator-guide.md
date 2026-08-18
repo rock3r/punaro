@@ -20,7 +20,9 @@ still lists the previous release; that decision is durable across restarts
 so a later failure cannot swap back to the known-unhealthy slot. An
 unreadable update journal also stays recovery-only. `run` holds a separate
 run lease so two supervisors cannot share the same mailbox; `update` still
-uses the transaction lock. A later publish stops the old adapter with
+uses the transaction lock. A crash-safe `run.pid` is killed only when the
+live process image still matches the recorded adapter path; an unverifiable
+pid is left alone. A later publish stops the old adapter with
 SIGTERM and a bounded wait before SIGKILL. A healthy adapter that exits
 while the supervisor is still running is a supervisor failure so the
 platform service restarts it. Recovery-only keeps the supervisor parked

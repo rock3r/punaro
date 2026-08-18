@@ -106,8 +106,12 @@ func Run(ctx context.Context, request RunRequest) error {
 	if err != nil {
 		return err
 	}
-	defer unlockRun()
+	defer func() {
+		clearRunPID(request.Directory)
+		unlockRun()
+	}()
 	err = superviseRun(ctx, request)
+	clearRunPID(request.Directory)
 	if !request.WaitRecovery || !errors.Is(err, ErrRecoveryOnly) {
 		return err
 	}
@@ -348,6 +352,22 @@ func writeRunPID(directory string, pid int, path string) error {
 	return writeAtomic(filepath.Join(directory, runPIDFile), body, 0o600)
 }
 
+func loadRunPID(directory string) (runPIDRecord, bool) {
+	body, err := os.ReadFile(filepath.Join(directory, runPIDFile)) // #nosec G304,G703 -- run pid file is a fixed child of the bootstrap directory.
+	if err != nil {
+		return runPIDRecord{}, false
+	}
+	var record runPIDRecord
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.PID <= 0 {
+		return runPIDRecord{}, false
+	}
+	return record, true
+}
+
+func clearRunPID(directory string) {
+	_ = os.Remove(filepath.Join(directory, runPIDFile)) // #nosec G703 -- run pid file is a fixed child of the bootstrap directory.
+}
+
 func terminateStaleRun(directory string) error {
 	proc := staleRunProcess(directory)
 	if proc == nil {
@@ -361,32 +381,77 @@ func terminateStaleRun(directory string) error {
 		}
 	}
 	_ = proc.Kill()
+	clearRunPID(directory)
 	return nil
 }
 
 func staleRunProcess(directory string) *os.Process {
-	body, err := os.ReadFile(filepath.Join(directory, runPIDFile)) // #nosec G304,G703 -- run pid file is a fixed child of the bootstrap directory.
-	if err != nil {
+	record, ok := loadRunPID(directory)
+	if !ok {
 		return nil
 	}
-	var record runPIDRecord
-	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.PID <= 0 {
+	switch matchProcessImage(record.PID, record.Path) {
+	case processImageGone, processImageMismatch:
+		clearRunPID(directory)
+		return nil
+	case processImageMatch:
+		proc, err := os.FindProcess(record.PID)
+		if err != nil || proc == nil {
+			return nil
+		}
+		return proc
+	default:
 		return nil
 	}
-	proc, err := os.FindProcess(record.PID)
-	if err != nil || proc == nil {
-		return nil
+}
+
+type processImageResult int
+
+const (
+	processImageUnknown processImageResult = iota
+	processImageMatch
+	processImageMismatch
+	processImageGone
+)
+
+func matchProcessImage(pid int, recorded string) processImageResult {
+	if recorded == "" || pid <= 0 {
+		return processImageUnknown
 	}
-	if runtime.GOOS != "windows" && proc.Signal(syscall.Signal(0)) != nil {
-		return nil
+	live, err := processImagePath(pid)
+	if errors.Is(err, errProcessImageGone) {
+		return processImageGone
 	}
-	return proc
+	if err != nil || live == "" {
+		return processImageUnknown
+	}
+	if sameImagePath(live, recorded) {
+		return processImageMatch
+	}
+	return processImageMismatch
+}
+
+func sameImagePath(live, recorded string) bool {
+	live = strings.TrimSuffix(live, " (deleted)")
+	if filepath.Clean(live) == filepath.Clean(recorded) {
+		return true
+	}
+	liveEval, liveErr := filepath.EvalSymlinks(live)
+	recordedEval, recordedErr := filepath.EvalSymlinks(recorded)
+	if liveErr == nil && recordedErr == nil && liveEval == recordedEval {
+		return true
+	}
+	liveInfo, liveStatErr := os.Lstat(live)             // #nosec G703 -- compared recorded adapter image.
+	recordedInfo, recordedStatErr := os.Lstat(recorded) // #nosec G703 -- compared recorded adapter image.
+	return liveStatErr == nil && recordedStatErr == nil && os.SameFile(liveInfo, recordedInfo)
 }
 
 var (
-	errChildExited = errors.New("bootstrap child exited")
-	errNoAdapter   = errors.New("bootstrap has no current adapter")
-	errSlotChanged = errors.New("bootstrap slot changed")
+	errChildExited         = errors.New("bootstrap child exited")
+	errNoAdapter           = errors.New("bootstrap has no current adapter")
+	errSlotChanged         = errors.New("bootstrap slot changed")
+	errProcessImageGone    = errors.New("bootstrap process image is gone")
+	errProcessImageUnknown = errors.New("bootstrap process image is unverifiable")
 )
 
 func startOrDefault(request RunRequest) func(context.Context, ChildSpec) (Process, error) {

@@ -1508,9 +1508,13 @@ The implementation is not internet-exposure-ready until these cases pass:
   the platform service restarts onto the repaired slot. An unreadable update
   journal also enters recovery-only. `run` holds a separate `run.lock` lease for
   the child's lifetime so two supervisors cannot share the same mailbox and
-  ready file; the transaction lock stays free for `update`. A later publish
-  stops the old adapter with SIGTERM and a bounded wait before SIGKILL so the
-  service can restart onto the new slot. A healthy child that exits while the
+  ready file; the transaction lock stays free for `update`. A crash-safe
+  `run.pid` records the child's pid and image path. The next supervisor kills
+  that process only when the live image still matches, and it removes the file
+  when the child or supervisor exits. If the image cannot be verified, the
+  supervisor leaves the process alone. A later publish stops the old adapter
+  with SIGTERM and a bounded wait before SIGKILL so the service can restart
+  onto the new slot. A healthy child that exits while the
   supervisor is still running is a supervisor failure so systemd/launchd restart
   it. The one-shot rollback decision is durable across supervisor restarts so a
   later failure cannot swap back to the known-unhealthy slot. Enrollment is not

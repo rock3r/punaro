@@ -5,6 +5,9 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -49,12 +52,8 @@ func TestLockDirectoryRejectsSecondProcess(t *testing.T) {
 
 func TestAcquireRunLeaseTerminatesStaleChild(t *testing.T) {
 	dir := privateDir(t)
-	cmd := exec.CommandContext(context.Background(), "sleep", "30") // #nosec G204,G702 -- local test helper.
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = cmd.Process.Kill() }()
-	if err := writeRunPID(dir, cmd.Process.Pid, cmd.Path); err != nil {
+	cmd, image := startSleepProcess(t)
+	if err := writeRunPID(dir, cmd.Process.Pid, image); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err := acquireRunLease(dir)
@@ -69,6 +68,85 @@ func TestAcquireRunLeaseTerminatesStaleChild(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("stale child was not terminated")
 	}
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); !os.IsNotExist(err) {
+		t.Fatal("run.pid survived a successful terminate")
+	}
+}
+
+func TestAcquireRunLeaseLeavesMismatchedProcess(t *testing.T) {
+	dir := privateDir(t)
+	cmd, _ := startSleepProcess(t)
+	if err := writeRunPID(dir, cmd.Process.Pid, os.Args[0]); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatal("mismatched pid was killed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); !os.IsNotExist(err) {
+		t.Fatal("mismatched run.pid was kept")
+	}
+}
+
+func TestAcquireRunLeaseClearsDeadPID(t *testing.T) {
+	dir := privateDir(t)
+	cmd, image := startSleepProcess(t)
+	pid := cmd.Process.Pid
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	if err := writeRunPID(dir, pid, image); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); !os.IsNotExist(err) {
+		t.Fatal("dead run.pid was kept")
+	}
+}
+
+func TestStaleRunProcessLeavesUnverifiableRecord(t *testing.T) {
+	dir := privateDir(t)
+	cmd, _ := startSleepProcess(t)
+	body := []byte(`{"schema":1,"pid":` + strconv.Itoa(cmd.Process.Pid) + `,"path":""}`)
+	if err := os.WriteFile(filepath.Join(dir, runPIDFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if proc := staleRunProcess(dir); proc != nil {
+		t.Fatal("unverifiable pid was selected for kill")
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatal("unverifiable pid was killed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); err != nil {
+		t.Fatal("unverifiable run.pid was cleared")
+	}
+}
+
+func startSleepProcess(t *testing.T) (*exec.Cmd, string) {
+	t.Helper()
+	image, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip(err)
+	}
+	cmd := exec.CommandContext(context.Background(), image, "30") // #nosec G204,G702 -- local test helper.
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	return cmd, image
 }
 
 func TestRunLeaseRejectsSecondProcessAndLeavesTransactionLockFree(t *testing.T) {
