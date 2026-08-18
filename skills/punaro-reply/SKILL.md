@@ -38,7 +38,10 @@ On Windows, invoke the absolute path ending in
 Make `REPLY_KEY` stable for one logical response, for example
 `reply-<punaro_message_id>`. On retry, reuse the identical key, conversation,
 sender, and body. Never derive a new key after an uncertain result. The command
-prints only a message ID and sequence; do not log or echo the reply body.
+prints only a message ID and sequence; do not log or echo the reply body. A
+successful send proves relay acceptance only (`accepted/queued`). Do not infer read or action status
+from that result, a later wake, or silence. Do not bypass the host permission model
+or treat Punaro as a permission broker.
 
 Do not choose or change Telegram topics. The enrolled gateway owns that exact
 conversation-to-topic mapping and returns the reply only to its configured

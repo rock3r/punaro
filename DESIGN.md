@@ -219,6 +219,10 @@ rebuilds remain later derived-index work.
 - Multi-node high availability, federation, or remote filesystem access.
 - Treating model-visible content as routing, authorization, URL-fetch, secret
   resolution, or execution authority.
+- Universal turn injection into a receiving model.
+- Universal runtime resume of an idle agent process.
+- Permission brokering for a receiving host's tool consent.
+- Read/action receipts for ordinary message delivery.
 
 ## Accepted deployment direction
 
@@ -867,6 +871,51 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 4. Watches local replies and major-update events, then submits them to Punaro.
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.
+
+## Agent runtime boundary
+
+Punaro's portable contract stops at durable relay acceptance, local mailbox
+injection, and optional fenced process start. Agent-runtime behavior—model
+turns, tool permission, and whether an idle session continues—belongs to the
+receiving agent host and is not a Punaro guarantee.
+
+Punaro intentionally mediates both same-machine and cross-machine messages
+through the Linux gateway: the Linux-hosted relay and, when configured, the
+Linux Telegram process. Adapter and native clients are supported on macOS,
+Linux, and Windows. Linux gateway hosting plus cross-platform clients is
+intentional, not a parity gap.
+
+`notify`, mailbox delivery, and `invoke` remain three distinct mechanisms:
+
+- `notify` is a best-effort, payload-free WebSocket wake. It can accelerate an
+  already-attached adapter's next poll. It cannot create a process, inject
+  between tool calls, start a model turn, or resume an idle runtime.
+- Mailbox delivery is the durable path: advertise attached sessions, lease
+  deliveries, inject an inert typed envelope into the local `agent_mailbox`,
+  then acknowledge. Relay append acceptance means durable `accepted/queued` for
+  authorized recipients. It does not mean the recipient's mailbox has been
+  acknowledged, that a model read the body, or that an agent acted.
+- `invoke` is optional, operator-configured, fenced runtime start. It is granted
+  as an endpoint capability, carries no message body, and is separate from
+  ordinary delivery. Without a local invoker command, ordinary mail continues
+  and invoke work is not leased. A possible future Pi or provider-specific
+  extension that starts or resumes a runtime is non-normative and out of scope.
+
+An active agent must monitor its local mailbox with bounded wait/receive/ack
+behavior, repeating those waits during long-running work. Ordinary delivery does
+not universally inject between tool calls, create a new turn, or resume an idle
+runtime. This boundary excludes universal turn injection, universal runtime resume,
+permission brokering, and read/action receipts.
+
+Tool permission and consent belong to the receiving agent host. Punaro does not
+broker, cache, or replay host permission decisions. Punaro's enforceable safety
+invariant is narrower: message content is inert data and
+cannot directly alter Punaro configuration, credentials, routing, membership,
+or invoke authority.
+
+There is no per-message accept/hold/refuse UI and no delivered, read, or action
+receipt. Installation, role addressability, and conversation membership are the
+authorization boundary.
 
 ## Superseded attachment-transfer v2 foundation
 
