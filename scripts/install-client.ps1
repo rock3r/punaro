@@ -17,6 +17,23 @@ $ErrorActionPreference = 'Stop'
 
 function Stop-Install([string]$Message) { throw "punaro installer: $Message" }
 
+function Test-PunaroRepeatTrigger($Task) {
+    if ($null -eq $Task) { return $false }
+    $taskTriggers = @()
+    try { $taskTriggers = @($Task.Triggers) } catch { return $false }
+    foreach ($taskTrigger in $taskTriggers) {
+        $repetitionProp = $null
+        try { $repetitionProp = $taskTrigger.PSObject.Properties['Repetition'] } catch { continue }
+        if ($null -eq $repetitionProp -or $null -eq $repetitionProp.Value) { continue }
+        $intervalProp = $null
+        try { $intervalProp = $repetitionProp.Value.PSObject.Properties['Interval'] } catch { continue }
+        if ($null -eq $intervalProp -or $null -eq $intervalProp.Value) { continue }
+        $interval = [string]$intervalProp.Value
+        if (-not [string]::IsNullOrWhiteSpace($interval) -and $interval -ne 'PT0S') { return $true }
+    }
+    return $false
+}
+
 function Get-PunaroProcessImage($Process) {
     $image = $null
     try { $image = $Process.Path } catch { }
@@ -293,6 +310,7 @@ $adapterTaskName = 'Punaro Adapter'
 $adapterTaskWasRunning = $false
 $adapterTaskRestored = $false
 $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+$hadRepeatTrigger = Test-PunaroRepeatTrigger $existingAdapterTask
 if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
     $adapterTaskWasRunning = $true
     Stop-ScheduledTask -TaskName $adapterTaskName
@@ -386,10 +404,11 @@ $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # RestartCount is an unsignedByte (max 255). A one-minute repeating trigger
 # re-arms the task after that budget so a later signed repair can start it.
 # Do not attach it until -Enable (or an already-running task) so a fresh
-# install cannot start during the Access-credential setup window.
+# install cannot start during the Access-credential setup window. Keep it
+# if a previous install already registered the re-arm trigger.
 $repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval ([TimeSpan]::FromMinutes(1)) -RepetitionDuration ([TimeSpan]::FromDays(3650))
 $triggers = @($logonTrigger)
-if ($Enable -or $adapterTaskWasRunning) { $triggers += $repeatTrigger }
+if ($Enable -or $adapterTaskWasRunning -or $hadRepeatTrigger) { $triggers += $repeatTrigger }
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.RestartCount = 255

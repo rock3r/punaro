@@ -19,6 +19,7 @@ for expected in \
 	'RepetitionInterval' \
 	'RepetitionDuration' \
 	'Do not attach it until -Enable' \
+	'hadRepeatTrigger' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \
