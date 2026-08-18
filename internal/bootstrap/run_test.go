@@ -672,6 +672,23 @@ func TestRunEntersRecoveryWhenJournalIsUnreadable(t *testing.T) {
 	}
 }
 
+func TestStatusQuarantinesMalformedJournalIntoRecovery(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Status(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("malformed journal survived status")
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("status did not park after a malformed journal")
+	}
+}
+
 func TestUpdateSucceedsAfterMalformedJournalRecovery(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {

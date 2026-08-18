@@ -275,6 +275,9 @@ func failInvalidJournal(directory string) error {
 	if err := os.Remove(filepath.Join(directory, journalFile)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	if err := writeRecoveryRecord(directory, recoveryCurrentExited); err != nil {
+		return err
+	}
 	if err := syncDir(directory); err != nil {
 		return err
 	}
