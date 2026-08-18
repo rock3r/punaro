@@ -94,7 +94,8 @@ PUNARO_ADAPTER_POLL_INTERVAL=30s
 
 To enable offline-role invocation, additionally configure
 `PUNARO_INVOKER_COMMAND` with an absolute, protected executable owned by the
-local operator. Punaro invokes it only as:
+local operator. That command is provider- and operator-specific fenced runtime
+start, not ordinary message delivery. Punaro invokes it only as:
 
 ```text
 COMMAND invoke --invocation-id ID --conversation ID --endpoint ENDPOINT --fence FENCE
@@ -194,10 +195,12 @@ punaro-adapter send \
 
 The explicit idempotency key must be retained for retrying the same logical
 reply. The command emits only a message ID and sequence, not the message body.
-It automatically uses the installed adapter profile. A deliberately supplied
-non-empty adapter environment setting overrides its matching profile value;
-use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute, owner-only
-profile.
+That output is append acceptance only. Punaro promises no sender receipt beyond
+append acceptance: not mailbox acknowledgement, not a read, and not an agent
+action. It automatically uses the installed adapter profile. A deliberately
+supplied non-empty adapter environment setting overrides its matching profile
+value; use `PUNARO_ADAPTER_PROFILE_FILE` only to select another absolute,
+owner-only profile.
 
 To address exactly one durable role, add `--target-role`. The relay derives
 the recipient from the conversation's role membership; it does not trust an
@@ -253,6 +256,23 @@ restart, advertise the new session and bind the role again. No membership edit
 is needed, but a stale session can neither send, receive, nor acknowledge as
 the role.
 
+To make a durable role a collision-safe public address, register a canonical
+handle owned by this machine. The slug must be lowercase ASCII
+`[a-z0-9][a-z0-9-]{0,62}`. Display names are labels only. Addressability
+defaults to off and does not by itself list or deliver messages:
+
+```sh
+punaro-adapter register-role \
+  --role role/workstation-review/reviewer \
+  --display-name "Plan Reviewer" \
+  --idempotency-key register-reviewer-1
+```
+
+Pass `--direct-addressable` when a later discovery slice should be allowed to
+name this role. Exact retries reuse the same idempotency key. Legacy names such
+as `role/plan-reviewer` remain conversation members until you register a
+canonical handle; registration does not rename them.
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production
@@ -277,7 +297,9 @@ go test -tags=e2e ./cmd/punaro-adapter -run TestE2EPayloadFreeWake
 
 When the adapter receives its credentials from an external secret provider,
 run that provider's environment wrapper around the test command. A wake is a
-best-effort hint only; fetch/lease/ack polling is still authoritative.
+best-effort hint only; fetch/lease/ack polling is still authoritative. A
+WebSocket wake accelerates adapter polling only. It does not create a model
+turn, inject between tool calls, or resume an idle runtime.
 
 ## Disposable two-client lifecycle smoke test
 
@@ -330,7 +352,9 @@ fallback route for the main chat.
 
 - Topic routes are explicit operator state; no automatic picker or target
   discovery is implemented.
-- WebSocket hints are best-effort; polling remains correct when a machine
-  sleeps or reconnects.
+- WebSocket hints are best-effort and accelerate adapter polling only; polling
+  remains correct when a machine sleeps or reconnects.
+- `PUNARO_INVOKER_COMMAND` is optional, operator-specific start, not ordinary
+  message delivery. Punaro promises no sender receipt beyond append acceptance.
 - V2/v3 attachment settings are rejected and their routes are unmounted. Their
   source-level protocol evidence is retained but cannot authorize deployment.

@@ -527,5 +527,8 @@ shared ACLs, and replacement races fail closed.
 Agents use the local `agent-mailbox` MCP, not a remote Punaro MCP. Call
 `mailbox_status` once, then use bounded `mailbox_wait` calls to block until
 mail is available. Call `mailbox_recv` to claim it and `mailbox_ack` after
-handling it. A WebSocket wake is only an optimization; the durable fetch/ack
-path remains correct through sleep, reconnect, or missed wake events.
+handling it. Repeat bounded waits during long-running work. A WebSocket wake
+accelerates adapter polling only; it does not itself create a model turn. The
+durable fetch/ack path remains correct through sleep, reconnect, or missed wake
+events. A successful `punaro-adapter send` proves relay acceptance only
+(`accepted/queued`); it is not a mailbox acknowledgement or an agent action.

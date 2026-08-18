@@ -18,6 +18,7 @@ var mailCutoverTables = []string{
 	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_request_nonces",
 	"mail_conversation_controls", "mail_conversation_control_idempotency",
+	"mail_role_profiles", "mail_role_profile_idempotency",
 }
 
 var emptyMailCutoverDigest = func() string {
@@ -328,7 +329,7 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) {
 		return 0, emptyMailCutoverDigest
 	}
 	switch table {
@@ -368,6 +369,18 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 		return manifest.Counts.ControlIdempotency, digest
 	case "mail_request_nonces":
 		return manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces
+	case "mail_role_profiles":
+		digest := manifest.TableSHA256.RoleProfiles
+		if digest == "" && manifest.Counts.RoleProfiles == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.RoleProfiles, digest
+	case "mail_role_profile_idempotency":
+		digest := manifest.TableSHA256.RoleProfileIdempotency
+		if digest == "" && manifest.Counts.RoleProfileIdempotency == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.RoleProfileIdempotency, digest
 	default:
 		return -1, ""
 	}
@@ -419,6 +432,12 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_request_nonces(machine_id,nonce,expires_at)
 	 SELECT payload->>'machine_id',payload->>'nonce',TIMESTAMPTZ 'epoch'+(payload->>'expires_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_request_nonces' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_role_profiles(role,display_name,direct_addressable,updated_at)
+	 SELECT payload->>'role',NULLIF(payload->>'display_name',''),(payload->>'direct_addressable')::int=1,TIMESTAMPTZ 'epoch'+(payload->>'updated_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_role_profiles' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_role_profile_idempotency(machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at)
+	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',payload->>'role',NULLIF(payload->>'display_name',''),(payload->>'direct_addressable')::int=1,TIMESTAMPTZ 'epoch'+(payload->>'updated_at')::bigint*INTERVAL '1 millisecond',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_role_profile_idempotency' ORDER BY row_key COLLATE "C"`,
 }
 
 // CheckMailCutoverActivationReadiness proves that the verified destination has
