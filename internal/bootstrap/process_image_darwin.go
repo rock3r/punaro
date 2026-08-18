@@ -5,9 +5,32 @@ package bootstrap
 import (
 	"bytes"
 	"errors"
+	"os"
 
 	"golang.org/x/sys/unix"
 )
+
+func pidsMatchingImage(path string) ([]int, error) {
+	if path == "" {
+		return nil, errProcessImageUnknown
+	}
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, errProcessImageUnknown
+	}
+	var pids []int
+	self := os.Getpid()
+	for _, proc := range procs {
+		pid := int(proc.Proc.P_pid)
+		if pid <= 0 || pid == self {
+			continue
+		}
+		if matchProcessImage(pid, path) == processImageMatch {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
 
 func processImagePath(pid int) (string, error) {
 	if pid <= 0 {

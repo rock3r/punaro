@@ -7,6 +7,28 @@ import (
 	"strconv"
 )
 
+func pidsMatchingImage(path string) ([]int, error) {
+	if path == "" {
+		return nil, errProcessImageUnknown
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, errProcessImageUnknown
+	}
+	var pids []int
+	self := os.Getpid()
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 || pid == self {
+			continue
+		}
+		if matchProcessImage(pid, path) == processImageMatch {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
 func processImagePath(pid int) (string, error) {
 	if pid <= 0 {
 		return "", errProcessImageUnknown

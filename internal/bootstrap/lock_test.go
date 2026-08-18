@@ -92,6 +92,44 @@ func TestAcquireRunLeaseLeavesMismatchedProcess(t *testing.T) {
 	}
 }
 
+func TestAcquireRunLeaseClearsAbandonedStartingMarker(t *testing.T) {
+	dir := privateDir(t)
+	if err := writeRunStarting(dir, filepath.Join(dir, "missing-adapter")); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); !os.IsNotExist(err) {
+		t.Fatal("starting marker survived with no matching child")
+	}
+}
+
+func TestAcquireRunLeaseTerminatesStartingChild(t *testing.T) {
+	dir := privateDir(t)
+	cmd, image := startUniqueSleepProcess(t, dir)
+	if err := writeRunStarting(dir, image); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("starting child was not terminated")
+	}
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); !os.IsNotExist(err) {
+		t.Fatal("starting run.pid survived terminate")
+	}
+}
+
 func TestAcquireRunLeaseClearsDeadPID(t *testing.T) {
 	dir := privateDir(t)
 	cmd, image := startSleepProcess(t)
@@ -150,6 +188,28 @@ func startSleepProcess(t *testing.T) (*exec.Cmd, string) {
 	if err != nil {
 		t.Skip(err)
 	}
+	return startImageProcess(t, image)
+}
+
+func startUniqueSleepProcess(t *testing.T, directory string) (*exec.Cmd, string) {
+	t.Helper()
+	src, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip(err)
+	}
+	image := filepath.Join(directory, "unique-sleep")
+	body, err := os.ReadFile(src) // #nosec G304 -- local test helper copies sleep.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(image, body, 0o700); err != nil { // #nosec G306,G703 -- copied sleep helper must be executable.
+		t.Fatal(err)
+	}
+	return startImageProcess(t, image)
+}
+
+func startImageProcess(t *testing.T, image string) (*exec.Cmd, string) {
+	t.Helper()
 	cmd := exec.CommandContext(context.Background(), image, "30") // #nosec G204,G702 -- local test helper.
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)

@@ -8,6 +8,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func pidsMatchingImage(string) ([]int, error) {
+	return nil, errProcessImageUnknown
+}
+
 func processImagePath(pid int) (string, error) {
 	if pid <= 0 || pid > int(^uint32(0)) {
 		return "", errProcessImageUnknown

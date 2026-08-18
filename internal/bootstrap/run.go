@@ -332,8 +332,12 @@ func removeReadyFile(directory string) error {
 
 func startAdapter(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), adapter string) (Process, error) {
 	ready := filepath.Join(request.Directory, readyFile)
+	if err := writeRunStarting(request.Directory, adapter); err != nil {
+		return nil, err
+	}
 	child, err := start(ctx, ChildSpec{Path: adapter, Env: withReadyEnv(ready)})
 	if err != nil {
+		clearRunPID(request.Directory)
 		return nil, err
 	}
 	if proc, ok := child.(*osProcess); ok && proc.cmd != nil && proc.cmd.Process != nil {
@@ -346,9 +350,21 @@ func startAdapter(ctx context.Context, request RunRequest, start func(context.Co
 }
 
 type runPIDRecord struct {
-	Schema int64  `json:"schema"`
-	PID    int    `json:"pid"`
-	Path   string `json:"path"`
+	Schema   int64  `json:"schema"`
+	PID      int    `json:"pid"`
+	Path     string `json:"path"`
+	Starting bool   `json:"starting,omitempty"`
+}
+
+func writeRunStarting(directory, path string) error {
+	if path == "" {
+		return nil
+	}
+	body, err := json.Marshal(runPIDRecord{Schema: 1, Path: path, Starting: true})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, runPIDFile), body, 0o600)
 }
 
 func writeRunPID(directory string, pid int, path string) error {
@@ -371,7 +387,13 @@ func loadRunPID(directory string) (runPIDRecord, error) {
 		return runPIDRecord{}, err
 	}
 	var record runPIDRecord
-	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.PID <= 0 {
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 {
+		return runPIDRecord{}, errors.New("bootstrap run is already active")
+	}
+	if record.Starting && record.Path != "" && record.PID <= 0 {
+		return record, nil
+	}
+	if record.PID <= 0 {
 		return runPIDRecord{}, errors.New("bootstrap run is already active")
 	}
 	return record, nil
@@ -385,6 +407,9 @@ func terminateStaleRun(directory string) error {
 	record, err := loadRunPID(directory)
 	if err != nil {
 		return err
+	}
+	if record.PID == 0 && record.Starting {
+		return terminateStartingRun(directory, record)
 	}
 	if record.PID == 0 {
 		return nil
@@ -408,6 +433,55 @@ func terminateStaleRun(directory string) error {
 		_ = proc.Kill()
 		if waitStaleProcessGone(record) {
 			clearRunPID(directory)
+			return nil
+		}
+		return errors.New("bootstrap run is already active")
+	default:
+		return errors.New("bootstrap run is already active")
+	}
+}
+
+func terminateStartingRun(directory string, record runPIDRecord) error {
+	pids, err := pidsMatchingImage(record.Path)
+	if errors.Is(err, errProcessImageUnknown) {
+		return errors.New("bootstrap run is already active")
+	}
+	if err != nil {
+		return err
+	}
+	for _, pid := range pids {
+		if err := terminateRecordedProcess(runPIDRecord{PID: pid, Path: record.Path}); err != nil {
+			return err
+		}
+	}
+	remaining, err := pidsMatchingImage(record.Path)
+	if errors.Is(err, errProcessImageUnknown) || len(remaining) > 0 {
+		return errors.New("bootstrap run is already active")
+	}
+	if err != nil {
+		return err
+	}
+	clearRunPID(directory)
+	return nil
+}
+
+func terminateRecordedProcess(record runPIDRecord) error {
+	switch matchProcessImage(record.PID, record.Path) {
+	case processImageGone, processImageMismatch:
+		return nil
+	case processImageMatch:
+		proc, err := os.FindProcess(record.PID)
+		if err != nil || proc == nil {
+			return errors.New("bootstrap run is already active")
+		}
+		if runtime.GOOS != "windows" {
+			_ = proc.Signal(syscall.SIGTERM)
+			if waitStaleProcessGone(record) {
+				return nil
+			}
+		}
+		_ = proc.Kill()
+		if waitStaleProcessGone(record) {
 			return nil
 		}
 		return errors.New("bootstrap run is already active")
