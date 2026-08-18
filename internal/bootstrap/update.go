@@ -230,6 +230,9 @@ func Update(request Request) (Result, error) {
 	if sameIdentity {
 		phase = "repairing"
 	}
+	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
+		return Result{}, err
+	}
 	if err := writeJournal(request.Directory, journal{
 		Schema:          1,
 		Phase:           phase,
@@ -245,9 +248,6 @@ func Update(request Request) (Result, error) {
 			return Result{}, err
 		}
 	} else if err := publishSlot(request.Directory, published.Release, published.ReleaseSequence, published.ManifestSHA256); err != nil {
-		return Result{}, err
-	}
-	if err := persistDirectoryKeys(request.Directory, request.Keys); err != nil {
 		return Result{}, err
 	}
 	if err := finishPublication(request.Directory, published); err != nil {

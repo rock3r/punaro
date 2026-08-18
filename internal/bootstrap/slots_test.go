@@ -138,6 +138,46 @@ func TestRecoverJournalCompletesInterruptedRollback(t *testing.T) {
 	}
 }
 
+func TestRecoverJournalAppliesRollbackCatalogSequence(t *testing.T) {
+	dir := privateDir(t)
+	previous := filepath.Join(dir, previousSlot)
+	swap := filepath.Join(dir, swapSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(swap, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(filepath.Join(previous, slotRecord), []byte(`{"schema":1,"release":"v0.1.0","sequence":1,"manifest_sha256":"`+repeatC()+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(filepath.Join(swap, slotRecord), []byte(`{"schema":1,"release":"v0.2.0","sequence":2,"manifest_sha256":"`+repeatC()+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAccepted(dir, acceptedState{
+		Schema:          1,
+		Release:         "v0.2.0",
+		ReleaseSequence: 2,
+		CatalogSequence: 1,
+		ManifestSHA256:  repeatC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJournal(dir, journal{Schema: 1, Phase: "rolling-back", Release: "v0.1.0", Sequence: 1, CatalogSequence: 3, ManifestSHA256: repeatC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := loadAccepted(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.CatalogSequence != 3 || accepted.Release != "v0.2.0" {
+		t.Fatalf("accepted=%#v", accepted)
+	}
+}
+
 func TestRecoverJournalDoesNotReswapCompletedRollback(t *testing.T) {
 	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
