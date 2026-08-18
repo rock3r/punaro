@@ -41,6 +41,9 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	if got, want := cfg.RelayRateLimits(), relay.DefaultRateLimitConfig(); got != want {
 		t.Fatalf("unexpected default rate limits: %#v", got)
 	}
+	if got, want := cfg.RelayPendingCapacity(), relay.DefaultPendingCapacityConfig(); got != want {
+		t.Fatalf("unexpected default pending capacity: %#v", got)
+	}
 }
 
 func TestLoadAcceptsProductionComposeRuntimeConfiguration(t *testing.T) {
@@ -536,19 +539,31 @@ func TestLoadRejectsInvalidRelayRateLimits(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsExplicitRelayRateLimits(t *testing.T) {
-	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "4")
-	t.Setenv("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "12")
-	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_BURST", "8")
-	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "24")
-	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "9")
+func TestLoadRejectsInvalidRelayPendingCapacity(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero recipient count was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "10000")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer installation bytes were accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayPendingCapacity(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "4")
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", "4096")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", "8")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "8192")
+	t.Setenv("PUNARO_RELAY_CAPACITY_RETRY_AFTER_SECONDS", "9")
 	cfg, err := Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := cfg.RelayRateLimits()
-	want := relay.RateLimitConfig{SenderBurst: 4, SenderRefillPerMinute: 12, ConversationBurst: 8, ConversationRefillPerMinute: 24, RetryAfterMaxSeconds: 9}
+	got := cfg.RelayPendingCapacity()
+	want := relay.PendingCapacityConfig{RecipientCount: 4, RecipientBytes: 4096, InstallationCount: 8, InstallationBytes: 8192, RetryAfterSeconds: 9}
 	if got != want {
-		t.Fatalf("rate limits=%#v want %#v", got, want)
+		t.Fatalf("pending capacity=%#v want %#v", got, want)
 	}
 }

@@ -51,6 +51,7 @@ type MigrationSourceCounts struct {
 	RoleProfiles            int64 `json:"role_profiles,omitempty"`
 	RoleProfileIdempotency  int64 `json:"role_profile_idempotency,omitempty"`
 	RateBuckets             int64 `json:"rate_buckets,omitempty"`
+	PendingCapacity         int64 `json:"pending_capacity,omitempty"`
 	RequestNonces           int64 `json:"request_nonces"`
 }
 
@@ -72,6 +73,7 @@ type MigrationSourceHashes struct {
 	RoleProfiles            string `json:"role_profiles,omitempty"`
 	RoleProfileIdempotency  string `json:"role_profile_idempotency,omitempty"`
 	RateBuckets             string `json:"rate_buckets,omitempty"`
+	PendingCapacity         string `json:"pending_capacity,omitempty"`
 	RequestNonces           string `json:"request_nonces"`
 }
 
@@ -117,10 +119,12 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"role_profiles", "role,display_name,direct_addressable,updated_at", "role"},
 	{"role_profile_idempotency", "machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at", "machine_id,key"},
 	{"rate_buckets", "kind,bucket_key,tokens,updated_at", "kind,bucket_key"},
+	{"pending_capacity", "scope,scope_key,pending_count,pending_bytes", "scope,scope_key"},
 }
 
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
 var v4MigrationTableSpecs = migrationTableSpecs[:16]
+var v5MigrationTableSpecs = migrationTableSpecs[:17]
 
 var roleMigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
@@ -139,7 +143,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
+const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;pending_capacity"
+const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
 const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
 const roleMigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
@@ -398,10 +403,17 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='rate_buckets'`).Scan(&rateBucketTables); err != nil || rateBucketTables != 0 && rateBucketTables != 1 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var pendingCapacityTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='pending_capacity'`).Scan(&pendingCapacityTables); err != nil || pendingCapacityTables != 0 && pendingCapacityTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
 	if profileTables == 2 && controlTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
 	if rateBucketTables == 1 && profileTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if pendingCapacityTables == 1 && rateBucketTables != 1 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
 	manifest := MigrationSourceManifest{Version: 3}
@@ -409,7 +421,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
 	switch {
 	case roleTables == 0:
-		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 {
+		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 || pendingCapacityTables != 0 {
 			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
@@ -417,9 +429,12 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	case pendingCapacityTables == 1:
+		manifest.Version = 6
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
 	case profileTables == 2 && rateBucketTables == 1:
 		manifest.Version = 5
-		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
+		tableSpecs, schema = v5MigrationTableSpecs, v5MigrationSourceSchema
 	case profileTables == 2:
 		manifest.Version = 4
 		tableSpecs, schema = v4MigrationTableSpecs, v4MigrationSourceSchema
@@ -452,7 +467,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, pendingCapacityTables == 1); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -522,11 +537,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets bool) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, pendingCapacity bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets)
+	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets, pendingCapacity)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -561,7 +576,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets, pendingCapacity bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -577,6 +592,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	switch {
+	case pendingCapacity:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "pending_capacity", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	case rateBuckets:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	case profiles:
@@ -596,6 +613,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
 		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"rate_buckets":                     {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
+		"pending_capacity":                 {"scope:TEXT:1:1:-", "scope_key:TEXT:1:2:-", "pending_count:INTEGER:1:0:-", "pending_bytes:INTEGER:1:0:-"},
 		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
 		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
 		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
@@ -617,6 +635,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if !rateBuckets {
 		delete(expectedColumns, "rate_buckets")
+	}
+	if !pendingCapacity {
+		delete(expectedColumns, "pending_capacity")
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -717,6 +738,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	if rateBuckets {
 		expectedIndexes = append(expectedIndexes, "rate_buckets:1:pk:0:kind,bucket_key")
 	}
+	if pendingCapacity {
+		expectedIndexes = append(expectedIndexes, "pending_capacity:1:pk:0:scope,scope_key")
+	}
 	var actualIndexes []string
 	for table := range expectedColumns {
 		indexes, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -802,6 +826,8 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	wantTriggers := 42
 	switch {
+	case pendingCapacity:
+		wantTriggers = 54
 	case rateBuckets:
 		wantTriggers = 51
 	case profiles:
@@ -885,6 +911,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		logicalStateQuery += `
 		OR EXISTS (SELECT 1 FROM rate_buckets WHERE kind NOT IN ('sender','conversation') OR typeof(kind)<>'text' OR typeof(bucket_key)<>'text' OR typeof(tokens)<>'integer' OR tokens<0 OR typeof(updated_at)<>'integer')`
 	}
+	if pendingCapacity {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM pending_capacity WHERE scope NOT IN ('installation','recipient') OR typeof(scope)<>'text' OR typeof(scope_key)<>'text' OR typeof(pending_count)<>'integer' OR pending_count<0 OR typeof(pending_bytes)<>'integer' OR pending_bytes<0 OR (scope='installation' AND scope_key<>'') OR (scope='recipient' AND scope_key=''))`
+	}
 	if profiles {
 		logicalStateQuery += `
 		OR EXISTS (SELECT 1 FROM role_profiles WHERE direct_addressable NOT IN (0,1) OR typeof(role)<>'text' OR (display_name IS NOT NULL AND typeof(display_name)<>'text') OR typeof(direct_addressable)<>'integer' OR typeof(updated_at)<>'integer')
@@ -958,6 +988,11 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = text == "sender" || text == "conversation"
 	case "rate_buckets.bucket_key":
 		valid = ValidMachineID(text) || uuid.Validate(text) == nil
+	case "pending_capacity.scope":
+		valid = text == pendingScopeInstallation || text == pendingScopeRecipient
+	case "pending_capacity.scope_key":
+		_, roleRecipient := parseRoleRecipient(text)
+		valid = text == pendingInstallationKey || ValidEndpoint(text) || roleRecipient
 	case "messages.body":
 		valid = ValidMessageBody(text)
 	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id":
@@ -1033,6 +1068,8 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency = count, digest
 	case "rate_buckets":
 		manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets = count, digest
+	case "pending_capacity":
+		manifest.Counts.PendingCapacity, manifest.TableSHA256.PendingCapacity = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}

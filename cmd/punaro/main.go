@@ -363,6 +363,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if len(args) > 1 && args[1] == "cutover" {
 			return runMailCutover(args[2:], stdout, stderr, executeMailCutover)
 		}
+		if len(args) > 1 && args[1] == "reconcile-capacity" {
+			return runMailReconcileCapacity(args[2:], stdout, stderr, executeMailReconcileCapacity)
+		}
 	case "relay":
 		if len(args) > 1 && args[1] == "configure" {
 			return runRelayConfigure(args[2:], stdout, stderr, operator.ConfigureRelayMachines)

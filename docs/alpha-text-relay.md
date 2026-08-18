@@ -65,10 +65,18 @@ minute with burst 120. Override with
 `PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE`, and
 `PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS`. Invalid values fail startup. A
 rate-limited append is HTTP 429 with integer `Retry-After` and the content-free
-error `rate limited`. Exact committed retries never consume tokens. The
+error `rate limited`. Exact committed retries never consume tokens. Pending
+deliveries are bounded by recipient and installation count and body-byte
+ceilings (`PUNARO_RELAY_PENDING_RECIPIENT_COUNT`,
+`PUNARO_RELAY_PENDING_RECIPIENT_BYTES`,
+`PUNARO_RELAY_PENDING_INSTALLATION_COUNT`,
+`PUNARO_RELAY_PENDING_INSTALLATION_BYTES`,
+`PUNARO_RELAY_CAPACITY_RETRY_AFTER_SECONDS`). A capacity refusal is HTTP 429
+with integer `Retry-After` and the content-free error `at capacity`. The
 loopback health listener exposes `GET /metrics` with
-`relay_rate_limit_rejections` only; it has no body, endpoint, role, or
-conversation labels.
+`relay_rate_limit_rejections`, `relay_capacity_rejections`,
+`relay_pending_deliveries`, and `relay_pending_bytes` only; it has no body,
+endpoint, role, or conversation labels.
 
 For a Cloudflare-protected remote route, additionally set the Access issuer,
 application audience tag, and JWKS URL. Configure the tunnel origin to require

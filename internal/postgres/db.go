@@ -35,6 +35,8 @@ type Database struct {
 	memoryUsageStopOnce       sync.Once
 	rateMu                    sync.Mutex
 	rateLimits                relay.RateLimitConfig
+	capacityMu                sync.Mutex
+	capacity                  relay.PendingCapacityConfig
 	metrics                   *relay.Metrics
 }
 
@@ -96,7 +98,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		return nil, err
 	}
 	database := &Database{
-		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(),
+		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(), capacity: relay.DefaultPendingCapacityConfig(),
 		attachmentPhysicalGCSlots: make(chan struct{}, 1),
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
@@ -179,7 +181,13 @@ func (d *Database) Ready(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return state.Ready()
+	if err := state.Ready(); err != nil {
+		return err
+	}
+	if state.Version >= 47 {
+		return d.ensurePendingCapacityReady()
+	}
+	return nil
 }
 
 // TrustedAttachmentRuntimeReady requires the exact current schema because the
@@ -1264,6 +1272,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL relay rate-limit schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = rateObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 47 {
+		capacityObjectsPresent, err := relayPendingCapacityControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay pending-capacity schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = capacityObjectsPresent
 	}
 	return snapshot, nil
 }

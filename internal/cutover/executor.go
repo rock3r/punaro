@@ -21,7 +21,7 @@ var tables = []string{
 	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency",
 	"mail_conversation_controls", "mail_conversation_control_idempotency", "mail_request_nonces",
-	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets",
+	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_pending_capacity",
 }
 
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -343,6 +343,8 @@ func tableEvidence(manifest relay.MigrationSourceManifest, table string) (int64,
 		return manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency
 	case "mail_rate_buckets":
 		return manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets
+	case "mail_pending_capacity":
+		return manifest.Counts.PendingCapacity, manifest.TableSHA256.PendingCapacity
 	default:
 		return -1, ""
 	}

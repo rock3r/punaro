@@ -404,7 +404,17 @@ charging. A new request consumes one token from each bucket in the same
 transaction that accepts the message. Exhaustion returns HTTP `429` with a
 bounded integer `Retry-After` and the stable error `rate limited`. A rejected
 request creates no sequence, message, delivery, idempotency, or audit row.
-Bodies are never hashed, compared, or parsed for loop detection.
+Pending deliveries are additionally bounded by explicit per-recipient and
+installation count and body-byte ceilings. Capacity is reserved in the same
+transaction as append for the complete fan-out; broadcast denial creates no
+partial recipient state. Ack, membership-revocation retirement, and other
+terminal pending transitions release exactly once. Lease and redelivery do not
+change charged occupancy. Exact committed retries return the original result
+without reserving again. Capacity denial returns HTTP `429` with a bounded
+integer `Retry-After` and the stable error `at capacity`. Counters are
+explicit rows, not unbounded `COUNT`/`SUM` on the send path. Startup and
+readiness verify them or fail closed; `punaro mail reconcile-capacity` is the
+host-local bounded repair. Bodies are never hashed, compared, or parsed for loop detection.
 
 The guarantee is **at-least-once delivery**: a crash after a
 local mailbox injection but before the relay receives the acknowledgement can
@@ -863,7 +873,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
-| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits; committed idempotent retries do not consume tokens. |
+| `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity; committed idempotent retries do not consume tokens or reserve occupancy again. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
 | `POST` | `/v1/deliveries/{id}/ack` | Acknowledge after local injection. |
@@ -1431,7 +1441,16 @@ version 5 and copy those rows into PostgreSQL during cutover so a depleted
 sender cannot regain burst after authority transfer. A prepared parent source
 without that table remains version 4 and exports an empty `mail_rate_buckets`
 page, so crash-during-cutover plus an upgraded admin binary can still inspect
-and resume. Capacity, expiry, and dead-letter policies remain later slices.
+and resume.
+
+Schema version 47 adds explicit pending-delivery occupancy counters. Recipient
+and installation count and body-byte ceilings are startup-validated. Current
+SQLite sources that contain `pending_capacity` are migration-source version 6
+and copy those rows into PostgreSQL during cutover. A prepared parent source
+without that table remains version 5 and exports an empty `mail_pending_capacity`
+page. Readiness verifies counters against pending deliveries or fails closed;
+uninitialized counters with pending work are rebuilt once. Expiry and
+dead-letter policies remain later slices.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the

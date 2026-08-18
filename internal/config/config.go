@@ -59,6 +59,11 @@ type Config struct {
 	RelayConversationRateBurst           int
 	RelayConversationRateRefillPerMinute int
 	RelayRateRetryAfterMaxSeconds        int
+	RelayPendingRecipientCount           int
+	RelayPendingRecipientBytes           int
+	RelayPendingInstallationCount        int
+	RelayPendingInstallationBytes        int
+	RelayCapacityRetryAfterSeconds       int
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -254,7 +259,28 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax}, nil
+	capacityDefaults := relay.DefaultPendingCapacityConfig()
+	pendingRecipientCount, err := parseBoundedInt("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", value("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", strconv.Itoa(capacityDefaults.RecipientCount)), relay.PendingCountMin, relay.PendingCountMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingRecipientBytes, err := parseBoundedInt("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", value("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", strconv.Itoa(capacityDefaults.RecipientBytes)), relay.PendingBytesMin, relay.PendingBytesMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingInstallationCount, err := parseBoundedInt("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", value("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", strconv.Itoa(capacityDefaults.InstallationCount)), relay.PendingCountMin, relay.PendingCountMax)
+	if err != nil {
+		return Config{}, err
+	}
+	pendingInstallationBytes, err := parseBoundedInt("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", value("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", strconv.Itoa(capacityDefaults.InstallationBytes)), relay.PendingBytesMin, relay.PendingBytesMax)
+	if err != nil {
+		return Config{}, err
+	}
+	capacityRetryAfter, err := parseBoundedInt("PUNARO_RELAY_CAPACITY_RETRY_AFTER_SECONDS", value("PUNARO_RELAY_CAPACITY_RETRY_AFTER_SECONDS", strconv.Itoa(capacityDefaults.RetryAfterSeconds)), relay.CapacityRetryAfterMin, relay.CapacityRetryAfterMaxBound)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayCapacityRetryAfterSeconds: capacityRetryAfter}, nil
 }
 
 func parseBoundedInt(name, raw string, minimum, maximum int) (int, error) {
@@ -273,6 +299,17 @@ func (c Config) RelayRateLimits() relay.RateLimitConfig {
 		ConversationBurst:           c.RelayConversationRateBurst,
 		ConversationRefillPerMinute: c.RelayConversationRateRefillPerMinute,
 		RetryAfterMaxSeconds:        c.RelayRateRetryAfterMaxSeconds,
+	}
+}
+
+// RelayPendingCapacity returns the startup-validated pending-delivery ceilings.
+func (c Config) RelayPendingCapacity() relay.PendingCapacityConfig {
+	return relay.PendingCapacityConfig{
+		RecipientCount:    c.RelayPendingRecipientCount,
+		RecipientBytes:    c.RelayPendingRecipientBytes,
+		InstallationCount: c.RelayPendingInstallationCount,
+		InstallationBytes: c.RelayPendingInstallationBytes,
+		RetryAfterSeconds: c.RelayCapacityRetryAfterSeconds,
 	}
 }
 

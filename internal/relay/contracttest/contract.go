@@ -18,6 +18,7 @@ import (
 // cursor contract against one otherwise-empty backend namespace.
 func Run(t *testing.T, backend relay.Backend, namespace string) {
 	t.Helper()
+	RunPendingCapacity(t, backend, namespace+"-capacity")
 	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
 	machineA, machineB := namespace+"-machine-a", namespace+"-machine-b"
 	consumerB := namespace + "-consumer-b"
@@ -395,6 +396,157 @@ func RunRateLimits(t *testing.T, backend relay.Backend, namespace string) {
 		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
 	}
 	if err := limiter.SetRateLimits(relay.DefaultRateLimitConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// PendingCapacitySetter is implemented by durable stores that keep pending
+// delivery ceilings in process and occupancy in the database.
+type PendingCapacitySetter interface {
+	relay.Backend
+	SetPendingCapacity(relay.PendingCapacityConfig) error
+}
+
+// RunPendingCapacity proves the same recipient and installation pending-capacity
+// contract against every backend.
+func RunPendingCapacity(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	limiter, ok := backend.(PendingCapacitySetter)
+	if !ok {
+		t.Fatal("backend does not expose durable pending capacity")
+	}
+	if err := limiter.SetPendingCapacity(relay.DefaultPendingCapacityConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.SetPendingCapacity(relay.DefaultPendingCapacityConfig())
+	})
+	now := time.Date(2026, time.August, 18, 19, 30, 0, 0, time.UTC)
+	cfg := relay.PendingCapacityConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 8, InstallationBytes: 8192, RetryAfterSeconds: 60}
+	if err := limiter.SetPendingCapacity(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineA, machineB, machineC := namespace+"-a", namespace+"-b", namespace+"-c"
+	endpointA, endpointB, endpointC := "agent/"+namespace+"/a", "agent/"+namespace+"/b", "agent/"+namespace+"/c"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineC, []string{endpointC}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-one", Now: now})
+	if err != nil || duplicate {
+		t.Fatalf("first append message=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-two", Now: now})
+	if !errors.Is(err, relay.ErrAtCapacity) {
+		t.Fatalf("recipient ceiling err=%v", err)
+	}
+	replay, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-one", Now: now})
+	if err != nil || !duplicate || replay.Sequence != first.Sequence {
+		t.Fatalf("committed retry message=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("lease=%#v err=%v", page, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-two", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.RecipientCount = 8
+	cfg.InstallationCount = 1
+	if err := limiter.SetPendingCapacity(cfg); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-create-shared", CreatorEndpoint: endpointB, Now: now.Add(time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: shared.ID, SenderMachineID: machineB, FromEndpoint: endpointB, Body: "install", IdempotencyKey: namespace + "-install", Now: now.Add(time.Second)})
+	if !errors.Is(err, relay.ErrAtCapacity) {
+		t.Fatalf("installation ceiling err=%v", err)
+	}
+	remaining, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now.Add(time.Second), time.Minute, 10)
+	if err != nil || len(remaining.Deliveries) != 1 {
+		t.Fatalf("remaining lease=%#v err=%v", remaining, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, remaining.Deliveries[0].ID, remaining.Deliveries[0].LeaseToken, remaining.Deliveries[0].LeaseGeneration, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.RecipientCount = 1
+	cfg.InstallationCount = 1
+	if err := limiter.SetPendingCapacity(cfg); err != nil {
+		t.Fatal(err)
+	}
+	concurrent, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineC, IdempotencyKey: namespace + "-create-concurrent", CreatorEndpoint: endpointC, Now: now.Add(2 * time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointC, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointA, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 6
+	var started, running sync.WaitGroup
+	started.Add(workers)
+	running.Add(workers)
+	results := make(chan error, workers)
+	for index := 0; index < workers; index++ {
+		go func(index int) {
+			defer running.Done()
+			started.Done()
+			started.Wait()
+			_, _, err := backend.AppendMessage(relay.AppendInput{
+				ConversationID: concurrent.ID, SenderMachineID: machineC, FromEndpoint: endpointC,
+				Body: fmt.Sprintf("concurrent-%d", index), IdempotencyKey: fmt.Sprintf("%s-conc-%d", namespace, index),
+				Now: now.Add(2 * time.Second),
+			})
+			results <- err
+		}(index)
+	}
+	running.Wait()
+	close(results)
+	var accepted, limited int
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, relay.ErrAtCapacity):
+			limited++
+		default:
+			t.Fatalf("concurrent append err=%v", err)
+		}
+	}
+	if accepted != 1 || limited != workers-1 {
+		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
+	}
+	if err := limiter.SetPendingCapacity(relay.DefaultPendingCapacityConfig()); err != nil {
 		t.Fatal(err)
 	}
 }

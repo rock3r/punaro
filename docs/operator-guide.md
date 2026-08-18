@@ -222,6 +222,17 @@ punaro mail cutover --directory /absolute/private/punaro \
   --abort --epoch-id 019f7f07-8b88-7c12-a394-b663274a6555 --yes
 ```
 
+If readiness fails closed after a v5 source import because occupancy counters
+were empty while pending deliveries exist, repair them host-locally:
+
+```sh
+punaro mail reconcile-capacity --directory /absolute/private/punaro --yes
+```
+
+The command rebuilds explicit pending-delivery counters from current pending
+rows. It does not inspect bodies for loops, change leases, or expose an agent
+API. Exact retries are safe.
+
 Abort is itself crash-safe. If PostgreSQL rejected the begin before creating
 the epoch, Punaro first records an exact terminal abort reservation; a delayed
 begin can then only observe that tombstone and cannot recreate an import fence.

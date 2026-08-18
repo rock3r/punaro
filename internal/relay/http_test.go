@@ -776,6 +776,64 @@ func TestHTTPAppendRateLimitIsRetryableAndContentFree(t *testing.T) {
 	}
 }
 
+func TestHTTPAppendCapacityIsRetryableAndContentFree(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetPendingCapacity(PendingCapacityConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 8, InstallationBytes: 8192, RetryAfterSeconds: 60}); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	metrics := &Metrics{}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Metrics: metrics})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "cap-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "cap-advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "cap-create", "cap-create")
+	var conversation Conversation
+	if create.Code != http.StatusCreated || json.NewDecoder(create.Body).Decode(&conversation) != nil {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "cap-send-1", "cap-send-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("accepted status=%d body=%s", first.Code, first.Body.String())
+	}
+	replay := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "cap-send-1-retry", "cap-send-1")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("committed retry status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	limited := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"two"}`, "cap-send-2", "cap-send-2")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited status=%d body=%s", limited.Code, limited.Body.String())
+	}
+	if limited.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After=%q", limited.Header().Get("Retry-After"))
+	}
+	body := limited.Body.String()
+	if !strings.Contains(body, `"error":"at capacity"`) || strings.Contains(body, conversation.ID) || strings.Contains(body, "two") || strings.Contains(body, "agent/") {
+		t.Fatalf("limited body leaked content: %s", body)
+	}
+	if snapshot := metrics.Snapshot(); snapshot.RelayCapacityRejections != 1 || snapshot.RelayPendingDeliveries != 1 {
+		t.Fatalf("metrics=%#v", snapshot)
+	}
+}
+
 func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey, machineID, method, path, body, nonce, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)

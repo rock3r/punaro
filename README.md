@@ -132,6 +132,11 @@ precedence over dotenv values.
 | `PUNARO_TRUSTED_LAN_HTTP` | `false` | Explicit plaintext credential exception for observed peers inside the validated trusted LAN. Public peers never qualify. |
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
 | `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. Before cutover, `postgres` is limited to empty-destination parity/qualification. The supported one-shot executor publishes `postgres` marker-last only after verified import, SQLite retirement, legacy-gate closure, and PostgreSQL activation. It never dual-writes. |
+| `PUNARO_RELAY_PENDING_RECIPIENT_COUNT` | `10000` | Maximum pending deliveries charged to one recipient identity. Integer 1..10000000. |
+| `PUNARO_RELAY_PENDING_RECIPIENT_BYTES` | `33554432` | Maximum pending body bytes charged to one recipient identity. Integer 1..1073741824. |
+| `PUNARO_RELAY_PENDING_INSTALLATION_COUNT` | `100000` | Maximum pending deliveries installation-wide. Integer 1..10000000. |
+| `PUNARO_RELAY_PENDING_INSTALLATION_BYTES` | `268435456` | Maximum pending body bytes installation-wide. Integer 1..1073741824. |
+| `PUNARO_RELAY_CAPACITY_RETRY_AFTER_SECONDS` | `60` | Integer Retry-After advertised on capacity `429`. Range 1..3600. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. |
 | `PUNARO_TRUSTED_ATTACHMENTS_ENABLED` | `false` | Separately gates the authenticated trusted-relay attachment surface; requires PostgreSQL device authentication, a valid ingress policy, schema v13, and successful startup reconciliation. |
 | `PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR` | unset | Required with trusted attachments: absolute private (`0700`) daemon-owned blob root. |

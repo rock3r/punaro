@@ -750,6 +750,20 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 			return nil, nil, err
 		}
 	}
+	if setter, ok := backend.(interface {
+		SetPendingCapacity(relay.PendingCapacityConfig) error
+	}); ok {
+		capacity := cfg.RelayPendingCapacity()
+		if capacity == (relay.PendingCapacityConfig{}) {
+			capacity = relay.DefaultPendingCapacityConfig()
+		}
+		if err := setter.SetPendingCapacity(capacity); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {
