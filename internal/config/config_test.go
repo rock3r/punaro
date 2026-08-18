@@ -44,6 +44,9 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	if got, want := cfg.RelayQuotaLimits(), relay.DefaultQuotaConfig(); got != want {
 		t.Fatalf("unexpected default pending quota: %#v", got)
 	}
+	if got, want := cfg.RelayRetentionPolicy(), relay.DefaultRetentionConfig(); got != want {
+		t.Fatalf("unexpected default retention: %#v", got)
+	}
 }
 
 func TestLoadAcceptsProductionComposeRuntimeConfiguration(t *testing.T) {
@@ -570,6 +573,69 @@ func TestLoadRejectsInvalidRelayQuotaLimits(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", "nope")
 	if _, err := Load(""); err == nil {
 		t.Fatal("non-integer pending retry-after was accepted")
+	}
+}
+
+func TestLoadRejectsInvalidRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending max age was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer terminal retention was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "90")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "180")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "7")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRetentionPolicy()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
+func TestRetentionPolicyFromFileIgnoresProcessEnv(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
+func TestRetentionPolicyFromFileUsesDefaultsWhenKeysAbsent(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("PUNARO_LOG_LEVEL=info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != relay.DefaultRetentionConfig() {
+		t.Fatalf("retention=%#v want defaults", got)
 	}
 }
 

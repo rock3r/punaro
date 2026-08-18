@@ -64,6 +64,9 @@ type Config struct {
 	RelayPendingInstallationCount        int
 	RelayPendingInstallationBytes        int64
 	RelayPendingRetryAfterSeconds        int
+	RelayPendingMaxAgeSeconds            int
+	RelayTerminalRetentionSeconds        int
+	RelayDeliveryMaintenanceBatch        int
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -280,7 +283,20 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayPendingRetryAfterSeconds: pendingRetryAfter}, nil
+	retentionDefaults := relay.DefaultRetentionConfig()
+	pendingMaxAge, err := parseBoundedInt("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", value("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", strconv.Itoa(retentionDefaults.PendingMaxAgeSeconds)), relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	terminalRetention, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", value("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(retentionDefaults.TerminalRetentionSeconds)), relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	if err != nil {
+		return Config{}, err
+	}
+	maintenanceBatch, err := parseBoundedInt("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", value("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", strconv.Itoa(retentionDefaults.MaintenanceBatch)), relay.RetentionBatchMin, relay.RetentionBatchMax)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayPendingRetryAfterSeconds: pendingRetryAfter, RelayPendingMaxAgeSeconds: pendingMaxAge, RelayTerminalRetentionSeconds: terminalRetention, RelayDeliveryMaintenanceBatch: maintenanceBatch}, nil
 }
 
 func parseBoundedInt(name, raw string, minimum, maximum int) (int, error) {
@@ -318,6 +334,15 @@ func (c Config) RelayQuotaLimits() relay.QuotaConfig {
 		InstallationCount: c.RelayPendingInstallationCount,
 		InstallationBytes: c.RelayPendingInstallationBytes,
 		RetryAfterSeconds: c.RelayPendingRetryAfterSeconds,
+	}
+}
+
+// RelayRetentionPolicy returns the startup-validated pending-age and terminal retention.
+func (c Config) RelayRetentionPolicy() relay.RetentionConfig {
+	return relay.RetentionConfig{
+		PendingMaxAgeSeconds:     c.RelayPendingMaxAgeSeconds,
+		TerminalRetentionSeconds: c.RelayTerminalRetentionSeconds,
+		MaintenanceBatch:         c.RelayDeliveryMaintenanceBatch,
 	}
 }
 
@@ -457,16 +482,76 @@ func parseLogLevel(raw string) (string, error) {
 	}
 }
 
+// RetentionPolicyFromFile reads pending-age and terminal-retention keys from one
+// installation dotenv file. Process environment values do not override the file,
+// so host-local maintenance uses the daemon policy for that directory.
+func RetentionPolicyFromFile(path string) (relay.RetentionConfig, error) {
+	values, err := readDotEnvFile(path)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	defaults := relay.DefaultRetentionConfig()
+	lookup := func(key string, fallback int) (int, error) {
+		raw, ok := values[key]
+		if !ok {
+			return fallback, nil
+		}
+		return parseBoundedInt(key, raw, relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+	}
+	pendingMaxAge, err := lookup("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", defaults.PendingMaxAgeSeconds)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	terminalRetention, err := lookup("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", defaults.TerminalRetentionSeconds)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	maintenanceRaw, ok := values["PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH"]
+	maintenanceBatch := defaults.MaintenanceBatch
+	if ok {
+		maintenanceBatch, err = parseBoundedInt("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", maintenanceRaw, relay.RetentionBatchMin, relay.RetentionBatchMax)
+		if err != nil {
+			return relay.RetentionConfig{}, err
+		}
+	}
+	cfg := relay.RetentionConfig{
+		PendingMaxAgeSeconds:     pendingMaxAge,
+		TerminalRetentionSeconds: terminalRetention,
+		MaintenanceBatch:         maintenanceBatch,
+	}
+	if err := cfg.Validate(); err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	return cfg, nil
+}
+
 // loadDotEnv supports the deliberately small KEY=VALUE subset needed for local
 // development. Existing process variables win over dotenv values.
 func loadDotEnv(path string) error {
+	values, err := readDotEnvFile(path)
+	if err != nil {
+		return err
+	}
+	for key, v := range values {
+		if _, present := os.LookupEnv(key); present {
+			continue
+		}
+		if err := os.Setenv(key, v); err != nil { // #nosec G703 -- dotenv values are operator-chosen local config
+			return fmt.Errorf("set dotenv value %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func readDotEnvFile(path string) (map[string]string, error) {
 	// #nosec G304,G703 -- the operator explicitly chooses this local dotenv
 	// path via CLI or PUNARO_ENV_FILE; it is never derived from remote input.
 	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("read dotenv file: %w", err)
+		return nil, fmt.Errorf("read dotenv file: %w", err)
 	}
 	defer func() { _ = file.Close() }()
+	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 	for line := 1; scanner.Scan(); line++ {
 		raw := strings.TrimSpace(scanner.Text())
@@ -476,16 +561,15 @@ func loadDotEnv(path string) error {
 		key, v, found := strings.Cut(raw, "=")
 		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
 		if !found || key == "" || strings.ContainsAny(key, " \t") {
-			return fmt.Errorf("parse dotenv file line %d", line)
+			return nil, fmt.Errorf("parse dotenv file line %d", line)
 		}
-		if _, present := os.LookupEnv(key); !present {
-			if err := os.Setenv(key, strings.Trim(strings.TrimSpace(v), "\"'")); err != nil {
-				return fmt.Errorf("set dotenv value line %d: %w", line, err)
-			}
+		if _, exists := values[key]; exists {
+			continue
 		}
+		values[key] = strings.Trim(strings.TrimSpace(v), "\"'")
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("scan dotenv file: %w", err)
+		return nil, fmt.Errorf("scan dotenv file: %w", err)
 	}
-	return nil
+	return values, nil
 }

@@ -37,11 +37,12 @@ import (
 )
 
 const (
-	trustedReconcileBatch    = 100
-	trustedReconcileMaxPages = 1000
-	trustedOrphanGrace       = 24 * time.Hour
-	trustedGCClaimLifetime   = time.Minute
-	trustedReconcileInterval = 5 * time.Minute
+	trustedReconcileBatch       = 100
+	trustedReconcileMaxPages    = 1000
+	trustedOrphanGrace          = 24 * time.Hour
+	trustedGCClaimLifetime      = time.Minute
+	trustedReconcileInterval    = 5 * time.Minute
+	deliveryMaintenanceInterval = time.Minute
 )
 
 type platformDatabase interface {
@@ -212,6 +213,11 @@ func run(args []string, stderr io.Writer) int {
 	}
 	if relayStore != nil {
 		defer func() { _ = relayStore.Close() }()
+	}
+	if relayHandler != nil {
+		if stopMaintain := startDeliveryMaintenance(relayStore, postgresRelay); stopMaintain != nil {
+			defer stopMaintain()
+		}
 	}
 	relayMetricsSnapshot := func() relay.MetricsSnapshot { return relay.MetricsSnapshot{} }
 	if provider, ok := relayHandler.(interface{ MetricsSnapshot() relay.MetricsSnapshot }); ok {
@@ -764,6 +770,20 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 			return nil, nil, err
 		}
 	}
+	if setter, ok := backend.(interface {
+		SetRetentionPolicy(relay.RetentionConfig) error
+	}); ok {
+		policy := cfg.RelayRetentionPolicy()
+		if policy == (relay.RetentionConfig{}) {
+			policy = relay.DefaultRetentionConfig()
+		}
+		if err := setter.SetRetentionPolicy(policy); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {
@@ -805,6 +825,47 @@ type relayMetricsHandler struct {
 
 func (h relayMetricsHandler) MetricsSnapshot() relay.MetricsSnapshot {
 	return h.metrics.Snapshot()
+}
+
+type deliveryMaintainer interface {
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+}
+
+func startDeliveryMaintenance(store *relay.Store, postgresRelay relay.Backend) func() {
+	var maintainer deliveryMaintainer
+	if store != nil {
+		maintainer = store
+	} else if postgres, ok := postgresRelay.(deliveryMaintainer); ok {
+		maintainer = postgres
+	}
+	if maintainer == nil {
+		return nil
+	}
+	// #nosec G118 -- the returned stop function owns and invokes cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(deliveryMaintenanceInterval)
+		defer ticker.Stop()
+		if _, err := maintainer.MaintainDeliveries(time.Now().UTC()); err != nil {
+			log.Printf("punarod delivery maintenance did not complete")
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := maintainer.MaintainDeliveries(time.Now().UTC()); err != nil {
+					log.Printf("punarod delivery maintenance did not complete")
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 func newAccessVerifier(cfg config.Config) (*access.Verifier, error) {
