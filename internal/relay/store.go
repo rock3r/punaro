@@ -1208,6 +1208,17 @@ func (s *Store) SendDirectMessage(input DirectMessageInput) (Message, bool, erro
 	return message, false, nil
 }
 
+func rejectDirectConversationAppend(tx *sql.Tx, conversationID string) error {
+	var exists int
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM direct_conversations WHERE conversation_id = ?)`, conversationID).Scan(&exists); err != nil {
+		return fmt.Errorf("read direct conversation: %w", err)
+	}
+	if exists == 1 {
+		return ErrForbidden
+	}
+	return nil
+}
+
 func liveBoundRoleSession(tx *sql.Tx, machineID, role string, now time.Time) (string, error) {
 	var session string
 	err := tx.QueryRowContext(context.Background(), `SELECT rb.session_endpoint FROM role_bindings rb
@@ -1595,11 +1606,15 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 	if capabilities&CapSend == 0 {
 		return ErrForbidden
 	}
+	if err := rejectDirectConversationAppend(tx, conversationID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
+// Direct-role conversations are writable only through SendDirectMessage.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || (input.TargetRole != "" && !ValidRole(input.TargetRole)) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
@@ -1622,6 +1637,9 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	if capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
+	}
+	if err := rejectDirectConversationAppend(tx, input.ConversationID); err != nil {
+		return Message{}, false, err
 	}
 	if input.TargetRole != "" {
 		var allowed bool

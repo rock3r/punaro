@@ -588,8 +588,11 @@ func (d *Database) SendDirectMessage(input relay.DirectMessageInput) (relay.Mess
 	if err != nil {
 		return relay.Message{}, false, err
 	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, input.ToRole); err != nil {
+		return relay.Message{}, false, errors.New("target role profile lock is unavailable")
+	}
 	var addressable bool
-	err = tx.QueryRowContext(context.Background(), `SELECT direct_addressable FROM relay.mail_role_profiles WHERE role=$1`, input.ToRole).Scan(&addressable)
+	err = tx.QueryRowContext(context.Background(), `SELECT direct_addressable FROM relay.mail_role_profiles WHERE role=$1 FOR UPDATE`, input.ToRole).Scan(&addressable)
 	if errors.Is(err, sql.ErrNoRows) || !addressable {
 		return relay.Message{}, false, relay.ErrForbidden
 	}
@@ -631,6 +634,24 @@ func (d *Database) SendDirectMessage(input relay.DirectMessageInput) (relay.Mess
 		return relay.Message{}, false, relayDatabaseError(err, "commit direct message")
 	}
 	return message, false, nil
+}
+
+func postgresRejectDirectConversationAppend(tx *sql.Tx, conversationID string) error {
+	available, err := postgresDirectMessagesAvailable(tx)
+	if err != nil {
+		return errors.New("direct conversations are unavailable")
+	}
+	if !available {
+		return nil
+	}
+	var exists bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_direct_conversations WHERE conversation_id=$1::uuid)`, conversationID).Scan(&exists); err != nil {
+		return errors.New("direct conversation lookup is unavailable")
+	}
+	if exists {
+		return relay.ErrForbidden
+	}
+	return nil
 }
 
 func postgresDirectMessagesAvailable(q queryer) (bool, error) {
@@ -1072,10 +1093,14 @@ func (d *Database) AuthorizeSender(conversationID, machineID, endpoint string, n
 	if capabilities&relay.CapSend == 0 {
 		return relay.ErrForbidden
 	}
+	if err := postgresRejectDirectConversationAppend(tx, conversationID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // AppendMessage transactionally appends one immutable PostgreSQL relay message.
+// Direct-role conversations are writable only through SendDirectMessage.
 func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.SenderMachineID) || !relay.ValidEndpoint(input.FromEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
 		return relay.Message{}, false, errors.New("invalid message request")
@@ -1135,6 +1160,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	}
 	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if err := postgresRejectDirectConversationAppend(tx, input.ConversationID); err != nil {
+		return relay.Message{}, false, err
 	}
 	if input.TargetRole != "" {
 		if !relay.ValidRole(input.TargetRole) || !rolesAvailable {

@@ -949,6 +949,57 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testin
 	}
 }
 
+func TestInspectMigrationSourceAcceptsPreparedParentWithoutDirectMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 5 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent without direct messages inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 5 {
+		t.Fatalf("parent prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 5 {
+		t.Fatalf("prepared parent changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_direct_conversations", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent direct-conversation batch=%#v err=%v", batch, err)
+	}
+}
+
 func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

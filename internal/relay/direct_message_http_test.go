@@ -119,3 +119,58 @@ func TestHTTPDirectMessageRejectsMalformedAndUnauthorizedRequests(t *testing.T) 
 		t.Fatalf("stolen status=%d body=%s", stolen.Code, stolen.Body.String())
 	}
 }
+
+func TestHTTPDirectConversationRejectsGenericAppendAfterOptOut(t *testing.T) {
+	handler, privateA, privateB := newRoleRegisterHandler(t)
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "advertise-a", ""); response.Code != http.StatusOK {
+		t.Fatalf("advertise a status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "advertise-b", ""); response.Code != http.StatusOK {
+		t.Fatalf("advertise b status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/roles/register", `{"role":"role/machine-a/reviewer","direct_addressable":true}`, "reg-a", "reg-a"); response.Code != http.StatusCreated {
+		t.Fatalf("register a status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/roles/register", `{"role":"role/machine-b/implementer","direct_addressable":true}`, "reg-b", "reg-b"); response.Code != http.StatusCreated {
+		t.Fatalf("register b status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/roles/bindings", `{"role":"role/machine-a/reviewer","session_endpoint":"agent/a/session"}`, "bind-a", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("bind a status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/roles/bindings", `{"role":"role/machine-b/implementer","session_endpoint":"agent/b/session"}`, "bind-b", ""); response.Code != http.StatusNoContent {
+		t.Fatalf("bind b status=%d body=%s", response.Code, response.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/direct-messages", `{"from_role":"role/machine-a/reviewer","to_role":"role/machine-b/implementer","body":"please review"}`, "dm-1", "dm-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	var message Message
+	if err := json.NewDecoder(first.Body).Decode(&message); err != nil {
+		t.Fatal(err)
+	}
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["send","receive"]}]}`, "create-named", "create-named")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("named create status=%d body=%s", create.Code, create.Body.String())
+	}
+	var named struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(create.Body).Decode(&named); err != nil {
+		t.Fatal(err)
+	}
+	bypass := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+message.ConversationID+"/messages", `{"from_endpoint":"agent/a/session","body":"bypass"}`, "append-direct", "append-direct")
+	if bypass.Code != http.StatusForbidden {
+		t.Fatalf("direct append status=%d body=%s", bypass.Code, bypass.Body.String())
+	}
+	if response := serveSigned(t, handler, privateB, "machine-b", http.MethodPost, "/v1/roles/register", `{"role":"role/machine-b/implementer","direct_addressable":false}`, "opt-out", "opt-out"); response.Code != http.StatusOK && response.Code != http.StatusCreated {
+		t.Fatalf("opt-out status=%d body=%s", response.Code, response.Body.String())
+	}
+	afterOptOut := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+message.ConversationID+"/messages", `{"from_endpoint":"agent/a/session","body":"after opt-out"}`, "append-opt-out", "append-opt-out")
+	if afterOptOut.Code != http.StatusForbidden {
+		t.Fatalf("opt-out append status=%d body=%s", afterOptOut.Code, afterOptOut.Body.String())
+	}
+	namedSend := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+named.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"named room still works"}`, "append-named", "append-named")
+	if namedSend.Code != http.StatusCreated {
+		t.Fatalf("named append status=%d body=%s", namedSend.Code, namedSend.Body.String())
+	}
+}

@@ -1591,6 +1591,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
 	testDurableRoleRebindFencesPostgresDelivery(t, app)
+	testDirectSendLocksTargetProfileBeforeCommit(t, app)
 }
 
 func testPostgresMembershipControls(t *testing.T, app *Database) {
@@ -1800,6 +1801,98 @@ func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	}
 	if err := app.AckDelivery(roleMachine, sessionA, stale.ID, stale.LeaseToken, stale.LeaseGeneration, now.Add(7*time.Second)); !errors.Is(err, relay.ErrForbidden) {
 		t.Fatalf("expired role binding rebind acknowledged stale lease: %v", err)
+	}
+}
+
+func testDirectSendLocksTargetProfileBeforeCommit(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 18, 19, 0, 0, 0, time.UTC)
+	const (
+		machineA  = "postgres-direct-lock-a"
+		machineB  = "postgres-direct-lock-b"
+		endpointA = "agent/postgres-direct-lock/a"
+		endpointB = "agent/postgres-direct-lock/b"
+		fromRole  = "role/postgres-direct-lock-a/reviewer"
+		toRole    = "role/postgres-direct-lock-b/implementer"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineA, Role: fromRole, DirectAddressable: true, IdempotencyKey: "postgres-direct-lock-reg-a", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineB, Role: toRole, DirectAddressable: true, IdempotencyKey: "postgres-direct-lock-reg-b", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.BindRoleToSession(machineB, toRole, endpointB, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	blocker, blockerCancel, err := app.beginRelayTransaction(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blockerCancel()
+	defer func() { _ = blocker.Rollback() }()
+	if _, err := blocker.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, toRole); err != nil {
+		t.Fatal(err)
+	}
+	var addressable bool
+	if err := blocker.QueryRowContext(context.Background(), `SELECT direct_addressable FROM relay.mail_role_profiles WHERE role=$1 FOR UPDATE`, toRole).Scan(&addressable); err != nil || !addressable {
+		t.Fatalf("lock target profile addressable=%t err=%v", addressable, err)
+	}
+	sendResult := make(chan error, 1)
+	go func() {
+		_, _, err := app.SendDirectMessage(relay.DirectMessageInput{
+			SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "must not land after revoke", IdempotencyKey: "postgres-direct-lock-send", Now: now.Add(time.Second),
+		})
+		sendResult <- err
+	}()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer waitCancel()
+	for {
+		var waiting bool
+		err := app.relayPool().QueryRowContext(waitCtx, `SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname=current_database() AND usename=current_user AND wait_event_type='Lock'
+			  AND (query LIKE '%durable-role%' OR query LIKE '%mail_role_profiles%FOR UPDATE%' OR query LIKE 'SELECT direct_addressable FROM relay.mail_role_profiles%')
+		)`).Scan(&waiting)
+		if err != nil {
+			t.Fatalf("inspect direct-send profile lock wait: %v", err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case sendErr := <-sendResult:
+			t.Fatalf("direct send escaped target profile lock: %v", sendErr)
+		case <-waitCtx.Done():
+			t.Fatal("direct send did not wait on the target profile lock")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if _, err := blocker.ExecContext(context.Background(), `UPDATE relay.mail_role_profiles SET direct_addressable=false, updated_at=$1 WHERE role=$2`, now.Add(time.Second), toRole); err != nil {
+		t.Fatal(err)
+	}
+	if err := blocker.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-sendResult:
+		if !errors.Is(err, relay.ErrForbidden) {
+			t.Fatalf("concurrent opt-out send err=%v, want forbidden", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct send did not finish after profile opt-out")
+	}
+	rooms, err := app.ConversationsForMachine(machineA, now.Add(2*time.Second))
+	if err != nil || len(rooms) != 0 {
+		t.Fatalf("opt-out during send created a conversation: %#v err=%v", rooms, err)
 	}
 }
 

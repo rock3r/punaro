@@ -332,8 +332,10 @@ sender is the source role, not the bound session. Exact retries of the same
 machine, key, roles, and body return the original conversation, message, and
 sequence. Changing target, body, or source with the same key conflicts.
 Revoking addressability before commit creates nothing; revocation after
-acceptance does not recall. Delivery remains durable while the target is
-offline and becomes leaseable when that role binds later.
+acceptance does not recall. Direct-role conversations are writable only
+through this route; generic `POST /v1/conversations/{id}/messages` appends,
+including targeted `target_role` sends, are refused. Delivery remains durable
+while the target is offline and becomes leaseable when that role binds later.
 
 The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
 the role and one of its currently advertised endpoints. The server verifies the

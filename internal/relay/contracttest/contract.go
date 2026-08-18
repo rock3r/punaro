@@ -859,4 +859,43 @@ func RunDirectMessages(t *testing.T, backend relay.Backend, namespace string) {
 	}); err == nil || errors.Is(err, relay.ErrForbidden) || errors.Is(err, relay.ErrConflict) {
 		t.Fatalf("self-send err=%v", err)
 	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "generic bypass", IdempotencyKey: namespace + "-append-direct", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append on direct room err=%v", err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, TargetRole: toRole, Body: "targeted bypass", IdempotencyKey: namespace + "-append-direct-target", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("targeted append on direct room err=%v", err)
+	}
+	if err := backend.AuthorizeSender(first.ConversationID, machineA, endpointA, now.Add(3*time.Second)); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("authorize sender on direct room err=%v", err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineB, Role: toRole, DirectAddressable: false, IdempotencyKey: namespace + "-opt-out", Now: now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "after opt-out", IdempotencyKey: namespace + "-append-opt-out", Now: now.Add(4 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append after opt-out err=%v", err)
+	}
+	namedMessage, duplicate, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: named.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "named room still works", IdempotencyKey: namespace + "-append-named", Now: now.Add(4 * time.Second),
+	})
+	if err != nil || duplicate || namedMessage.Body != "named room still works" {
+		t.Fatalf("named append=%#v duplicate=%t err=%v", namedMessage, duplicate, err)
+	}
 }

@@ -290,6 +290,55 @@ func TestStoreDirectMessageDoesNotDeliverToUnrelatedRolesOrEndpoints(t *testing.
 	}
 }
 
+func TestStoreDirectConversationRejectsGenericAppendAfterOptOut(t *testing.T) {
+	t.Parallel()
+	store := openRoleProfileStore(t)
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	fromRole, toRole := prepareDirectPair(t, store, now, true)
+	first, _, err := store.SendDirectMessage(DirectMessageInput{
+		SenderMachineID: "machine-a", FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: "dm-append-block", Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	named, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapSend | CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "bypass while addressable", IdempotencyKey: "append-direct-open", Now: now,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("generic append on live direct room err=%v", err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", TargetRole: toRole, Body: "targeted bypass", IdempotencyKey: "append-direct-target", Now: now,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("targeted append on live direct room err=%v", err)
+	}
+	if err := store.AuthorizeSender(first.ConversationID, "machine-a", "agent/a", now); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("authorize sender on live direct room err=%v", err)
+	}
+	if _, _, err := store.RegisterRoleProfile(RegisterRoleInput{
+		MachineID: "machine-b", Role: toRole, DirectAddressable: false, IdempotencyKey: "opt-out-append", Now: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "bypass after opt-out", IdempotencyKey: "append-direct-opt-out", Now: now.Add(time.Second),
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("generic append after opt-out err=%v", err)
+	}
+	namedMessage, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: named.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a", Body: "named room still works", IdempotencyKey: "append-named", Now: now.Add(time.Second),
+	})
+	if err != nil || duplicate || namedMessage.Body != "named room still works" {
+		t.Fatalf("named append=%#v duplicate=%t err=%v", namedMessage, duplicate, err)
+	}
+}
+
 func TestStoreDirectMessagePersistsAcrossRestart(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "relay.db")
