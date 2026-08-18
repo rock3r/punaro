@@ -887,8 +887,7 @@ func loadRecovery(directory string) (recoveryState, error) {
 }
 
 func clearRecovery(directory string) error {
-	err := os.Remove(filepath.Join(directory, recoveryFile))
-	if err != nil && !os.IsNotExist(err) {
+	if err := os.RemoveAll(filepath.Join(directory, recoveryFile)); err != nil {
 		return err
 	}
 	return syncDir(directory)
