@@ -28,6 +28,7 @@ const (
 	slotRecord       = "slot.json"
 	journalFile      = "journal.json"
 	lockFile         = "bootstrap.lock"
+	runLeaseFile     = "run.lock"
 	autoRollbackFile = "auto-rollback.json"
 )
 

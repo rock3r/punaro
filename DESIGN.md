@@ -1504,12 +1504,15 @@ The implementation is not internet-exposure-ready until these cases pass:
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that
   previous release, and otherwise enters recovery-only. An unreadable update
-  journal also enters recovery-only. A later publish stops the old adapter with
-  SIGTERM and a bounded wait before SIGKILL so the service can restart onto the
-  new slot. A healthy child that exits while the supervisor is still running is
-  a supervisor failure so systemd/launchd restart it. The one-shot rollback
-  decision is durable across supervisor restarts so a later failure cannot swap
-  back to the known-unhealthy slot. Enrollment is not implemented yet.
+  journal also enters recovery-only. `run` holds a separate `run.lock` lease for
+  the child's lifetime so two supervisors cannot share the same mailbox and
+  ready file; the transaction lock stays free for `update`. A later publish
+  stops the old adapter with SIGTERM and a bounded wait before SIGKILL so the
+  service can restart onto the new slot. A healthy child that exits while the
+  supervisor is still running is a supervisor failure so systemd/launchd restart
+  it. The one-shot rollback decision is durable across supervisor restarts so a
+  later failure cannot swap back to the known-unhealthy slot. Enrollment is not
+  implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.

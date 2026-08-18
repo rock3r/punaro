@@ -188,6 +188,22 @@ try {
 } catch { Stop-Install 'agent-mailbox is required; install it before onboarding this machine' }
 $MailboxStateDir = Get-FullPath $MailboxStateDir
 
+$adapterTaskName = 'Punaro Adapter'
+$adapterTaskWasRunning = $false
+$existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
+    $adapterTaskWasRunning = $true
+    Stop-ScheduledTask -TaskName $adapterTaskName
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        Start-Sleep -Milliseconds 200
+        $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+    } while ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running' -and (Get-Date) -lt $deadline)
+    if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
+        Stop-Install 'could not stop the running Punaro Adapter task before replacing bootstrap'
+    }
+}
+
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
@@ -260,7 +276,7 @@ $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoi
 $settings.RestartCount = 3
 $settings.RestartInterval = [TimeSpan]::FromMinutes(1)
 Register-ScheduledTask -TaskName 'Punaro Adapter' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
-if ($Enable) { Start-ScheduledTask -TaskName 'Punaro Adapter' }
+if ($Enable -or $adapterTaskWasRunning) { Start-ScheduledTask -TaskName $adapterTaskName }
 
 if (-not [string]::IsNullOrWhiteSpace($AgentGuidanceDir)) {
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $AgentGuidanceDir

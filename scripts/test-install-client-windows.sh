@@ -28,7 +28,10 @@ for expected in \
 	'AllowLanHttp' \
 	'PUNARO_ADAPTER_TRUSTED_LAN_CIDR' \
 	'Push-Location -LiteralPath $repoDir' \
-	'seed-checkout'; do
+	'seed-checkout' \
+	'Stop-ScheduledTask' \
+	'Get-ScheduledTask' \
+	'could not stop the running Punaro Adapter task'; do
 	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
 done
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -17,6 +18,52 @@ import (
 
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
+
+func TestRunHoldsLeaseUntilSupervisorExits(t *testing.T) {
+	if dir := os.Getenv("PUNARO_BOOTSTRAP_RUN_LEASE_PROBE"); dir != "" {
+		if _, err := acquireRunLease(dir); err != nil {
+			os.Exit(3)
+		}
+		os.Exit(0)
+	}
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
+	probe := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunHoldsLeaseUntilSupervisorExits$") // #nosec G204,G702 -- same test binary.
+	probe.Env = append(os.Environ(), "PUNARO_BOOTSTRAP_RUN_LEASE_PROBE="+dir)
+	if err := probe.Run(); err == nil || probe.ProcessState.ExitCode() != 3 {
+		t.Fatalf("active run did not hold the lease: err=%v code=%v", err, probe.ProcessState)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	released := exec.CommandContext(context.Background(), os.Args[0], "-test.run=^TestRunHoldsLeaseUntilSupervisorExits$") // #nosec G204,G702 -- same test binary.
+	released.Env = append(os.Environ(), "PUNARO_BOOTSTRAP_RUN_LEASE_PROBE="+dir)
+	if err := released.Run(); err != nil {
+		t.Fatalf("run lease was not released: %v", err)
+	}
+}
 
 func TestRunRequiresCurrentAdapter(t *testing.T) {
 	dir := privateDir(t)

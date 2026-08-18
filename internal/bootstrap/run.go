@@ -96,6 +96,14 @@ func Run(ctx context.Context, request RunRequest) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := prepareDirectory(request.Directory); err != nil {
+		return err
+	}
+	unlockRun, err := acquireRunLease(request.Directory)
+	if err != nil {
+		return err
+	}
+	defer unlockRun()
 	identity, adapter, err := prepareRun(&request)
 	if errors.Is(err, errNoAdapter) {
 		hadPrevious, prevErr := request.hasPrevious(identity)
