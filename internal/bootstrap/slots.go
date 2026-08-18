@@ -318,7 +318,11 @@ func rememberHealthyGeneration(directory string, current slotState) error {
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(directory, healthyGenerationFile), body, 0o600); err != nil {
+	path := filepath.Join(directory, healthyGenerationFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	if err := writeAtomic(path, body, 0o600); err != nil {
 		return err
 	}
 	return observeGeneration(directory, current.Generation)
@@ -749,7 +753,11 @@ func saveGenerationHighWater(directory string, generation int64) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(directory, generationHighWaterFile), body, 0o600)
+	path := filepath.Join(directory, generationHighWaterFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	return writeAtomic(path, body, 0o600)
 }
 
 func readOptionalSlot(directory string) (slotState, error) {
@@ -886,6 +894,20 @@ func removeAbandonedTemps(directory string) error {
 		}
 	}
 	return nil
+}
+
+func removeNonRegular(path string) error {
+	info, err := os.Lstat(path) // #nosec G703 -- marker is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode().IsRegular() {
+		return nil
+	}
+	return os.RemoveAll(path)
 }
 
 func writeAtomic(path string, body []byte, mode os.FileMode) error {

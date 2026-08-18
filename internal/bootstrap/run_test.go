@@ -1425,6 +1425,105 @@ func TestUpdatePersistsDirectoryKeys(t *testing.T) {
 	}
 }
 
+func TestUpdateSucceedsAfterGenerationDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, generationHighWaterFile))
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(dir, generationHighWaterFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("generation directory node survived a signed update: info=%v err=%v", info, err)
+	}
+}
+
+func TestRunStartsWhenGenerationIsDirectory(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	writeNonFileMarker(t, filepath.Join(dir, generationHighWaterFile))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
+				if err := writeReady(spec.Env); err != nil {
+					return nil, err
+				}
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRemembersHealthWhenHealthyGenerationIsDirectory(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	writeNonFileMarker(t, filepath.Join(dir, healthyGenerationFile))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			HealthWindow:  0,
+			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
+				if err := writeReady(spec.Env); err != nil {
+					return nil, err
+				}
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !currentGenerationIsHealthy(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}) {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("healthy generation directory blocked readiness persistence")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpdateClearsRecoveryDirectoryNode(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.Mkdir(filepath.Join(dir, recoveryFile), 0o700); err != nil {
@@ -1592,6 +1691,16 @@ func writeReady(env []string) error {
 		return errors.New("ready path missing")
 	}
 	return os.WriteFile(path, []byte(`{"schema":1,"status":"healthy"}`), 0o600)
+}
+
+func writeNonFileMarker(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "junk"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func allowPreviousInCatalog(t *testing.T, origin *signedOrigin, release string, sequence int64, digest string) {

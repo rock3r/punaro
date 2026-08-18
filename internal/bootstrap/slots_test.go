@@ -367,6 +367,41 @@ func TestNextSlotGenerationUsesHealthyGeneration(t *testing.T) {
 	}
 }
 
+func TestNextSlotGenerationReplacesGenerationDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	writeNonFileMarker(t, filepath.Join(dir, generationHighWaterFile))
+	got, err := nextSlotGeneration(dir)
+	if err != nil || got != 3 {
+		t.Fatalf("next generation=%d err=%v", got, err)
+	}
+	info, err := os.Lstat(filepath.Join(dir, generationHighWaterFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("generation high-water still not a file: info=%v err=%v", info, err)
+	}
+	record, err := loadGenerationHighWater(dir)
+	if err != nil || record.Generation != 3 {
+		t.Fatalf("persisted generation=%+v err=%v", record, err)
+	}
+}
+
+func TestRememberHealthyGenerationReplacesDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, healthyGenerationFile))
+	identity := slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}
+	if err := rememberHealthyGeneration(dir, identity); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(dir, healthyGenerationFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("healthy generation still not a file: info=%v err=%v", info, err)
+	}
+	if !currentGenerationIsHealthy(dir, identity) {
+		t.Fatal("healthy identity was not recorded after replacing the directory node")
+	}
+}
+
 func TestBlocksAutoRollbackAllowsLaterGeneration(t *testing.T) {
 	dir := privateDir(t)
 	away := slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: repeatC(), Generation: 1}
