@@ -63,10 +63,10 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 4 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 5 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
-	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 {
+	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 || first.Counts.RateBuckets != 2 {
 		t.Fatalf("manifest counts=%#v", first.Counts)
 	}
 	if got := migrationSourcePhase(t, store); got != beforePhase {
@@ -518,7 +518,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -895,6 +895,101 @@ func TestInspectMigrationSourceRefusesMissingAndSymlink(t *testing.T) {
 	}
 	if _, err := InspectMigrationSource(ctx, special); err != nil {
 		t.Fatalf("literal special-character source path: %v", err)
+	}
+}
+
+func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 4 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent without rate_buckets inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("c", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 4 {
+		t.Fatalf("parent prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 4 {
+		t.Fatalf("prepared parent changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent rate-bucket batch=%#v err=%v", batch, err)
+	}
+}
+
+func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 18, 30, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetRateLimits(tightRateLimits()); err != nil {
+		t.Fatal(err)
+	}
+	conversation := createRateTestConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	if _, _, err := store.AppendMessage(rateAppend(conversation, "machine-a", "agent/a", "one", "one", now)); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 5 || inspected.Counts.RateBuckets != 2 {
+		t.Fatalf("current inspect=%#v err=%v", inspected, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_rate_buckets")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 5 {
+		t.Fatalf("current prepare=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
+	if err != nil || len(batch.Rows) != 2 || !batch.Done {
+		t.Fatalf("current rate-bucket batch=%#v err=%v", batch, err)
+	}
+	for _, row := range batch.Rows {
+		if err := hasher.Add(row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count, digest := hasher.Evidence()
+	if count != inspected.Counts.RateBuckets || digest != inspected.TableSHA256.RateBuckets {
+		t.Fatalf("rate-bucket evidence count=%d digest=%s want count=%d digest=%s", count, digest, inspected.Counts.RateBuckets, inspected.TableSHA256.RateBuckets)
 	}
 }
 

@@ -1414,7 +1414,12 @@ conversation members until explicitly registered.
 Schema version 46 adds durable per-sender and per-conversation token buckets
 for new relay messages. Token state survives daemon restart. Configuration
 bounds are startup-validated. Exact committed retries do not consume tokens.
-Capacity, expiry, and dead-letter policies remain later slices.
+Current SQLite sources that contain `rate_buckets` are migration-source
+version 5 and copy those rows into PostgreSQL during cutover so a depleted
+sender cannot regain burst after authority transfer. A prepared parent source
+without that table remains version 4 and exports an empty `mail_rate_buckets`
+page, so crash-during-cutover plus an upgraded admin binary can still inspect
+and resume. Capacity, expiry, and dead-letter policies remain later slices.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the

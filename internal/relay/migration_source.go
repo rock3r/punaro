@@ -50,6 +50,7 @@ type MigrationSourceCounts struct {
 	ControlIdempotency      int64 `json:"control_idempotency,omitempty"`
 	RoleProfiles            int64 `json:"role_profiles,omitempty"`
 	RoleProfileIdempotency  int64 `json:"role_profile_idempotency,omitempty"`
+	RateBuckets             int64 `json:"rate_buckets,omitempty"`
 	RequestNonces           int64 `json:"request_nonces"`
 }
 
@@ -70,6 +71,7 @@ type MigrationSourceHashes struct {
 	ControlIdempotency      string `json:"control_idempotency,omitempty"`
 	RoleProfiles            string `json:"role_profiles,omitempty"`
 	RoleProfileIdempotency  string `json:"role_profile_idempotency,omitempty"`
+	RateBuckets             string `json:"rate_buckets,omitempty"`
 	RequestNonces           string `json:"request_nonces"`
 }
 
@@ -114,9 +116,11 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 	{"role_profiles", "role,display_name,direct_addressable,updated_at", "role"},
 	{"role_profile_idempotency", "machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at", "machine_id,key"},
+	{"rate_buckets", "kind,bucket_key,tokens,updated_at", "kind,bucket_key"},
 }
 
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
+var v4MigrationTableSpecs = migrationTableSpecs[:16]
 
 var roleMigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
@@ -135,7 +139,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
+const migrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
+const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
 const roleMigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
 const legacyMigrationSourceSchema = "punaro-relay-sqlite-v1:endpoints;conversations;memberships;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;request_nonces"
@@ -389,7 +394,14 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('role_profiles','role_profile_idempotency')`).Scan(&profileTables); err != nil || profileTables != 0 && profileTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var rateBucketTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='rate_buckets'`).Scan(&rateBucketTables); err != nil || rateBucketTables != 0 && rateBucketTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
 	if profileTables == 2 && controlTables != 2 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if rateBucketTables == 1 && profileTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
 	manifest := MigrationSourceManifest{Version: 3}
@@ -397,7 +409,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
 	switch {
 	case roleTables == 0:
-		if controlTables != 0 || profileTables != 0 {
+		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 {
 			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
@@ -405,9 +417,12 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	case profileTables == 2 && rateBucketTables == 1:
+		manifest.Version = 5
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
 	case profileTables == 2:
 		manifest.Version = 4
-		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
+		tableSpecs, schema = v4MigrationTableSpecs, v4MigrationSourceSchema
 	}
 	var storedFingerprint sql.NullString
 	var controlRows int
@@ -437,7 +452,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -507,11 +522,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles bool) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls, profiles)
+	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -528,7 +543,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces"}
+	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -546,7 +561,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -560,11 +575,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
-	if profiles {
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	if rateBuckets {
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+	} else if profiles {
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	} else if !controls {
-		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
@@ -596,6 +613,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	if !profiles {
 		delete(expectedColumns, "role_profiles")
 		delete(expectedColumns, "role_profile_idempotency")
+	}
+	if !rateBuckets {
+		delete(expectedColumns, "rate_buckets")
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -675,7 +695,6 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"role_memberships:1:pk:0:conversation_id,role",
 		"role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until",
 		"messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence",
-		"rate_buckets:1:pk:0:kind,bucket_key",
 		"deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until",
 		"recipient_cursors:1:pk:0:recipient_endpoint,conversation_id",
 		"idempotency:1:pk:0:machine_id,key",
@@ -691,8 +710,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if !controls {
 		expectedIndexes = []string{
-			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "rate_buckets:1:pk:0:kind,bucket_key", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 		}
+	}
+	if rateBuckets {
+		expectedIndexes = append(expectedIndexes, "rate_buckets:1:pk:0:kind,bucket_key")
 	}
 	var actualIndexes []string
 	for table := range expectedColumns {
@@ -777,11 +799,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	wantTriggers := 45
-	if profiles {
+	wantTriggers := 42
+	if rateBuckets {
 		wantTriggers = 51
+	} else if profiles {
+		wantTriggers = 48
 	} else if !controls {
-		wantTriggers = 39
+		wantTriggers = 36
 	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")
@@ -854,8 +878,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		OR EXISTS (SELECT 1 FROM conversation_controls WHERE typeof(actor_endpoint)<>'text' OR typeof(operation)<>'text' OR typeof(member_endpoint)<>'text' OR typeof(member_capabilities)<>'integer' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM conversation_control_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM request_nonces WHERE typeof(machine_id)<>'text' OR typeof(nonce)<>'text' OR typeof(expires_at)<>'integer')
-		OR EXISTS (SELECT 1 FROM rate_buckets WHERE kind NOT IN ('sender','conversation') OR typeof(kind)<>'text' OR typeof(bucket_key)<>'text' OR typeof(tokens)<>'integer' OR tokens<0 OR typeof(updated_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM relay_migration_control WHERE typeof(source_id)<>'text' OR typeof(phase)<>'text' OR (epoch_id IS NOT NULL AND typeof(epoch_id)<>'text') OR (target_identity IS NOT NULL AND typeof(target_identity)<>'text') OR (fingerprint IS NOT NULL AND typeof(fingerprint)<>'text') OR (last_epoch_id IS NOT NULL AND typeof(last_epoch_id)<>'text') OR (last_target_identity IS NOT NULL AND typeof(last_target_identity)<>'text') OR (last_expected_fingerprint IS NOT NULL AND typeof(last_expected_fingerprint)<>'text') OR (last_result_fingerprint IS NOT NULL AND typeof(last_result_fingerprint)<>'text') OR (last_cutoff IS NOT NULL AND typeof(last_cutoff)<>'integer') OR (last_transition IS NOT NULL AND typeof(last_transition)<>'text') OR typeof(changed_at)<>'integer')`
+	if rateBuckets {
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM rate_buckets WHERE kind NOT IN ('sender','conversation') OR typeof(kind)<>'text' OR typeof(bucket_key)<>'text' OR typeof(tokens)<>'integer' OR tokens<0 OR typeof(updated_at)<>'integer')`
+	}
 	if profiles {
 		logicalStateQuery += `
 		OR EXISTS (SELECT 1 FROM role_profiles WHERE direct_addressable NOT IN (0,1) OR typeof(role)<>'text' OR (display_name IS NOT NULL AND typeof(display_name)<>'text') OR typeof(direct_addressable)<>'integer' OR typeof(updated_at)<>'integer')
@@ -925,6 +952,10 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidRequestToken(text)
 	case "role_profiles.display_name", "role_profile_idempotency.display_name":
 		_, valid = NormalizeRoleDisplayName(text)
+	case "rate_buckets.kind":
+		valid = text == "sender" || text == "conversation"
+	case "rate_buckets.bucket_key":
+		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":
 		valid = ValidMessageBody(text)
 	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id":
@@ -998,6 +1029,8 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.RoleProfiles, manifest.TableSHA256.RoleProfiles = count, digest
 	case "role_profile_idempotency":
 		manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency = count, digest
+	case "rate_buckets":
+		manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}
