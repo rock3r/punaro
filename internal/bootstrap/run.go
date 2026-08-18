@@ -199,11 +199,11 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 func snapshotAdapter(directory, slotDir, goos, goarch string) (string, error) {
 	src, err := adapterBinary(slotDir, goos, goarch)
 	if err != nil {
-		return "", err
+		return "", errNoAdapter
 	}
 	body, err := os.ReadFile(src) // #nosec G304 -- snapshot is copied from the locked current slot.
 	if err != nil {
-		return "", errors.New("bootstrap has no current adapter")
+		return "", errNoAdapter
 	}
 	running := filepath.Join(directory, runningSlot)
 	if err := os.RemoveAll(running); err != nil {

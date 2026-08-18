@@ -693,6 +693,28 @@ func TestUpdateClearsRecoveryOnly(t *testing.T) {
 	}
 }
 
+func TestRunEntersRecoveryWhenCurrentAdapterMissing(t *testing.T) {
+	dir := privateDir(t)
+	current := filepath.Join(dir, currentSlot)
+	if err := os.Mkdir(current, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeSlotRecord(t, current, "v0.1.0", 1, strings.Repeat("a", 64))
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			t.Fatal("launched without an adapter")
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("missing adapter err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("missing adapter did not enter recovery-only")
+	}
+}
+
 func TestRunDoesNotLaunchUnexpectedNames(t *testing.T) {
 	dir := privateDir(t)
 	current := filepath.Join(dir, currentSlot)
