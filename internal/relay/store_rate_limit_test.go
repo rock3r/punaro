@@ -56,6 +56,21 @@ func TestStoreTokenRefillAndExactRetryAfter(t *testing.T) {
 	}
 }
 
+func TestStoreClockRollbackDoesNotRestoreCapacity(t *testing.T) {
+	t.Parallel()
+	store, now := openRateLimitedStore(t, RateLimitPolicy{SenderBurst: 2, SenderRefillPerMinute: 60, ConversationBurst: 10, ConversationRefillPerMinute: 60, MaxRetryAfterSeconds: 60})
+	conversation := createRateLimitConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	if _, _, err := store.AppendMessage(rateLimitAppend(conversation.ID, "machine-a", "agent/a", "one", "send-1", now)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(rateLimitAppend(conversation.ID, "machine-a", "agent/a", "two", "send-2", now.Add(-time.Second))); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(rateLimitAppend(conversation.ID, "machine-a", "agent/a", "three", "send-3", now)); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("clock correction restored capacity err=%v", err)
+	}
+}
+
 func TestStoreExactCommittedRetryWhileBucketEmpty(t *testing.T) {
 	t.Parallel()
 	store, now := openRateLimitedStore(t, RateLimitPolicy{SenderBurst: 1, SenderRefillPerMinute: 60, ConversationBurst: 1, ConversationRefillPerMinute: 60, MaxRetryAfterSeconds: 60})

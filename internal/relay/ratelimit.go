@@ -141,10 +141,14 @@ func refillRateBucket(snapshot rateBucketSnapshot, now time.Time, burst, refillP
 		return rateBucketSnapshot{TokensMilli: maxTokens, LastRefillUnixMilli: nowMilli}
 	}
 	last := snapshot.LastRefillUnixMilli
-	if last <= 0 || last > nowMilli {
+	if last <= 0 {
 		last = nowMilli
 	}
 	elapsed := nowMilli - last
+	if elapsed < 0 {
+		// Keep a future watermark so clock correction cannot refill the same interval twice.
+		return rateBucketSnapshot{TokensMilli: snapshot.TokensMilli, LastRefillUnixMilli: last}
+	}
 	tokens := snapshot.TokensMilli + elapsed*int64(refillPerMinute)/60
 	if tokens > maxTokens {
 		tokens = maxTokens

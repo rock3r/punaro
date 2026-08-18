@@ -528,8 +528,9 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces"}
-	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
+	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
+	filtered, _ := partitionRateBucketTable(names)
+	if err := rows.Err(); err != nil || strings.Join(filtered, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
 	var integrity string
@@ -560,13 +561,14 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 		names = append(names, name)
 	}
-	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	if profiles {
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	} else if !controls {
-		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
+		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	}
-	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
+	filtered, hasRateBuckets := partitionRateBucketTable(names)
+	if strings.Join(filtered, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
 	expectedColumns := map[string][]string{
@@ -596,6 +598,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	if !profiles {
 		delete(expectedColumns, "role_profiles")
 		delete(expectedColumns, "role_profile_idempotency")
+	}
+	if !hasRateBuckets {
+		delete(expectedColumns, "rate_buckets")
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -694,6 +699,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "rate_buckets:1:pk:0:scope,bucket_key", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 		}
 	}
+	if !hasRateBuckets {
+		expectedIndexes = omitPrefixedIndexEvidence(expectedIndexes, "rate_buckets:")
+	}
 	var actualIndexes []string
 	for table := range expectedColumns {
 		indexes, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -777,11 +785,14 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	wantTriggers := 45
+	wantTriggers := 42
 	if profiles {
-		wantTriggers = 51
+		wantTriggers = 48
 	} else if !controls {
-		wantTriggers = 39
+		wantTriggers = 36
+	}
+	if hasRateBuckets {
+		wantTriggers += 3
 	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")
@@ -1047,4 +1058,28 @@ func validMigrationDigest(value string) bool {
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil && value == strings.ToLower(value)
+}
+
+func partitionRateBucketTable(names []string) ([]string, bool) {
+	filtered := make([]string, 0, len(names))
+	present := false
+	for _, name := range names {
+		if name == "rate_buckets" {
+			present = true
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return filtered, present
+}
+
+func omitPrefixedIndexEvidence(indexes []string, prefix string) []string {
+	filtered := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		if strings.HasPrefix(index, prefix) {
+			continue
+		}
+		filtered = append(filtered, index)
+	}
+	return filtered
 }

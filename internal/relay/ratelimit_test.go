@@ -57,6 +57,29 @@ func TestTokenBucketRefillAndExactRetryAfter(t *testing.T) {
 	}
 }
 
+func TestTokenBucketClockRollbackDoesNotRestoreCapacity(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.August, 18, 12, 0, 0, 0, time.UTC)
+	first := refillRateBucket(rateBucketSnapshot{}, now, 2, 60)
+	afterFirst, _, ok := consumeRefilledBucket(first, 2, 60, 60)
+	if !ok {
+		t.Fatal("first consume was refused")
+	}
+	rolled := refillRateBucket(afterFirst, now.Add(-time.Second), 2, 60)
+	if rolled.LastRefillUnixMilli != afterFirst.LastRefillUnixMilli || rolled.TokensMilli != afterFirst.TokensMilli {
+		t.Fatalf("clock rollback mutated watermark rolled=%#v afterFirst=%#v", rolled, afterFirst)
+	}
+	afterSecond, _, ok := consumeRefilledBucket(rolled, 2, 60, 60)
+	if !ok {
+		t.Fatal("remaining token was refused during clock rollback")
+	}
+	restored := refillRateBucket(afterSecond, now, 2, 60)
+	_, _, ok = consumeRefilledBucket(restored, 2, 60, 60)
+	if ok {
+		t.Fatal("clock correction restored a third token")
+	}
+}
+
 func TestRateLimitedErrorIsRetryableAndContentFree(t *testing.T) {
 	t.Parallel()
 	err := newRateLimitedError(1500*time.Millisecond, 60)

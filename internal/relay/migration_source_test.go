@@ -250,6 +250,51 @@ func TestMigrationSourceFingerprintIgnoresRateBuckets(t *testing.T) {
 	}
 }
 
+func TestPreparedMigrationSourceWithoutRateBucketsRemainsRecoverable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 0, time.UTC)
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	source, err := InspectMigrationSource(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), source.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Phase != MigrationSourcePrepared || inspected.Fingerprint != prepared.Fingerprint {
+		t.Fatalf("prepared source without rate_buckets inspect=%#v err=%v", inspected, err)
+	}
+	aborted, err := AbortPreparedMigrationSource(ctx, path, prepared.EpochID, prepared.TargetIdentity, prepared.Fingerprint)
+	if err != nil || aborted.Phase != MigrationSourceActive {
+		t.Fatalf("abort prepared source without rate_buckets=%#v err=%v", aborted, err)
+	}
+}
+
 func TestMigrationSourceAcceptsInvokeCapabilityBeforePreparation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
