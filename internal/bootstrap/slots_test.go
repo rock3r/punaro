@@ -267,6 +267,23 @@ func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	}
 }
 
+func TestNextSlotGenerationIgnoresCorruptPrevious(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	previous := filepath.Join(dir, previousSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := nextSlotGeneration(dir)
+	if err != nil || got != 3 {
+		t.Fatalf("next generation=%d err=%v", got, err)
+	}
+}
+
 func TestNextSlotGenerationUsesPreviousAndAutoRollback(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "previous-adapter")

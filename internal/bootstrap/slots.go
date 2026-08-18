@@ -580,17 +580,13 @@ func nextSlotGeneration(directory string) (int64, error) {
 	for _, name := range []string{currentSlot, previousSlot} {
 		slot, err := readOptionalSlot(filepath.Join(directory, name))
 		if err != nil {
-			return 0, err
+			continue
 		}
 		if slot.Generation > high {
 			high = slot.Generation
 		}
 	}
-	record, err := loadAutoRollback(directory)
-	if err != nil {
-		return 0, err
-	}
-	if record.Generation > high {
+	if record, err := loadAutoRollback(directory); err == nil && record.Generation > high {
 		high = record.Generation
 	}
 	return high + 1, nil
