@@ -423,7 +423,14 @@ recipient identity before sequence allocation: count and body-byte ceilings per
 recipient, plus installation-wide count and body-byte ceilings. Broadcast
 reserves the complete fan-out or creates nothing. Acknowledgement, membership-
 revocation retirement, and other terminal delivery transitions release that
-reservation once. Lease and redelivery do not change charged capacity. Capacity
+reservation once. Lease and redelivery do not change charged capacity. A
+pending delivery whose `created_at` plus the startup-validated maximum age is
+at or before server time transitions atomically to terminal `expired`,
+releases capacity once, and counts as complete only for that recipient's
+contiguous cursor. Expired and revoked rows are retained for a separate
+bounded period, then pruned in bounded batches. Operators inspect content-free
+dead-letter metadata host-locally; ordinary agents have no dead-letter or
+receipt API. Capacity
 exhaustion returns HTTP `429` with a bounded integer `Retry-After` and the
 stable error `capacity exceeded`. A rejected request creates no sequence,
 message, delivery, idempotency, or audit row. Explicit counters are updated in
@@ -1466,7 +1473,14 @@ adds explicit pending-delivery capacity counters per recipient identity and
 installation-wide. Quota tables are derived operational
 state, not cutover content: inspect and fingerprint ignore them, and activation
 rebuilds them from pending deliveries. Capacity denial is distinct from rate
-limiting. Expiry and dead-letter policies remain later slices.
+limiting. Schema version 49 adds `closed_reason` on deliveries (`acked`,
+`expired`, or `revoked`, XOR with `acked_at`), pending-delivery maximum age,
+terminal retention, and a SECURITY DEFINER prune that deletes only terminal
+rows. Expiry moves aged pending work to terminal `expired`, releases pending
+capacity exactly once, and advances only that recipient's contiguous cursor.
+Expired and revoked rows are host-local dead letters; they are not an agent
+API and never include bodies or credentials. The application role still has no
+table DELETE on `mail_deliveries`.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the

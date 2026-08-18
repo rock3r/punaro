@@ -3,8 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -587,5 +589,37 @@ func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
 	want := relay.QuotaConfig{RecipientCount: 2, RecipientBytes: 64, InstallationCount: 8, InstallationBytes: 256, RetryAfterSeconds: 9}
 	if got != want {
 		t.Fatalf("quota limits=%#v want %#v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidRelayRetentionPolicy(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending max age was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(int(relay.RetentionTerminalMax/time.Second)+1))
+	if _, err := Load(""); err == nil {
+		t.Fatal("oversized terminal retention was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_MAINTENANCE_BATCH", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero terminal maintenance batch was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRetentionPolicy(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "3600")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "7200")
+	t.Setenv("PUNARO_RELAY_TERMINAL_MAINTENANCE_BATCH", "3")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRetentionPolicy()
+	want := relay.RetentionConfig{PendingMaxAge: time.Hour, TerminalRetention: 2 * time.Hour, MaintenanceBatch: 3}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
 	}
 }

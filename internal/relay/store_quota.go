@@ -154,7 +154,7 @@ func releaseQuota(tx *sql.Tx, recipient string, bodyBytes int64) error {
 	return nil
 }
 
-func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) error {
+func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time, metrics *Metrics) error {
 	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, `+sqlitePendingBodyBytes+`
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
 		WHERE delivery.recipient_endpoint = ? AND delivery.acked_at IS NULL AND message.conversation_id = ?`, recipient, conversationID)
@@ -185,20 +185,17 @@ func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), recipient, conversationID); err != nil {
+	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=?, closed_reason=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), ClosedReasonRevoked, recipient, conversationID); err != nil {
 		return fmt.Errorf("retire revoked deliveries: %w", err)
+	}
+	for range retired {
+		metrics.ObserveTerminalTransition(ClosedReasonRevoked)
 	}
 	return nil
 }
 
 func (s *Store) refreshPendingMetrics() {
-	s.pendingMetricsMu.Lock()
-	defer s.pendingMetricsMu.Unlock()
-	counters, err := readInstallQuota(context.Background(), s.db)
-	if err != nil {
-		return
-	}
-	s.metrics.SetPending(counters.Count, counters.Bytes)
+	s.refreshPendingMetricsAt(time.Now().UTC())
 }
 
 func readInstallQuota(ctx context.Context, q interface {

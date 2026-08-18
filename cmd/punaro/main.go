@@ -373,6 +373,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		if len(args) > 1 && args[1] == "reconcile-capacity" {
 			return runRelayReconcileCapacity(args[2:], stdout, stderr, reconcileRelayCapacity)
 		}
+		if len(args) > 2 && args[1] == "terminal" && args[2] == "list" {
+			return runRelayTerminalList(args[3:], stdout, stderr, listRelayTerminalDeliveries)
+		}
+		if len(args) > 2 && args[1] == "terminal" && args[2] == "maintain" {
+			return runRelayTerminalMaintain(args[3:], stdout, stderr, maintainRelayTerminalDeliveries)
+		}
 	case "backup":
 		return runBackup(args[1:], stdout, stderr)
 	case "restore":

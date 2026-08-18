@@ -319,6 +319,8 @@ type Store struct {
 	rateLimits       RateLimitConfig
 	quotaMu          sync.Mutex
 	quota            QuotaConfig
+	retentionMu      sync.Mutex
+	retention        RetentionConfig
 	pendingMetricsMu sync.Mutex
 	metrics          *Metrics
 }
@@ -351,7 +353,7 @@ func openStore(database string, verifyQuota bool) (*Store, error) {
 	// from surfacing SQLITE_BUSY instead of orderly transactional serialization.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db, rateLimits: DefaultRateLimitConfig(), quota: DefaultQuotaConfig()}
+	store := &Store{db: db, rateLimits: DefaultRateLimitConfig(), quota: DefaultQuotaConfig(), retention: DefaultRetentionConfig()}
 	var migrationControlExists bool
 	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
 		_ = db.Close()
@@ -513,7 +515,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			consumer_generation INTEGER,
 			lease_until INTEGER,
 			acked_at INTEGER,
-			UNIQUE (message_id, recipient_endpoint)
+			closed_reason TEXT CHECK (closed_reason IS NULL OR closed_reason IN ('acked','expired','revoked')),
+			UNIQUE (message_id, recipient_endpoint),
+			CHECK ((acked_at IS NULL) = (closed_reason IS NULL))
 		)`,
 		`CREATE TABLE IF NOT EXISTS recipient_cursors (
 			recipient_endpoint TEXT NOT NULL,
@@ -653,6 +657,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"endpoints", "consumer_lease_until", "INTEGER"},
 		{"deliveries", "ownership_generation", "INTEGER"},
 		{"deliveries", "consumer_generation", "INTEGER"},
+		{"deliveries", "closed_reason", "TEXT"},
 		{"relay_migration_control", "last_epoch_id", "TEXT"},
 		{"relay_migration_control", "last_target_identity", "TEXT"},
 		{"relay_migration_control", "last_expected_fingerprint", "TEXT"},
@@ -663,6 +668,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := ensureSQLiteColumn(ctx, s.db, column.table, column.name, column.definition); err != nil {
 			return err
 		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE deliveries SET closed_reason = 'acked' WHERE acked_at IS NOT NULL AND closed_reason IS NULL`); err != nil {
+		return fmt.Errorf("backfill delivery closed reasons: %w", err)
 	}
 	return s.bootstrapPendingQuota(ctx)
 }
@@ -742,7 +750,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			}
 		}
 		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
-			if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+			if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now, s.metrics); err != nil {
 				return ControlEvent{}, false, err
 			}
 			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -778,7 +786,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
-		if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+		if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now, s.metrics); err != nil {
 			return ControlEvent{}, false, err
 		}
 		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -1927,6 +1935,9 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = token
 			delivery.LeaseUntil = now.Add(ttl).UTC()
+			if leaseToken.Valid {
+				s.metrics.ObserveLeaseRedelivery()
+			}
 			if _, err := tx.ExecContext(context.Background(), `UPDATE deliveries SET lease_machine_id = ?, lease_token = ?, lease_generation = ?, ownership_generation = ?, consumer_generation = ?, lease_until = ? WHERE id = ?`, machineID, token, delivery.LeaseGeneration, ownershipGeneration, consumerGeneration, delivery.LeaseUntil.UnixMilli(), delivery.ID); err != nil {
 				return DeliveryLeasePage{}, fmt.Errorf("lease delivery: %w", err)
 			}
@@ -2016,12 +2027,16 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	var leaseGeneration int64
 	var leaseOwnership, leaseConsumer sql.NullInt64
 	var leaseUntil, acknowledged sql.NullInt64
-	err = tx.QueryRowContext(context.Background(), "SELECT recipient_endpoint, lease_machine_id, lease_token, lease_generation, ownership_generation, consumer_generation, lease_until, acked_at FROM deliveries WHERE id = ?", deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &acknowledged)
+	var closedReason sql.NullString
+	err = tx.QueryRowContext(context.Background(), "SELECT recipient_endpoint, lease_machine_id, lease_token, lease_generation, ownership_generation, consumer_generation, lease_until, acked_at, closed_reason FROM deliveries WHERE id = ?", deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &acknowledged, &closedReason)
 	if errors.Is(err, sql.ErrNoRows) || !recipient.Valid || !containsString(recipientIDs, recipient.String) {
 		return ErrForbidden
 	}
 	if err != nil {
 		return fmt.Errorf("read delivery acknowledgement state: %w", err)
+	}
+	if closedReason.Valid && closedReason.String != ClosedReasonAcked {
+		return ErrForbidden
 	}
 	if acknowledged.Valid && leaseToken.Valid && token == leaseToken.String && leaseGeneration == generation {
 		return tx.Commit()
@@ -2033,7 +2048,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	if !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || token != leaseToken.String || leaseGeneration != generation || !leaseOwnership.Valid || leaseOwnership.Int64 != ownershipGeneration || !leaseConsumer.Valid || leaseConsumer.Int64 != currentConsumerGeneration || !leaseUntil.Valid || leaseUntil.Int64 <= now.UnixMilli() {
 		return ErrForbidden
 	}
-	result, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), deliveryID)
+	result, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at = ?, closed_reason = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), ClosedReasonAcked, deliveryID)
 	if err != nil {
 		return fmt.Errorf("acknowledge delivery: %w", err)
 	}
@@ -2052,6 +2067,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 		if err := releaseQuota(tx, recipient.String, bodyBytes); err != nil {
 			return err
 		}
+		s.metrics.ObserveTerminalTransition(ClosedReasonAcked)
 	}
 	if err := advanceRecipientCursor(tx, recipient.String, conversationID); err != nil {
 		return err

@@ -78,9 +78,23 @@ Override with `PUNARO_RELAY_PENDING_RECIPIENT_COUNT`,
 1..3600. Invalid values fail startup. A capacity-limited append is HTTP 429
 with integer `Retry-After` and the content-free error `capacity exceeded`,
 distinct from `rate limited`. Exact committed retries never reserve capacity
-again. The loopback health listener exposes `GET /metrics` with
+again. Pending deliveries older than
+`PUNARO_RELAY_PENDING_MAX_AGE_SECONDS` (default 7 days, range 1 second through
+90 days) transition to terminal `expired` in bounded batches of
+`PUNARO_RELAY_TERMINAL_MAINTENANCE_BATCH` (default 100, range 1 through 1000)
+and release reserved capacity exactly once. Terminal rows are retained for
+`PUNARO_RELAY_TERMINAL_RETENTION_SECONDS` (default 7 days, range 1 second
+through 365 days) then pruned in the same batch size. Invalid values fail
+startup. `punarod` runs one maintenance batch per minute using injected
+database time. Host-local `punaro relay terminal list --directory DIR` pages
+content-free dead-letter metadata; `punaro relay terminal maintain
+--directory DIR --yes` runs one batch. There is no agent dead-letter or
+receipt API. The loopback health listener exposes `GET /metrics` with
 `relay_rate_limit_rejections`, `relay_capacity_rejections`,
-`relay_pending_deliveries`, and `relay_pending_bytes` only; it has no body,
+`relay_pending_deliveries`, `relay_pending_bytes`,
+`relay_oldest_pending_age_seconds`, `relay_terminal_transitions_acked`,
+`relay_terminal_transitions_expired`, `relay_terminal_transitions_revoked`,
+`relay_terminal_retained`, and `relay_lease_redeliveries` only; it has no body,
 endpoint, role, or conversation labels.
 
 For a Cloudflare-protected remote route, additionally set the Access issuer,

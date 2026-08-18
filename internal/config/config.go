@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/rock3r/punaro/internal/listener"
@@ -64,6 +65,9 @@ type Config struct {
 	RelayPendingInstallationCount        int
 	RelayPendingInstallationBytes        int64
 	RelayPendingRetryAfterSeconds        int
+	RelayPendingMaxAgeSeconds            int
+	RelayTerminalRetentionSeconds        int
+	RelayTerminalMaintenanceBatch        int
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -280,7 +284,20 @@ func Load(explicitEnvFile string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayPendingRetryAfterSeconds: pendingRetryAfter}, nil
+	retentionDefaults := relay.DefaultRetentionConfig()
+	pendingMaxAgeSeconds, err := parseBoundedInt("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", value("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", strconv.Itoa(int(retentionDefaults.PendingMaxAge/time.Second))), int(relay.RetentionAgeMin/time.Second), int(relay.RetentionPendingMaxAgeMax/time.Second))
+	if err != nil {
+		return Config{}, err
+	}
+	terminalRetentionSeconds, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", value("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(int(retentionDefaults.TerminalRetention/time.Second))), int(relay.RetentionAgeMin/time.Second), int(relay.RetentionTerminalMax/time.Second))
+	if err != nil {
+		return Config{}, err
+	}
+	terminalMaintenanceBatch, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_MAINTENANCE_BATCH", value("PUNARO_RELAY_TERMINAL_MAINTENANCE_BATCH", strconv.Itoa(retentionDefaults.MaintenanceBatch)), relay.RetentionBatchMin, relay.RetentionBatchMax)
+	if err != nil {
+		return Config{}, err
+	}
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax, RelayPendingRecipientCount: pendingRecipientCount, RelayPendingRecipientBytes: pendingRecipientBytes, RelayPendingInstallationCount: pendingInstallationCount, RelayPendingInstallationBytes: pendingInstallationBytes, RelayPendingRetryAfterSeconds: pendingRetryAfter, RelayPendingMaxAgeSeconds: pendingMaxAgeSeconds, RelayTerminalRetentionSeconds: terminalRetentionSeconds, RelayTerminalMaintenanceBatch: terminalMaintenanceBatch}, nil
 }
 
 func parseBoundedInt(name, raw string, minimum, maximum int) (int, error) {
@@ -318,6 +335,15 @@ func (c Config) RelayQuotaLimits() relay.QuotaConfig {
 		InstallationCount: c.RelayPendingInstallationCount,
 		InstallationBytes: c.RelayPendingInstallationBytes,
 		RetryAfterSeconds: c.RelayPendingRetryAfterSeconds,
+	}
+}
+
+// RelayRetentionPolicy returns the startup-validated pending-expiry and terminal-retention policy.
+func (c Config) RelayRetentionPolicy() relay.RetentionConfig {
+	return relay.RetentionConfig{
+		PendingMaxAge:     time.Duration(c.RelayPendingMaxAgeSeconds) * time.Second,
+		TerminalRetention: time.Duration(c.RelayTerminalRetentionSeconds) * time.Second,
+		MaintenanceBatch:  c.RelayTerminalMaintenanceBatch,
 	}
 }
 
