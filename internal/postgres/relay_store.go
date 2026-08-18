@@ -251,6 +251,9 @@ func (d *Database) RegisterRoleProfile(input relay.RegisterRoleInput) (relay.Rol
 	if !profilesAvailable {
 		return relay.RoleProfile{}, false, relay.ErrForbidden
 	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('role-profile-retry',$1::text,$2::text)::text, 579001230612))`, input.MachineID, input.IdempotencyKey); err != nil {
+		return relay.RoleProfile{}, false, errors.New("role registration retry lock is unavailable")
+	}
 	var existingHash string
 	var existingRole string
 	var existingDisplay sql.NullString
@@ -295,7 +298,7 @@ func (d *Database) RegisterRoleProfile(input relay.RegisterRoleInput) (relay.Rol
 	if displayName != "" {
 		display = displayName
 	}
-	updatedAt := input.Now.UTC()
+	updatedAt := input.Now.UTC().Truncate(time.Millisecond)
 	if created {
 		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_profiles(role,display_name,direct_addressable,updated_at) VALUES($1,$2,$3,$4)`, input.Role, display, input.DirectAddressable, updatedAt); err != nil {
 			return relay.RoleProfile{}, false, relayDatabaseError(err, "create role profile")
@@ -304,7 +307,7 @@ func (d *Database) RegisterRoleProfile(input relay.RegisterRoleInput) (relay.Rol
 		return relay.RoleProfile{}, false, relayDatabaseError(err, "update role profile")
 	}
 	profile := relay.RoleProfile{Role: input.Role, DisplayName: displayName, DirectAddressable: input.DirectAddressable, UpdatedAt: updatedAt}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_profile_idempotency(machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, input.DirectAddressable, profile.UpdatedAt, input.Now.UTC()); err != nil {
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_profile_idempotency(machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, input.DirectAddressable, profile.UpdatedAt, updatedAt); err != nil {
 		return relay.RoleProfile{}, false, relayDatabaseError(err, "record role profile retry")
 	}
 	if err := tx.Commit(); err != nil {

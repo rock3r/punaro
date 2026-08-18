@@ -993,15 +993,16 @@ func (s *Store) RegisterRoleProfile(input RegisterRoleInput) (RoleProfile, bool,
 	if displayName != "" {
 		display = displayName
 	}
+	updatedAt := input.Now.UTC().Truncate(time.Millisecond)
 	if created {
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profiles(role, display_name, direct_addressable, updated_at) VALUES (?, ?, ?, ?)`, input.Role, display, addressable, input.Now.UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profiles(role, display_name, direct_addressable, updated_at) VALUES (?, ?, ?, ?)`, input.Role, display, addressable, updatedAt.UnixMilli()); err != nil {
 			return RoleProfile{}, false, fmt.Errorf("create role profile: %w", err)
 		}
-	} else if _, err := tx.ExecContext(context.Background(), `UPDATE role_profiles SET display_name = ?, direct_addressable = ?, updated_at = ? WHERE role = ?`, display, addressable, input.Now.UnixMilli(), input.Role); err != nil {
+	} else if _, err := tx.ExecContext(context.Background(), `UPDATE role_profiles SET display_name = ?, direct_addressable = ?, updated_at = ? WHERE role = ?`, display, addressable, updatedAt.UnixMilli(), input.Role); err != nil {
 		return RoleProfile{}, false, fmt.Errorf("update role profile: %w", err)
 	}
-	profile := RoleProfile{Role: input.Role, DisplayName: displayName, DirectAddressable: input.DirectAddressable, UpdatedAt: input.Now.UTC()}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profile_idempotency(machine_id, key, request_hash, role, display_name, direct_addressable, updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, addressable, profile.UpdatedAt.UnixMilli(), input.Now.UnixMilli()); err != nil {
+	profile := RoleProfile{Role: input.Role, DisplayName: displayName, DirectAddressable: input.DirectAddressable, UpdatedAt: updatedAt}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_profile_idempotency(machine_id, key, request_hash, role, display_name, direct_addressable, updated_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, input.MachineID, input.IdempotencyKey, requestHash, input.Role, display, addressable, profile.UpdatedAt.UnixMilli(), updatedAt.UnixMilli()); err != nil {
 		return RoleProfile{}, false, fmt.Errorf("record role profile idempotency key: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

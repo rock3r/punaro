@@ -463,6 +463,59 @@ func RunRoleProfiles(t *testing.T, backend relay.Backend, namespace string) {
 	if _, err := store.RoleProfile(invented); !errors.Is(err, relay.ErrForbidden) {
 		t.Fatalf("message body created a role profile: %v", err)
 	}
+	preciseNow := now.Add(4 * time.Minute).Add(123456789 * time.Nanosecond)
+	preciseRole := "role/" + machineA + "/precise"
+	precise, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: preciseRole, DisplayName: "Precise", IdempotencyKey: namespace + "-precise", Now: preciseNow,
+	})
+	if err != nil || !created || !precise.UpdatedAt.Equal(preciseNow.UTC().Truncate(time.Millisecond)) {
+		t.Fatalf("precise register=%#v created=%t err=%v", precise, created, err)
+	}
+	preciseRetry, created, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: preciseRole, DisplayName: "Precise", IdempotencyKey: namespace + "-precise", Now: preciseNow.Add(time.Hour),
+	})
+	if err != nil || created || !sameRoleProfile(preciseRetry, precise) {
+		t.Fatalf("precise retry=%#v created=%t err=%v", preciseRetry, created, err)
+	}
+	concurrentRole := "role/" + machineA + "/concurrent"
+	concurrentInput := relay.RegisterRoleInput{
+		MachineID: machineA, Role: concurrentRole, DisplayName: "Concurrent", IdempotencyKey: namespace + "-concurrent", Now: now.Add(5 * time.Minute),
+	}
+	const workers = 8
+	profiles := make([]relay.RoleProfile, workers)
+	createdFlags := make([]bool, workers)
+	errs := make([]error, workers)
+	var started, done sync.WaitGroup
+	started.Add(workers)
+	done.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer done.Done()
+			started.Done()
+			started.Wait()
+			profiles[i], createdFlags[i], errs[i] = store.RegisterRoleProfile(concurrentInput)
+		}(i)
+	}
+	done.Wait()
+	var concurrentFirst relay.RoleProfile
+	createdCount := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent worker %d err=%v", i, err)
+		}
+		if createdFlags[i] {
+			createdCount++
+			concurrentFirst = profiles[i]
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("concurrent created=%d want 1", createdCount)
+	}
+	for i, profile := range profiles {
+		if !sameRoleProfile(profile, concurrentFirst) {
+			t.Fatalf("concurrent worker %d profile=%#v want=%#v", i, profile, concurrentFirst)
+		}
+	}
 }
 
 func sameRoleProfile(got, want relay.RoleProfile) bool {

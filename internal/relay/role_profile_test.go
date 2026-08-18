@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -193,6 +194,71 @@ func TestStoreLegacyRoleRemainsHiddenUntilCanonicalRegistration(t *testing.T) {
 	}
 	if err := store.BindRoleToSession("machine-b", "role/plan-reviewer", "agent/b", now.Add(time.Second), time.Hour); err != nil {
 		t.Fatalf("legacy role binding after canonical register: %v", err)
+	}
+}
+
+func TestStoreRoleRegistrationRetryReturnsPersistedMillisecondTimestamp(t *testing.T) {
+	t.Parallel()
+	store := openRoleProfileStore(t)
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 123456789, time.UTC)
+	input := RegisterRoleInput{
+		MachineID: "machine-a", Role: "role/machine-a/reviewer", DisplayName: "Reviewer", IdempotencyKey: "register-1", Now: now,
+	}
+	first, created, err := store.RegisterRoleProfile(input)
+	if err != nil || !created {
+		t.Fatalf("first=%#v created=%t err=%v", first, created, err)
+	}
+	want := now.UTC().Truncate(time.Millisecond)
+	if !first.UpdatedAt.Equal(want) {
+		t.Fatalf("first timestamp=%s want=%s", first.UpdatedAt.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+	retry, created, err := store.RegisterRoleProfile(input)
+	if err != nil || created || retry != first {
+		t.Fatalf("retry=%#v created=%t err=%v", retry, created, err)
+	}
+}
+
+func TestStoreConcurrentRoleRegistrationRetriesReturnFirstResult(t *testing.T) {
+	t.Parallel()
+	store := openRoleProfileStore(t)
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 0, time.UTC)
+	input := RegisterRoleInput{
+		MachineID: "machine-a", Role: "role/machine-a/reviewer", DisplayName: "Reviewer", IdempotencyKey: "register-concurrent", Now: now,
+	}
+	const workers = 8
+	profiles := make([]RoleProfile, workers)
+	created := make([]bool, workers)
+	errs := make([]error, workers)
+	var started, done sync.WaitGroup
+	started.Add(workers)
+	done.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer done.Done()
+			started.Done()
+			started.Wait()
+			profiles[i], created[i], errs[i] = store.RegisterRoleProfile(input)
+		}(i)
+	}
+	done.Wait()
+	var first RoleProfile
+	createdCount := 0
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("worker %d err=%v", i, err)
+		}
+		if created[i] {
+			createdCount++
+			first = profiles[i]
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created=%d want 1", createdCount)
+	}
+	for i, profile := range profiles {
+		if profile != first {
+			t.Fatalf("worker %d profile=%#v want=%#v", i, profile, first)
+		}
 	}
 }
 
