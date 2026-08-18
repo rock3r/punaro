@@ -94,9 +94,9 @@ func (p RateLimitPolicy) Validate() error {
 	return validateRateBound("rate retry-after max seconds", p.MaxRetryAfterSeconds, minRateRetryAfterSeconds, maxRateRetryAfterSeconds)
 }
 
-func validateRateBound(name string, value, min, max int) error {
-	if value < min || value > max {
-		return fmt.Errorf("relay %s must be between %d and %d", name, min, max)
+func validateRateBound(name string, value, minimum, maximum int) error {
+	if value < minimum || value > maximum {
+		return fmt.Errorf("relay %s must be between %d and %d", name, minimum, maximum)
 	}
 	return nil
 }
@@ -155,7 +155,7 @@ func refillRateBucket(snapshot rateBucketSnapshot, now time.Time, burst, refillP
 	return rateBucketSnapshot{TokensMilli: tokens, LastRefillUnixMilli: nowMilli}
 }
 
-func consumeRefilledBucket(snapshot rateBucketSnapshot, burst, refillPerMinute, maxRetryAfterSeconds int) (rateBucketSnapshot, time.Duration, bool) {
+func consumeRefilledBucket(snapshot rateBucketSnapshot, _ int, refillPerMinute, maxRetryAfterSeconds int) (rateBucketSnapshot, time.Duration, bool) {
 	if snapshot.TokensMilli >= millitokensPerToken {
 		snapshot.TokensMilli -= millitokensPerToken
 		return snapshot, 0, true

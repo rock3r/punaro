@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -236,19 +237,19 @@ type durableRelaySnapshot struct {
 func durableAppendSnapshot(t *testing.T, store *Store, conversationID string) durableRelaySnapshot {
 	t.Helper()
 	var snapshot durableRelaySnapshot
-	if err := store.db.QueryRow(`SELECT next_sequence FROM conversations WHERE id=?`, conversationID).Scan(&snapshot.Sequence); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT next_sequence FROM conversations WHERE id=?`, conversationID).Scan(&snapshot.Sequence); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT count(*) FROM messages WHERE conversation_id=?`, conversationID).Scan(&snapshot.Messages); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM messages WHERE conversation_id=?`, conversationID).Scan(&snapshot.Messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT count(*) FROM deliveries`).Scan(&snapshot.Deliveries); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM deliveries`).Scan(&snapshot.Deliveries); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT count(*) FROM idempotency`).Scan(&snapshot.Idempotency); err != nil {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*) FROM idempotency`).Scan(&snapshot.Idempotency); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.db.QueryRow(`SELECT count(*), COALESCE(sum(tokens_milli),0) FROM rate_buckets`).Scan(&snapshot.RateBuckets, &snapshot.BucketTokens); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := store.db.QueryRowContext(context.Background(), `SELECT count(*), COALESCE(sum(tokens_milli),0) FROM rate_buckets`).Scan(&snapshot.RateBuckets, &snapshot.BucketTokens); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal(err)
 	}
 	return snapshot

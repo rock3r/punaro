@@ -383,10 +383,10 @@ func value(name, fallback string) string {
 	return fallback
 }
 
-func parseBoundedInt(name, raw string, min, max int) (int, error) {
+func parseBoundedInt(name, raw string, minimum, maximum int) (int, error) {
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < min || value > max {
-		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, min, max)
+	if err != nil || value < minimum || value > maximum {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, minimum, maximum)
 	}
 	return value, nil
 }
