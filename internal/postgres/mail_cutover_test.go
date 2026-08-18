@@ -1,11 +1,14 @@
 package postgres
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -57,6 +60,24 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	valid.ManifestSHA256 = hex.EncodeToString(digest[:])
 	if err := valid.Validate(); err != nil {
 		t.Fatal(err)
+	}
+	current := valid
+	currentManifest := manifest
+	currentManifest.Version = 6
+	currentManifest.TableSHA256.RoleProfiles = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.RoleProfileIdempotency = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.RateBuckets = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DirectConversations = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.MessageFromRoles = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DirectMessageIdempotency = strings.Repeat("c", 64)
+	current.Manifest, _ = json.Marshal(currentManifest)
+	currentDigest := sha256.Sum256(current.Manifest)
+	current.ManifestSHA256 = hex.EncodeToString(currentDigest[:])
+	if err := current.Validate(); err != nil {
+		t.Fatalf("current v6 request rejected: %v", err)
+	}
+	if len(current.Manifest) > 8192 {
+		t.Fatalf("current v6 manifest is %d bytes, want <= 8192", len(current.Manifest))
 	}
 	legacy := valid
 	legacyManifest := manifest
@@ -129,6 +150,49 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 		if err := request.Validate(); err == nil {
 			t.Fatalf("invalid request %d accepted: %#v", index, request)
 		}
+	}
+}
+
+func TestMailCutoverRequestAcceptsPreparedCurrentSQLiteSource(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := relay.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 18, 19, 30, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := relay.InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 7 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	epochID := "019f7f07-4b88-7c12-a394-b663274a6555"
+	target := strings.Repeat("a", 64)
+	prepared, err := relay.PrepareMigrationSource(ctx, path, epochID, target, inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := MailCutoverRequest{
+		EpochID: epochID, SourceID: prepared.SourceID, TargetIdentity: target, SourceFingerprint: prepared.Fingerprint,
+	}
+	request.Manifest, err = json.Marshal(prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(request.Manifest)
+	request.ManifestSHA256 = hex.EncodeToString(digest[:])
+	if len(request.Manifest) > 8192 {
+		t.Fatalf("prepared current manifest is %d bytes, want <= 8192", len(request.Manifest))
+	}
+	if err := request.Validate(); err != nil {
+		t.Fatalf("prepared current source rejected: %v", err)
 	}
 }
 

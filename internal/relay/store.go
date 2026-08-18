@@ -118,7 +118,8 @@ type Message struct {
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	Sequence       int64     `json:"sequence"`
-	FromEndpoint   string    `json:"from_endpoint"`
+	FromEndpoint   string    `json:"from_endpoint,omitempty"`
+	FromRole       string    `json:"from_role,omitempty"`
 	Body           string    `json:"body"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -238,6 +239,17 @@ type RoleListPage struct {
 type RoleResolveInput struct {
 	Name string
 	Now  time.Time
+}
+
+// DirectMessageInput is one signed-machine retry domain for a direct role send.
+// The conversation ID is assigned server-side for the unordered role pair.
+type DirectMessageInput struct {
+	SenderMachineID string
+	FromRole        string
+	ToRole          string
+	Body            string
+	IdempotencyKey  string
+	Now             time.Time
 }
 
 // RoleResolveResult is a deterministic directory answer. Ambiguous matches
@@ -553,6 +565,30 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY (kind, bucket_key)
 		)`,
+		`CREATE TABLE IF NOT EXISTS direct_conversations (
+			role_low TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
+			role_high TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
+			conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (role_low, role_high),
+			CHECK (role_low < role_high)
+		)`,
+		`CREATE TABLE IF NOT EXISTS message_from_roles (
+			message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+			from_role TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT
+		)`,
+		`CREATE TABLE IF NOT EXISTS direct_message_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			from_role TEXT NOT NULL,
+			to_role TEXT NOT NULL,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+			sequence INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS pending_capacity (
 			scope TEXT NOT NULL CHECK (scope IN ('installation','recipient')),
 			scope_key TEXT NOT NULL,
@@ -592,7 +628,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "pending_capacity"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "direct_conversations", "message_from_roles", "direct_message_idempotency", "pending_capacity"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -1112,6 +1148,179 @@ func (s *Store) RegisterRoleProfile(input RegisterRoleInput) (RoleProfile, bool,
 	return profile, created, nil
 }
 
+// SendDirectMessage creates or reuses the unique unordered-role conversation
+// and appends one targeted message. Exact retries return the original result.
+func (s *Store) SendDirectMessage(input DirectMessageInput) (Message, bool, error) {
+	if !ValidMachineID(input.SenderMachineID) || !ValidRequestToken(input.IdempotencyKey) || !CanonicalRoleForMachine(input.FromRole, input.SenderMachineID) || !CanonicalRoleHandle(input.ToRole) || input.FromRole == input.ToRole {
+		return Message{}, false, fmt.Errorf("invalid direct message request")
+	}
+	if len(input.Body) > maxMessageBodyBytes {
+		return Message{}, false, fmt.Errorf("message body exceeds %d bytes", maxMessageBodyBytes)
+	}
+	if !ValidMessageBody(input.Body) {
+		return Message{}, false, errors.New("message body is not portable UTF-8 text")
+	}
+	roleLow, roleHigh, ok := OrderedDirectRolePair(input.FromRole, input.ToRole)
+	if !ok {
+		return Message{}, false, fmt.Errorf("invalid direct message request")
+	}
+	requestHash := DirectMessageRequestHash(input.FromRole, input.ToRole, input.Body)
+	now := input.Now.UTC().Truncate(time.Millisecond)
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return Message{}, false, err
+	}
+	defer rollback(tx)
+	var existingHash, existingMessageID string
+	err = tx.QueryRowContext(context.Background(), `SELECT request_hash, message_id FROM direct_message_idempotency WHERE machine_id = ? AND key = ?`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingHash, &existingMessageID)
+	if err == nil {
+		if existingHash != requestHash {
+			return Message{}, false, ErrConflict
+		}
+		message, err := messageByID(tx, existingMessageID)
+		if err != nil {
+			return Message{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return Message{}, false, err
+		}
+		return message, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Message{}, false, fmt.Errorf("read direct message idempotency key: %w", err)
+	}
+	session, err := liveBoundRoleSession(tx, input.SenderMachineID, input.FromRole, now)
+	if err != nil {
+		return Message{}, false, err
+	}
+	// Hold the target profile write lock through commit so a concurrent opt-out
+	// cannot revoke addressability after this read and still land a message.
+	locked, err := tx.ExecContext(context.Background(), `UPDATE role_profiles SET updated_at = updated_at WHERE role = ?`, input.ToRole)
+	if err != nil {
+		return Message{}, false, fmt.Errorf("lock target role profile: %w", err)
+	}
+	affected, err := locked.RowsAffected()
+	if err != nil {
+		return Message{}, false, fmt.Errorf("lock target role profile: %w", err)
+	}
+	if affected == 0 {
+		return Message{}, false, ErrForbidden
+	}
+	var addressable int
+	err = tx.QueryRowContext(context.Background(), `SELECT direct_addressable FROM role_profiles WHERE role = ?`, input.ToRole).Scan(&addressable)
+	if errors.Is(err, sql.ErrNoRows) || addressable != 1 {
+		return Message{}, false, ErrForbidden
+	}
+	if err != nil {
+		return Message{}, false, fmt.Errorf("read target role profile: %w", err)
+	}
+	conversationID, err := getOrCreateDirectConversation(tx, roleLow, roleHigh, input.FromRole, input.ToRole, now)
+	if err != nil {
+		return Message{}, false, err
+	}
+	if err := s.consumeRateLimits(tx, input.SenderMachineID, conversationID, now); err != nil {
+		return Message{}, false, err
+	}
+	if err := s.reservePendingCapacity(tx, []string{roleRecipient(input.ToRole)}, int64(len(input.Body))); err != nil {
+		return Message{}, false, err
+	}
+	message := Message{ID: uuid.NewString(), ConversationID: conversationID, FromRole: input.FromRole, Body: input.Body, CreatedAt: now}
+	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", conversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
+		return Message{}, false, ErrForbidden
+	} else if err != nil {
+		return Message{}, false, fmt.Errorf("allocate message sequence: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO messages(id, conversation_id, sequence, from_endpoint, body, created_at) VALUES (?, ?, ?, ?, ?, ?)`, message.ID, message.ConversationID, message.Sequence, session, message.Body, message.CreatedAt.UnixMilli()); err != nil {
+		return Message{}, false, fmt.Errorf("append direct message: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO message_from_roles(message_id, from_role) VALUES (?, ?)`, message.ID, input.FromRole); err != nil {
+		return Message{}, false, fmt.Errorf("record direct message sender role: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO deliveries(id, message_id, recipient_endpoint) VALUES (?, ?, ?)`, uuid.NewString(), message.ID, roleRecipient(input.ToRole)); err != nil {
+		return Message{}, false, fmt.Errorf("create direct role delivery: %w", err)
+	}
+	if err := advanceRecipientCursor(tx, roleRecipient(input.FromRole), conversationID); err != nil {
+		return Message{}, false, err
+	}
+	if err := advanceSessionCursors(tx, input.SenderMachineID, session, conversationID, now); err != nil {
+		return Message{}, false, err
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO direct_message_idempotency(machine_id, key, request_hash, from_role, to_role, conversation_id, message_id, sequence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, input.SenderMachineID, input.IdempotencyKey, requestHash, input.FromRole, input.ToRole, conversationID, message.ID, message.Sequence, now.UnixMilli()); err != nil {
+		return Message{}, false, fmt.Errorf("record direct message idempotency key: %w", err)
+	}
+	s.refreshPendingMetrics(tx)
+	if err := tx.Commit(); err != nil {
+		return Message{}, false, err
+	}
+	return message, false, nil
+}
+
+func rejectDirectConversationAppend(tx *sql.Tx, conversationID string) error {
+	var exists int
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM direct_conversations WHERE conversation_id = ?)`, conversationID).Scan(&exists); err != nil {
+		return fmt.Errorf("read direct conversation: %w", err)
+	}
+	if exists == 1 {
+		return ErrForbidden
+	}
+	return nil
+}
+
+func liveBoundRoleSession(tx *sql.Tx, machineID, role string, now time.Time) (string, error) {
+	var session string
+	err := tx.QueryRowContext(context.Background(), `SELECT rb.session_endpoint FROM role_bindings rb
+		JOIN endpoints e ON e.endpoint = rb.session_endpoint
+		WHERE rb.role = ? AND rb.machine_id = ? AND e.machine_id = ?
+		  AND rb.ownership_generation = e.ownership_generation
+		  AND rb.lease_until > ? AND e.lease_until > ?`, role, machineID, machineID, now.UnixMilli(), now.UnixMilli()).Scan(&session)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrForbidden
+	}
+	if err != nil {
+		return "", fmt.Errorf("read live role binding: %w", err)
+	}
+	return session, nil
+}
+
+func getOrCreateDirectConversation(tx *sql.Tx, roleLow, roleHigh, fromRole, toRole string, now time.Time) (string, error) {
+	if _, err := tx.ExecContext(context.Background(), `SAVEPOINT create_direct_conversation`); err != nil {
+		return "", fmt.Errorf("begin direct conversation create: %w", err)
+	}
+	conversationID := uuid.NewString()
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO conversations(id, created_at) VALUES (?, ?)`, conversationID, now.UnixMilli()); err != nil {
+		return "", fmt.Errorf("create direct conversation: %w", err)
+	}
+	for _, role := range []string{fromRole, toRole} {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO role_memberships(conversation_id, role, capabilities) VALUES (?, ?, ?)`, conversationID, role, CapSend|CapReceive); err != nil {
+			return "", fmt.Errorf("add direct conversation role member: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(context.Background(), `INSERT OR IGNORE INTO direct_conversations(role_low, role_high, conversation_id, created_at) VALUES (?, ?, ?, ?)`, roleLow, roleHigh, conversationID, now.UnixMilli())
+	if err != nil {
+		return "", fmt.Errorf("record direct conversation pair: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return "", fmt.Errorf("record direct conversation pair: %w", err)
+	}
+	if affected == 1 {
+		if _, err := tx.ExecContext(context.Background(), `RELEASE create_direct_conversation`); err != nil {
+			return "", fmt.Errorf("commit direct conversation create: %w", err)
+		}
+		return conversationID, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), `ROLLBACK TO create_direct_conversation`); err != nil {
+		return "", fmt.Errorf("discard duplicate direct conversation: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `RELEASE create_direct_conversation`); err != nil {
+		return "", fmt.Errorf("release direct conversation savepoint: %w", err)
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT conversation_id FROM direct_conversations WHERE role_low = ? AND role_high = ?`, roleLow, roleHigh).Scan(&conversationID); err != nil {
+		return "", fmt.Errorf("read converged direct conversation: %w", err)
+	}
+	return conversationID, nil
+}
+
 // RoleProfile returns one registered profile. Unregistered and legacy roles are
 // indistinguishable from missing.
 func (s *Store) RoleProfile(role string) (RoleProfile, error) {
@@ -1444,11 +1653,15 @@ func (s *Store) AuthorizeSender(conversationID, machineID, endpoint string, now 
 	if capabilities&CapSend == 0 {
 		return ErrForbidden
 	}
+	if err := rejectDirectConversationAppend(tx, conversationID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // AppendMessage accepts one immutable, authorized message and creates one
 // independent durable delivery per receiving endpoint, excluding the sender.
+// Direct-role conversations are writable only through SendDirectMessage.
 func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.SenderMachineID) || !ValidEndpoint(input.FromEndpoint) || (input.TargetRole != "" && !ValidRole(input.TargetRole)) || !ValidRequestToken(input.IdempotencyKey) || len(input.ArtifactIDs) != 0 {
 		return Message{}, false, fmt.Errorf("conversation, machine, endpoint, and idempotency key are required")
@@ -1471,6 +1684,9 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	}
 	if capabilities&CapSend == 0 {
 		return Message{}, false, ErrForbidden
+	}
+	if err := rejectDirectConversationAppend(tx, input.ConversationID); err != nil {
+		return Message{}, false, err
 	}
 	if input.TargetRole != "" {
 		var allowed bool
@@ -1665,8 +1881,9 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(recipientIDs)), ",")
 	query := `SELECT d.id, d.recipient_endpoint, d.lease_machine_id, d.lease_token, d.lease_generation, d.ownership_generation, d.consumer_generation, d.lease_until,
-		m.id, m.conversation_id, m.sequence, m.from_endpoint, m.body, m.created_at
+		m.id, m.conversation_id, m.sequence, m.from_endpoint, m.body, m.created_at, sender.from_role
 		FROM deliveries d JOIN messages m ON m.id = d.message_id
+		LEFT JOIN message_from_roles sender ON sender.message_id = m.id
 		WHERE d.recipient_endpoint IN (` + placeholders + `) AND d.acked_at IS NULL
 		AND (d.lease_until IS NULL OR d.lease_until <= ? OR d.ownership_generation IS NULL OR d.ownership_generation <> ? OR d.consumer_generation IS NULL OR d.consumer_generation <> ? OR d.lease_machine_id = ?)` // #nosec G202 -- placeholders are generated only from bounded, server-derived recipient identities.
 	args := make([]any, 0, len(recipientIDs)+5)
@@ -1694,9 +1911,11 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 		var leaseUntil, leaseOwnership, leaseConsumer sql.NullInt64
 		var createdAt int64
 		var recipientID string
-		if err := rows.Scan(&delivery.ID, &recipientID, &leaseMachine, &leaseToken, &delivery.LeaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &delivery.Message.ID, &delivery.Message.ConversationID, &delivery.Message.Sequence, &delivery.Message.FromEndpoint, &delivery.Message.Body, &createdAt); err != nil {
+		var fromRole sql.NullString
+		if err := rows.Scan(&delivery.ID, &recipientID, &leaseMachine, &leaseToken, &delivery.LeaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &delivery.Message.ID, &delivery.Message.ConversationID, &delivery.Message.Sequence, &delivery.Message.FromEndpoint, &delivery.Message.Body, &createdAt, &fromRole); err != nil {
 			return DeliveryLeasePage{}, err
 		}
+		applyDirectSender(&delivery.Message, fromRole)
 		delivery.RecipientEndpoint = endpoint
 		if role, isRole := parseRoleRecipient(recipientID); isRole {
 			delivery.RecipientRole = role
@@ -2106,12 +2325,23 @@ func endpointOwnershipUntil(tx *sql.Tx, endpoint, machineID string, now time.Tim
 func messageByID(tx *sql.Tx, messageID string) (Message, error) {
 	var message Message
 	var createdAt int64
-	err := tx.QueryRowContext(context.Background(), "SELECT id, conversation_id, sequence, from_endpoint, body, created_at FROM messages WHERE id = ?", messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &createdAt)
+	var fromRole sql.NullString
+	err := tx.QueryRowContext(context.Background(), `SELECT m.id, m.conversation_id, m.sequence, m.from_endpoint, m.body, m.created_at, sender.from_role
+		FROM messages m LEFT JOIN message_from_roles sender ON sender.message_id = m.id
+		WHERE m.id = ?`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &createdAt, &fromRole)
 	if err != nil {
 		return Message{}, fmt.Errorf("read idempotent message: %w", err)
 	}
 	message.CreatedAt = fromMillis(createdAt)
+	applyDirectSender(&message, fromRole)
 	return message, nil
+}
+
+func applyDirectSender(message *Message, fromRole sql.NullString) {
+	if fromRole.Valid && fromRole.String != "" {
+		message.FromRole = fromRole.String
+		message.FromEndpoint = ""
+	}
 }
 
 func conversationByID(tx *sql.Tx, conversationID string) (Conversation, error) {

@@ -620,6 +620,8 @@ type sendRequest struct {
 	conversationID string
 	fromEndpoint   string
 	targetRole     string
+	toRole         string
+	fromRole       string
 	bodyFile       string
 	idempotencyKey string
 }
@@ -631,10 +633,25 @@ func parseSendArgs(args []string) (sendRequest, error) {
 	flags.StringVar(&request.conversationID, "conversation", "", "conversation ID")
 	flags.StringVar(&request.fromEndpoint, "from", "", "attached sender endpoint")
 	flags.StringVar(&request.targetRole, "target-role", "", "deliver only to this durable conversation role")
+	flags.StringVar(&request.toRole, "to", "", "canonical destination role")
+	flags.StringVar(&request.fromRole, "from-role", "", "canonical source role")
 	flags.StringVar(&request.bodyFile, "body-file", "", "message body file or - for stdin")
 	flags.StringVar(&request.idempotencyKey, "idempotency-key", "", "stable key for retries")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
 		return sendRequest{}, fmt.Errorf("invalid send arguments")
+	}
+	direct := strings.TrimSpace(request.toRole) != "" || strings.TrimSpace(request.fromRole) != ""
+	if direct {
+		if strings.TrimSpace(request.conversationID) != "" || strings.TrimSpace(request.fromEndpoint) != "" || request.targetRole != "" {
+			return sendRequest{}, fmt.Errorf("--to/--from-role cannot be combined with --conversation, --from, or --target-role")
+		}
+		if strings.TrimSpace(request.toRole) == "" || strings.TrimSpace(request.fromRole) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
+			return sendRequest{}, fmt.Errorf("--to, --from-role, --body-file, and --idempotency-key are required")
+		}
+		if !relay.CanonicalRoleHandle(request.toRole) || !relay.CanonicalRoleHandle(request.fromRole) {
+			return sendRequest{}, fmt.Errorf("--to and --from-role must be canonical role handles")
+		}
+		return request, nil
 	}
 	if strings.TrimSpace(request.conversationID) == "" || strings.TrimSpace(request.fromEndpoint) == "" || request.bodyFile == "" || strings.TrimSpace(request.idempotencyKey) == "" {
 		return sendRequest{}, fmt.Errorf("--conversation, --from, --body-file, and --idempotency-key are required")
@@ -663,12 +680,19 @@ func runSend(args []string) error {
 		return err
 	}
 	var message relay.Message
-	if request.targetRole == "" {
+	switch {
+	case request.toRole != "":
+		message, err = client.SendDirectMessage(context.Background(), request.fromRole, request.toRole, string(body), request.idempotencyKey)
+	case request.targetRole == "":
 		message, err = client.Send(context.Background(), request.conversationID, request.fromEndpoint, string(body), request.idempotencyKey)
-	} else {
+	default:
 		message, err = client.SendToRole(context.Background(), request.conversationID, request.fromEndpoint, request.targetRole, string(body), request.idempotencyKey)
 	}
 	if err != nil {
+		return err
+	}
+	if request.toRole != "" {
+		_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"conversation_id\":%q,\"sequence\":%d}\n", message.ID, message.ConversationID, message.Sequence)
 		return err
 	}
 	_, err = fmt.Fprintf(os.Stdout, "{\"id\":%q,\"sequence\":%d}\n", message.ID, message.Sequence)

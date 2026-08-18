@@ -319,8 +319,23 @@ fully qualified handle such as `role/workstation-review/reviewer` or an
 unqualified slug such as `reviewer`. Display names are never keys. Zero matches
 are indistinguishable from hidden or legacy roles. Multiple slug matches return
 a typed ambiguity result with at most 20 qualified roles and display names,
-never sessions or conversation inventory. Direct send remains a separate
-operation.
+never sessions or conversation inventory. After resolve, an authenticated
+machine sends with `POST /v1/direct-messages` and a required `Idempotency-Key`.
+The request names canonical `from_role` and `to_role` handles plus a body. The
+server proves `from_role` is owned by the signed machine and currently bound to
+one of its live advertised sessions. `to_role` must exist and remain
+`direct_addressable`; it may be offline. Self-send is rejected. One transaction
+reuses the unique unordered-role conversation or creates it with exactly those
+two role members, both send and receive, and no endpoint membership from
+request text. The immutable message is targeted only to `to_role`. The envelope
+sender is the source role, not the bound session. Exact retries of the same
+machine, key, roles, and body return the original conversation, message, and
+sequence. Changing target, body, or source with the same key conflicts.
+Revoking addressability before commit creates nothing; revocation after
+acceptance does not recall. Direct-role conversations are writable only
+through this route; generic `POST /v1/conversations/{id}/messages` appends,
+including targeted `target_role` sends, are refused. Delivery remains durable
+while the target is offline and becomes leaseable when that role binds later.
 
 The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
 the role and one of its currently advertised endpoints. The server verifies the
@@ -874,6 +889,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/list` | Bounded listing of opted-in addressable roles; no session inventory. |
 | `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
+| `POST` | `/v1/direct-messages` | Create or reuse the unique direct-role conversation and send; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity; committed idempotent retries do not consume tokens or reserve occupancy again. |
@@ -1446,11 +1462,16 @@ without that table remains version 4 and exports an empty `mail_rate_buckets`
 page, so crash-during-cutover plus an upgraded admin binary can still inspect
 and resume.
 
-Schema version 47 adds explicit pending-delivery occupancy counters. Recipient
+Schema version 47 adds durable direct-role conversations, message-from-role
+attribution, and direct-message idempotency. Current SQLite sources that
+contain those tables are migration-source version 6. A prepared parent source
+without them remains version 5 and exports empty direct-message pages.
+
+Schema version 48 adds explicit pending-delivery occupancy counters. Recipient
 and installation count and body-byte ceilings are startup-validated. Current
-SQLite sources that contain `pending_capacity` are migration-source version 6
+SQLite sources that contain `pending_capacity` are migration-source version 7
 and copy those rows into PostgreSQL during cutover. A prepared parent source
-without that table remains version 5 and exports an empty `mail_pending_capacity`
+without that table remains version 6 and exports an empty `mail_pending_capacity`
 page. Readiness verifies counters against pending deliveries or fails closed;
 uninitialized counters with pending work are rebuilt once. Expiry and
 dead-letter policies remain later slices.

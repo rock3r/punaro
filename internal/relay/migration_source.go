@@ -35,46 +35,52 @@ const (
 // MigrationSourceCounts are the exact logical row counts bound into a source
 // manifest. Cutover metadata is intentionally excluded.
 type MigrationSourceCounts struct {
-	Endpoints               int64 `json:"endpoints"`
-	Conversations           int64 `json:"conversations"`
-	Memberships             int64 `json:"memberships"`
-	Roles                   int64 `json:"roles"`
-	RoleMemberships         int64 `json:"role_memberships"`
-	RoleBindings            int64 `json:"role_bindings"`
-	Messages                int64 `json:"messages"`
-	Deliveries              int64 `json:"deliveries"`
-	RecipientCursors        int64 `json:"recipient_cursors"`
-	MessageIdempotency      int64 `json:"message_idempotency"`
-	ConversationIdempotency int64 `json:"conversation_idempotency"`
-	ControlEvents           int64 `json:"control_events,omitempty"`
-	ControlIdempotency      int64 `json:"control_idempotency,omitempty"`
-	RoleProfiles            int64 `json:"role_profiles,omitempty"`
-	RoleProfileIdempotency  int64 `json:"role_profile_idempotency,omitempty"`
-	RateBuckets             int64 `json:"rate_buckets,omitempty"`
-	PendingCapacity         int64 `json:"pending_capacity,omitempty"`
-	RequestNonces           int64 `json:"request_nonces"`
+	Endpoints                int64 `json:"endpoints"`
+	Conversations            int64 `json:"conversations"`
+	Memberships              int64 `json:"memberships"`
+	Roles                    int64 `json:"roles"`
+	RoleMemberships          int64 `json:"role_memberships"`
+	RoleBindings             int64 `json:"role_bindings"`
+	Messages                 int64 `json:"messages"`
+	Deliveries               int64 `json:"deliveries"`
+	RecipientCursors         int64 `json:"recipient_cursors"`
+	MessageIdempotency       int64 `json:"message_idempotency"`
+	ConversationIdempotency  int64 `json:"conversation_idempotency"`
+	ControlEvents            int64 `json:"control_events,omitempty"`
+	ControlIdempotency       int64 `json:"control_idempotency,omitempty"`
+	RoleProfiles             int64 `json:"role_profiles,omitempty"`
+	RoleProfileIdempotency   int64 `json:"role_profile_idempotency,omitempty"`
+	RateBuckets              int64 `json:"rate_buckets,omitempty"`
+	DirectConversations      int64 `json:"direct_conversations,omitempty"`
+	MessageFromRoles         int64 `json:"message_from_roles,omitempty"`
+	DirectMessageIdempotency int64 `json:"direct_message_idempotency,omitempty"`
+	PendingCapacity          int64 `json:"pending_capacity,omitempty"`
+	RequestNonces            int64 `json:"request_nonces"`
 }
 
 // MigrationSourceHashes are per-table hashes over canonical ordered rows.
 type MigrationSourceHashes struct {
-	Endpoints               string `json:"endpoints"`
-	Conversations           string `json:"conversations"`
-	Memberships             string `json:"memberships"`
-	Roles                   string `json:"roles"`
-	RoleMemberships         string `json:"role_memberships"`
-	RoleBindings            string `json:"role_bindings"`
-	Messages                string `json:"messages"`
-	Deliveries              string `json:"deliveries"`
-	RecipientCursors        string `json:"recipient_cursors"`
-	MessageIdempotency      string `json:"message_idempotency"`
-	ConversationIdempotency string `json:"conversation_idempotency"`
-	ControlEvents           string `json:"control_events,omitempty"`
-	ControlIdempotency      string `json:"control_idempotency,omitempty"`
-	RoleProfiles            string `json:"role_profiles,omitempty"`
-	RoleProfileIdempotency  string `json:"role_profile_idempotency,omitempty"`
-	RateBuckets             string `json:"rate_buckets,omitempty"`
-	PendingCapacity         string `json:"pending_capacity,omitempty"`
-	RequestNonces           string `json:"request_nonces"`
+	Endpoints                string `json:"endpoints"`
+	Conversations            string `json:"conversations"`
+	Memberships              string `json:"memberships"`
+	Roles                    string `json:"roles"`
+	RoleMemberships          string `json:"role_memberships"`
+	RoleBindings             string `json:"role_bindings"`
+	Messages                 string `json:"messages"`
+	Deliveries               string `json:"deliveries"`
+	RecipientCursors         string `json:"recipient_cursors"`
+	MessageIdempotency       string `json:"message_idempotency"`
+	ConversationIdempotency  string `json:"conversation_idempotency"`
+	ControlEvents            string `json:"control_events,omitempty"`
+	ControlIdempotency       string `json:"control_idempotency,omitempty"`
+	RoleProfiles             string `json:"role_profiles,omitempty"`
+	RoleProfileIdempotency   string `json:"role_profile_idempotency,omitempty"`
+	RateBuckets              string `json:"rate_buckets,omitempty"`
+	DirectConversations      string `json:"direct_conversations,omitempty"`
+	MessageFromRoles         string `json:"message_from_roles,omitempty"`
+	DirectMessageIdempotency string `json:"direct_message_idempotency,omitempty"`
+	PendingCapacity          string `json:"pending_capacity,omitempty"`
+	RequestNonces            string `json:"request_nonces"`
 }
 
 // MigrationSourceManifest is a content-addressed logical view of one SQLite
@@ -119,12 +125,16 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"role_profiles", "role,display_name,direct_addressable,updated_at", "role"},
 	{"role_profile_idempotency", "machine_id,key,request_hash,role,display_name,direct_addressable,updated_at,created_at", "machine_id,key"},
 	{"rate_buckets", "kind,bucket_key,tokens,updated_at", "kind,bucket_key"},
+	{"direct_conversations", "role_low,role_high,conversation_id,created_at", "role_low,role_high"},
+	{"message_from_roles", "message_id,from_role", "message_id"},
+	{"direct_message_idempotency", "machine_id,key,request_hash,from_role,to_role,conversation_id,message_id,sequence,created_at", "machine_id,key"},
 	{"pending_capacity", "scope,scope_key,pending_count,pending_bytes", "scope,scope_key"},
 }
 
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
 var v4MigrationTableSpecs = migrationTableSpecs[:16]
 var v5MigrationTableSpecs = migrationTableSpecs[:17]
+var v6MigrationTableSpecs = migrationTableSpecs[:20]
 
 var roleMigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
@@ -143,7 +153,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;pending_capacity"
+const migrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;pending_capacity"
+const v6MigrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
 const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
@@ -403,6 +414,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='rate_buckets'`).Scan(&rateBucketTables); err != nil || rateBucketTables != 0 && rateBucketTables != 1 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var directTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('direct_conversations','message_from_roles','direct_message_idempotency')`).Scan(&directTables); err != nil || directTables != 0 && directTables != 3 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
 	var pendingCapacityTables int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='pending_capacity'`).Scan(&pendingCapacityTables); err != nil || pendingCapacityTables != 0 && pendingCapacityTables != 1 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
@@ -413,7 +428,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if rateBucketTables == 1 && profileTables != 2 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
-	if pendingCapacityTables == 1 && rateBucketTables != 1 {
+	if directTables == 3 && rateBucketTables != 1 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
+	if pendingCapacityTables == 1 && directTables != 3 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
 	manifest := MigrationSourceManifest{Version: 3}
@@ -421,7 +439,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
 	switch {
 	case roleTables == 0:
-		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 || pendingCapacityTables != 0 {
+		if controlTables != 0 || profileTables != 0 || rateBucketTables != 0 || directTables != 0 || pendingCapacityTables != 0 {
 			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
@@ -430,8 +448,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
 	case pendingCapacityTables == 1:
-		manifest.Version = 6
+		manifest.Version = 7
 		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
+	case directTables == 3:
+		manifest.Version = 6
+		tableSpecs, schema = v6MigrationTableSpecs, v6MigrationSourceSchema
 	case profileTables == 2 && rateBucketTables == 1:
 		manifest.Version = 5
 		tableSpecs, schema = v5MigrationTableSpecs, v5MigrationSourceSchema
@@ -467,7 +488,7 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if manifest.lastTransition != "" && manifest.lastTransition != "prepared" && manifest.lastTransition != "aborted" && manifest.lastTransition != "retired" {
 		return MigrationSourceManifest{}, errors.New("relay migration transition journal is invalid")
 	}
-	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, pendingCapacityTables == 1); err != nil {
+	if err := verifyMigrationSourceSchemaVersion(ctx, q, manifest.Version, controlTables == 2, profileTables == 2, rateBucketTables == 1, directTables == 3, pendingCapacityTables == 1); err != nil {
 		return MigrationSourceManifest{}, err
 	}
 	overall := sha256.New()
@@ -537,11 +558,11 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
-func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, pendingCapacity bool) error {
+func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct, pendingCapacity bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets, pendingCapacity)
+	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets, direct, pendingCapacity)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -576,7 +597,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets, pendingCapacity bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets, direct, pendingCapacity bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -593,7 +614,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	switch {
 	case pendingCapacity:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "pending_capacity", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "pending_capacity", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
+	case direct:
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	case rateBuckets:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
 	case profiles:
@@ -613,7 +636,6 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
 		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"rate_buckets":                     {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
-		"pending_capacity":                 {"scope:TEXT:1:1:-", "scope_key:TEXT:1:2:-", "pending_count:INTEGER:1:0:-", "pending_bytes:INTEGER:1:0:-"},
 		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
 		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
 		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
@@ -624,6 +646,10 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
 		"role_profiles":                    {"role:TEXT:0:1:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:0", "updated_at:INTEGER:1:0:-"},
 		"role_profile_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "role:TEXT:1:0:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"direct_conversations":             {"role_low:TEXT:1:1:-", "role_high:TEXT:1:2:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"message_from_roles":               {"message_id:TEXT:0:1:-", "from_role:TEXT:1:0:-"},
+		"direct_message_idempotency":       {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "from_role:TEXT:1:0:-", "to_role:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "message_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"pending_capacity":                 {"scope:TEXT:1:1:-", "scope_key:TEXT:1:2:-", "pending_count:INTEGER:1:0:-", "pending_bytes:INTEGER:1:0:-"},
 	}
 	if !controls {
 		delete(expectedColumns, "conversation_controls")
@@ -635,6 +661,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if !rateBuckets {
 		delete(expectedColumns, "rate_buckets")
+	}
+	if !direct {
+		delete(expectedColumns, "direct_conversations")
+		delete(expectedColumns, "message_from_roles")
+		delete(expectedColumns, "direct_message_idempotency")
 	}
 	if !pendingCapacity {
 		delete(expectedColumns, "pending_capacity")
@@ -678,6 +709,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"conversation_control_idempotency": {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
 		"role_profiles":                    {"roles:role:role:NO ACTION:CASCADE:NONE"},
 		"role_profile_idempotency":         {"role_profiles:role:role:NO ACTION:CASCADE:NONE"},
+		"direct_conversations":             {"roles:role_low:role:NO ACTION:RESTRICT:NONE", "roles:role_high:role:NO ACTION:RESTRICT:NONE", "conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"message_from_roles":               {"messages:message_id:id:NO ACTION:CASCADE:NONE", "roles:from_role:role:NO ACTION:RESTRICT:NONE"},
+		"direct_message_idempotency":       {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "messages:message_id:id:NO ACTION:CASCADE:NONE"},
 	}
 	if !controls {
 		delete(expectedForeignKeys, "conversation_controls")
@@ -686,6 +720,11 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	if !profiles {
 		delete(expectedForeignKeys, "role_profiles")
 		delete(expectedForeignKeys, "role_profile_idempotency")
+	}
+	if !direct {
+		delete(expectedForeignKeys, "direct_conversations")
+		delete(expectedForeignKeys, "message_from_roles")
+		delete(expectedForeignKeys, "direct_message_idempotency")
 	}
 	for table := range expectedColumns {
 		foreignKeys, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -737,6 +776,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if rateBuckets {
 		expectedIndexes = append(expectedIndexes, "rate_buckets:1:pk:0:kind,bucket_key")
+	}
+	if direct {
+		expectedIndexes = append(expectedIndexes,
+			"direct_conversations:1:pk:0:role_low,role_high", "direct_conversations:1:u:0:conversation_id",
+			"message_from_roles:1:pk:0:message_id",
+			"direct_message_idempotency:1:pk:0:machine_id,key",
+		)
 	}
 	if pendingCapacity {
 		expectedIndexes = append(expectedIndexes, "pending_capacity:1:pk:0:scope,scope_key")
@@ -827,7 +873,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	wantTriggers := 42
 	switch {
 	case pendingCapacity:
-		wantTriggers = 54
+		wantTriggers = 63
+	case direct:
+		wantTriggers = 60
 	case rateBuckets:
 		wantTriggers = 51
 	case profiles:
@@ -911,6 +959,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		logicalStateQuery += `
 		OR EXISTS (SELECT 1 FROM rate_buckets WHERE kind NOT IN ('sender','conversation') OR typeof(kind)<>'text' OR typeof(bucket_key)<>'text' OR typeof(tokens)<>'integer' OR tokens<0 OR typeof(updated_at)<>'integer')`
 	}
+	if direct {
+		logicalStateQuery = strings.Replace(logicalStateQuery, "UNION ALL SELECT control_id FROM conversation_control_idempotency\n\t)", "UNION ALL SELECT control_id FROM conversation_control_idempotency\n\t\tUNION ALL SELECT conversation_id FROM direct_conversations UNION ALL SELECT message_id FROM message_from_roles\n\t\tUNION ALL SELECT conversation_id FROM direct_message_idempotency UNION ALL SELECT message_id FROM direct_message_idempotency\n\t)", 1)
+		logicalStateQuery += `
+		OR EXISTS (SELECT 1 FROM direct_conversations WHERE role_low>=role_high OR typeof(role_low)<>'text' OR typeof(role_high)<>'text' OR typeof(created_at)<>'integer')
+		OR EXISTS (SELECT 1 FROM direct_conversations AS pair LEFT JOIN roles AS low ON low.role=pair.role_low LEFT JOIN roles AS high ON high.role=pair.role_high LEFT JOIN conversations AS conversation ON conversation.id=pair.conversation_id WHERE low.role IS NULL OR high.role IS NULL OR conversation.id IS NULL)
+		OR EXISTS (SELECT 1 FROM message_from_roles AS sender LEFT JOIN messages AS message ON message.id=sender.message_id LEFT JOIN roles AS role ON role.role=sender.from_role WHERE message.id IS NULL OR role.role IS NULL OR typeof(sender.from_role)<>'text')
+		OR EXISTS (SELECT 1 FROM direct_message_idempotency WHERE length(request_hash)<>64 OR request_hash GLOB '*[^0-9a-f]*' OR sequence<1)
+		OR EXISTS (SELECT 1 FROM direct_message_idempotency AS retry LEFT JOIN conversations AS conversation ON conversation.id=retry.conversation_id LEFT JOIN messages AS message ON message.id=retry.message_id WHERE conversation.id IS NULL OR message.id IS NULL
+			OR typeof(retry.machine_id)<>'text' OR typeof(retry.key)<>'text' OR typeof(retry.request_hash)<>'text' OR typeof(retry.from_role)<>'text' OR typeof(retry.to_role)<>'text' OR typeof(retry.sequence)<>'integer' OR typeof(retry.created_at)<>'integer')`
+	}
 	if pendingCapacity {
 		logicalStateQuery += `
 		OR EXISTS (SELECT 1 FROM pending_capacity WHERE scope NOT IN ('installation','recipient') OR typeof(scope)<>'text' OR typeof(scope_key)<>'text' OR typeof(pending_count)<>'integer' OR pending_count<0 OR typeof(pending_bytes)<>'integer' OR pending_bytes<0 OR (scope='installation' AND scope_key<>'') OR (scope='recipient' AND scope_key='') OR (scope='recipient' AND NOT ((substr(scope_key,1,6)=char(30)||'role:' AND length(substr(scope_key,7)) BETWEEN 1 AND 512 AND length(CAST(substr(scope_key,7) AS blob))<=2048) OR (substr(scope_key,1,6)<>char(30)||'role:' AND length(scope_key) BETWEEN 1 AND 512 AND length(CAST(scope_key AS blob))<=2048))))`
@@ -973,14 +1031,14 @@ func validateMigrationSourceValue(table, column string, value any) error {
 	switch table + "." + column {
 	case "endpoints.endpoint", "memberships.endpoint", "messages.from_endpoint", "role_bindings.session_endpoint", "conversation_controls.actor_endpoint", "conversation_controls.member_endpoint":
 		valid = ValidEndpoint(text)
-	case "roles.role", "role_memberships.role", "role_bindings.role", "role_profiles.role", "role_profile_idempotency.role":
+	case "roles.role", "role_memberships.role", "role_bindings.role", "role_profiles.role", "role_profile_idempotency.role", "direct_conversations.role_low", "direct_conversations.role_high", "message_from_roles.from_role", "direct_message_idempotency.from_role", "direct_message_idempotency.to_role":
 		valid = ValidRole(text)
-	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "role_profile_idempotency.machine_id", "request_nonces.machine_id":
+	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id":
 		valid = ValidMachineID(text)
 	case "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
 		_, roleRecipient := parseRoleRecipient(text)
 		valid = roleRecipient || ValidEndpoint(text)
-	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "role_profile_idempotency.key", "request_nonces.nonce":
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce":
 		valid = ValidRequestToken(text)
 	case "role_profiles.display_name", "role_profile_idempotency.display_name":
 		_, valid = NormalizeRoleDisplayName(text)
@@ -995,7 +1053,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = text == pendingInstallationKey || ValidEndpoint(text) || roleRecipient
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil
@@ -1068,6 +1126,12 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.RoleProfileIdempotency, manifest.TableSHA256.RoleProfileIdempotency = count, digest
 	case "rate_buckets":
 		manifest.Counts.RateBuckets, manifest.TableSHA256.RateBuckets = count, digest
+	case "direct_conversations":
+		manifest.Counts.DirectConversations, manifest.TableSHA256.DirectConversations = count, digest
+	case "message_from_roles":
+		manifest.Counts.MessageFromRoles, manifest.TableSHA256.MessageFromRoles = count, digest
+	case "direct_message_idempotency":
+		manifest.Counts.DirectMessageIdempotency, manifest.TableSHA256.DirectMessageIdempotency = count, digest
 	case "pending_capacity":
 		manifest.Counts.PendingCapacity, manifest.TableSHA256.PendingCapacity = count, digest
 	case "request_nonces":

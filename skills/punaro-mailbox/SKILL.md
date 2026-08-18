@@ -43,6 +43,16 @@ must use a qualified handle such as `role/workstation-review/reviewer`.
 Display names are labels, not lookup keys. Listing and resolve do not send
 mail or create conversations.
 
+After resolve, send with canonical handles:
+
+```text
+punaro-adapter send --to role/workstation-implement/implementer --from-role role/workstation-review/reviewer --body-file FILE --idempotency-key KEY
+```
+
+The destination may be offline. Keep one stable idempotency key for retries.
+Do not combine this form with `--conversation` or `--from`. The envelope
+identifies the source role, not the bound session.
+
 For a genuine local or authorization blocker, report it concisely to the task
 owner. Do not guess a route or bypass the relay with a public link, Telegram
 file, or direct peer transfer.

@@ -18,7 +18,9 @@ var mailCutoverTables = []string{
 	"mail_endpoints", "mail_conversations", "mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency", "mail_request_nonces",
 	"mail_conversation_controls", "mail_conversation_control_idempotency",
-	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets", "mail_pending_capacity",
+	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets",
+	"mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency",
+	"mail_pending_capacity",
 }
 
 var emptyMailCutoverDigest = func() string {
@@ -329,7 +331,7 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && table == "mail_pending_capacity") {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && table == "mail_pending_capacity") {
 		return 0, emptyMailCutoverDigest
 	}
 	switch table {
@@ -387,6 +389,24 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 			digest = emptyMailCutoverDigest
 		}
 		return manifest.Counts.RateBuckets, digest
+	case "mail_direct_conversations":
+		digest := manifest.TableSHA256.DirectConversations
+		if digest == "" && manifest.Counts.DirectConversations == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.DirectConversations, digest
+	case "mail_message_from_roles":
+		digest := manifest.TableSHA256.MessageFromRoles
+		if digest == "" && manifest.Counts.MessageFromRoles == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.MessageFromRoles, digest
+	case "mail_direct_message_idempotency":
+		digest := manifest.TableSHA256.DirectMessageIdempotency
+		if digest == "" && manifest.Counts.DirectMessageIdempotency == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.DirectMessageIdempotency, digest
 	case "mail_pending_capacity":
 		digest := manifest.TableSHA256.PendingCapacity
 		if digest == "" && manifest.Counts.PendingCapacity == 0 {
@@ -453,6 +473,15 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_rate_buckets(kind,bucket_key,tokens,updated_at)
 	 SELECT payload->>'kind',payload->>'bucket_key',(payload->>'tokens')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'updated_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_rate_buckets' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_direct_conversations(role_low,role_high,conversation_id,created_at)
+	 SELECT payload->>'role_low',payload->>'role_high',(payload->>'conversation_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_direct_conversations' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_message_from_roles(message_id,from_role)
+	 SELECT (payload->>'message_id')::uuid,payload->>'from_role'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_message_from_roles' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_direct_message_idempotency(machine_id,key,request_hash,from_role,to_role,conversation_id,message_id,sequence,created_at)
+	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',payload->>'from_role',payload->>'to_role',(payload->>'conversation_id')::uuid,(payload->>'message_id')::uuid,(payload->>'sequence')::bigint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_direct_message_idempotency' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_pending_capacity(scope,scope_key,pending_count,pending_bytes)
 	 SELECT payload->>'scope',payload->>'scope_key',(payload->>'pending_count')::bigint,(payload->>'pending_bytes')::bigint
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_pending_capacity' ORDER BY row_key COLLATE "C"`,

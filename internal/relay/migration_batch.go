@@ -134,7 +134,10 @@ var migrationBatchSpecs = []migrationBatchSpec{
 	{target: "mail_role_profiles", source: migrationTableSpecs[14], keyColumns: []string{"role"}},
 	{target: "mail_role_profile_idempotency", source: migrationTableSpecs[15], keyColumns: []string{"machine_id", "key"}},
 	{target: "mail_rate_buckets", source: migrationTableSpecs[16], keyColumns: []string{"kind", "bucket_key"}},
-	{target: "mail_pending_capacity", source: migrationTableSpecs[17], keyColumns: []string{"scope", "scope_key"}},
+	{target: "mail_direct_conversations", source: migrationTableSpecs[17], keyColumns: []string{"role_low", "role_high"}},
+	{target: "mail_message_from_roles", source: migrationTableSpecs[18], keyColumns: []string{"message_id"}},
+	{target: "mail_direct_message_idempotency", source: migrationTableSpecs[19], keyColumns: []string{"machine_id", "key"}},
+	{target: "mail_pending_capacity", source: migrationTableSpecs[20], keyColumns: []string{"scope", "scope_key"}},
 }
 
 // ReadMigrationSourceBatch reads one bounded page from the exact prepared
@@ -172,7 +175,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
 	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && table == "mail_pending_capacity") {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && table == "mail_pending_capacity") {
 		return MigrationSourceBatch{Done: true}, nil
 	}
 	var keyValues []any
@@ -276,10 +279,9 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	return batch, nil
 }
 
-// encodeMigrationRowKey preserves SQLite's binary string ordering. Composite
-// keys use unit separator as the delimiter, so key columns may be empty
-// (installation pending-capacity uses "") and may include the internal
-// role-recipient record separator, but they cannot contain NUL or the delimiter.
+// encodeMigrationRowKey preserves SQLite's binary string ordering. Source key
+// columns reject control characters, so unit separator is an unambiguous tuple
+// delimiter and the raw UTF-8 cursor remains within the 4096-byte bound.
 func encodeMigrationRowKey(values []string) string {
 	return strings.Join(values, "\x1f")
 }

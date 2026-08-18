@@ -41,6 +41,22 @@ func TestParseSendArgsAcceptsOneOptionalTargetRole(t *testing.T) {
 	}
 }
 
+func TestParseSendArgsAcceptsDirectRoleSendAndRejectsMixedForms(t *testing.T) {
+	request, err := parseSendArgs([]string{"--to", "role/machine-b/implementer", "--from-role", "role/machine-a/reviewer", "--body-file", "-", "--idempotency-key", "dm-1"})
+	if err != nil || request.toRole != "role/machine-b/implementer" || request.fromRole != "role/machine-a/reviewer" || request.conversationID != "" {
+		t.Fatalf("direct send request=%#v err=%v", request, err)
+	}
+	if _, err := parseSendArgs([]string{"--to", "implementer", "--from-role", "role/machine-a/reviewer", "--body-file", "-", "--idempotency-key", "dm-1"}); err == nil {
+		t.Fatal("unqualified destination was accepted")
+	}
+	if _, err := parseSendArgs([]string{"--to", "role/machine-b/implementer", "--from-role", "role/machine-a/reviewer", "--conversation", "conversation-1", "--body-file", "-", "--idempotency-key", "dm-1"}); err == nil {
+		t.Fatal("mixed send form was accepted")
+	}
+	if _, err := parseSendArgs([]string{"--to", "role/machine-b/implementer", "--body-file", "-", "--idempotency-key", "dm-1"}); err == nil {
+		t.Fatal("direct send without source role was accepted")
+	}
+}
+
 func TestParseAttachmentNotifyArgsRequiresStableOfferHandoff(t *testing.T) {
 	if _, err := parseAttachmentNotifyArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--offer-file", "offer.cbor"}); err == nil {
 		t.Fatal("attachment notify without idempotency key was accepted")
