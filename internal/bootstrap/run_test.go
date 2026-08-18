@@ -1440,6 +1440,28 @@ func TestRunKeepsLocalCheckoutDespiteInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutQuarantinesUnreadablePreviousOnSignedCurrent(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	previous := filepath.Join(dir, previousSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(previous); !os.IsNotExist(err) {
+		t.Fatal("unreadable previous survived a signed-current seed")
+	}
+}
+
 func TestSeedLocalCheckoutSucceedsWithUnreadablePrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "local-adapter")

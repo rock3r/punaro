@@ -999,6 +999,9 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 			if recErr != nil || recovery.Mode == recoveryMode {
 				return errors.New("bootstrap is recovery-only; use a signed update")
 			}
+			if err := quarantineUnreadablePrevious(directory); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
