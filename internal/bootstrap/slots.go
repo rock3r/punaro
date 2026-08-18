@@ -120,6 +120,11 @@ func replaceCurrent(directory, release string, sequence int64, manifestSHA256 st
 	if err := writeAtomic(filepath.Join(candidate, slotRecord), record, 0o600); err != nil {
 		return err
 	}
+	if _, err := readOptionalSlot(filepath.Join(directory, previousSlot)); err != nil {
+		if err := os.RemoveAll(filepath.Join(directory, previousSlot)); err != nil {
+			return err
+		}
+	}
 	if err := os.RemoveAll(current); err != nil {
 		return err
 	}

@@ -267,6 +267,34 @@ func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	}
 }
 
+func TestReplaceCurrentQuarantinesCorruptPrevious(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	previous := filepath.Join(dir, previousSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Join(dir, candidateSlot)
+	if err := os.Mkdir(candidate, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(candidate, "punaro-adapter"), []byte("repaired"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceCurrent(dir, "v0.2.0", 2, payloadDigest("current-adapter")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(previous); !os.IsNotExist(err) {
+		t.Fatal("corrupt previous retained after same-identity repair")
+	}
+	if _, err := readOptionalSlot(previous); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNextSlotGenerationIgnoresCorruptPrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
