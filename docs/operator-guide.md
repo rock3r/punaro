@@ -17,8 +17,12 @@ signed catalog/manifest pairs; unsigned draft assets are not an automatic
 update source. Platform services launch `punaro-bootstrap run` against the
 current slot. An unhealthy candidate rolls back once when the fresh catalog
 still lists the previous release; that decision is durable across restarts
-so a later failure cannot swap back to the known-unhealthy slot. Otherwise
-the host stays recovery-only.
+so a later failure cannot swap back to the known-unhealthy slot. An
+unreadable update journal also stays recovery-only. A later publish stops
+the old adapter with SIGTERM and a bounded wait before SIGKILL. A healthy
+adapter that exits while the supervisor is still running is a supervisor
+failure so the platform service restarts it. Otherwise the host stays
+recovery-only.
 
 ## Run locally
 

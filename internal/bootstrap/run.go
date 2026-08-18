@@ -28,6 +28,7 @@ const (
 	DefaultHealthTimeout = 60 * time.Second
 	// DefaultHealthWindow is how long a ready child must remain alive.
 	DefaultHealthWindow    = time.Second
+	childStopTimeout       = 2 * time.Second
 	maxReadyBytes          = 256
 	adapterComponent       = "punaro-adapter"
 	recoveryMode           = "recovery-only"
@@ -66,6 +67,7 @@ type ChildSpec struct {
 // Process is one supervised child.
 type Process interface {
 	Wait() error
+	Stop() error
 	Kill() error
 	Done() <-chan struct{}
 	Err() error
@@ -130,8 +132,10 @@ func Run(ctx context.Context, request RunRequest) error {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, identity)
 		}
-		_ = child.Kill()
-		<-child.Done()
+		_ = stopChild(child)
+		if errors.Is(err, errSlotChanged) {
+			return err
+		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)
 	}
 	return waitChild(ctx, request, child, identity)
@@ -175,7 +179,10 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	}
 	defer unlock()
 	if err := recoverJournal(request.Directory); err != nil {
-		return slotState{}, "", err
+		if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
+			return slotState{}, "", recErr
+		}
+		return slotState{}, "", ErrRecoveryOnly
 	}
 	if recovery, err := loadRecovery(request.Directory); err != nil {
 		if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
@@ -407,8 +414,10 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, rolled)
 		}
-		_ = child.Kill()
-		<-child.Done()
+		_ = stopChild(child)
+		if errors.Is(err, errSlotChanged) {
+			return err
+		}
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
@@ -423,21 +432,36 @@ func waitChild(ctx context.Context, request RunRequest, child Process, started s
 	for {
 		select {
 		case <-child.Done():
-			err := child.Wait()
-			if ctx.Err() == nil {
+			if ctx.Err() != nil {
+				return nil //nolint:nilerr // SIGINT/SIGTERM is a clean supervisor stop
+			}
+			if err := child.Wait(); err != nil {
 				return err
 			}
-			return nil //nolint:nilerr // SIGINT/SIGTERM is a clean supervisor stop
+			return errChildExited
 		case <-ticker.C:
 			if started.Release == "" {
 				continue
 			}
 			if err := failIfSlotChanged(request.Directory, started); err != nil {
-				_ = child.Kill()
-				<-child.Done()
+				_ = stopChild(child)
 				return err
 			}
 		}
+	}
+}
+
+func stopChild(child Process) error {
+	_ = child.Stop()
+	timer := time.NewTimer(childStopTimeout)
+	defer timer.Stop()
+	select {
+	case <-child.Done():
+		return child.Wait()
+	case <-timer.C:
+		_ = child.Kill()
+		<-child.Done()
+		return child.Wait()
 	}
 }
 
@@ -819,6 +843,16 @@ func newOSProcess(cmd *exec.Cmd) *osProcess {
 func (proc *osProcess) Wait() error {
 	<-proc.done
 	return proc.err
+}
+
+func (proc *osProcess) Stop() error {
+	if proc.cmd.Process == nil {
+		return nil
+	}
+	if runtime.GOOS == "windows" {
+		return proc.cmd.Process.Kill()
+	}
+	return proc.cmd.Process.Signal(syscall.SIGTERM)
 }
 
 func (proc *osProcess) Kill() error {

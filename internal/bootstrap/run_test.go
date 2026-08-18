@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -143,6 +144,7 @@ func TestRunStartsSnapshotWhenCurrentSlotChanges(t *testing.T) {
 func TestRunExitsWhenCurrentChangesAfterReady(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	var child *fakeProcess
 	err := Run(context.Background(), RunRequest{
 		Directory:     dir,
 		HealthTimeout: 40 * time.Millisecond,
@@ -158,11 +160,18 @@ func TestRunExitsWhenCurrentChangesAfterReady(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
 				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
 			}()
-			return blockingProcess(context.Background()), nil
+			child = blockingProcess(context.Background()).(*fakeProcess)
+			return child, nil
 		},
 	})
 	if !errors.Is(err, errSlotChanged) {
 		t.Fatalf("post-ready slot change err=%v", err)
+	}
+	if child == nil || !child.stopped.Load() {
+		t.Fatal("slot change did not request a graceful stop")
+	}
+	if child.killed.Load() {
+		t.Fatal("slot change force-killed a child that stopped")
 	}
 }
 
@@ -190,6 +199,7 @@ func TestRunTreatsInvalidRecoveryAsRecoveryOnly(t *testing.T) {
 func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	var child *fakeProcess
 	err := Run(context.Background(), RunRequest{
 		Directory:     dir,
 		HealthTimeout: 200 * time.Millisecond,
@@ -202,7 +212,8 @@ func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
 				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
 			}()
-			return blockingProcess(context.Background()), nil
+			child = blockingProcess(context.Background()).(*fakeProcess)
+			return child, nil
 		},
 	})
 	if !errors.Is(err, errSlotChanged) {
@@ -210,6 +221,12 @@ func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("health-window slot change entered recovery-only")
+	}
+	if child == nil || !child.stopped.Load() {
+		t.Fatal("health-window slot change did not request a graceful stop")
+	}
+	if child.killed.Load() {
+		t.Fatal("health-window slot change force-killed a child that stopped")
 	}
 }
 
@@ -312,6 +329,48 @@ func TestRunDoesNotEnterRecoveryWhenCurrentSlotChanged(t *testing.T) {
 	}
 }
 
+func TestRunFailsWhenHealthyChildExits(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 20 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("healthy child exit err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("unexpected healthy exit entered recovery-only")
+	}
+}
+
+func TestRunEntersRecoveryWhenJournalIsUnreadable(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			t.Fatal("started with an unreadable journal")
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("unreadable journal err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("unreadable journal did not enter recovery-only")
+	}
+}
+
 func TestRunClearsHealthDirectoryBeforeStart(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
@@ -333,8 +392,8 @@ func TestRunClearsHealthDirectoryBeforeStart(t *testing.T) {
 			return finishedProcess(nil), nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("cleared health start err=%v", err)
 	}
 	if !started {
 		t.Fatal("did not start after clearing health directory")
@@ -451,8 +510,8 @@ func TestRunRollsBackUnhealthyCurrentWhenCatalogAllowsPrevious(t *testing.T) {
 			return finishedProcess(nil), nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("rollback start err=%v", err)
 	}
 	if starts != 2 {
 		t.Fatalf("starts=%d", starts)
@@ -496,8 +555,8 @@ func TestRunLoadsKeysFromDirectory(t *testing.T) {
 			}
 			return finishedProcess(nil), nil
 		},
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, errChildExited) {
+		t.Fatalf("directory keys start err=%v", err)
 	}
 	status, err := Status(dir)
 	if err != nil {
@@ -608,8 +667,8 @@ func TestRunDoesNotUndoSuccessfulRollbackOnLaterRestart(t *testing.T) {
 			}
 			return finishedProcess(nil), nil
 		},
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, errChildExited) {
+		t.Fatalf("first rollback err=%v", err)
 	}
 	status, err := Status(dir)
 	if err != nil {
@@ -664,8 +723,8 @@ func TestRunAllowsRollbackAfterLaterSignedUpdate(t *testing.T) {
 			}
 			return finishedProcess(nil), nil
 		},
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, errChildExited) {
+		t.Fatalf("first update rollback err=%v", err)
 	}
 	if err := os.RemoveAll(filepath.Join(dir, previousSlot)); err != nil {
 		t.Fatal(err)
@@ -694,8 +753,8 @@ func TestRunAllowsRollbackAfterLaterSignedUpdate(t *testing.T) {
 			}
 			return finishedProcess(nil), nil
 		},
-	}); err != nil {
-		t.Fatal(err)
+	}); !errors.Is(err, errChildExited) {
+		t.Fatalf("later update rollback err=%v", err)
 	}
 	status, err := Status(dir)
 	if err != nil {
@@ -1036,9 +1095,11 @@ func allowPreviousInCatalog(t *testing.T, origin *signedOrigin, release string, 
 }
 
 type fakeProcess struct {
-	done chan struct{}
-	err  error
-	once sync.Once
+	done    chan struct{}
+	err     error
+	once    sync.Once
+	stopped atomic.Bool
+	killed  atomic.Bool
 }
 
 func blockingProcess(ctx context.Context) Process {
@@ -1061,7 +1122,14 @@ func (proc *fakeProcess) Wait() error {
 	return proc.err
 }
 
+func (proc *fakeProcess) Stop() error {
+	proc.stopped.Store(true)
+	proc.finish(errors.New("stopped"))
+	return nil
+}
+
 func (proc *fakeProcess) Kill() error {
+	proc.killed.Store(true)
 	proc.finish(errors.New("killed"))
 	return nil
 }
