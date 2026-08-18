@@ -312,7 +312,7 @@ func (a *Administration) AbortMailCutover(ctx context.Context, actorPrincipalID,
 		return errors.New("active mail cutover cannot be aborted")
 	}
 	if phase != MailCutoverAborted {
-		for _, table := range []string{"mail_pending_recipients", "mail_pending_install", "mail_direct_message_idempotency", "mail_message_from_roles", "mail_direct_conversations", "mail_request_nonces", "mail_rate_buckets", "mail_role_profile_idempotency", "mail_role_profiles", "mail_conversation_control_idempotency", "mail_conversation_controls", "mail_conversation_idempotency", "mail_message_idempotency", "mail_recipient_cursors", "mail_deliveries", "mail_messages", "mail_role_bindings", "mail_role_memberships", "mail_memberships", "mail_roles", "mail_conversations", "mail_endpoints"} {
+		for _, table := range []string{"mail_delivery_terminals", "mail_pending_recipients", "mail_pending_install", "mail_direct_message_idempotency", "mail_message_from_roles", "mail_direct_conversations", "mail_request_nonces", "mail_rate_buckets", "mail_role_profile_idempotency", "mail_role_profiles", "mail_conversation_control_idempotency", "mail_conversation_controls", "mail_conversation_idempotency", "mail_message_idempotency", "mail_recipient_cursors", "mail_deliveries", "mail_messages", "mail_role_bindings", "mail_role_memberships", "mail_memberships", "mail_roles", "mail_conversations", "mail_endpoints"} {
 			// #nosec G202 -- table comes only from the fixed dependency-order allowlist.
 			if _, err := tx.ExecContext(ctx, `DELETE FROM relay.`+table); err != nil {
 				return errors.New("mail cutover cannot be aborted")

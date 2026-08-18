@@ -184,10 +184,16 @@ func boundRetryAfter(wait time.Duration, maxSeconds int) int {
 // Metrics counts content-free relay pressure signals. Labels are fixed names
 // only; bodies, endpoints, roles, and conversation IDs are never recorded.
 type Metrics struct {
-	rateLimitRejections atomic.Uint64
-	capacityRejections  atomic.Uint64
-	pendingDeliveries   atomic.Uint64
-	pendingBytes        atomic.Uint64
+	rateLimitRejections        atomic.Uint64
+	capacityRejections         atomic.Uint64
+	pendingDeliveries          atomic.Uint64
+	pendingBytes               atomic.Uint64
+	pendingOldestAgeSeconds    atomic.Uint64
+	terminalTransitionsAcked   atomic.Uint64
+	terminalTransitionsExpired atomic.Uint64
+	terminalTransitionsRevoked atomic.Uint64
+	terminalsRetained          atomic.Uint64
+	leaseRedeliveries          atomic.Uint64
 }
 
 // ObserveRateLimited increments the rate-rejection counter.
@@ -200,10 +206,16 @@ func (m *Metrics) ObserveRateLimited() {
 
 // MetricsSnapshot is the bounded JSON body served on the local health listener.
 type MetricsSnapshot struct {
-	RelayRateLimitRejections uint64 `json:"relay_rate_limit_rejections"`
-	RelayCapacityRejections  uint64 `json:"relay_capacity_rejections"`
-	RelayPendingDeliveries   uint64 `json:"relay_pending_deliveries"`
-	RelayPendingBytes        uint64 `json:"relay_pending_bytes"`
+	RelayRateLimitRejections        uint64 `json:"relay_rate_limit_rejections"`
+	RelayCapacityRejections         uint64 `json:"relay_capacity_rejections"`
+	RelayPendingDeliveries          uint64 `json:"relay_pending_deliveries"`
+	RelayPendingBytes               uint64 `json:"relay_pending_bytes"`
+	RelayPendingOldestAgeSeconds    uint64 `json:"relay_pending_oldest_age_seconds"`
+	RelayTerminalTransitionsAcked   uint64 `json:"relay_terminal_transitions_acked"`
+	RelayTerminalTransitionsExpired uint64 `json:"relay_terminal_transitions_expired"`
+	RelayTerminalTransitionsRevoked uint64 `json:"relay_terminal_transitions_revoked"`
+	RelayTerminalsRetained          uint64 `json:"relay_terminals_retained"`
+	RelayLeaseRedeliveries          uint64 `json:"relay_lease_redeliveries"`
 }
 
 // Snapshot returns the current content-free counters.
@@ -212,11 +224,61 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		return MetricsSnapshot{}
 	}
 	return MetricsSnapshot{
-		RelayRateLimitRejections: m.rateLimitRejections.Load(),
-		RelayCapacityRejections:  m.capacityRejections.Load(),
-		RelayPendingDeliveries:   m.pendingDeliveries.Load(),
-		RelayPendingBytes:        m.pendingBytes.Load(),
+		RelayRateLimitRejections:        m.rateLimitRejections.Load(),
+		RelayCapacityRejections:         m.capacityRejections.Load(),
+		RelayPendingDeliveries:          m.pendingDeliveries.Load(),
+		RelayPendingBytes:               m.pendingBytes.Load(),
+		RelayPendingOldestAgeSeconds:    m.pendingOldestAgeSeconds.Load(),
+		RelayTerminalTransitionsAcked:   m.terminalTransitionsAcked.Load(),
+		RelayTerminalTransitionsExpired: m.terminalTransitionsExpired.Load(),
+		RelayTerminalTransitionsRevoked: m.terminalTransitionsRevoked.Load(),
+		RelayTerminalsRetained:          m.terminalsRetained.Load(),
+		RelayLeaseRedeliveries:          m.leaseRedeliveries.Load(),
 	}
+}
+
+// ObserveTerminal increments one closed-reason transition counter.
+func (m *Metrics) ObserveTerminal(reason string) {
+	m.ObserveTerminals(reason, 1)
+}
+
+// ObserveTerminals increments one closed-reason transition counter after a durable commit.
+func (m *Metrics) ObserveTerminals(reason string, count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	switch reason {
+	case ClosedAcked:
+		m.terminalTransitionsAcked.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
+	case ClosedExpired:
+		m.terminalTransitionsExpired.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
+	case ClosedRevoked:
+		m.terminalTransitionsRevoked.Add(uint64(count)) // #nosec G115 -- transition counts are bounded by the maintenance page size.
+	}
+}
+
+// ObserveLeaseRedeliveries counts deliveries whose previous lease had expired.
+func (m *Metrics) ObserveLeaseRedeliveries(count int) {
+	if m == nil || count <= 0 {
+		return
+	}
+	m.leaseRedeliveries.Add(uint64(count)) // #nosec G115 -- redelivery counts are bounded by the lease page size.
+}
+
+// SetPendingOldestAge publishes the oldest pending delivery age in seconds.
+func (m *Metrics) SetPendingOldestAge(seconds int64) {
+	if m == nil {
+		return
+	}
+	m.pendingOldestAgeSeconds.Store(unsignedPending(seconds))
+}
+
+// SetTerminalsRetained publishes the number of retained terminal rows.
+func (m *Metrics) SetTerminalsRetained(count int64) {
+	if m == nil {
+		return
+	}
+	m.terminalsRetained.Store(unsignedPending(count))
 }
 
 // SetRateLimits replaces the in-process bucket policy. Token state remains in

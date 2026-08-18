@@ -37,6 +37,8 @@ type Database struct {
 	rateLimits                relay.RateLimitConfig
 	quotaMu                   sync.Mutex
 	quota                     relay.QuotaConfig
+	retentionMu               sync.Mutex
+	retention                 relay.RetentionConfig
 	pendingMetricsMu          sync.Mutex
 	metrics                   *relay.Metrics
 }
@@ -1287,6 +1289,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL relay pending-quota schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = quotaObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 49 {
+		terminalObjectsPresent, err := relayDeliveryTerminalsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay delivery-terminal schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = terminalObjectsPresent
 	}
 	return snapshot, nil
 }

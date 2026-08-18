@@ -319,6 +319,8 @@ type Store struct {
 	rateLimits       RateLimitConfig
 	quotaMu          sync.Mutex
 	quota            QuotaConfig
+	retentionMu      sync.Mutex
+	retention        RetentionConfig
 	pendingMetricsMu sync.Mutex
 	metrics          *Metrics
 }
@@ -351,7 +353,7 @@ func openStore(database string, verifyQuota bool) (*Store, error) {
 	// from surfacing SQLITE_BUSY instead of orderly transactional serialization.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db, rateLimits: DefaultRateLimitConfig(), quota: DefaultQuotaConfig()}
+	store := &Store{db: db, rateLimits: DefaultRateLimitConfig(), quota: DefaultQuotaConfig(), retention: DefaultRetentionConfig()}
 	var migrationControlExists bool
 	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
 		_ = db.Close()
@@ -577,6 +579,18 @@ func (s *Store) migrate(ctx context.Context) error {
 			pending_count INTEGER NOT NULL CHECK (pending_count >= 0),
 			pending_bytes INTEGER NOT NULL CHECK (pending_bytes >= 0)
 		)`,
+		`CREATE TABLE IF NOT EXISTS delivery_terminals (
+			delivery_id TEXT PRIMARY KEY,
+			message_id TEXT NOT NULL,
+			conversation_id TEXT NOT NULL,
+			recipient_endpoint TEXT NOT NULL,
+			sequence INTEGER NOT NULL CHECK (sequence >= 1),
+			closed_reason TEXT NOT NULL CHECK (closed_reason IN ('acked','expired','revoked')),
+			lease_generation INTEGER NOT NULL CHECK (lease_generation >= 0),
+			created_at INTEGER NOT NULL,
+			closed_at INTEGER NOT NULL
+		)`,
+		"CREATE INDEX IF NOT EXISTS delivery_terminals_closed_at ON delivery_terminals(closed_at, delivery_id)",
 		`CREATE TABLE IF NOT EXISTS direct_conversations (
 			role_low TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
 			role_high TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
@@ -633,7 +647,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "direct_conversations", "message_from_roles", "direct_message_idempotency"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "delivery_terminals", "direct_conversations", "message_from_roles", "direct_message_idempotency"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -696,6 +710,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if actorCapabilities&CapAdmin == 0 {
 		return ControlEvent{}, false, ErrForbidden
 	}
+	revoked := 0
 	var existingID, existingHash string
 	err = tx.QueryRowContext(context.Background(), "SELECT control_id,request_hash FROM conversation_control_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
 	if err == nil {
@@ -742,9 +757,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			}
 		}
 		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
-			if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+			n, err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now)
+			if err != nil {
 				return ControlEvent{}, false, err
 			}
+			revoked += n
 			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 				return ControlEvent{}, false, err
 			}
@@ -778,9 +795,11 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
-		if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+		n, err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now)
+		if err != nil {
 			return ControlEvent{}, false, err
 		}
+		revoked += n
 		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 			return ControlEvent{}, false, err
 		}
@@ -809,6 +828,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if err := tx.Commit(); err != nil {
 		return ControlEvent{}, false, err
 	}
+	s.metrics.ObserveTerminals(ClosedRevoked, revoked)
 	s.refreshPendingMetrics()
 	return event, false, nil
 }
@@ -1900,6 +1920,7 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 	}
 	defer func() { _ = rows.Close() }()
 	var deliveries []Delivery
+	var redeliveries int
 	for rows.Next() {
 		var delivery Delivery
 		var leaseMachine, leaseToken sql.NullString
@@ -1923,6 +1944,9 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 			token, err := randomToken()
 			if err != nil {
 				return DeliveryLeasePage{}, err
+			}
+			if leaseUntil.Valid && leaseUntil.Int64 <= now.UnixMilli() {
+				redeliveries++
 			}
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = token
@@ -1957,6 +1981,7 @@ func (s *Store) LeaseDeliveries(machineID, consumerID, endpoint, conversationID 
 	if err := tx.Commit(); err != nil {
 		return DeliveryLeasePage{}, err
 	}
+	s.metrics.ObserveLeaseRedeliveries(redeliveries)
 	return DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
 }
 
@@ -2048,10 +2073,15 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 		WHERE delivery.id = ?`, deliveryID).Scan(&conversationID, &bodyBytes); err != nil {
 		return fmt.Errorf("read delivery conversation: %w", err)
 	}
+	acked := 0
 	if affected == 1 {
 		if err := releaseQuota(tx, recipient.String, bodyBytes); err != nil {
 			return err
 		}
+		if err := recordAckedTerminal(tx, deliveryID, now); err != nil {
+			return err
+		}
+		acked = 1
 	}
 	if err := advanceRecipientCursor(tx, recipient.String, conversationID); err != nil {
 		return err
@@ -2059,6 +2089,7 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	s.metrics.ObserveTerminals(ClosedAcked, acked)
 	s.refreshPendingMetrics()
 	return nil
 }
