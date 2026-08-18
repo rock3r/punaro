@@ -420,7 +420,7 @@ func failIfSlotChanged(directory string, started slotState) error {
 		}
 		return nil
 	}
-	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 {
+	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 || current.Generation != started.Generation {
 		return errSlotChanged
 	}
 	return nil
@@ -563,7 +563,7 @@ func rollbackIfAllowed(ctx context.Context, request RunRequest, started slotStat
 	if err != nil {
 		return false, slotState{}, err
 	}
-	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 {
+	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 || current.Generation != started.Generation {
 		return false, slotState{}, errSlotChanged
 	}
 	previous, err := readSlot(filepath.Join(request.Directory, previousSlot))

@@ -65,6 +65,31 @@ func TestRunHoldsLeaseUntilSupervisorExits(t *testing.T) {
 	}
 }
 
+func TestRunExitsWhenSameIdentityRepairReplacesCurrent(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	digest := payloadDigest("current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				current := filepath.Join(dir, currentSlot)
+				_ = os.WriteFile(filepath.Join(current, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("repaired-adapter"), 0o600)
+				writeSlotRecordGeneration(t, current, "v0.1.0", 1, digest, 1)
+			}()
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("same-identity repair err=%v", err)
+	}
+}
+
 func TestRunTreatsCanceledStartAsCleanShutdown(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
@@ -1206,8 +1231,12 @@ func writeAdapterSlot(t *testing.T, directory, slot, release string, sequence in
 }
 
 func writeSlotRecord(t *testing.T, slotDir, release string, sequence int64, digest string) {
+	writeSlotRecordGeneration(t, slotDir, release, sequence, digest, 0)
+}
+
+func writeSlotRecordGeneration(t *testing.T, slotDir, release string, sequence int64, digest string, generation int64) {
 	t.Helper()
-	body, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: digest})
+	body, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: digest, Generation: generation})
 	if err != nil {
 		t.Fatal(err)
 	}

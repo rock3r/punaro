@@ -22,6 +22,7 @@ type slotState struct {
 	Release        string `json:"release"`
 	Sequence       int64  `json:"sequence"`
 	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation,omitempty"`
 }
 
 type journal struct {
@@ -69,7 +70,11 @@ func publishSlot(directory, release string, sequence int64, manifestSHA256 strin
 	if err := requireRealDir(candidate); err != nil {
 		return err
 	}
-	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256})
+	generation, err := nextSlotGeneration(directory)
+	if err != nil {
+		return err
+	}
+	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256, Generation: generation})
 	if err != nil {
 		return err
 	}
@@ -103,7 +108,11 @@ func replaceCurrent(directory, release string, sequence int64, manifestSHA256 st
 	if err := requireRealDir(candidate); err != nil {
 		return err
 	}
-	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256})
+	generation, err := nextSlotGeneration(directory)
+	if err != nil {
+		return err
+	}
+	record, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: manifestSHA256, Generation: generation})
 	if err != nil {
 		return err
 	}
@@ -562,6 +571,14 @@ func Status(directory string) (State, error) {
 		CatalogSequence:  accepted.CatalogSequence,
 		RecoveryOnly:     recovery.Mode == recoveryMode,
 	}, nil
+}
+
+func nextSlotGeneration(directory string) (int64, error) {
+	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		return 0, err
+	}
+	return current.Generation + 1, nil
 }
 
 func readOptionalSlot(directory string) (slotState, error) {
