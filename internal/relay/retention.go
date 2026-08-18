@@ -109,7 +109,7 @@ func EncodeTerminalListCursor(closedAt time.Time, deliveryID string) string {
 	if deliveryID == "" || closedAt.IsZero() {
 		return ""
 	}
-	raw := fmt.Sprintf("%d\x1e%s", closedAt.UTC().UnixMilli(), deliveryID)
+	raw := fmt.Sprintf("%d\x1e%s", closedAt.UTC().Truncate(time.Microsecond).UnixMicro(), deliveryID)
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -122,15 +122,15 @@ func DecodeTerminalListCursor(cursor string) (time.Time, string, bool) {
 	if err != nil {
 		return time.Time{}, "", false
 	}
-	millis, deliveryID, ok := strings.Cut(string(raw), "\x1e")
+	micros, deliveryID, ok := strings.Cut(string(raw), "\x1e")
 	if !ok || deliveryID == "" {
 		return time.Time{}, "", false
 	}
 	var value int64
-	if _, err := fmt.Sscan(millis, &value); err != nil || value < 0 {
+	if _, err := fmt.Sscan(micros, &value); err != nil || value < 0 {
 		return time.Time{}, "", false
 	}
-	return fromMillis(value), deliveryID, true
+	return time.UnixMicro(value).UTC(), deliveryID, true
 }
 
 func (m *Metrics) observeTerminalTransition(reason string, count uint64) {

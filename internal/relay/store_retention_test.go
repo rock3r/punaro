@@ -39,6 +39,46 @@ func TestRetentionConfigRejectsOutOfBoundsValues(t *testing.T) {
 	}
 }
 
+func TestTerminalListCursorRoundTripsMicrosecondTimestamps(t *testing.T) {
+	ts := time.Date(2026, time.August, 18, 21, 0, 0, 123456000, time.UTC)
+	cursor := EncodeTerminalListCursor(ts, "delivery-1")
+	got, id, ok := DecodeTerminalListCursor(cursor)
+	if !ok || id != "delivery-1" || !got.Equal(ts) {
+		t.Fatalf("cursor round-trip got=%s id=%q ok=%t want %s", got, id, ok, ts)
+	}
+}
+
+func TestStoreListDeliveryTerminalsPagesWithoutRepeating(t *testing.T) {
+	t.Parallel()
+	store := openRetentionStore(t, tightRetention(time.Minute, time.Hour, 10))
+	now := retentionNow()
+	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	first, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", "one", "send-1", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", "two", "send-2", now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, err := store.MaintainDeliveries(now.Add(time.Minute)); err != nil || result.Expired != 2 {
+		t.Fatalf("expire=%#v err=%v", result, err)
+	}
+	page, err := store.ListDeliveryTerminals(TerminalListInput{Limit: 1})
+	if err != nil || len(page.Terminals) != 1 || page.NextCursor == "" {
+		t.Fatalf("first page=%#v err=%v", page, err)
+	}
+	seen := page.Terminals[0].MessageID
+	next, err := store.ListDeliveryTerminals(TerminalListInput{Cursor: page.NextCursor, Limit: 1})
+	if err != nil || len(next.Terminals) != 1 || next.Terminals[0].MessageID == seen {
+		t.Fatalf("second page repeated or missing next=%#v first=%q err=%v", next, seen, err)
+	}
+	ids := map[string]bool{seen: true, next.Terminals[0].MessageID: true}
+	if !ids[first.ID] || !ids[second.ID] {
+		t.Fatalf("paged ids=%v want %s and %s", ids, first.ID, second.ID)
+	}
+}
+
 func TestStoreExpiryBoundaryJustBeforeAtAfter(t *testing.T) {
 	t.Parallel()
 	store := openRetentionStore(t, tightRetention(time.Minute, time.Hour, 10))

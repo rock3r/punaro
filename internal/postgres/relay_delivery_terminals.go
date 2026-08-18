@@ -137,7 +137,7 @@ func postgresRecordDeliveryTerminal(tx *sql.Tx, deliveryID, reason string, now t
 		SELECT delivery.id, delivery.message_id, message.conversation_id, delivery.recipient_endpoint, message.sequence, $2, COALESCE(delivery.lease_generation, 0), $3, message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.id=$1::uuid
-		ON CONFLICT (delivery_id) DO NOTHING`, deliveryID, reason, now.UTC()); err != nil {
+		ON CONFLICT (delivery_id) DO NOTHING`, deliveryID, reason, now.UTC().Truncate(time.Microsecond)); err != nil {
 		return relayDatabaseError(err, "record delivery terminal")
 	}
 	return nil
