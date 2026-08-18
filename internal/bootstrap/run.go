@@ -126,9 +126,9 @@ func Run(ctx context.Context, request RunRequest) error {
 	if err != nil {
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	if err := waitHealth(ctx, request, child, hadPrevious); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
+	if err := waitHealth(ctx, request, child, identity, hadPrevious); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return waitChild(ctx, child)
 		}
 		_ = child.Kill()
 		<-child.Done()
@@ -177,17 +177,20 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	if err := recoverJournal(request.Directory); err != nil {
 		return slotState{}, "", err
 	}
-	if len(request.Keys) == 0 {
-		keys, err := loadDirectoryKeys(request.Directory)
-		if err != nil {
-			return slotState{}, "", err
-		}
-		request.Keys = keys
-	}
 	if recovery, err := loadRecovery(request.Directory); err != nil {
 		return slotState{}, "", err
 	} else if recovery.Mode == recoveryMode {
 		return slotState{}, "", ErrRecoveryOnly
+	}
+	if len(request.Keys) == 0 {
+		keys, err := loadDirectoryKeys(request.Directory)
+		if err != nil {
+			if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
+				return slotState{}, "", recErr
+			}
+			return slotState{}, "", ErrRecoveryOnly
+		}
+		request.Keys = keys
 	}
 	current := filepath.Join(request.Directory, currentSlot)
 	if err := requireRealDir(current); err != nil {
@@ -284,12 +287,15 @@ func startOrDefault(request RunRequest) func(context.Context, ChildSpec) (Proces
 	return startOSProcess
 }
 
-func waitHealth(ctx context.Context, request RunRequest, child Process, required bool) error {
+func waitHealth(ctx context.Context, request RunRequest, child Process, started slotState, required bool) error {
 	deadline := time.Now().Add(request.HealthTimeout)
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := failIfSlotChanged(request.Directory, started); err != nil {
 			return err
 		}
 		status, err := readReadyFile(filepath.Join(request.Directory, readyFile))
@@ -394,9 +400,9 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	if err := waitHealth(ctx, request, child, true); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
+	if err := waitHealth(ctx, request, child, rolled, true); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return waitChild(ctx, child)
 		}
 		_ = child.Kill()
 		<-child.Done()

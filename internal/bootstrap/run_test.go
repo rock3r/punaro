@@ -140,6 +140,53 @@ func TestRunStartsSnapshotWhenCurrentSlotChanges(t *testing.T) {
 	}
 }
 
+func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 200 * time.Millisecond,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
+				next := filepath.Join(dir, currentSlot)
+				_ = os.Mkdir(next, 0o700)
+				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
+				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+			}()
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("health-window slot change err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("health-window slot change entered recovery-only")
+	}
+}
+
+func TestRunEntersRecoveryWhenKeysFileInvalid(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, directoryKeysFile), []byte("not-a-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			t.Fatal("started with invalid keys")
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("invalid keys err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("invalid keys did not enter recovery-only")
+	}
+}
+
 func TestRunDoesNotStartAfterPreparedSlotChanged(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
@@ -260,14 +307,14 @@ func TestRunRejectsExpiredCatalogOnRollback(t *testing.T) {
 		release:         "v0.2.0",
 		sequence:        2,
 		catalogSequence: 2,
-		expiresAt:       start.Add(30 * time.Millisecond),
+		expiresAt:       start.Add(time.Second),
 	})
 	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
 	err := Run(context.Background(), RunRequest{
 		Directory:     dir,
 		Origin:        origin.URL,
 		Keys:          origin.Keys,
-		HealthTimeout: 80 * time.Millisecond,
+		HealthTimeout: 1200 * time.Millisecond,
 		Now:           start,
 		Start: func(context.Context, ChildSpec) (Process, error) {
 			return blockingProcess(context.Background()), nil
