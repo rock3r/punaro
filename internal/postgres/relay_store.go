@@ -391,6 +391,7 @@ func scanPostgresRoleContact(scanner interface{ Scan(dest ...any) error }) (rela
 	return contact, nil
 }
 
+// ListAddressableRoles returns one bounded page of opted-in public roles.
 func (d *Database) ListAddressableRoles(input relay.RoleListInput) (relay.RoleListPage, error) {
 	after, ok := relay.DecodeRoleListCursor(input.Cursor)
 	if !ok || input.Limit < 1 || input.Limit > relay.MaxRoleListLimit {
@@ -411,7 +412,7 @@ func (d *Database) ListAddressableRoles(input relay.RoleListInput) (relay.RoleLi
 	if err != nil {
 		return relay.RoleListPage{}, errors.New("role directory is unavailable")
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var contacts []relay.RoleContact
 	for rows.Next() {
 		contact, err := scanPostgresRoleContact(rows)
@@ -447,6 +448,7 @@ func (d *Database) lookupAddressableContact(q queryer, role string, now time.Tim
 	return contact, err
 }
 
+// ResolveAddressableRole answers one public name without guessing.
 func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.RoleResolveResult, error) {
 	name := strings.TrimSpace(input.Name)
 	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
@@ -487,7 +489,7 @@ func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.R
 	if err != nil {
 		return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var matches []relay.RoleContact
 	for rows.Next() {
 		contact, err := scanPostgresRoleContact(rows)

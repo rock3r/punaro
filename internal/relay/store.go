@@ -191,12 +191,18 @@ type RoleProfile struct {
 }
 
 const (
-	DefaultRoleListLimit  = 50
-	MaxRoleListLimit      = 100
+	// DefaultRoleListLimit is the page size when a list request omits limit.
+	DefaultRoleListLimit = 50
+	// MaxRoleListLimit is the inclusive upper bound for one directory page.
+	MaxRoleListLimit = 100
+	// MaxRoleResolveMatches is the inclusive cap for ambiguous slug matches.
 	MaxRoleResolveMatches = 20
-	RoleResolveResolved   = "resolved"
-	RoleResolveNotFound   = "not_found"
-	RoleResolveAmbiguous  = "ambiguous"
+	// RoleResolveResolved is a unique visible directory match.
+	RoleResolveResolved = "resolved"
+	// RoleResolveNotFound is the uniform missing/hidden/legacy answer.
+	RoleResolveNotFound = "not_found"
+	// RoleResolveAmbiguous means more than one visible role shares the slug.
+	RoleResolveAmbiguous = "ambiguous"
 )
 
 // RoleContact is one opted-in public role. It never includes sessions or membership.
@@ -1132,7 +1138,7 @@ func (s *Store) ListAddressableRoles(input RoleListInput) (RoleListPage, error) 
 	if err != nil {
 		return RoleListPage{}, fmt.Errorf("list addressable roles: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var contacts []RoleContact
 	for rows.Next() {
 		contact, err := scanRoleContact(rows)
@@ -1187,7 +1193,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 	if err != nil {
 		return RoleResolveResult{}, fmt.Errorf("resolve addressable role: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var matches []RoleContact
 	for rows.Next() {
 		contact, err := scanRoleContact(rows)
