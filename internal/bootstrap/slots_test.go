@@ -331,7 +331,7 @@ func TestNextSlotGenerationUsesHealthyGeneration(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
 	writeSlotRecordGeneration(t, filepath.Join(dir, previousSlot), "v0.1.0", 1, payloadDigest("previous-adapter"), 1)
-	if err := rememberHealthyGeneration(dir, 4); err != nil {
+	if err := rememberHealthyGeneration(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 4}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := nextSlotGeneration(dir)

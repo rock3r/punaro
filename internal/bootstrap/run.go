@@ -617,7 +617,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 
 func superviseHealthyChild(ctx context.Context, request RunRequest, child Process, started slotState) error {
 	if status, err := readReadyFile(filepath.Join(request.Directory, readyFile)); err == nil && status == "healthy" {
-		if err := rememberHealthyGeneration(request.Directory, started.Generation); err != nil {
+		if err := rememberHealthyGeneration(request.Directory, started); err != nil {
 			_ = stopChild(child)
 			return err
 		}

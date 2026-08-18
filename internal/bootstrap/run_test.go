@@ -367,7 +367,7 @@ func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
 	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
-	if err := rememberHealthyGeneration(dir, 2); err != nil {
+	if err := rememberHealthyGeneration(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,6 +389,35 @@ func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("proven generation reapplied the candidate health gate")
+	}
+}
+
+func TestRunSkipsCandidateHealthForGenerationZeroIdentity(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	if err := rememberHealthyGeneration(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("legacy generation-zero slot reapplied the candidate health gate")
 	}
 }
 

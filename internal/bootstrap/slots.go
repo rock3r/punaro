@@ -18,8 +18,11 @@ type acceptedState struct {
 }
 
 type healthyGenerationState struct {
-	Schema     int64 `json:"schema"`
-	Generation int64 `json:"generation"`
+	Schema         int64  `json:"schema"`
+	Release        string `json:"release"`
+	Sequence       int64  `json:"sequence"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation"`
 }
 
 type slotState struct {
@@ -291,18 +294,24 @@ func readRepairableCurrent(directory string) (slotState, error) {
 }
 
 func currentGenerationIsHealthy(directory string, current slotState) bool {
-	if current.Generation < 1 {
+	if current.Release == "" || current.Sequence < 1 || !validManifestDigest(current.ManifestSHA256) {
 		return false
 	}
 	record, err := loadHealthyGeneration(directory)
-	return err == nil && record.Generation == current.Generation
+	return err == nil && record.Release == current.Release && record.Sequence == current.Sequence && record.ManifestSHA256 == current.ManifestSHA256 && record.Generation == current.Generation
 }
 
-func rememberHealthyGeneration(directory string, generation int64) error {
-	if generation < 1 {
+func rememberHealthyGeneration(directory string, current slotState) error {
+	if current.Release == "" || current.Sequence < 1 || !validManifestDigest(current.ManifestSHA256) {
 		return nil
 	}
-	body, err := json.Marshal(healthyGenerationState{Schema: 1, Generation: generation})
+	body, err := json.Marshal(healthyGenerationState{
+		Schema:         1,
+		Release:        current.Release,
+		Sequence:       current.Sequence,
+		ManifestSHA256: current.ManifestSHA256,
+		Generation:     current.Generation,
+	})
 	if err != nil {
 		return err
 	}
@@ -315,7 +324,7 @@ func loadHealthyGeneration(directory string) (healthyGenerationState, error) {
 		return healthyGenerationState{}, err
 	}
 	var record healthyGenerationState
-	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Generation < 1 {
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 		return healthyGenerationState{}, errors.New("bootstrap healthy generation is invalid")
 	}
 	return record, nil
