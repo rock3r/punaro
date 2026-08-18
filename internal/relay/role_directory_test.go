@@ -54,6 +54,10 @@ func TestStoreRoleDirectoryOnlineRequiresCurrentBindingAndGeneration(t *testing.
 	if !byRole["role/machine-a/live"].Online || byRole["role/machine-a/never"].Online {
 		t.Fatalf("online state=%#v", byRole)
 	}
+	neverJSON, err := json.Marshal(byRole["role/machine-a/never"])
+	if err != nil || !strings.Contains(string(neverJSON), `"online":false`) {
+		t.Fatalf("offline list contact omitted online: %s err=%v", neverJSON, err)
+	}
 	later := now.Add(2 * time.Hour)
 	expired, err := store.ListAddressableRoles(RoleListInput{Limit: 10, Now: later})
 	if err != nil || contactsByRole(expired.Roles)["role/machine-a/live"].Online {
@@ -94,12 +98,20 @@ func TestStoreResolvesQualifiedUniqueAndAmbiguousNames(t *testing.T) {
 	if err != nil || unique.Status != RoleResolveResolved || unique.Role != "role/machine-a/unique" {
 		t.Fatalf("unique=%#v err=%v", unique, err)
 	}
+	uniqueJSON, err := json.Marshal(unique)
+	if err != nil || !strings.Contains(string(uniqueJSON), `"online":false`) {
+		t.Fatalf("offline unique resolve omitted online: %s err=%v", uniqueJSON, err)
+	}
 	ambiguous, err := store.ResolveAddressableRole(RoleResolveInput{Name: "reviewer", Now: now})
 	if err != nil || ambiguous.Status != RoleResolveAmbiguous || len(ambiguous.Matches) != 2 {
 		t.Fatalf("ambiguous=%#v err=%v", ambiguous, err)
 	}
-	if ambiguous.Matches[0].Role != "role/machine-a/reviewer" || ambiguous.Matches[0].MachineID != "" || ambiguous.Matches[0].Online {
+	if ambiguous.Matches[0].Role != "role/machine-a/reviewer" || ambiguous.Matches[0].DisplayName != "Plan Reviewer" {
 		t.Fatalf("ambiguous match leaked fields: %#v", ambiguous.Matches[0])
+	}
+	matchJSON, err := json.Marshal(ambiguous.Matches[0])
+	if err != nil || strings.Contains(string(matchJSON), "machine_id") || strings.Contains(string(matchJSON), "online") {
+		t.Fatalf("ambiguous match JSON leaked inventory: %s err=%v", matchJSON, err)
 	}
 	missing, err := store.ResolveAddressableRole(RoleResolveInput{Name: "role/machine-a/hidden", Now: now})
 	if err != nil || missing.Status != RoleResolveNotFound {

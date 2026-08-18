@@ -210,7 +210,14 @@ type RoleContact struct {
 	Role        string `json:"role"`
 	DisplayName string `json:"display_name,omitempty"`
 	MachineID   string `json:"machine_id,omitempty"`
-	Online      bool   `json:"online,omitempty"`
+	Online      bool   `json:"online"`
+}
+
+// RoleResolveMatch is one qualified candidate from an ambiguous short name.
+// It never includes machine ID, online state, or session inventory.
+type RoleResolveMatch struct {
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name,omitempty"`
 }
 
 // RoleListInput is one authenticated, bounded directory page request.
@@ -235,12 +242,12 @@ type RoleResolveInput struct {
 // RoleResolveResult is a deterministic directory answer. Ambiguous matches
 // contain only canonical roles and display names.
 type RoleResolveResult struct {
-	Status      string        `json:"status"`
-	Role        string        `json:"role,omitempty"`
-	DisplayName string        `json:"display_name,omitempty"`
-	MachineID   string        `json:"machine_id,omitempty"`
-	Online      bool          `json:"online,omitempty"`
-	Matches     []RoleContact `json:"matches,omitempty"`
+	Status      string             `json:"status"`
+	Role        string             `json:"role,omitempty"`
+	DisplayName string             `json:"display_name,omitempty"`
+	MachineID   string             `json:"machine_id,omitempty"`
+	Online      bool               `json:"online"`
+	Matches     []RoleResolveMatch `json:"matches,omitempty"`
 }
 
 // InvocationStatus is the durable state of a server-authorized runtime
@@ -1194,7 +1201,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 		return RoleResolveResult{}, fmt.Errorf("resolve addressable role: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var matches []RoleContact
+	var matches []RoleResolveMatch
 	for rows.Next() {
 		contact, err := scanRoleContact(rows)
 		if err != nil {
@@ -1203,7 +1210,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 		if slug, ok := CanonicalRoleSlug(contact.Role); !ok || slug != name {
 			continue
 		}
-		matches = append(matches, RoleContact{Role: contact.Role, DisplayName: contact.DisplayName})
+		matches = append(matches, RoleResolveMatch{Role: contact.Role, DisplayName: contact.DisplayName})
 	}
 	if err := rows.Err(); err != nil {
 		return RoleResolveResult{}, err

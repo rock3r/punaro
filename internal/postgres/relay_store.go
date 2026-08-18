@@ -490,7 +490,7 @@ func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.R
 		return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	var matches []relay.RoleContact
+	var matches []relay.RoleResolveMatch
 	for rows.Next() {
 		contact, err := scanPostgresRoleContact(rows)
 		if err != nil {
@@ -499,7 +499,7 @@ func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.R
 		if slug, ok := relay.CanonicalRoleSlug(contact.Role); !ok || slug != name {
 			continue
 		}
-		matches = append(matches, relay.RoleContact{Role: contact.Role, DisplayName: contact.DisplayName})
+		matches = append(matches, relay.RoleResolveMatch{Role: contact.Role, DisplayName: contact.DisplayName})
 	}
 	if err := rows.Err(); err != nil {
 		return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
