@@ -19,7 +19,8 @@ function Stop-Install([string]$Message) { throw "punaro installer: $Message" }
 
 function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $pidFile = Join-Path $BootstrapDirectory 'run.pid'
-    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return }
+    if (-not (Test-Path -LiteralPath $pidFile)) { return }
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { Stop-Install 'run.pid is invalid' }
     $raw = Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace($raw)) { Stop-Install 'run.pid is invalid' }
     try { $record = $raw | ConvertFrom-Json } catch { Stop-Install 'run.pid is invalid' }

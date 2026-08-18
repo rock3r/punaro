@@ -37,6 +37,7 @@ for expected in \
 	'Wait-PunaroReplaceableBinary' \
 	'Stop-PunaroOrphanAdapter' \
 	'run.pid is invalid' \
+	'PathType Leaf' \
 	'run.pid' \
 	'FileShare]::None' \
 	'adapterTaskRestored'; do
