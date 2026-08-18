@@ -395,16 +395,17 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
-	if roleTables == 0 {
+	switch {
+	case roleTables == 0:
 		if controlTables != 0 || profileTables != 0 {
 			return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 		}
 		manifest.Version, tableSpecs, schema = 1, legacyMigrationTableSpecs, legacyMigrationSourceSchema
-	} else if controlTables == 0 {
+	case controlTables == 0:
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
-	} else if profileTables == 2 {
+	case profileTables == 2:
 		manifest.Version = 4
 		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
 	}
