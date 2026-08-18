@@ -544,8 +544,8 @@ func loadDotEnv(path string) error {
 }
 
 func readDotEnvFile(path string) (map[string]string, error) {
-	// #nosec G304 -- the operator explicitly chooses this local dotenv path via
-	// CLI or PUNARO_ENV_FILE; it is never derived from remote input.
+	// #nosec G304,G703 -- the operator explicitly chooses this local dotenv
+	// path via CLI or PUNARO_ENV_FILE; it is never derived from remote input.
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read dotenv file: %w", err)

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -560,7 +561,7 @@ func TestStorePartialExpireFailurePublishesCommittedMetrics(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := store.db.Exec(`CREATE TRIGGER fail_second_terminal BEFORE INSERT ON delivery_terminals
+	if _, err := store.db.ExecContext(context.Background(), `CREATE TRIGGER fail_second_terminal BEFORE INSERT ON delivery_terminals
 		WHEN (SELECT COUNT(*) FROM delivery_terminals) >= 1
 		BEGIN SELECT RAISE(ABORT, 'injected terminal insert failure'); END`); err != nil {
 		t.Fatal(err)
