@@ -686,6 +686,9 @@ func nextSlotGeneration(directory string) (int64, error) {
 	if record, err := loadAutoRollback(directory); err == nil && record.Generation > high {
 		high = record.Generation
 	}
+	if record, err := loadHealthyGeneration(directory); err == nil && record.Generation > high {
+		high = record.Generation
+	}
 	return high + 1, nil
 }
 
