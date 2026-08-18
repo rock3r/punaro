@@ -1077,8 +1077,7 @@ func (s *Store) RoleProfile(role string) (RoleProfile, error) {
 	return RoleProfile{Role: role, DisplayName: display.String, DirectAddressable: addressable == 1, UpdatedAt: fromMillis(updatedAt)}, nil
 }
 
-func roleDirectoryOnlineSQL() string {
-	return `EXISTS (
+const roleDirectoryOnlineSQL = `EXISTS (
 		SELECT 1 FROM role_bindings AS binding
 		JOIN endpoints AS endpoint ON endpoint.endpoint = binding.session_endpoint
 			AND endpoint.machine_id = binding.machine_id
@@ -1088,7 +1087,25 @@ func roleDirectoryOnlineSQL() string {
 			AND binding.lease_until > ?
 			AND endpoint.lease_until > ?
 	)`
-}
+
+const listAddressableRolesSQL = `SELECT profiles.role, profiles.display_name, roles.machine_id, ` + roleDirectoryOnlineSQL + `
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND (? = '' OR profiles.role > ?)
+		ORDER BY profiles.role ASC
+		LIMIT ?`
+
+const lookupAddressableContactSQL = `SELECT profiles.role, profiles.display_name, roles.machine_id, ` + roleDirectoryOnlineSQL + `
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND profiles.role = ?`
+
+const resolveAddressableRoleSQL = `SELECT profiles.role, profiles.display_name, roles.machine_id, ` + roleDirectoryOnlineSQL + `
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND profiles.role LIKE ? ESCAPE '\'
+		ORDER BY profiles.role ASC
+		LIMIT ?`
 
 func scanRoleContact(scanner interface {
 	Scan(dest ...any) error
@@ -1111,12 +1128,7 @@ func (s *Store) ListAddressableRoles(input RoleListInput) (RoleListPage, error) 
 		return RoleListPage{}, fmt.Errorf("invalid role directory request")
 	}
 	now := input.Now.UnixMilli()
-	rows, err := s.db.QueryContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
-		FROM role_profiles AS profiles
-		JOIN roles ON roles.role = profiles.role
-		WHERE profiles.direct_addressable = 1 AND (? = '' OR profiles.role > ?)
-		ORDER BY profiles.role ASC
-		LIMIT ?`, now, now, after, after, input.Limit+1)
+	rows, err := s.db.QueryContext(context.Background(), listAddressableRolesSQL, now, now, after, after, input.Limit+1)
 	if err != nil {
 		return RoleListPage{}, fmt.Errorf("list addressable roles: %w", err)
 	}
@@ -1145,10 +1157,7 @@ func (s *Store) ListAddressableRoles(input RoleListInput) (RoleListPage, error) 
 }
 
 func (s *Store) lookupAddressableContact(role string, now int64) (RoleContact, error) {
-	row := s.db.QueryRowContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
-		FROM role_profiles AS profiles
-		JOIN roles ON roles.role = profiles.role
-		WHERE profiles.direct_addressable = 1 AND profiles.role = ?`, now, now, role)
+	row := s.db.QueryRowContext(context.Background(), lookupAddressableContactSQL, now, now, role)
 	contact, err := scanRoleContact(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoleContact{}, ErrForbidden
@@ -1174,12 +1183,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 		return RoleResolveResult{Status: RoleResolveNotFound}, nil
 	}
 	like := "%/" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
-	rows, err := s.db.QueryContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
-		FROM role_profiles AS profiles
-		JOIN roles ON roles.role = profiles.role
-		WHERE profiles.direct_addressable = 1 AND profiles.role LIKE ? ESCAPE '\'
-		ORDER BY profiles.role ASC
-		LIMIT ?`, now, now, like, MaxRoleResolveMatches+1)
+	rows, err := s.db.QueryContext(context.Background(), resolveAddressableRoleSQL, now, now, like, MaxRoleResolveMatches+1)
 	if err != nil {
 		return RoleResolveResult{}, fmt.Errorf("resolve addressable role: %w", err)
 	}
