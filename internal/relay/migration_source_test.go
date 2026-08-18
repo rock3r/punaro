@@ -222,6 +222,34 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	}
 }
 
+func TestMigrationSourceFingerprintIgnoresRateBuckets(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	before, err := InspectMigrationSource(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO rate_buckets(scope, bucket_key, tokens_milli, last_refill_unix_milli) VALUES ('sender_machine', 'cutover-ignored', 0, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	after, err := InspectMigrationSource(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Fingerprint != after.Fingerprint || before.Counts != after.Counts {
+		t.Fatalf("rate-bucket mutation changed cutover identity before=%#v after=%#v", before, after)
+	}
+	if _, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 1); err == nil {
+		t.Fatal("cutover export accepted rate-bucket rows")
+	}
+}
+
 func TestMigrationSourceAcceptsInvokeCapabilityBeforePreparation(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

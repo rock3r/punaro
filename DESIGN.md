@@ -405,7 +405,10 @@ conversation tokens with a 120/minute refill, and a 60-second Retry-After
 ceiling; hard bounds are 1–10000 tokens/refill and 1–3600 Retry-After seconds.
 SQLite and PostgreSQL implement the same observable contract. Metrics count
 rate rejections without labels derived from bodies, endpoints, roles, or
-conversation IDs.
+conversation IDs. Token-bucket rows are store-local operational state: a
+daemon restart of the same SQLite or PostgreSQL store cannot restore a
+depleted bucket, but mail cutover fingerprints and import batches omit them
+so a prepared source identity cannot change with limiter refill.
 
 An adapter does not receive a message merely because it has opened a WebSocket.
 It fetches durable deliveries, injects them into its local `agent_mailbox`, and
