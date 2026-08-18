@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the audited pgx database/sql driver.
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const operationTimeout = 5 * time.Second
@@ -32,6 +33,9 @@ type Database struct {
 	memoryUsageStop           chan struct{}
 	memoryUsageDone           chan struct{}
 	memoryUsageStopOnce       sync.Once
+	rateMu                    sync.Mutex
+	rateLimits                relay.RateLimitConfig
+	metrics                   *relay.Metrics
 }
 
 // InstallationState identifies one installation timeline and its last change.
@@ -92,7 +96,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		return nil, err
 	}
 	database := &Database{
-		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(),
+		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(),
 		attachmentPhysicalGCSlots: make(chan struct{}, 1),
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
@@ -1246,6 +1250,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL client lifecycle schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = lifecycleObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 45 {
+		rateObjectsPresent, err := relayRateLimitControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay rate-limit schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = rateObjectsPresent
 	}
 	return snapshot, nil
 }

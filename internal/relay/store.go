@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -221,7 +222,10 @@ type InvocationAuditEvent struct {
 
 // Store owns SQLite-backed relay state.
 type Store struct {
-	db *sql.DB
+	db         *sql.DB
+	rateMu     sync.Mutex
+	rateLimits RateLimitConfig
+	metrics    *Metrics
 }
 
 // Open creates or opens a SQLite WAL database with the full durable delivery
@@ -242,7 +246,7 @@ func Open(database string) (*Store, error) {
 	// from surfacing SQLITE_BUSY instead of orderly transactional serialization.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, rateLimits: DefaultRateLimitConfig()}
 	var migrationControlExists bool
 	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
 		_ = db.Close()
@@ -428,6 +432,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			expires_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, nonce)
 		)`,
+		`CREATE TABLE IF NOT EXISTS rate_buckets (
+			kind TEXT NOT NULL CHECK (kind IN ('sender','conversation')),
+			bucket_key TEXT NOT NULL,
+			tokens INTEGER NOT NULL CHECK (tokens >= 0),
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (kind, bucket_key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS relay_migration_control (
 			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 			source_id TEXT NOT NULL,
@@ -460,7 +471,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -1110,6 +1121,9 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, fmt.Errorf("read idempotency key: %w", err)
 	}
+	if err := s.consumeRateLimits(tx, input.SenderMachineID, input.ConversationID, input.Now); err != nil {
+		return Message{}, false, err
+	}
 	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
@@ -1180,6 +1194,46 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 		return Message{}, false, err
 	}
 	return message, false, nil
+}
+
+func (s *Store) consumeRateLimits(tx *sql.Tx, senderMachineID, conversationID string, now time.Time) error {
+	cfg := s.rateLimitConfig()
+	sender, err := loadRateBucket(tx, rateBucketSender, senderMachineID, now, int64(cfg.SenderBurst))
+	if err != nil {
+		return err
+	}
+	conversation, err := loadRateBucket(tx, rateBucketConversation, conversationID, now, int64(cfg.ConversationBurst))
+	if err != nil {
+		return err
+	}
+	decision := DecideRateLimit(cfg, sender, conversation, now)
+	if !decision.Allowed {
+		s.metrics.ObserveRateLimited()
+		return &RateLimitedError{RetryAfterSeconds: decision.RetryAfterSeconds}
+	}
+	if err := saveRateBucket(tx, rateBucketSender, senderMachineID, decision.Sender); err != nil {
+		return err
+	}
+	return saveRateBucket(tx, rateBucketConversation, conversationID, decision.Conversation)
+}
+
+func loadRateBucket(tx *sql.Tx, kind, key string, now time.Time, burst int64) (RateBucket, error) {
+	now = now.UTC().Truncate(time.Millisecond)
+	if _, err := tx.ExecContext(context.Background(), `INSERT OR IGNORE INTO rate_buckets(kind, bucket_key, tokens, updated_at) VALUES (?, ?, ?, ?)`, kind, key, burst, now.UnixMilli()); err != nil {
+		return RateBucket{}, fmt.Errorf("initialize rate bucket: %w", err)
+	}
+	var tokens, updatedAt int64
+	if err := tx.QueryRowContext(context.Background(), `SELECT tokens, updated_at FROM rate_buckets WHERE kind = ? AND bucket_key = ?`, kind, key).Scan(&tokens, &updatedAt); err != nil {
+		return RateBucket{}, fmt.Errorf("read rate bucket: %w", err)
+	}
+	return RateBucket{Tokens: tokens, UpdatedAt: fromMillis(updatedAt)}, nil
+}
+
+func saveRateBucket(tx *sql.Tx, kind, key string, bucket RateBucket) error {
+	if _, err := tx.ExecContext(context.Background(), `UPDATE rate_buckets SET tokens = ?, updated_at = ? WHERE kind = ? AND bucket_key = ?`, bucket.Tokens, bucket.UpdatedAt.UTC().Truncate(time.Millisecond).UnixMilli(), kind, key); err != nil {
+		return fmt.Errorf("update rate bucket: %w", err)
+	}
+	return nil
 }
 
 // LeaseDeliveries leases a bounded page of pending deliveries for one active

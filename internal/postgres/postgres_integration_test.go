@@ -499,7 +499,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testTransactionalUpdateFenceIntegration(ctx, t, app, ownerDB)
 	testMailCutoverSubstrate(ctx, t, app, ownerDB)
 	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
-	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
+	testRelayRateLimitSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1282,6 +1282,9 @@ func testMailCutoverSubstrate(ctx context.Context, t *testing.T, app *Database, 
 			t.Fatalf("application cutover guard table=%s err=%v", table, err)
 		}
 	}
+	if _, err := app.relayPool().ExecContext(ctx, `INSERT INTO relay.mail_rate_buckets(kind,bucket_key,tokens,updated_at) VALUES ('sender','cutover-fence',1,statement_timestamp())`); !isMaintenanceError(err) {
+		t.Fatalf("application cutover guard table=mail_rate_buckets err=%v", err)
+	}
 	if err := app.ConsumeRequestNonce("cutover-fenced-machine", "cutover-fenced-nonce", time.Now().UTC(), time.Now().UTC().Add(time.Minute)); !errors.Is(err, relay.ErrMaintenance) {
 		t.Fatalf("application nonce write during cutover err=%v", err)
 	}
@@ -1664,6 +1667,22 @@ func testRelayMembershipControlSchemaDrift(ctx context.Context, t *testing.T, ap
 	}
 	if err := app.Ready(ctx); err != nil {
 		t.Fatalf("membership-control constraint restoration did not recover readiness: %v", err)
+	}
+}
+
+func testRelayRateLimitSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_rate_buckets DROP CONSTRAINT mail_rate_buckets_tokens_check; ALTER TABLE relay.mail_rate_buckets ADD CONSTRAINT mail_rate_buckets_tokens_check CHECK (tokens IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive rate-limit tokens constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_rate_buckets DROP CONSTRAINT mail_rate_buckets_tokens_check; ALTER TABLE relay.mail_rate_buckets ADD CONSTRAINT mail_rate_buckets_tokens_check CHECK (tokens >= 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored rate-limit tokens constraint state=%#v err=%v", restored, err)
 	}
 }
 
