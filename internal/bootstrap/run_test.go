@@ -1302,7 +1302,7 @@ func TestSeedCheckoutRefusesInvalidRecoveryOnSignedSlot(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := SeedLocalCheckout(dir, adapter)
+	err := SeedLocalCheckout(dir, adapter, nil)
 	if err == nil || !strings.Contains(err.Error(), "recovery-only") {
 		t.Fatalf("invalid recovery seed err=%v", err)
 	}
@@ -1316,7 +1316,7 @@ func TestSeedCheckoutRefusesSignedRecoveryOnly(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := SeedLocalCheckout(dir, adapter)
+	err := SeedLocalCheckout(dir, adapter, nil)
 	if err == nil || !strings.Contains(err.Error(), "recovery-only") {
 		t.Fatalf("signed recovery seed err=%v", err)
 	}
@@ -1332,11 +1332,43 @@ func TestSeedLocalCheckoutClearsRecoveryOnly(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedLocalCheckout(dir, adapter); err != nil {
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
 		t.Fatal(err)
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("seed left recovery-only")
+	}
+}
+
+func TestSeedLocalCheckoutRequiresKeysWhenSignedPreviousExists(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := SeedLocalCheckout(dir, adapter, nil)
+	if err == nil || !strings.Contains(err.Error(), "persisted release keys") {
+		t.Fatalf("signed previous without keys err=%v", err)
+	}
+}
+
+func TestSeedLocalCheckoutAcceptsSignedPreviousWhenKeysPresent(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, origin.Keys); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadDirectoryKeys(dir)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("persisted keys=%v err=%v", loaded, err)
 	}
 }
 
@@ -1346,7 +1378,7 @@ func TestSeedLocalCheckoutLeavesSignedHistoryUnblocked(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedLocalCheckout(dir, adapter); err != nil {
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
 		t.Fatal(err)
 	}
 	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH})
@@ -1394,7 +1426,7 @@ func TestSeedLocalCheckoutPreservesSignedAcceptedState(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("new-checkout"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedLocalCheckout(dir, adapter); err != nil {
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
 		t.Fatal(err)
 	}
 	accepted, err := loadAccepted(dir)

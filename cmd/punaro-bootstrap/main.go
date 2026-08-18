@@ -169,13 +169,22 @@ func runSeedCheckout(args []string) error {
 	flags.SetOutput(io.Discard)
 	directory := flags.String("directory", "", "absolute private bootstrap directory")
 	adapter := flags.String("adapter", "", "absolute checkout adapter binary")
+	keysFile := flags.String("keys-file", "", "release public key set")
 	if err := flags.Parse(args); err != nil {
 		return errors.New("bootstrap seed-checkout is invalid")
 	}
 	if flags.NArg() != 0 || *directory == "" || *adapter == "" {
 		return errors.New("bootstrap seed-checkout is invalid")
 	}
-	return bootstrap.SeedLocalCheckout(*directory, *adapter)
+	var keys map[string]ed25519.PublicKey
+	if *keysFile != "" {
+		loaded, err := loadKeys(*keysFile)
+		if err != nil {
+			return err
+		}
+		keys = loaded
+	}
+	return bootstrap.SeedLocalCheckout(*directory, *adapter, keys)
 }
 
 func loadKeys(path string) (map[string]ed25519.PublicKey, error) {

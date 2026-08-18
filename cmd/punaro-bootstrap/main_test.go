@@ -49,6 +49,9 @@ func TestBootstrapCLIRequiresAbsoluteDirectoryAndKeys(t *testing.T) {
 	if err := run([]string{"seed-checkout", "--directory", abs, "--adapter", adapter}); err != nil {
 		t.Fatal(err)
 	}
+	if err := run([]string{"seed-checkout", "--directory", abs, "--adapter", adapter, "--keys-file", "keys.json"}); err == nil {
+		t.Fatal("relative seed-checkout keys file accepted")
+	}
 	if err := run([]string{"update", "--directory", abs, "--keys-file", "keys.json"}); err == nil {
 		t.Fatal("relative keys file accepted")
 	}
@@ -83,6 +86,22 @@ func TestBootstrapCLIStatusPrintsRecoveryWithoutCurrent(t *testing.T) {
 	got := string(body)
 	if !strings.Contains(got, "current none") || !strings.Contains(got, "recovery-only") {
 		t.Fatalf("status=%q", got)
+	}
+}
+
+func TestBootstrapCLISeedCheckoutPersistsKeys(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	_, keysPath := newCLIOrigin(t, dir)
+	adapter := filepath.Join(dir, "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"seed-checkout", "--directory", state, "--adapter", adapter, "--keys-file", keysPath}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "release.pub")); err != nil {
+		t.Fatalf("keys not persisted: %v", err)
 	}
 }
 

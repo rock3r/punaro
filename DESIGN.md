@@ -1511,7 +1511,9 @@ The implementation is not internet-exposure-ready until these cases pass:
   journal also enters recovery-only. Invalid `generation.json`,
   `healthy-generation.json`, `release.pub`, or `auto-rollback.json` nodes are
   quarantined so signed repair and supervision can continue. An exhausted
-  generation high-water mark is rejected instead of wrapping. `run` holds a separate `run.lock` lease for
+  generation high-water mark is rejected instead of wrapping. Source installers
+  persist `--keys-file` into `release.pub` and refuse to leave a signed previous
+  slot without that key set, so catalog-gated rollback remains available. `run` holds a separate `run.lock` lease for
   the child's lifetime so two supervisors cannot share the same mailbox and
   ready file; the transaction lock stays free for `update`. A crash-safe
   `run.pid` records the child's pid and image path. The next supervisor kills

@@ -22,6 +22,7 @@ Options:
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
   --agent-guidance-dir PATH   Add Punaro guidance and skills to this project
+  --keys-file PATH            Persist this release public key set into the bootstrap directory
   --enable                    Start the per-user service after installation
   --help                      Show this help
 
@@ -73,6 +74,7 @@ agent_guidance_dir=
 enable=0
 allow_lan_http=false
 trusted_lan_cidr=
+keys_file=
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -84,6 +86,7 @@ while [ "$#" -gt 0 ]; do
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
 		--agent-guidance-dir) [ "$#" -ge 2 ] || fail '--agent-guidance-dir requires a value'; agent_guidance_dir=$2; shift 2 ;;
+		--keys-file) [ "$#" -ge 2 ] || fail '--keys-file requires a value'; keys_file=$2; shift 2 ;;
 		--enable) enable=1; shift ;;
 		--help) usage; exit 0 ;;
 		*) fail "unknown option: $1" ;;
@@ -117,6 +120,11 @@ require_safe_value "$mailbox_bin" 'agent-mailbox path'
 require_safe_value "$mailbox_state_dir" 'mailbox state directory'
 require_safe_value "$attached_group" 'attached group'
 if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trusted LAN CIDR'; fi
+if [ -n "$keys_file" ]; then
+	require_safe_value "$keys_file" 'release keys file'
+	case "$keys_file" in /*) ;; *) fail 'keys file must be an absolute path' ;; esac
+	[ -f "$keys_file" ] && [ ! -L "$keys_file" ] || fail 'keys file must be a non-symlink regular file'
+fi
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
@@ -238,7 +246,11 @@ fi
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
 install -m 700 "$build_dir/punaro-bootstrap" "$bin_dir/punaro-bootstrap"
-"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter"
+if [ -n "$keys_file" ]; then
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"
+else
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter"
+fi
 install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
 install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
 install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"

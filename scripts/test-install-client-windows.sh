@@ -29,6 +29,8 @@ for expected in \
 	'PUNARO_ADAPTER_TRUSTED_LAN_CIDR' \
 	'Push-Location -LiteralPath $repoDir' \
 	'seed-checkout' \
+	'KeysFile' \
+	'--keys-file' \
 	'Stop-ScheduledTask' \
 	'Get-ScheduledTask' \
 	'could not stop the running Punaro Adapter task' \

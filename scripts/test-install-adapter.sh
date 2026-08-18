@@ -22,6 +22,14 @@ grep -Fq 'launchctl print "gui/$(id -u)/org.punaro.adapter"' "$repo_dir/scripts/
 	printf '%s\n' 'installer must restart an already-active macOS adapter without --enable' >&2
 	exit 1
 }
+grep -Fq -- '--keys-file' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must accept --keys-file so signed slots can roll back' >&2
+	exit 1
+}
+grep -Fq 'seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"' "$repo_dir/scripts/install-adapter.sh" || {
+	printf '%s\n' 'installer must persist release keys during seed-checkout' >&2
+	exit 1
+}
 
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-install-test.XXXXXXXX")
 fixture_dir=$(CDPATH= cd -- "$fixture_dir" && pwd -P)
