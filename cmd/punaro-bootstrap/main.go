@@ -150,9 +150,12 @@ func runRun(args []string) error {
 		Keys:          keys,
 		HealthTimeout: bootstrap.DefaultHealthTimeout,
 		HealthWindow:  bootstrap.DefaultHealthWindow,
+		WaitRecovery:  true,
+		OnRecoveryOnly: func() {
+			fmt.Println("recovery-only")
+		},
 	})
 	if errors.Is(err, bootstrap.ErrRecoveryOnly) {
-		fmt.Println("recovery-only")
 		return nil
 	}
 	return err

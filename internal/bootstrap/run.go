@@ -43,18 +43,20 @@ var ErrRecoveryOnly = errors.New("bootstrap is recovery-only")
 
 // RunRequest starts the current-slot adapter and applies one-shot rollback.
 type RunRequest struct {
-	Directory     string
-	Origin        string
-	Keys          map[string]ed25519.PublicKey
-	GOOS          string
-	GOARCH        string
-	Now           time.Time
-	HTTP          fetcher
-	HealthTimeout time.Duration
-	HealthWindow  time.Duration
-	Start         func(context.Context, ChildSpec) (Process, error)
-	afterPrepare  func()
-	clockStart    time.Time
+	Directory      string
+	Origin         string
+	Keys           map[string]ed25519.PublicKey
+	GOOS           string
+	GOARCH         string
+	Now            time.Time
+	HTTP           fetcher
+	HealthTimeout  time.Duration
+	HealthWindow   time.Duration
+	Start          func(context.Context, ChildSpec) (Process, error)
+	WaitRecovery   bool
+	OnRecoveryOnly func()
+	afterPrepare   func()
+	clockStart     time.Time
 }
 
 // ChildSpec is the closed-list adapter launch. Release metadata cannot add
@@ -88,7 +90,8 @@ type recoveryState struct {
 // configuration the child already loads. It does not read adapter credentials.
 // After a previous slot exists, the new current must become healthy within the
 // timeout or it is rolled back once when the fresh catalog still lists that
-// previous release. Otherwise run enters recovery-only and does not restart.
+// previous release. Otherwise run enters recovery-only and, when
+// WaitRecovery is set, stays parked until that marker is cleared.
 func Run(ctx context.Context, request RunRequest) error {
 	if err := request.normalizeRun(); err != nil {
 		return err
@@ -104,6 +107,17 @@ func Run(ctx context.Context, request RunRequest) error {
 		return err
 	}
 	defer unlockRun()
+	err = superviseRun(ctx, request)
+	if !request.WaitRecovery || !errors.Is(err, ErrRecoveryOnly) {
+		return err
+	}
+	if request.OnRecoveryOnly != nil {
+		request.OnRecoveryOnly()
+	}
+	return waitRecoveryCleared(ctx, request.Directory)
+}
+
+func superviseRun(ctx context.Context, request RunRequest) error {
 	identity, adapter, err := prepareRun(&request)
 	if errors.Is(err, errNoAdapter) {
 		hadPrevious, prevErr := request.hasPrevious(identity)
@@ -147,6 +161,25 @@ func Run(ctx context.Context, request RunRequest) error {
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)
 	}
 	return waitChild(ctx, request, child, identity)
+}
+
+func waitRecoveryCleared(ctx context.Context, directory string) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return ErrRecoveryOnly
+		}
+		recovery, err := loadRecovery(directory)
+		if err == nil && recovery.Mode != recoveryMode {
+			return errSlotChanged
+		}
+		select {
+		case <-ctx.Done():
+			return ErrRecoveryOnly
+		case <-ticker.C:
+		}
+	}
 }
 
 func (request *RunRequest) normalizeRun() error {

@@ -73,6 +73,79 @@ func TestRunRequiresCurrentAdapter(t *testing.T) {
 	}
 }
 
+func TestRunWaitsInRecoveryUntilItIsCleared(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	writeRecoveryOnly(t, dir)
+	noticed := make(chan struct{}, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(context.Background(), RunRequest{
+			Directory:    dir,
+			WaitRecovery: true,
+			OnRecoveryOnly: func() {
+				select {
+				case noticed <- struct{}{}:
+				default:
+				}
+			},
+			Start: func(context.Context, ChildSpec) (Process, error) {
+				t.Error("started while recovery-only")
+				return finishedProcess(nil), nil
+			},
+		})
+	}()
+	select {
+	case <-noticed:
+	case err := <-errCh:
+		t.Fatalf("recovery wait exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("recovery wait did not start")
+	}
+	if err := clearRecovery(dir); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errSlotChanged) {
+			t.Fatalf("recovery cleared err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery wait did not exit after publication")
+	}
+}
+
+func TestRunLeavesRecoveryWaitOnCancel(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	writeRecoveryOnly(t, dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:    dir,
+			WaitRecovery: true,
+			Start: func(context.Context, ChildSpec) (Process, error) {
+				t.Error("started while recovery-only")
+				return finishedProcess(nil), nil
+			},
+		})
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrRecoveryOnly) {
+			t.Fatalf("canceled recovery wait err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled recovery wait did not return")
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("cancel cleared recovery-only")
+	}
+}
+
 func TestRunRefusesRecoveryOnly(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "healthy-adapter")

@@ -138,7 +138,9 @@ publishes `current` / `previous` slots. Platform services launch
 existing host-local profile. After a previous slot exists, the new current
 must write a content-free ready file within 60 seconds; otherwise run rolls
 back once when the fresh catalog still lists that previous release, or enters
-recovery-only. An unreadable update journal also enters recovery-only. `run` holds a
+recovery-only. Recovery-only keeps the supervisor parked until a later signed update or
+seed clears that marker, then the platform service restarts onto the
+repaired slot. An unreadable update journal also enters recovery-only. `run` holds a
 separate run lease until the child exits so two supervisors cannot share
 the same mailbox; `update` still uses the transaction lock. A later
 publish stops the old adapter with SIGTERM and a bounded wait before SIGKILL.

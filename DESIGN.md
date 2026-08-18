@@ -1503,7 +1503,9 @@ The implementation is not internet-exposure-ready until these cases pass:
   Platform services launch `punaro-bootstrap run`, which supervises the
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that
-  previous release, and otherwise enters recovery-only. An unreadable update
+  previous release, and otherwise enters recovery-only. The supervisor stays
+  parked until a later signed update or seed clears that marker, then exits so
+  the platform service restarts onto the repaired slot. An unreadable update
   journal also enters recovery-only. `run` holds a separate `run.lock` lease for
   the child's lifetime so two supervisors cannot share the same mailbox and
   ready file; the transaction lock stays free for `update`. A later publish

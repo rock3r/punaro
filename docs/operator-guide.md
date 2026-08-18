@@ -23,7 +23,9 @@ run lease so two supervisors cannot share the same mailbox; `update` still
 uses the transaction lock. A later publish stops the old adapter with
 SIGTERM and a bounded wait before SIGKILL. A healthy adapter that exits
 while the supervisor is still running is a supervisor failure so the
-platform service restarts it. Otherwise the host stays recovery-only.
+platform service restarts it. Recovery-only keeps the supervisor parked
+until a later signed update or seed clears that marker, then the platform
+service restarts onto the repaired slot.
 
 ## Run locally
 
