@@ -318,9 +318,12 @@ func postgresRebuildPendingQuota(tx *sql.Tx) error {
 		return errors.New("recipient quota cannot be rebuilt")
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_pending_install(singleton,pending_count,pending_bytes)
-		SELECT 1, count(*), COALESCE(sum(`+postgresPendingBodyBytes+`),0)
-		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
-		WHERE delivery.acked_at IS NULL`); err != nil {
+		SELECT 1, counted, bytes FROM (
+			SELECT count(*) AS counted, COALESCE(sum(`+postgresPendingBodyBytes+`),0) AS bytes
+			FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+			WHERE delivery.acked_at IS NULL
+		) AS pending
+		WHERE counted > 0`); err != nil {
 		return errors.New("installation quota cannot be rebuilt")
 	}
 	return nil

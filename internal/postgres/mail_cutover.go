@@ -178,7 +178,7 @@ func (a *Administration) BeginMailCutover(ctx context.Context, actorPrincipalID 
 		return MailCutoverEpoch{}, errors.New("mail cutover state is unavailable")
 	}
 	var rows int64
-	if err := tx.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM relay.mail_endpoints)+(SELECT count(*) FROM relay.mail_conversations)+(SELECT count(*) FROM relay.mail_memberships)+(SELECT count(*) FROM relay.mail_roles)+(SELECT count(*) FROM relay.mail_role_memberships)+(SELECT count(*) FROM relay.mail_role_bindings)+(SELECT count(*) FROM relay.mail_messages)+(SELECT count(*) FROM relay.mail_deliveries)+(SELECT count(*) FROM relay.mail_recipient_cursors)+(SELECT count(*) FROM relay.mail_message_idempotency)+(SELECT count(*) FROM relay.mail_conversation_idempotency)+(SELECT count(*) FROM relay.mail_conversation_controls)+(SELECT count(*) FROM relay.mail_conversation_control_idempotency)+(SELECT count(*) FROM relay.mail_request_nonces)+(SELECT count(*) FROM relay.mail_role_profiles)+(SELECT count(*) FROM relay.mail_role_profile_idempotency)+(SELECT count(*) FROM relay.mail_rate_buckets)+(SELECT count(*) FROM relay.mail_pending_recipients)+(SELECT count(*) FROM relay.mail_pending_install)`).Scan(&rows); err != nil || rows != 0 {
+	if err := tx.QueryRowContext(ctx, mailCutoverEmptyTargetCountSQL).Scan(&rows); err != nil || rows != 0 {
 		return MailCutoverEpoch{}, errors.New("mail cutover target is not empty")
 	}
 	if err := scanMailCutover(tx.QueryRowContext(ctx, `INSERT INTO relay.mail_cutover_epochs(epoch_id,source_id,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase) VALUES($1,$2,$3,$4,$5,$6,'importing') RETURNING epoch_id::text,source_id::text,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,created_at,updated_at,verified_at,activated_at,aborted_at`, request.EpochID, request.SourceID, request.TargetIdentity, request.SourceFingerprint, string(request.Manifest), request.ManifestSHA256), &existing); err != nil {
@@ -189,6 +189,8 @@ func (a *Administration) BeginMailCutover(ctx context.Context, actorPrincipalID 
 	}
 	return existing, nil
 }
+
+const mailCutoverEmptyTargetCountSQL = `SELECT (SELECT count(*) FROM relay.mail_endpoints)+(SELECT count(*) FROM relay.mail_conversations)+(SELECT count(*) FROM relay.mail_memberships)+(SELECT count(*) FROM relay.mail_roles)+(SELECT count(*) FROM relay.mail_role_memberships)+(SELECT count(*) FROM relay.mail_role_bindings)+(SELECT count(*) FROM relay.mail_messages)+(SELECT count(*) FROM relay.mail_deliveries)+(SELECT count(*) FROM relay.mail_recipient_cursors)+(SELECT count(*) FROM relay.mail_message_idempotency)+(SELECT count(*) FROM relay.mail_conversation_idempotency)+(SELECT count(*) FROM relay.mail_conversation_controls)+(SELECT count(*) FROM relay.mail_conversation_control_idempotency)+(SELECT count(*) FROM relay.mail_request_nonces)+(SELECT count(*) FROM relay.mail_role_profiles)+(SELECT count(*) FROM relay.mail_role_profile_idempotency)+(SELECT count(*) FROM relay.mail_rate_buckets)`
 
 const mailCutoverSelect = `SELECT epoch_id::text,source_id::text,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,created_at,updated_at,verified_at,activated_at,aborted_at FROM relay.mail_cutover_epochs`
 
