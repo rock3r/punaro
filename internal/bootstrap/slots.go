@@ -683,7 +683,7 @@ func Status(directory string) (State, error) {
 
 func nextSlotGeneration(directory string) (int64, error) {
 	var high int64
-	for _, name := range []string{currentSlot, previousSlot} {
+	for _, name := range []string{currentSlot, previousSlot, candidateSlot} {
 		slot, err := readOptionalSlot(filepath.Join(directory, name))
 		if err != nil {
 			continue
