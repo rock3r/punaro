@@ -44,11 +44,14 @@ function Get-PunaroMatchingAdapterPids([string]$WantPath) {
     return $matches
 }
 
-function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath) {
+function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath, [switch]$RequireImage) {
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -eq $proc) { return }
     $image = Get-PunaroProcessImage $proc
-    if ([string]::IsNullOrWhiteSpace($image)) { return }
+    if ([string]::IsNullOrWhiteSpace($image)) {
+        if ($RequireImage) { Stop-Install 'run.pid image is unverifiable' }
+        return
+    }
     $got = [System.IO.Path]::GetFullPath($image)
     if (-not $WantPath.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
     Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
@@ -96,7 +99,7 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
         if ($remaining.Count -gt 0) { Stop-Install 'could not stop a matching Punaro adapter' }
         return
     }
-    Stop-PunaroMatchingAdapter $orphanPid $want
+    Stop-PunaroMatchingAdapter $orphanPid $want -RequireImage
 }
 
 function Wait-PunaroReplaceableBinary([string]$Path) {

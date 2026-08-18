@@ -508,11 +508,7 @@ func TestRunExitsWhenCurrentChangesAfterReady(t *testing.T) {
 			}
 			go func() {
 				time.Sleep(30 * time.Millisecond)
-				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
-				next := filepath.Join(dir, currentSlot)
-				_ = os.Mkdir(next, 0o700)
-				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
-				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+				replaceCurrentSlot(dir, "v0.2.0", 2, "next-adapter")
 			}()
 			child = blockingProcess(context.Background()).(*fakeProcess)
 			return child, nil
@@ -564,11 +560,7 @@ func TestRunExitsWhenCurrentChangesDuringReadyWindow(t *testing.T) {
 			}
 			go func() {
 				time.Sleep(30 * time.Millisecond)
-				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
-				next := filepath.Join(dir, currentSlot)
-				_ = os.Mkdir(next, 0o700)
-				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
-				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+				replaceCurrentSlot(dir, "v0.2.0", 2, "next-adapter")
 			}()
 			child = blockingProcess(context.Background()).(*fakeProcess)
 			return child, nil
@@ -598,11 +590,7 @@ func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 		Start: func(context.Context, ChildSpec) (Process, error) {
 			go func() {
 				time.Sleep(30 * time.Millisecond)
-				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
-				next := filepath.Join(dir, currentSlot)
-				_ = os.Mkdir(next, 0o700)
-				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
-				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+				replaceCurrentSlot(dir, "v0.2.0", 2, "next-adapter")
 			}()
 			child = blockingProcess(context.Background()).(*fakeProcess)
 			return child, nil
@@ -1876,6 +1864,24 @@ func writeAdapterSlot(t *testing.T, directory, slot, release string, sequence in
 
 func writeSlotRecord(t *testing.T, slotDir, release string, sequence int64, digest string) {
 	writeSlotRecordGeneration(t, slotDir, release, sequence, digest, 0)
+}
+
+func replaceCurrentSlot(dir, release string, sequence int64, payload string) {
+	next := filepath.Join(dir, "next-current")
+	_ = os.RemoveAll(next)
+	if os.Mkdir(next, 0o700) != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte(payload), 0o600)
+	body, err := json.Marshal(slotState{Schema: 1, Release: release, Sequence: sequence, ManifestSHA256: payloadDigest(payload)})
+	if err != nil {
+		return
+	}
+	if os.WriteFile(filepath.Join(next, slotRecord), body, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
+	_ = os.Rename(next, filepath.Join(dir, currentSlot))
 }
 
 func writeSlotRecordGeneration(t *testing.T, slotDir, release string, sequence int64, digest string, generation int64) {

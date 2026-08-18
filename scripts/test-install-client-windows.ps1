@@ -27,8 +27,9 @@ if ($allScripts -match 'Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=|\.\s*\
     throw 'Windows client scripts must not execute configuration or embed Access credentials'
 }
 
-$fixture = Join-Path ([System.IO.Path]::GetTempPath()) ("punaro-windows-install-test-" + [Guid]::NewGuid())
 $originalLocalAppData = $env:LOCALAPPDATA
+# Keep the fixture under the real per-user LOCALAPPDATA so seed ancestor walks succeed.
+$fixture = Join-Path $originalLocalAppData ("punaro-windows-install-test-" + [Guid]::NewGuid())
 try {
     [System.IO.Directory]::CreateDirectory($fixture) | Out-Null
     $env:LOCALAPPDATA = Join-Path $fixture 'localappdata'

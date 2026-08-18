@@ -40,6 +40,7 @@ for expected in \
 	'PathType Leaf' \
 	'starting marker' \
 	'could not enumerate processes to recover run.pid' \
+	'run.pid image is unverifiable' \
 	'could not stop a matching Punaro adapter' \
 	'run.pid' \
 	'FileShare]::None' \
