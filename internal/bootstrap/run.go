@@ -393,20 +393,33 @@ func terminateStaleRun(directory string) error {
 		}
 		if runtime.GOOS != "windows" {
 			_ = proc.Signal(syscall.SIGTERM)
-		}
-		deadline := time.Now().Add(childStopTimeout)
-		for time.Now().Before(deadline) {
-			switch matchProcessImage(record.PID, record.Path) {
-			case processImageGone, processImageMismatch:
+			if waitStaleProcessGone(record) {
 				clearRunPID(directory)
 				return nil
 			}
-			_ = proc.Kill()
-			time.Sleep(20 * time.Millisecond)
+		}
+		_ = proc.Kill()
+		if waitStaleProcessGone(record) {
+			clearRunPID(directory)
+			return nil
 		}
 		return errors.New("bootstrap run is already active")
 	default:
 		return errors.New("bootstrap run is already active")
+	}
+}
+
+func waitStaleProcessGone(record runPIDRecord) bool {
+	deadline := time.Now().Add(childStopTimeout)
+	for {
+		switch matchProcessImage(record.PID, record.Path) {
+		case processImageGone, processImageMismatch:
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
