@@ -276,6 +276,20 @@ func recoverJournal(directory string) error {
 	}
 }
 
+func readRepairableCurrent(directory string) (slotState, error) {
+	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
+	if err == nil {
+		return current, nil
+	}
+	if recErr := writeRecoveryRecord(directory, recoveryCurrentExited); recErr != nil {
+		return slotState{}, recErr
+	}
+	if err := os.RemoveAll(filepath.Join(directory, currentSlot)); err != nil {
+		return slotState{}, err
+	}
+	return slotState{}, nil
+}
+
 func currentGenerationIsHealthy(directory string, current slotState) bool {
 	if current.Generation < 1 {
 		return false

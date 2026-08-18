@@ -95,11 +95,11 @@ func Update(request Request) (Result, error) {
 			return Result{}, slotErr
 		}
 		if exists {
-			slot, readErr := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
+			slot, readErr := readRepairableCurrent(request.Directory)
 			if readErr != nil {
 				return Result{}, readErr
 			}
-			if slot.Release != localCheckoutRelease {
+			if slot.Release != "" && slot.Release != localCheckoutRelease {
 				return Result{}, errors.New("bootstrap accepted state is invalid")
 			}
 		}
@@ -186,7 +186,7 @@ func Update(request Request) (Result, error) {
 	if !platformHasAdapter(artifacts, request.GOOS, request.GOARCH) {
 		return Result{}, errors.New("release has no adapter for this platform")
 	}
-	current, err := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
+	current, err := readRepairableCurrent(request.Directory)
 	if err != nil {
 		return Result{}, err
 	}

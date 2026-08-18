@@ -336,6 +336,32 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRememberHealthWithoutReadyFile(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.1.0", 1, payloadDigest("current-adapter"), 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHealthyGeneration(dir); err == nil {
+		t.Fatal("unready first slot was recorded as healthy")
+	}
+}
+
 func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
@@ -716,6 +742,29 @@ func TestStatusQuarantinesMalformedJournalIntoRecovery(t *testing.T) {
 	}
 	if !recoveryOnly(t, dir) {
 		t.Fatal("status did not park after a malformed journal")
+	}
+}
+
+func TestUpdateSucceedsAfterUnreadableCurrentSlot(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, currentSlot, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryOnly(t, dir)
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("signed update left recovery-only after an unreadable current slot")
 	}
 }
 
