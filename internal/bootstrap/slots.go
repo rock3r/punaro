@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -405,7 +406,11 @@ func saveAutoRollback(directory string, away slotState) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(directory, autoRollbackFile), body, 0o600)
+	path := filepath.Join(directory, autoRollbackFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	return writeAtomic(path, body, 0o600)
 }
 
 func blocksAutoRollback(directory string, previous slotState) (bool, error) {
@@ -715,6 +720,9 @@ func nextSlotGeneration(directory string) (int64, error) {
 	}
 	if record, err := loadGenerationHighWater(directory); err == nil && record.Generation > high {
 		high = record.Generation
+	}
+	if high == math.MaxInt64 {
+		return 0, errors.New("bootstrap generation high-water is exhausted")
 	}
 	next := high + 1
 	if err := observeGeneration(directory, next); err != nil {

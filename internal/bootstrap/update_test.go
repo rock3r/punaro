@@ -233,6 +233,34 @@ func TestRollbackSwapsPublishedSlots(t *testing.T) {
 	}
 }
 
+func TestRollbackSucceedsAfterAutoRollbackDirectoryNode(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	origin.republish(t, originSpec{payload: "second", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))
+	result, err := Rollback(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release != "v0.1.0" || result.Sequence != 1 {
+		t.Fatalf("rollback=%#v", result)
+	}
+	info, err := os.Lstat(filepath.Join(dir, autoRollbackFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("auto-rollback directory survived rollback: info=%v err=%v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("rolling-back journal survived after replacing auto-rollback")
+	}
+}
+
 func TestRollbackRequiresPreviousSlot(t *testing.T) {
 	dir := privateDir(t)
 	if _, err := Rollback(dir); err == nil {

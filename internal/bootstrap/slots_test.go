@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -383,6 +384,34 @@ func TestNextSlotGenerationReplacesGenerationDirectoryNode(t *testing.T) {
 	record, err := loadGenerationHighWater(dir)
 	if err != nil || record.Generation != 3 {
 		t.Fatalf("persisted generation=%+v err=%v", record, err)
+	}
+}
+
+func TestNextSlotGenerationRejectsExhaustedHighWater(t *testing.T) {
+	dir := privateDir(t)
+	if err := saveGenerationHighWater(dir, math.MaxInt64); err != nil {
+		t.Fatal(err)
+	}
+	got, err := nextSlotGeneration(dir)
+	if err == nil || got != 0 {
+		t.Fatalf("exhausted generation=%d err=%v", got, err)
+	}
+}
+
+func TestSaveAutoRollbackReplacesDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))
+	away := slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}
+	if err := saveAutoRollback(dir, away); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(filepath.Join(dir, autoRollbackFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("auto-rollback still not a file: info=%v err=%v", info, err)
+	}
+	blocked, err := blocksAutoRollback(dir, away)
+	if err != nil || !blocked {
+		t.Fatalf("saved auto-rollback blocked=%v err=%v", blocked, err)
 	}
 }
 
