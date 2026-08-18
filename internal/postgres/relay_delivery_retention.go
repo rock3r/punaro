@@ -42,81 +42,102 @@ func (d *Database) retentionConfig() relay.RetentionConfig {
 }
 
 // MaintainDeliveries expires due pending deliveries and prunes retained terminals.
+// Each close is its own bounded transaction so the five-second relay budget
+// cannot roll back earlier expiry or quota release.
 func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, error) {
 	cfg := d.retentionConfig()
 	now = now.UTC()
-	tx, cancel, err := d.beginRelayTransaction(nil)
-	if err != nil {
-		return relay.MaintenanceResult{}, errors.New("delivery maintenance cannot start")
-	}
-	defer cancel()
-	defer func() { _ = tx.Rollback() }()
 	expireCutoff := now.Add(-time.Duration(cfg.PendingMaxAgeSeconds) * time.Second)
-	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id::text, delivery.recipient_endpoint, message.id::text, message.conversation_id::text, message.sequence, delivery.lease_generation, `+postgresPendingBodyBytes+`, message.created_at
-		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
-		WHERE delivery.acked_at IS NULL AND message.created_at <= $1
-		ORDER BY message.created_at, delivery.id
-		LIMIT $2
-		FOR UPDATE OF delivery SKIP LOCKED`, expireCutoff, cfg.MaintenanceBatch)
-	if err != nil {
-		return relay.MaintenanceResult{}, errors.New("expired deliveries cannot be inspected")
-	}
-	var pending []postgresPendingClose
-	for rows.Next() {
-		var row postgresPendingClose
-		if err := rows.Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt); err != nil {
-			_ = rows.Close()
-			return relay.MaintenanceResult{}, errors.New("expired delivery is malformed")
-		}
-		pending = append(pending, row)
-	}
-	if err := rows.Close(); err != nil || rows.Err() != nil {
-		return relay.MaintenanceResult{}, errors.New("expired deliveries cannot be inspected")
-	}
 	var result relay.MaintenanceResult
-	result.Scanned = len(pending)
-	for _, row := range pending {
-		closed, err := postgresClosePendingDelivery(tx, row, relay.ClosedExpired, now)
+	for i := 0; i < cfg.MaintenanceBatch; i++ {
+		found, closed, err := d.expireOneDueDelivery(expireCutoff, now)
 		if err != nil {
-			return relay.MaintenanceResult{}, err
+			return result, err
 		}
+		if !found {
+			break
+		}
+		result.Scanned++
 		if closed {
 			result.Expired++
 		}
 	}
+	d.metrics.ObserveTerminals(relay.ClosedExpired, result.Expired)
 	pruneCutoff := now.Add(-time.Duration(cfg.TerminalRetentionSeconds) * time.Second)
-	pruneRows, err := tx.QueryContext(context.Background(), `SELECT delivery_id::text FROM relay.mail_delivery_terminals
-		WHERE closed_at <= $1
-		ORDER BY closed_at, delivery_id
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED`, pruneCutoff, cfg.MaintenanceBatch)
-	if err != nil {
-		return relay.MaintenanceResult{}, errors.New("retained terminals cannot be inspected")
-	}
-	var pruneIDs []string
-	for pruneRows.Next() {
-		var id string
-		if err := pruneRows.Scan(&id); err != nil {
-			_ = pruneRows.Close()
-			return relay.MaintenanceResult{}, errors.New("retained terminal is malformed")
+	for i := 0; i < cfg.MaintenanceBatch; i++ {
+		found, err := d.pruneOneTerminal(pruneCutoff)
+		if err != nil {
+			d.refreshPendingMetrics(context.Background(), now)
+			return result, err
 		}
-		pruneIDs = append(pruneIDs, id)
-	}
-	if err := pruneRows.Close(); err != nil || pruneRows.Err() != nil {
-		return relay.MaintenanceResult{}, errors.New("retained terminals cannot be inspected")
-	}
-	for _, id := range pruneIDs {
-		if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_delivery_terminals WHERE delivery_id=$1::uuid`, id); err != nil {
-			return relay.MaintenanceResult{}, relayDatabaseError(err, "prune terminal metadata")
+		if !found {
+			break
 		}
 		result.Pruned++
 	}
-	if err := tx.Commit(); err != nil {
-		return relay.MaintenanceResult{}, relayDatabaseError(err, "commit delivery maintenance")
-	}
-	d.metrics.ObserveTerminals(relay.ClosedExpired, result.Expired)
 	d.refreshPendingMetrics(context.Background(), now)
 	return result, nil
+}
+
+func (d *Database) expireOneDueDelivery(cutoff, now time.Time) (bool, bool, error) {
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return false, false, errors.New("delivery maintenance cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	var row postgresPendingClose
+	err = tx.QueryRowContext(context.Background(), `SELECT delivery.id::text, delivery.recipient_endpoint, message.id::text, message.conversation_id::text, message.sequence, delivery.lease_generation, `+postgresPendingBodyBytes+`, message.created_at
+		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+		WHERE delivery.acked_at IS NULL AND message.created_at <= $1
+		ORDER BY message.created_at, delivery.id
+		LIMIT 1
+		FOR UPDATE OF delivery SKIP LOCKED`, cutoff).Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, errors.New("expired deliveries cannot be inspected")
+	}
+	closed, err := postgresClosePendingDelivery(tx, row, relay.ClosedExpired, now)
+	if err != nil {
+		return true, false, err
+	}
+	if !closed {
+		return true, false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return true, false, relayDatabaseError(err, "commit expired delivery")
+	}
+	return true, true, nil
+}
+
+func (d *Database) pruneOneTerminal(cutoff time.Time) (bool, error) {
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return false, errors.New("delivery maintenance cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	var id string
+	err = tx.QueryRowContext(context.Background(), `SELECT delivery_id::text FROM relay.mail_delivery_terminals
+		WHERE closed_at <= $1
+		ORDER BY closed_at, delivery_id
+		LIMIT 1
+		FOR UPDATE SKIP LOCKED`, cutoff).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, errors.New("retained terminals cannot be inspected")
+	}
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM relay.mail_delivery_terminals WHERE delivery_id=$1::uuid`, id); err != nil {
+		return false, relayDatabaseError(err, "prune terminal metadata")
+	}
+	if err := tx.Commit(); err != nil {
+		return false, relayDatabaseError(err, "commit terminal prune")
+	}
+	return true, nil
 }
 
 // ListTerminalDeliveries returns one content-free operator page of retained terminals.

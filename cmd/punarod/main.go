@@ -848,13 +848,17 @@ func startDeliveryMaintenance(store *relay.Store, postgresRelay relay.Backend) f
 		defer close(done)
 		ticker := time.NewTicker(deliveryMaintenanceInterval)
 		defer ticker.Stop()
-		_, _ = maintainer.MaintainDeliveries(time.Now().UTC())
+		if _, err := maintainer.MaintainDeliveries(time.Now().UTC()); err != nil {
+			log.Printf("punarod delivery maintenance did not complete")
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				_, _ = maintainer.MaintainDeliveries(time.Now().UTC())
+				if _, err := maintainer.MaintainDeliveries(time.Now().UTC()); err != nil {
+					log.Printf("punarod delivery maintenance did not complete")
+				}
 			}
 		}
 	}()

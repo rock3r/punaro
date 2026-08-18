@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -39,83 +40,97 @@ func (s *Store) retentionConfig() RetentionConfig {
 }
 
 // MaintainDeliveries expires pending deliveries past the max-age boundary and
-// prunes retained terminal metadata, each in one bounded page.
+// prunes retained terminal metadata, each in one bounded page of independent
+// transactions so a later timeout cannot undo earlier closes.
 func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 	cfg := s.retentionConfig()
 	now = now.UTC().Truncate(time.Millisecond)
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
-		return MaintenanceResult{}, err
-	}
-	defer rollback(tx)
 	cutoff := now.Add(-time.Duration(cfg.PendingMaxAgeSeconds) * time.Second).UnixMilli()
-	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, delivery.recipient_endpoint, message.id, message.conversation_id, message.sequence, delivery.lease_generation, `+sqlitePendingBodyBytes+`, message.created_at
-		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
-		WHERE delivery.acked_at IS NULL AND message.created_at <= ?
-		ORDER BY message.created_at, delivery.id
-		LIMIT ?`, cutoff, cfg.MaintenanceBatch)
-	if err != nil {
-		return MaintenanceResult{}, fmt.Errorf("find expired deliveries: %w", err)
-	}
-	var pending []pendingClose
-	for rows.Next() {
-		var row pendingClose
-		if err := rows.Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt); err != nil {
-			_ = rows.Close()
-			return MaintenanceResult{}, err
-		}
-		pending = append(pending, row)
-	}
-	if err := rows.Close(); err != nil {
-		return MaintenanceResult{}, err
-	}
-	if err := rows.Err(); err != nil {
-		return MaintenanceResult{}, err
-	}
 	var result MaintenanceResult
-	result.Scanned = len(pending)
-	for _, row := range pending {
-		closed, err := closePendingDelivery(tx, row, ClosedExpired, now)
+	for i := 0; i < cfg.MaintenanceBatch; i++ {
+		found, closed, err := s.expireOneDueDelivery(cutoff, now)
 		if err != nil {
-			return MaintenanceResult{}, err
+			return result, err
 		}
+		if !found {
+			break
+		}
+		result.Scanned++
 		if closed {
 			result.Expired++
 		}
 	}
 	pruneCutoff := now.Add(-time.Duration(cfg.TerminalRetentionSeconds) * time.Second).UnixMilli()
-	pruneRows, err := tx.QueryContext(context.Background(), `SELECT delivery_id FROM delivery_terminals
-		WHERE closed_at <= ? ORDER BY closed_at, delivery_id LIMIT ?`, pruneCutoff, cfg.MaintenanceBatch)
-	if err != nil {
-		return MaintenanceResult{}, fmt.Errorf("find retained terminals: %w", err)
-	}
-	var pruneIDs []string
-	for pruneRows.Next() {
-		var id string
-		if err := pruneRows.Scan(&id); err != nil {
-			_ = pruneRows.Close()
-			return MaintenanceResult{}, err
+	for i := 0; i < cfg.MaintenanceBatch; i++ {
+		found, err := s.pruneOneTerminal(pruneCutoff)
+		if err != nil {
+			s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
+			s.refreshPendingMetrics(now)
+			return result, err
 		}
-		pruneIDs = append(pruneIDs, id)
-	}
-	if err := pruneRows.Close(); err != nil {
-		return MaintenanceResult{}, err
-	}
-	if err := pruneRows.Err(); err != nil {
-		return MaintenanceResult{}, err
-	}
-	for _, id := range pruneIDs {
-		if _, err := tx.ExecContext(context.Background(), `DELETE FROM delivery_terminals WHERE delivery_id = ?`, id); err != nil {
-			return MaintenanceResult{}, fmt.Errorf("prune terminal metadata: %w", err)
+		if !found {
+			break
 		}
 		result.Pruned++
-	}
-	if err := tx.Commit(); err != nil {
-		return MaintenanceResult{}, err
 	}
 	s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
 	s.refreshPendingMetrics(now)
 	return result, nil
+}
+
+func (s *Store) expireOneDueDelivery(cutoff int64, now time.Time) (bool, bool, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, false, err
+	}
+	defer rollback(tx)
+	var row pendingClose
+	err = tx.QueryRowContext(context.Background(), `SELECT delivery.id, delivery.recipient_endpoint, message.id, message.conversation_id, message.sequence, delivery.lease_generation, `+sqlitePendingBodyBytes+`, message.created_at
+		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
+		WHERE delivery.acked_at IS NULL AND message.created_at <= ?
+		ORDER BY message.created_at, delivery.id
+		LIMIT 1`, cutoff).Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("find expired delivery: %w", err)
+	}
+	closed, err := closePendingDelivery(tx, row, ClosedExpired, now)
+	if err != nil {
+		return true, false, err
+	}
+	if !closed {
+		return true, false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return true, false, err
+	}
+	return true, true, nil
+}
+
+func (s *Store) pruneOneTerminal(cutoff int64) (bool, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return false, err
+	}
+	defer rollback(tx)
+	var id string
+	err = tx.QueryRowContext(context.Background(), `SELECT delivery_id FROM delivery_terminals
+		WHERE closed_at <= ? ORDER BY closed_at, delivery_id LIMIT 1`, cutoff).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("find retained terminal: %w", err)
+	}
+	if _, err := tx.ExecContext(context.Background(), `DELETE FROM delivery_terminals WHERE delivery_id = ?`, id); err != nil {
+		return false, fmt.Errorf("prune terminal metadata: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ListTerminalDeliveries returns one content-free operator page of retained terminals.

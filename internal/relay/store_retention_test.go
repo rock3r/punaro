@@ -102,6 +102,56 @@ func TestStoreMaintainDeliveriesPagesWithStableContinuation(t *testing.T) {
 	}
 }
 
+func TestStoreMaintainDeliveriesPersistsPartialPageAcrossRestart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetRetentionPolicy(tightRetention(60, 3600, 2)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	now := retentionNow()
+	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	for i, key := range []string{"send-1", "send-2", "send-3"} {
+		if _, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", key, key, now.Add(time.Duration(i)*time.Millisecond))); err != nil {
+			_ = store.Close()
+			t.Fatal(err)
+		}
+	}
+	later := now.Add(61 * time.Second)
+	first, err := store.MaintainDeliveries(later)
+	if err != nil || first.Expired != 2 {
+		_ = store.Close()
+		t.Fatalf("first page=%#v err=%v", first, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.SetRetentionPolicy(tightRetention(60, 3600, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if pending := quotaInstallCounters(t, restarted); pending.Count != 1 {
+		t.Fatalf("pending after restart=%#v", pending)
+	}
+	listed, err := restarted.ListTerminalDeliveries("", 10)
+	if err != nil || len(listed.Terminals) != 2 {
+		t.Fatalf("terminals after restart=%#v err=%v", listed, err)
+	}
+	second, err := restarted.MaintainDeliveries(later)
+	if err != nil || second.Expired != 1 {
+		t.Fatalf("second page after restart=%#v err=%v", second, err)
+	}
+}
+
 func TestStoreExpiryReleasesCapacityOnce(t *testing.T) {
 	t.Parallel()
 	store := openRetentionStore(t, tightRetention(60, 3600, 10))
