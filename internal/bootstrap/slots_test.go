@@ -247,6 +247,28 @@ func TestRecoverRepairableJournalCompletesPartialRollback(t *testing.T) {
 	}
 }
 
+func TestRecoverJournalQuarantinesInvalidSwapNode(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	if err := os.WriteFile(filepath.Join(dir, swapSlot), []byte("not-a-slot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, swapSlot)); !os.IsNotExist(err) {
+		t.Fatalf("invalid swap was kept: %v", err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || status.Previous != "v0.1.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRecoverJournalRepairsSwapWithoutJournal(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")

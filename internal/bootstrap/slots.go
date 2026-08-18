@@ -384,7 +384,7 @@ func repairOrphanSwap(directory string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	swapExists, err := existsRealDir(swap)
+	swapExists, err := existsOrQuarantineSwap(directory)
 	if err != nil || !swapExists {
 		return false, err
 	}
@@ -963,6 +963,27 @@ func requireRealDir(path string) error {
 		return errors.New("bootstrap directory is invalid")
 	}
 	return nil
+}
+
+func existsOrQuarantineSwap(directory string) (bool, error) {
+	path := filepath.Join(directory, swapSlot)
+	info, err := os.Lstat(path) // #nosec G703 -- swap is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return true, nil
+	}
+	if err := os.RemoveAll(path); err != nil { // #nosec G703 -- swap is a fixed child of the bootstrap directory.
+		return false, err
+	}
+	if err := syncDir(directory); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func existsRealDir(path string) (bool, error) {
