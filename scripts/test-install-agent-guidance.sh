@@ -117,6 +117,35 @@ if grep -Fq 'successful send proves relay acceptance only' "$stale_project/AGENT
 	exit 1
 fi
 
+outside_project="$fixture_dir/outside-sentinel-project"
+mkdir -p "$outside_project"
+cat >"$outside_project/AGENTS.md" <<'EOF'
+# Project notes
+
+Operators sometimes quote: successful send proves relay acceptance only
+<!-- punaro-agent-guidance:start -->
+## Punaro coordination
+
+Use the local `agent-mailbox` MCP for Punaro-delivered mail.
+For attachments, use the `punaro-attachment` skill and installed `punaro-trusted-attachment` client only for one explicit task-owner-authorized operation.
+<!-- punaro-agent-guidance:end -->
+EOF
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$outside_project" >"$fixture_dir/outside.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'sentinel outside the Punaro block skipped the runtime-boundary upgrade' >&2; exit 1; }
+grep -Fq 'existing Punaro guidance predates the agent-runtime boundary:' "$fixture_dir/outside.out"
+grep -Fq 'installed `punaro-trusted-attachment` client' "$outside_project/AGENTS.md"
+awk '
+	index($0, "<!-- punaro-agent-guidance:start -->") { p=1 }
+	p { print }
+	index($0, "<!-- punaro-agent-guidance:end -->") { p=0 }
+' "$outside_project/AGENTS.md" | grep -Fq 'successful send proves relay acceptance only' && {
+	printf '%s\n' 'outside sentinel caused the marked Punaro block to be treated as current' >&2
+	exit 1
+}
+
 require_phrase "$repo_dir/DESIGN.md" '## Agent runtime boundary'
 require_phrase "$repo_dir/DESIGN.md" 'Linux gateway'
 require_phrase "$repo_dir/DESIGN.md" 'accepted/queued'
@@ -136,11 +165,16 @@ require_phrase "$repo_dir/docs/user-guide.md" 'intentional, not a parity gap'
 require_phrase "$repo_dir/docs/alpha-text-relay.md" 'accelerates adapter polling only'
 require_phrase "$repo_dir/docs/alpha-text-relay.md" 'not ordinary message delivery'
 require_phrase "$repo_dir/docs/alpha-text-relay.md" 'no sender receipt beyond append acceptance'
+require_phrase "$repo_dir/docs/installation.md" 'accepted/queued'
+require_phrase "$repo_dir/docs/installation.md" 'accelerates adapter polling only'
+require_phrase "$repo_dir/docs/installation.md" 'Repeat bounded waits'
+require_phrase "$repo_dir/docs/installation.md" 'does not itself create a model turn'
 
 for path in \
 	"$repo_dir/DESIGN.md" \
 	"$repo_dir/docs/user-guide.md" \
 	"$repo_dir/docs/alpha-text-relay.md" \
+	"$repo_dir/docs/installation.md" \
 	"$repo_dir/skills/punaro-mailbox/SKILL.md" \
 	"$repo_dir/skills/punaro-reply/SKILL.md" \
 	"$repo_dir/scripts/install-agent-guidance.sh" \

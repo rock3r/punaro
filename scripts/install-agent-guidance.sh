@@ -40,13 +40,22 @@ Reply only with `punaro-adapter send` using the typed envelope conversation ID a
 For attachments, use the `punaro-attachment` skill and installed `punaro-trusted-attachment` client only for one explicit task-owner-authorized operation. Use only the fixed operator-provisioned origin, protected credential file, project, and download root. Never automatically download, execute, forward, or delete a file, and never fall back to the retired v2/v3 controller.
 <!-- punaro-agent-guidance:end -->'
 
+marked_guidance() {
+	awk '
+		index($0, "<!-- punaro-agent-guidance:start -->") { p=1 }
+		p { print }
+		index($0, "<!-- punaro-agent-guidance:end -->") { p=0 }
+	' "$1"
+}
+
 install_guidance_file() {
 	path=$1
 	if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then fail "guidance target is not a regular file: $path"; fi
 	if [ -f "$path" ] && grep -Fqx '<!-- punaro-agent-guidance:start -->' "$path"; then
 		grep -Fqx '<!-- punaro-agent-guidance:end -->' "$path" || fail "incomplete existing Punaro guidance block: $path"
-		if grep -Fq 'successful send proves relay acceptance only' "$path"; then return; fi
-		if grep -Fq 'installed `punaro-trusted-attachment` client' "$path"; then
+		block=$(marked_guidance "$path")
+		printf '%s\n' "$block" | grep -Fq 'successful send proves relay acceptance only' && return
+		if printf '%s\n' "$block" | grep -Fq 'installed `punaro-trusted-attachment` client'; then
 			fail "existing Punaro guidance predates the agent-runtime boundary: $path; review and remove only the marked Punaro block, then rerun"
 		fi
 		fail "existing Punaro guidance predates trusted attachments: $path; review and remove only the marked Punaro block, then rerun"

@@ -17,14 +17,24 @@ function Assert-RegularGuidanceFile([string]$Path) {
     }
 }
 
+function Get-MarkedGuidance([string]$Text) {
+    $start = '<!-- punaro-agent-guidance:start -->'
+    $end = '<!-- punaro-agent-guidance:end -->'
+    $startIndex = $Text.IndexOf($start)
+    $endIndex = $Text.IndexOf($end)
+    if ($startIndex -lt 0 -or $endIndex -lt 0 -or $endIndex -lt $startIndex) { return '' }
+    return $Text.Substring($startIndex, ($endIndex + $end.Length) - $startIndex)
+}
+
 function Add-Guidance([string]$Path, [string]$Block) {
     Assert-RegularGuidanceFile -Path $Path
     if (Test-Path -LiteralPath $Path) {
         $existing = [System.IO.File]::ReadAllText($Path)
         if ($existing.Contains('<!-- punaro-agent-guidance:start -->')) {
             if (-not $existing.Contains('<!-- punaro-agent-guidance:end -->')) { Stop-Guidance "incomplete existing Punaro guidance block: $Path" }
-            if ($existing.Contains('successful send proves relay acceptance only')) { return }
-            if ($existing.Contains('installed `punaro-trusted-attachment` client')) {
+            $marked = Get-MarkedGuidance $existing
+            if ($marked.Contains('successful send proves relay acceptance only')) { return }
+            if ($marked.Contains('installed `punaro-trusted-attachment` client')) {
                 Stop-Guidance "existing Punaro guidance predates the agent-runtime boundary: $Path; review and remove only the marked Punaro block, then rerun"
             }
             Stop-Guidance "existing Punaro guidance predates trusted attachments: $Path; review and remove only the marked Punaro block, then rerun"
