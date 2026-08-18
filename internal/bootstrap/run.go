@@ -355,16 +355,19 @@ func writeRunPID(directory string, pid int, path string) error {
 	return writeAtomic(filepath.Join(directory, runPIDFile), body, 0o600)
 }
 
-func loadRunPID(directory string) (runPIDRecord, bool) {
+func loadRunPID(directory string) (runPIDRecord, error) {
 	body, err := os.ReadFile(filepath.Join(directory, runPIDFile)) // #nosec G304,G703 -- run pid file is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return runPIDRecord{}, nil
+	}
 	if err != nil {
-		return runPIDRecord{}, false
+		return runPIDRecord{}, err
 	}
 	var record runPIDRecord
 	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.PID <= 0 {
-		return runPIDRecord{}, false
+		return runPIDRecord{}, errors.New("bootstrap run is already active")
 	}
-	return record, true
+	return record, nil
 }
 
 func clearRunPID(directory string) {
@@ -372,8 +375,11 @@ func clearRunPID(directory string) {
 }
 
 func terminateStaleRun(directory string) error {
-	record, ok := loadRunPID(directory)
-	if !ok {
+	record, err := loadRunPID(directory)
+	if err != nil {
+		return err
+	}
+	if record.PID == 0 {
 		return nil
 	}
 	switch matchProcessImage(record.PID, record.Path) {

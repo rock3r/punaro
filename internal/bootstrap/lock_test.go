@@ -113,6 +113,19 @@ func TestAcquireRunLeaseClearsDeadPID(t *testing.T) {
 	}
 }
 
+func TestAcquireRunLeaseRejectsMalformedPIDRecord(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, runPIDFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireRunLease(dir); err == nil {
+		t.Fatal("malformed run.pid was leased")
+	}
+	if _, err := os.Stat(filepath.Join(dir, runPIDFile)); err != nil {
+		t.Fatal("malformed run.pid was discarded")
+	}
+}
+
 func TestAcquireRunLeaseRejectsUnverifiableChild(t *testing.T) {
 	dir := privateDir(t)
 	cmd, _ := startSleepProcess(t)
