@@ -161,6 +161,22 @@ func TestAcquireRunLeaseClearsDeadPID(t *testing.T) {
 	}
 }
 
+func TestAcquireRunLeaseQuarantinesDirectoryLeaseNode(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.Mkdir(filepath.Join(dir, runLeaseFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	info, err := os.Lstat(filepath.Join(dir, runLeaseFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("run lease node=%v err=%v", info, err)
+	}
+}
+
 func TestAcquireRunLeaseRejectsMalformedPIDRecord(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, runPIDFile), []byte(`{"schema":1`), 0o600); err != nil {

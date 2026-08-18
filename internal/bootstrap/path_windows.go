@@ -17,8 +17,9 @@ const (
 	// the bootstrap directory itself.
 	windowsLeafWriteMask = windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL | windows.GENERIC_WRITE
 	// windowsAncestorReplaceMask is the rights that let another account
-	// rename or replace a child. Volume-root "create folder" ACEs are not
-	// included; those would reject every path under C:\.
+	// rename or replace an already-created child. Volume-root create-folder
+	// ACEs are excluded here; requireTrustedExistingAncestor still applies
+	// the leaf write mask to the MkdirAll parent.
 	windowsAncestorReplaceMask = windows.DELETE | fileDeleteChild | windows.WRITE_DAC | windows.WRITE_OWNER | windows.GENERIC_ALL
 )
 
@@ -27,7 +28,12 @@ func requireTrustedExistingAncestor(path string) error {
 	for {
 		_, err := os.Lstat(current) // #nosec G703 -- ancestor of the operator-selected bootstrap directory.
 		if err == nil {
-			return walkTrustedWindowsAncestors(current)
+			// The nearest existing ancestor is the MkdirAll parent. It must
+			// not grant Everyone/Authenticated Users create-folder rights.
+			if err := requireTrustedWindowsDirectory(current); err != nil {
+				return err
+			}
+			return walkTrustedWindowsAncestors(filepath.Dir(current))
 		}
 		if !os.IsNotExist(err) {
 			return errors.New("bootstrap directory is invalid")

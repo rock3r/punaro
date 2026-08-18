@@ -942,7 +942,7 @@ func removeNonRegular(path string) error {
 	if info.Mode().IsRegular() {
 		return nil
 	}
-	return os.RemoveAll(path)
+	return os.RemoveAll(path) // #nosec G703 -- marker is a fixed child of the bootstrap directory.
 }
 
 func writeAtomic(path string, body []byte, mode os.FileMode) error {
