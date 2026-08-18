@@ -15,7 +15,7 @@ done
 for expected in \
 	'LogonType Interactive' \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
-	'RestartCount' \
+	'RestartCount = 999' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \
@@ -61,6 +61,10 @@ grep -Fq "foreach (\$name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironmen
 
 if grep -Eq '(^|[^A-Za-z])\.\s*\$config|Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=' "$installer" "$runner"; then
 	printf '%s\n' 'Windows client scripts must not execute configuration or embed Access credentials' >&2
+	exit 1
+fi
+if grep -Eq 'attempt -lt 3|RestartCount = 3' "$installer" "$runner"; then
+	printf '%s\n' 'Windows adapter supervision must not exhaust a 3-attempt restart budget' >&2
 	exit 1
 fi
 
