@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -163,5 +165,33 @@ func TestRelayMaintainDeliveriesPublishesContentFreeOutcome(t *testing.T) {
 		return relay.MaintenanceResult{}, errors.New("unsafe")
 	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRelayUsesPostgresWhenEnabledWithoutCutover(t *testing.T) {
+	if !relayUsesPostgres(operator.Installation{RelayEnabled: true}, "") {
+		t.Fatal("relay-enabled installation did not select postgres")
+	}
+	if relayUsesPostgres(operator.Installation{}, "") {
+		t.Fatal("sqlite-only installation selected postgres")
+	}
+	if !relayUsesPostgres(operator.Installation{}, "postgres") {
+		t.Fatal("explicit postgres store was ignored")
+	}
+}
+
+func TestRetentionPolicyFromInstallationEnvIgnoresProcessOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "punarod.env")
+	if err := os.WriteFile(path, []byte("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=60\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=120\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	got, err := retentionPolicyFromEnvFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 60, TerminalRetentionSeconds: 120, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("policy=%#v want %#v", got, want)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ed25519"
 	"errors"
@@ -9,9 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
@@ -186,7 +188,7 @@ func listRelayTerminals(directory string, input relay.TerminalListInput) (relay.
 }
 
 func maintainRelayDeliveries(directory string) (relay.MaintenanceResult, error) {
-	cfg, err := config.Load(operator.EnvFile(directory))
+	policy, err := retentionPolicyFromEnvFile(operator.EnvFile(directory))
 	if err != nil {
 		return relay.MaintenanceResult{}, err
 	}
@@ -195,10 +197,6 @@ func maintainRelayDeliveries(directory string) (relay.MaintenanceResult, error) 
 		return relay.MaintenanceResult{}, err
 	}
 	defer func() { _ = store.Close() }()
-	policy := cfg.RelayRetentionPolicy()
-	if policy == (relay.RetentionConfig{}) {
-		policy = relay.DefaultRetentionConfig()
-	}
 	if err := store.SetRetentionPolicy(policy); err != nil {
 		return relay.MaintenanceResult{}, err
 	}
@@ -210,7 +208,8 @@ func openRelayTerminalStore(directory string) (relayTerminalStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if installation.MailCutover != nil {
+	storeName, _ := dotenvValue(operator.EnvFile(directory), "PUNARO_RELAY_STORE")
+	if relayUsesPostgres(installation, storeName) {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
@@ -224,4 +223,78 @@ func openRelayTerminalStore(directory string) (relayTerminalStore, error) {
 		return nil, errors.New("relay terminal store is unavailable")
 	}
 	return relay.Open(path)
+}
+
+func relayUsesPostgres(installation operator.Installation, store string) bool {
+	if strings.EqualFold(strings.TrimSpace(store), "postgres") {
+		return true
+	}
+	return installation.RelayEnabled || installation.MailCutover != nil
+}
+
+func retentionPolicyFromEnvFile(path string) (relay.RetentionConfig, error) {
+	cfg := relay.DefaultRetentionConfig()
+	values, err := readDotEnvMap(path)
+	if err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	if raw, ok := values["PUNARO_RELAY_PENDING_MAX_AGE_SECONDS"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < relay.RetentionAgeMinSeconds || n > relay.RetentionAgeMaxSeconds {
+			return relay.RetentionConfig{}, fmt.Errorf("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS must be an integer between %d and %d", relay.RetentionAgeMinSeconds, relay.RetentionAgeMaxSeconds)
+		}
+		cfg.PendingMaxAgeSeconds = n
+	}
+	if raw, ok := values["PUNARO_RELAY_TERMINAL_RETENTION_SECONDS"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < relay.RetentionKeepMinSeconds || n > relay.RetentionKeepMaxSeconds {
+			return relay.RetentionConfig{}, fmt.Errorf("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS must be an integer between %d and %d", relay.RetentionKeepMinSeconds, relay.RetentionKeepMaxSeconds)
+		}
+		cfg.TerminalRetentionSeconds = n
+	}
+	if raw, ok := values["PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < relay.RetentionBatchMin || n > relay.RetentionBatchMax {
+			return relay.RetentionConfig{}, fmt.Errorf("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH must be an integer between %d and %d", relay.RetentionBatchMin, relay.RetentionBatchMax)
+		}
+		cfg.MaintenanceBatch = n
+	}
+	if err := cfg.Validate(); err != nil {
+		return relay.RetentionConfig{}, err
+	}
+	return cfg, nil
+}
+
+func dotenvValue(path, key string) (string, error) {
+	values, err := readDotEnvMap(path)
+	if err != nil {
+		return "", err
+	}
+	return values[key], nil
+}
+
+func readDotEnvMap(path string) (map[string]string, error) {
+	file, err := os.Open(path) // #nosec G304 -- operator-chosen installation dotenv path.
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	values := map[string]string{}
+	scanner := bufio.NewScanner(file)
+	for line := 1; scanner.Scan(); line++ {
+		raw := strings.TrimSpace(scanner.Text())
+		if raw == "" || strings.HasPrefix(raw, "#") {
+			continue
+		}
+		key, value, found := strings.Cut(raw, "=")
+		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
+		if !found || key == "" || strings.ContainsAny(key, " \t") {
+			return nil, fmt.Errorf("parse dotenv file line %d", line)
+		}
+		values[key] = strings.Trim(strings.TrimSpace(value), "\"'")
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
