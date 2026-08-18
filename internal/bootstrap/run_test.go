@@ -140,6 +140,53 @@ func TestRunStartsSnapshotWhenCurrentSlotChanges(t *testing.T) {
 	}
 }
 
+func TestRunExitsWhenCurrentChangesAfterReady(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
+				next := filepath.Join(dir, currentSlot)
+				_ = os.Mkdir(next, 0o700)
+				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
+				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+			}()
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("post-ready slot change err=%v", err)
+	}
+}
+
+func TestRunTreatsInvalidRecoveryAsRecoveryOnly(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, recoveryFile), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			t.Fatal("started with invalid recovery record")
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("invalid recovery err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("invalid recovery did not stay recovery-only")
+	}
+}
+
 func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")

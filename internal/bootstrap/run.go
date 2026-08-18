@@ -128,13 +128,13 @@ func Run(ctx context.Context, request RunRequest) error {
 	}
 	if err := waitHealth(ctx, request, child, identity, hadPrevious); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return waitChild(ctx, child)
+			return waitChild(ctx, request, child, identity)
 		}
 		_ = child.Kill()
 		<-child.Done()
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)
 	}
-	return waitChild(ctx, child)
+	return waitChild(ctx, request, child, identity)
 }
 
 func (request *RunRequest) normalizeRun() error {
@@ -178,7 +178,10 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 		return slotState{}, "", err
 	}
 	if recovery, err := loadRecovery(request.Directory); err != nil {
-		return slotState{}, "", err
+		if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
+			return slotState{}, "", recErr
+		}
+		return slotState{}, "", ErrRecoveryOnly
 	} else if recovery.Mode == recoveryMode {
 		return slotState{}, "", ErrRecoveryOnly
 	}
@@ -402,7 +405,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 	}
 	if err := waitHealth(ctx, request, child, rolled, true); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return waitChild(ctx, child)
+			return waitChild(ctx, request, child, rolled)
 		}
 		_ = child.Kill()
 		<-child.Done()
@@ -411,15 +414,31 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	return waitChild(ctx, child)
+	return waitChild(ctx, request, child, rolled)
 }
 
-func waitChild(ctx context.Context, child Process) error {
-	err := child.Wait()
-	if ctx.Err() == nil {
-		return err
+func waitChild(ctx context.Context, request RunRequest, child Process, started slotState) error {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-child.Done():
+			err := child.Wait()
+			if ctx.Err() == nil {
+				return err
+			}
+			return nil //nolint:nilerr // SIGINT/SIGTERM is a clean supervisor stop
+		case <-ticker.C:
+			if started.Release == "" {
+				continue
+			}
+			if err := failIfSlotChanged(request.Directory, started); err != nil {
+				_ = child.Kill()
+				<-child.Done()
+				return err
+			}
+		}
 	}
-	return nil //nolint:nilerr // SIGINT/SIGTERM is a clean supervisor stop
 }
 
 func waitHealthWindow(ctx context.Context, request RunRequest, child Process) error {
