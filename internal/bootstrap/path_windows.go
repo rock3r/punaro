@@ -34,10 +34,6 @@ func requireTrustedExistingAncestor(path string) error {
 	}
 }
 
-func requireTrustedSeedDirectory(path string) error {
-	return requireTrustedWindowsDirectory(path)
-}
-
 func requireTrustedBootstrapDirectory(path string) error {
 	if err := requireTrustedWindowsDirectory(path); err != nil {
 		return err

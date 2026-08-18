@@ -1340,6 +1340,30 @@ func TestRunRejectsReadySymlink(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutRejectsWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("writable-ancestor policy is Unix-specific")
+	}
+	parent := filepath.Join(t.TempDir(), "open")
+	if err := os.Mkdir(parent, 0o777); err != nil { // #nosec G301 -- the regression creates a world-writable ancestor.
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil { // #nosec G302 -- the regression creates a world-writable ancestor.
+		t.Fatal(err)
+	}
+	dir := filepath.Join(parent, "state")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err == nil {
+		t.Fatal("writable ancestor accepted")
+	}
+}
+
 func TestSeedCheckoutRefusesInvalidRecoveryOnSignedSlot(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "signed-adapter")

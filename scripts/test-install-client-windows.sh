@@ -39,6 +39,7 @@ for expected in \
 	'run.pid is invalid' \
 	'PathType Leaf' \
 	'starting marker' \
+	'could not enumerate processes to recover run.pid' \
 	'could not stop a matching Punaro adapter' \
 	'run.pid' \
 	'FileShare]::None' \

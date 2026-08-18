@@ -26,6 +26,24 @@ function Get-PunaroProcessImage($Process) {
     return $image
 }
 
+function Get-PunaroMatchingAdapterPids([string]$WantPath) {
+    try { $listed = @(Get-Process -ErrorAction Stop) } catch { Stop-Install 'could not enumerate processes to recover run.pid' }
+    if ($listed.Count -eq 0) { Stop-Install 'could not enumerate processes to recover run.pid' }
+    $usable = 0
+    $matches = @()
+    foreach ($proc in $listed) {
+        $image = Get-PunaroProcessImage $proc
+        if ([string]::IsNullOrWhiteSpace($image)) { continue }
+        $usable++
+        $got = [System.IO.Path]::GetFullPath($image)
+        if ($WantPath.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $matches += $proc.Id
+        }
+    }
+    if ($usable -eq 0) { Stop-Install 'could not enumerate processes to recover run.pid' }
+    return $matches
+}
+
 function Stop-PunaroMatchingAdapter([int]$ProcessId, [string]$WantPath) {
     $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
     if ($null -eq $proc) { return }
@@ -71,9 +89,11 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $want = [System.IO.Path]::GetFullPath($orphanPath)
     # A starting marker (pid 0) is recovered by identity-killing matching adapter images.
     if ($starting -and $orphanPid -le 0) {
-        foreach ($proc in Get-Process -ErrorAction SilentlyContinue) {
-            Stop-PunaroMatchingAdapter $proc.Id $want
+        foreach ($matchPid in @(Get-PunaroMatchingAdapterPids $want)) {
+            Stop-PunaroMatchingAdapter $matchPid $want
         }
+        $remaining = @(Get-PunaroMatchingAdapterPids $want)
+        if ($remaining.Count -gt 0) { Stop-Install 'could not stop a matching Punaro adapter' }
         return
     }
     Stop-PunaroMatchingAdapter $orphanPid $want
