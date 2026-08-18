@@ -576,11 +576,12 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		names = append(names, name)
 	}
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
-	if rateBuckets {
+	switch {
+	case rateBuckets:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
-	} else if profiles {
+	case profiles:
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles"}
-	} else if !controls {
+	case !controls:
 		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
@@ -800,11 +801,12 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 	}
 	wantTriggers := 42
-	if rateBuckets {
+	switch {
+	case rateBuckets:
 		wantTriggers = 51
-	} else if profiles {
+	case profiles:
 		wantTriggers = 48
-	} else if !controls {
+	case !controls:
 		wantTriggers = 36
 	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
