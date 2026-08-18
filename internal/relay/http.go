@@ -116,6 +116,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.listRoles(w, body, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/resolve":
 		h.resolveRole(w, body, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/direct-messages":
+		h.sendDirectMessage(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
 		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
@@ -269,6 +271,49 @@ func (h *handler) resolveRole(w http.ResponseWriter, body []byte, now time.Time)
 	default:
 		writeError(w, http.StatusNotFound, "role not found")
 	}
+}
+
+func (h *handler) sendDirectMessage(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(DirectMessageBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		FromRole string `json:"from_role"`
+		ToRole   string `json:"to_role"`
+		Body     string `json:"body"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid direct message request")
+		return
+	}
+	message, duplicate, err := store.SendDirectMessage(DirectMessageInput{
+		SenderMachineID: machineID, FromRole: request.FromRole, ToRole: request.ToRole, Body: request.Body, IdempotencyKey: idempotencyKey, Now: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !duplicate {
+		machines, err := h.store.RecipientMachines(message.ID, now)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, recipientMachine := range machines {
+			h.notifier.Publish(recipientMachine, message.ConversationID, message.Sequence)
+		}
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, message)
 }
 
 func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string, now time.Time) {

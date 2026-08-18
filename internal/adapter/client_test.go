@@ -791,6 +791,51 @@ func TestHTTPRelayClientListsAndResolvesPublicRoles(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientSendsDirectMessageWithCanonicalRoles(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("direct message request was not signed")
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/direct-messages" || r.URL.RawQuery != "" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.String())
+		}
+		if r.Header.Get("Idempotency-Key") != "dm-1" {
+			t.Fatalf("idempotency key=%q", r.Header.Get("Idempotency-Key"))
+		}
+		var payload struct {
+			FromRole     string `json:"from_role"`
+			ToRole       string `json:"to_role"`
+			Body         string `json:"body"`
+			FromEndpoint string `json:"from_endpoint"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil || payload.FromRole != "role/machine-a/reviewer" || payload.ToRole != "role/machine-b/implementer" || payload.Body != "please review" || payload.FromEndpoint != "" {
+			t.Fatalf("payload=%s err=%v", body, err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_role":"role/machine-a/reviewer","body":"please review","created_at":"2026-08-18T18:00:00Z"}`))
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := client.SendDirectMessage(context.Background(), "role/machine-a/reviewer", "role/machine-b/implementer", "please review", "dm-1")
+	if err != nil || message.ID != "message-1" || message.ConversationID != "conversation-1" || message.FromRole != "role/machine-a/reviewer" || message.FromEndpoint != "" {
+		t.Fatalf("direct send=%#v err=%v", message, err)
+	}
+	if _, err := client.SendDirectMessage(context.Background(), "reviewer", "role/machine-b/implementer", "please review", "dm-1"); err == nil {
+		t.Fatal("unqualified source role was accepted")
+	}
+}
+
 func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

@@ -21,7 +21,11 @@ type RichSender interface {
 // relay delivery only after this function succeeds; a crash can result in an
 // explicit at-least-once duplicate rather than silent loss.
 func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery relay.Delivery) error {
-	if state == nil || sender == nil || strings.TrimSpace(delivery.Message.ConversationID) == "" || strings.TrimSpace(delivery.Message.FromEndpoint) == "" || delivery.Message.Body == "" {
+	from := delivery.Message.FromEndpoint
+	if from == "" {
+		from = delivery.Message.FromRole
+	}
+	if state == nil || sender == nil || strings.TrimSpace(delivery.Message.ConversationID) == "" || strings.TrimSpace(from) == "" || delivery.Message.Body == "" {
 		return fmt.Errorf("invalid Telegram delivery")
 	}
 	chatID, threadID, found, err := state.RouteForConversation(delivery.Message.ConversationID)
@@ -31,7 +35,7 @@ func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery
 	if !found {
 		return fmt.Errorf("telegram conversation route is missing")
 	}
-	for _, rendered := range renderDelivery(delivery.Message.FromEndpoint, delivery.Message.Body) {
+	for _, rendered := range renderDelivery(from, delivery.Message.Body) {
 		if err := sender.SendRichMessage(ctx, chatID, threadID, rendered); err != nil {
 			return err
 		}

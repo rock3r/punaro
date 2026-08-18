@@ -63,7 +63,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 5 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 6 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
 	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 || first.Counts.RateBuckets != 2 {
@@ -518,7 +518,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls; DROP TABLE role_bindings; DROP TABLE role_memberships; DROP TABLE roles`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets; DROP TABLE role_profile_idempotency; DROP TABLE role_profiles; DROP TABLE conversation_control_idempotency; DROP TABLE conversation_controls`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -918,7 +918,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE rate_buckets`); err != nil {
+	if _, err := db.ExecContext(ctx, `DROP TABLE direct_message_idempotency; DROP TABLE message_from_roles; DROP TABLE direct_conversations; DROP TABLE rate_buckets`); err != nil {
 		_ = db.Close()
 		t.Fatal(err)
 	}
@@ -967,7 +967,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 5 || inspected.Counts.RateBuckets != 2 {
+	if err != nil || inspected.Version != 6 || inspected.Counts.RateBuckets != 2 {
 		t.Fatalf("current inspect=%#v err=%v", inspected, err)
 	}
 	hasher, err := NewMigrationTableHasher("mail_rate_buckets")
@@ -975,7 +975,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
-	if err != nil || prepared.Version != 5 {
+	if err != nil || prepared.Version != 6 {
 		t.Fatalf("current prepare=%#v err=%v", prepared, err)
 	}
 	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)

@@ -60,6 +60,24 @@ func CanonicalRoleForMachine(role, machineID string) bool {
 	return machine == machineID
 }
 
+// OrderedDirectRolePair returns the lexicographic unordered pair for two distinct
+// canonical roles. Equal or non-canonical handles are rejected.
+func OrderedDirectRolePair(left, right string) (string, string, bool) {
+	if !CanonicalRoleHandle(left) || !CanonicalRoleHandle(right) || left == right {
+		return "", "", false
+	}
+	if left < right {
+		return left, right, true
+	}
+	return right, left, true
+}
+
+// DirectMessageRequestHash binds a direct-send idempotency key to source role,
+// target role, and body. Conversation ID is assigned after this hash.
+func DirectMessageRequestHash(fromRole, toRole, body string) string {
+	return stableHash(fromRole, toRole, body)
+}
+
 // CanonicalRoleSlug returns the immutable trailing slug of a canonical handle.
 func CanonicalRoleSlug(role string) (string, bool) {
 	if !CanonicalRoleHandle(role) {
@@ -202,6 +220,12 @@ type RoleProfileBackend interface {
 	ResolveAddressableRole(RoleResolveInput) (RoleResolveResult, error)
 }
 
+// DirectMessageBackend creates or reuses one conversation for an unordered
+// opted-in role pair and appends a targeted message in the same transaction.
+type DirectMessageBackend interface {
+	SendDirectMessage(DirectMessageInput) (Message, bool, error)
+}
+
 // PrincipalAuthority is the non-secret, generation-fenced result of device
 // credential authentication. It is never populated from request JSON.
 type PrincipalAuthority struct {
@@ -219,3 +243,4 @@ type NonceStore interface {
 
 var _ Backend = (*Store)(nil)
 var _ RoleProfileBackend = (*Store)(nil)
+var _ DirectMessageBackend = (*Store)(nil)
