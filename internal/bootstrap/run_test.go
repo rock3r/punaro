@@ -144,6 +144,14 @@ func TestRunDoesNotStartAfterPreparedSlotChanged(t *testing.T) {
 	}
 }
 
+func TestFailIfSlotChangedWhenCurrentMissing(t *testing.T) {
+	dir := privateDir(t)
+	err := failIfSlotChanged(dir, slotState{Release: "v0.1.0", Sequence: 1, ManifestSHA256: payloadDigest("current-adapter")})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("missing current err=%v", err)
+	}
+}
+
 func TestEnterRecoveryOnlyRefusesWhenSlotChanged(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "next-adapter")

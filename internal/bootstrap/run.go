@@ -320,6 +320,9 @@ func failIfSlotChanged(directory string, started slotState) error {
 		return err
 	}
 	if current.Release == "" {
+		if started.Release != "" {
+			return errSlotChanged
+		}
 		return nil
 	}
 	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 {
