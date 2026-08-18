@@ -196,6 +196,44 @@ func TestRunTreatsInvalidRecoveryAsRecoveryOnly(t *testing.T) {
 	}
 }
 
+func TestRunExitsWhenCurrentChangesDuringReadyWindow(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	var child *fakeProcess
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 200 * time.Millisecond,
+		HealthWindow:  200 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			go func() {
+				time.Sleep(30 * time.Millisecond)
+				_ = os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot))
+				next := filepath.Join(dir, currentSlot)
+				_ = os.Mkdir(next, 0o700)
+				_ = os.WriteFile(filepath.Join(next, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("next-adapter"), 0o600)
+				writeSlotRecord(t, next, "v0.2.0", 2, payloadDigest("next-adapter"))
+			}()
+			child = blockingProcess(context.Background()).(*fakeProcess)
+			return child, nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("ready-window slot change err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("ready-window slot change entered recovery-only")
+	}
+	if child == nil || !child.stopped.Load() {
+		t.Fatal("ready-window slot change did not request a graceful stop")
+	}
+	if child.killed.Load() {
+		t.Fatal("ready-window slot change force-killed a child that stopped")
+	}
+}
+
 func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")

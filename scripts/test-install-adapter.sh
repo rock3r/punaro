@@ -5,6 +5,16 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+# --enable is also the live-apply path: it must restart an already-active user
+# service after switching ExecStart to punaro-bootstrap run.
+grep -Fqx "$(printf '\t\t\tsystemctl --user enable punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+grep -Fqx "$(printf '\t\t\tsystemctl --user restart punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"
+if grep -Fqx "$(printf '\t\t\tsystemctl --user enable --now punaro-adapter.service')" "$repo_dir/scripts/install-adapter.sh"; then
+	printf '%s\n' 'live adapter unit would not be applied to an already-running service' >&2
+	exit 1
+fi
+
 fixture_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-install-test.XXXXXXXX")
 fixture_dir=$(CDPATH= cd -- "$fixture_dir" && pwd -P)
 # The installer deliberately uses a temporary HOME. Keep Go's shared caches

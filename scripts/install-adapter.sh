@@ -319,7 +319,8 @@ if [ "$enable" -eq 1 ]; then
 		fi
 		if [ "$enable" -eq 1 ]; then
 			systemctl --user daemon-reload
-			systemctl --user enable --now punaro-adapter.service
+			systemctl --user enable punaro-adapter.service
+			systemctl --user restart punaro-adapter.service
 		fi
 		service_hint='systemctl --user status punaro-adapter.service'
 		;;
