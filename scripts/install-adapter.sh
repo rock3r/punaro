@@ -337,7 +337,7 @@ case "$(uname -s)" in
 		if systemctl --user is-active --quiet punaro-adapter.service; then
 			service_active=1
 		fi
-		systemctl --user daemon-reload
+		command -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload
 		if [ "$enable" -eq 1 ]; then
 			systemctl --user enable punaro-adapter.service
 			systemctl --user restart punaro-adapter.service

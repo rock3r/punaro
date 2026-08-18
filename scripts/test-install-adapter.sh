@@ -14,7 +14,7 @@ if grep -Fqx "$(printf '\t\t\tsystemctl --user enable --now punaro-adapter.servi
 	printf '%s\n' 'live adapter unit would not be applied to an already-running service' >&2
 	exit 1
 fi
-grep -Fqx "$(printf '\t\tsystemctl --user daemon-reload')" "$repo_dir/scripts/install-adapter.sh" || {
+grep -Fqx "$(printf '\t\tcommand -v systemctl >/dev/null 2>&1 && systemctl --user daemon-reload')" "$repo_dir/scripts/install-adapter.sh" || {
 	printf '%s\n' 'installer must reload the Linux user manager after replacing the unit' >&2
 	exit 1
 }
