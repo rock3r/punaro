@@ -795,7 +795,8 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	} else if exists {
 		slot, err := readSlot(current)
 		if err == nil && slot.Release != localCheckoutRelease {
-			if recovery, recErr := loadRecovery(directory); recErr == nil && recovery.Mode == recoveryMode {
+			recovery, recErr := loadRecovery(directory)
+			if recErr != nil || recovery.Mode == recoveryMode {
 				return errors.New("bootstrap is recovery-only; use a signed update")
 			}
 			return nil

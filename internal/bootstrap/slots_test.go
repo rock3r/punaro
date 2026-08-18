@@ -267,6 +267,21 @@ func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	}
 }
 
+func TestNextSlotGenerationUsesPreviousAndAutoRollback(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "previous-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.1.0", 1, payloadDigest("previous-adapter"), 1)
+	writeAdapterSlot(t, dir, previousSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, previousSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	if err := saveAutoRollback(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := nextSlotGeneration(dir)
+	if err != nil || got != 3 {
+		t.Fatalf("next generation=%d err=%v", got, err)
+	}
+}
+
 func TestBlocksAutoRollbackAllowsLaterGeneration(t *testing.T) {
 	dir := privateDir(t)
 	away := slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: repeatC(), Generation: 1}
