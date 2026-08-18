@@ -20,6 +20,9 @@ for expected in \
 	'RepetitionDuration' \
 	'Do not attach it until -Enable' \
 	'hadRepeatTrigger' \
+	'adapterTaskWasDisabled' \
+	"State -eq 'Disabled'" \
+	'Disable-ScheduledTask' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \

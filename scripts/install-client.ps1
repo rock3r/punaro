@@ -309,8 +309,13 @@ $MailboxStateDir = Get-FullPath $MailboxStateDir
 $adapterTaskName = 'Punaro Adapter'
 $adapterTaskWasRunning = $false
 $adapterTaskRestored = $false
+$adapterTaskWasDisabled = $false
 $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
 $hadRepeatTrigger = Test-PunaroRepeatTrigger $existingAdapterTask
+if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Disabled') {
+    $adapterTaskWasDisabled = $true
+    $hadRepeatTrigger = $false
+}
 if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
     $adapterTaskWasRunning = $true
     Stop-ScheduledTask -TaskName $adapterTaskName
@@ -405,7 +410,8 @@ $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # re-arms the task after that budget so a later signed repair can start it.
 # Do not attach it until -Enable (or an already-running task) so a fresh
 # install cannot start during the Access-credential setup window. Keep it
-# if a previous install already registered the re-arm trigger.
+# if a previous install already registered the re-arm trigger, except when
+# that task is Disabled so an operator-stopped adapter stays stopped.
 $repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval ([TimeSpan]::FromMinutes(1)) -RepetitionDuration ([TimeSpan]::FromDays(3650))
 $triggers = @($logonTrigger)
 if ($Enable -or $adapterTaskWasRunning -or $hadRepeatTrigger) { $triggers += $repeatTrigger }
@@ -417,6 +423,8 @@ Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $trig
 if ($Enable -or $adapterTaskWasRunning) {
     Start-ScheduledTask -TaskName $adapterTaskName
     $adapterTaskRestored = $true
+} elseif ($adapterTaskWasDisabled) {
+    Disable-ScheduledTask -TaskName $adapterTaskName
 }
 
 if (-not [string]::IsNullOrWhiteSpace($AgentGuidanceDir)) {
