@@ -150,20 +150,27 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		return ErrRecoveryOnly
 	}
 	start := startOrDefault(request)
+	proven := currentGenerationIsHealthy(request.Directory, identity)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // SIGINT/SIGTERM before the child starts is a clean supervisor stop
 		}
+		if proven {
+			return errChildExited
+		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	requireHealth := hadPrevious && !currentGenerationIsHealthy(request.Directory, identity)
+	requireHealth := hadPrevious && !proven
 	if err := waitHealth(ctx, request, child, identity, requireHealth); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, identity)
 		}
 		_ = stopChild(child)
 		if errors.Is(err, errSlotChanged) {
+			return err
+		}
+		if proven {
 			return err
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)

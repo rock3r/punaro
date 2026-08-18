@@ -371,6 +371,35 @@ func TestRunDoesNotRememberHealthWithoutReadyFile(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRollbackProvenGenerationOnStartFailure(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	if err := rememberHealthyGeneration(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 2}); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			return nil, errors.New("start failed")
+		},
+	})
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("proven start failure err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("proven generation entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" {
+		t.Fatalf("rolled back proven generation: %#v", status)
+	}
+}
+
 func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
@@ -1196,14 +1225,14 @@ func TestRunDoesNotUndoSuccessfulRollbackOnLaterRestart(t *testing.T) {
 			return finishedProcess(errors.New("adapter exited")), nil
 		},
 	})
-	if !errors.Is(err, ErrRecoveryOnly) {
+	if !errors.Is(err, errChildExited) {
 		t.Fatalf("later restart err=%v", err)
 	}
 	status, err = Status(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Current != "v0.1.0" || status.Previous != "v0.2.0" || !status.RecoveryOnly {
+	if status.Current != "v0.1.0" || status.Previous != "v0.2.0" || status.RecoveryOnly {
 		t.Fatalf("later restart undid rollback status=%#v", status)
 	}
 }

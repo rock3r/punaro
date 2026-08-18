@@ -392,6 +392,9 @@ func repairOrphanSwap(directory string) (bool, error) {
 		if err := os.Rename(previous, current); err != nil {
 			return false, err
 		}
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
 		if err := os.Rename(swap, previous); err != nil {
 			return false, err
 		}
