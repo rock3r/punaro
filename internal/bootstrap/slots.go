@@ -17,6 +17,11 @@ type acceptedState struct {
 	ManifestSHA256  string `json:"manifest_sha256"`
 }
 
+type healthyGenerationState struct {
+	Schema     int64 `json:"schema"`
+	Generation int64 `json:"generation"`
+}
+
 type slotState struct {
 	Schema         int64  `json:"schema"`
 	Release        string `json:"release"`
@@ -269,6 +274,37 @@ func recoverJournal(directory string) error {
 	default:
 		return failInvalidJournal(directory)
 	}
+}
+
+func currentGenerationIsHealthy(directory string, current slotState) bool {
+	if current.Generation < 1 {
+		return false
+	}
+	record, err := loadHealthyGeneration(directory)
+	return err == nil && record.Generation == current.Generation
+}
+
+func rememberHealthyGeneration(directory string, generation int64) error {
+	if generation < 1 {
+		return nil
+	}
+	body, err := json.Marshal(healthyGenerationState{Schema: 1, Generation: generation})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, healthyGenerationFile), body, 0o600)
+}
+
+func loadHealthyGeneration(directory string) (healthyGenerationState, error) {
+	body, err := os.ReadFile(filepath.Join(directory, healthyGenerationFile)) // #nosec G304 -- healthy generation is a fixed child of the bootstrap directory.
+	if err != nil {
+		return healthyGenerationState{}, err
+	}
+	var record healthyGenerationState
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Generation < 1 {
+		return healthyGenerationState{}, errors.New("bootstrap healthy generation is invalid")
+	}
+	return record, nil
 }
 
 func failInvalidJournal(directory string) error {

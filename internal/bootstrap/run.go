@@ -157,7 +157,8 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	if err := waitHealth(ctx, request, child, identity, hadPrevious); err != nil {
+	requireHealth := hadPrevious && !currentGenerationIsHealthy(request.Directory, identity)
+	if err := waitHealth(ctx, request, child, identity, requireHealth); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, identity)
 		}
@@ -166,6 +167,9 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 			return err
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)
+	}
+	if err := rememberHealthyGeneration(request.Directory, identity.Generation); err != nil {
+		return err
 	}
 	return waitChild(ctx, request, child, identity)
 }

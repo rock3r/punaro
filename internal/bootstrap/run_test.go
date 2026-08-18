@@ -336,6 +336,36 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	if err := rememberHealthyGeneration(dir, 2); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("proven generation reapplied the candidate health gate")
+	}
+}
+
 func TestRunEntersRecoveryWhenPreviousSlotIsCorrupt(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
