@@ -51,12 +51,13 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 	}
 	defer cancel()
 	defer func() { _ = tx.Rollback() }()
+	expireCutoff := now.Add(-time.Duration(cfg.PendingMaxAgeSeconds) * time.Second)
 	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id::text, delivery.recipient_endpoint, message.id::text, message.conversation_id::text, message.sequence, delivery.lease_generation, `+postgresPendingBodyBytes+`, message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
-		WHERE delivery.acked_at IS NULL AND message.created_at <= $1 - ($2 * interval '1 second')
+		WHERE delivery.acked_at IS NULL AND message.created_at <= $1
 		ORDER BY message.created_at, delivery.id
-		LIMIT $3
-		FOR UPDATE OF delivery SKIP LOCKED`, now, cfg.PendingMaxAgeSeconds, cfg.MaintenanceBatch)
+		LIMIT $2
+		FOR UPDATE OF delivery SKIP LOCKED`, expireCutoff, cfg.MaintenanceBatch)
 	if err != nil {
 		return relay.MaintenanceResult{}, errors.New("expired deliveries cannot be inspected")
 	}
@@ -83,11 +84,12 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 			result.Expired++
 		}
 	}
+	pruneCutoff := now.Add(-time.Duration(cfg.TerminalRetentionSeconds) * time.Second)
 	pruneRows, err := tx.QueryContext(context.Background(), `SELECT delivery_id::text FROM relay.mail_delivery_terminals
-		WHERE closed_at <= $1 - ($2 * interval '1 second')
+		WHERE closed_at <= $1
 		ORDER BY closed_at, delivery_id
-		LIMIT $3
-		FOR UPDATE SKIP LOCKED`, now, cfg.TerminalRetentionSeconds, cfg.MaintenanceBatch)
+		LIMIT $2
+		FOR UPDATE SKIP LOCKED`, pruneCutoff, cfg.MaintenanceBatch)
 	if err != nil {
 		return relay.MaintenanceResult{}, errors.New("retained terminals cannot be inspected")
 	}
