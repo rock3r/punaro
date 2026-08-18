@@ -37,10 +37,10 @@ import (
 )
 
 const (
-	trustedReconcileBatch    = 100
-	trustedReconcileMaxPages = 1000
-	trustedOrphanGrace       = 24 * time.Hour
-	trustedGCClaimLifetime   = time.Minute
+	trustedReconcileBatch       = 100
+	trustedReconcileMaxPages    = 1000
+	trustedOrphanGrace          = 24 * time.Hour
+	trustedGCClaimLifetime      = time.Minute
 	trustedReconcileInterval    = 5 * time.Minute
 	deliveryMaintenanceInterval = time.Minute
 )
@@ -841,6 +841,7 @@ func startDeliveryMaintenance(store *relay.Store, postgresRelay relay.Backend) f
 	if maintainer == nil {
 		return nil
 	}
+	// #nosec G118 -- the returned stop function owns and invokes cancel.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

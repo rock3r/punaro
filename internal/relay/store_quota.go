@@ -210,7 +210,7 @@ func (s *Store) refreshPendingMetrics(now time.Time) {
 		if age < 0 {
 			age = 0
 		} else {
-			age = age / 1000
+			age /= 1000
 		}
 	}
 	s.metrics.SetPendingOldestAge(age)

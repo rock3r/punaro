@@ -399,7 +399,7 @@ func TestStoreConcurrentExpireAndLeaseLeavesAtMostOneCloser(t *testing.T) {
 	}
 	later := now.Add(61 * time.Second)
 	var wg sync.WaitGroup
-	var leased atomic.Int32
+	var leased atomic.Int64
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -409,7 +409,7 @@ func TestStoreConcurrentExpireAndLeaseLeavesAtMostOneCloser(t *testing.T) {
 		defer wg.Done()
 		page, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", conversation.ID, later, time.Minute, 10)
 		if err == nil {
-			leased.Store(int32(len(page.Deliveries)))
+			leased.Store(int64(len(page.Deliveries)))
 		}
 	}()
 	wg.Wait()
@@ -417,7 +417,7 @@ func TestStoreConcurrentExpireAndLeaseLeavesAtMostOneCloser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if int(leased.Load())+len(page.Deliveries) > 1 {
+	if leased.Load()+int64(len(page.Deliveries)) > 1 {
 		t.Fatalf("expired work was leased after close leased=%d later=%d", leased.Load(), len(page.Deliveries))
 	}
 	if pending := quotaInstallCounters(t, store); pending.Count > 1 {
