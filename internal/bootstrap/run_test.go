@@ -1053,6 +1053,23 @@ func TestRunRejectsReadySymlink(t *testing.T) {
 	}
 }
 
+func TestSeedCheckoutRefusesSignedRecoveryOnly(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "signed-adapter")
+	writeRecoveryOnly(t, dir)
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := SeedLocalCheckout(dir, adapter)
+	if err == nil || !strings.Contains(err.Error(), "recovery-only") {
+		t.Fatalf("signed recovery seed err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("refused seed cleared recovery-only")
+	}
+}
+
 func TestSeedLocalCheckoutClearsRecoveryOnly(t *testing.T) {
 	dir := privateDir(t)
 	writeRecoveryOnly(t, dir)

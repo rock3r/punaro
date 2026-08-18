@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -94,5 +95,30 @@ func TestHTTPFetcherFollowsLocalhostRedirect(t *testing.T) {
 	}
 	if string(body) != `{"ok":true}` {
 		t.Fatalf("body=%q", body)
+	}
+}
+
+func TestFetcherPreservesContextCancel(t *testing.T) {
+	started := make(chan struct{})
+	origin := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(origin.Close)
+	client, err := newFetcher(origin.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, getErr := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 64)
+		errCh <- getErr
+	}()
+	<-started
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled fetch err=%v", err)
 	}
 }

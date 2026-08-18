@@ -428,8 +428,8 @@ func failIfSlotChanged(directory string, started slotState) error {
 
 func failOrRollback(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, reason string) error {
 	unlocked, rolled, err := rollbackIfAllowed(ctx, request, started)
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return nil
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil //nolint:nilerr // supervisor stop during catalog-gated rollback is a clean exit
 	}
 	if errors.Is(err, errSlotChanged) {
 		return err
@@ -795,6 +795,9 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	} else if exists {
 		slot, err := readSlot(current)
 		if err == nil && slot.Release != localCheckoutRelease {
+			if recovery, recErr := loadRecovery(directory); recErr == nil && recovery.Mode == recoveryMode {
+				return errors.New("bootstrap is recovery-only; use a signed update")
+			}
 			return nil
 		}
 	}

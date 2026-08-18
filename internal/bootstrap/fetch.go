@@ -66,6 +66,9 @@ func (transport *httpFetcher) Get(ctx context.Context, relative string, limit in
 	}
 	response, err := transport.client.Do(request) // #nosec G107 -- target is origin plus a validated relative path.
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, errors.New("release download failed")
 	}
 	defer func() { _ = response.Body.Close() }()
