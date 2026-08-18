@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/rock3r/punaro/internal/operator"
@@ -88,4 +89,75 @@ func TestRelayReconcileCapacityPublishesContentFreeOutcome(t *testing.T) {
 	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
+}
+
+func TestRelayListTerminalsPublishesContentFreePages(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	list := func(directory, after string, limit int) (relay.TerminalPage, error) {
+		called = directory == "/install" && after == "cursor-1" && limit == 2
+		return relay.TerminalPage{Terminals: []relay.TerminalRecord{{DeliveryID: "d1", MessageID: "m1", ConversationID: "c1", RecipientID: "r1", Sequence: 1, ClosedReason: relay.ClosedExpired}}, NextCursor: "d1"}, nil
+	}
+	if code := runRelayListTerminals([]string{"--directory", "/install", "--after", "cursor-1", "--limit", "2"}, &stdout, &stderr, list); code != 0 || !called || !bytes.Contains(stdout.Bytes(), []byte(`"closed_reason": "expired"`)) || bytes.Contains(stdout.Bytes(), []byte("body")) {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+}
+
+func TestRelayMaintainDeliveriesRequiresConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(string) (relay.MaintenanceResult, error) {
+		called = true
+		return relay.MaintenanceResult{}, nil
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install"}, &stdout, &stderr, maintain); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.MaintenanceResult, error) {
+		return relay.MaintenanceResult{Expired: 1, Pruned: 0, Scanned: 1}, nil
+	}); code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"deliveries_maintained"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"expired": 1`)) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+func TestApplyInstallationRetentionHonorsDaemonEnvFile(t *testing.T) {
+	directory := t.TempDir()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(operator.EnvFile(directory), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"PUNARO_RELAY_PENDING_MAX_AGE_SECONDS",
+		"PUNARO_RELAY_TERMINAL_RETENTION_SECONDS",
+		"PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH",
+	} {
+		previous, present := os.LookupEnv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if present {
+				_ = os.Setenv(key, previous)
+				return
+			}
+			_ = os.Unsetenv(key)
+		})
+	}
+	store := &recordingOperatorStore{}
+	if err := applyInstallationRetention(directory, store); err != nil {
+		t.Fatal(err)
+	}
+	if store.policy != want {
+		t.Fatalf("policy=%#v want %#v", store.policy, want)
+	}
+}
+
+type recordingOperatorStore struct {
+	policy relay.RetentionConfig
+}
+
+func (s *recordingOperatorStore) SetRetentionPolicy(cfg relay.RetentionConfig) error {
+	s.policy = cfg
+	return nil
 }

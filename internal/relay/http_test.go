@@ -852,3 +852,33 @@ func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey,
 	handler.ServeHTTP(response, request)
 	return response
 }
+
+func TestHTTPDoesNotExposeTerminalInventory(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: public, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute})
+	for _, path := range []string{"/v1/terminals", "/v1/deliveries/terminals", "/v1/dead-letters"} {
+		nonce := strings.ReplaceAll(path, "/", "-")
+		response := serveSigned(t, handler, private, "machine-a", http.MethodGet, path, "", "get"+nonce, "")
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+		posted := serveSigned(t, handler, private, "machine-a", http.MethodPost, path, `{}`, "post"+nonce, "")
+		if posted.Code != http.StatusNotFound {
+			t.Fatalf("post path=%s status=%d body=%s", path, posted.Code, posted.Body.String())
+		}
+	}
+}

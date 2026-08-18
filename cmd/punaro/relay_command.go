@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/rock3r/punaro/internal/config"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
 	"github.com/rock3r/punaro/internal/relay"
@@ -125,4 +126,110 @@ func reconcileRelayCapacity(directory string) (relay.QuotaCounters, error) {
 	}
 	defer func() { _ = store.Close() }()
 	return relay.ReconcilePendingQuota(store)
+}
+
+type relayListTerminalsCommand func(string, string, int) (relay.TerminalPage, error)
+
+func runRelayListTerminals(args []string, stdout, stderr io.Writer, list relayListTerminalsCommand) int {
+	flags := flag.NewFlagSet("relay list-terminals", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute Punaro installation directory")
+	after := flags.String("after", "", "opaque terminal page cursor")
+	limit := flags.Int("limit", 50, "bounded terminal page size")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || list == nil {
+		return 2
+	}
+	page, err := list(*directory, *after, *limit)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "relay terminal listing did not complete; rerun the exact command to recover safely")
+		return 1
+	}
+	return writeJSON(stdout, stderr, page)
+}
+
+func listRelayTerminals(directory, after string, limit int) (relay.TerminalPage, error) {
+	store, closer, err := openRelayOperatorStore(directory)
+	if err != nil {
+		return relay.TerminalPage{}, err
+	}
+	defer closer()
+	return store.ListTerminalDeliveries(after, limit)
+}
+
+type relayMaintainDeliveriesCommand func(string) (relay.MaintenanceResult, error)
+
+func runRelayMaintainDeliveries(args []string, stdout, stderr io.Writer, maintain relayMaintainDeliveriesCommand) int {
+	flags := flag.NewFlagSet("relay maintain-deliveries", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute Punaro installation directory")
+	confirmed := flags.Bool("yes", false, "confirm bounded expiry and terminal prune")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || !*confirmed || maintain == nil {
+		return 2
+	}
+	result, err := maintain(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "relay delivery maintenance did not complete; rerun the exact command to recover safely")
+		return 1
+	}
+	return writeJSON(stdout, stderr, map[string]any{"status": "deliveries_maintained", "directory": *directory, "expired": result.Expired, "pruned": result.Pruned, "scanned": result.Scanned})
+}
+
+func maintainRelayDeliveries(directory string) (relay.MaintenanceResult, error) {
+	store, closer, err := openRelayOperatorStore(directory)
+	if err != nil {
+		return relay.MaintenanceResult{}, err
+	}
+	defer closer()
+	if err := applyInstallationRetention(directory, store); err != nil {
+		return relay.MaintenanceResult{}, err
+	}
+	return store.MaintainDeliveries(time.Now().UTC())
+}
+
+type operatorRelayStore interface {
+	ListTerminalDeliveries(string, int) (relay.TerminalPage, error)
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+	SetRetentionPolicy(relay.RetentionConfig) error
+}
+
+func applyInstallationRetention(directory string, store interface {
+	SetRetentionPolicy(relay.RetentionConfig) error
+}) error {
+	cfg, err := config.Load(operator.EnvFile(directory))
+	if err != nil {
+		return err
+	}
+	policy := cfg.RelayRetentionPolicy()
+	if policy == (relay.RetentionConfig{}) {
+		policy = relay.DefaultRetentionConfig()
+	}
+	return store.SetRetentionPolicy(policy)
+}
+
+func openRelayOperatorStore(directory string) (operatorRelayStore, func(), error) {
+	installation, err := operator.Load(directory)
+	if err != nil {
+		return nil, nil, err
+	}
+	if installation.MailCutover != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		return database, func() {
+			_ = database.Close()
+			cancel()
+		}, nil
+	}
+	path := filepath.Join(installation.DataDir, "relay.db")
+	if _, err := os.Stat(path); err != nil {
+		return nil, nil, errors.New("relay terminal store is unavailable")
+	}
+	store, err := relay.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, func() { _ = store.Close() }, nil
 }

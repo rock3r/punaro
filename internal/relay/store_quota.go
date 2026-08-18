@@ -154,44 +154,43 @@ func releaseQuota(tx *sql.Tx, recipient string, bodyBytes int64) error {
 	return nil
 }
 
-func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) error {
-	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, `+sqlitePendingBodyBytes+`
+func retireRecipientDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time) (int, error) {
+	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id, delivery.lease_generation, `+sqlitePendingBodyBytes+`, message.id, message.conversation_id, message.sequence, message.created_at
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
 		WHERE delivery.recipient_endpoint = ? AND delivery.acked_at IS NULL AND message.conversation_id = ?`, recipient, conversationID)
 	if err != nil {
-		return fmt.Errorf("find revoked deliveries: %w", err)
+		return 0, fmt.Errorf("find revoked deliveries: %w", err)
 	}
-	type pending struct {
-		id    string
-		bytes int64
-	}
-	var retired []pending
+	var pending []pendingClose
 	for rows.Next() {
-		var row pending
-		if err := rows.Scan(&row.id, &row.bytes); err != nil {
+		var row pendingClose
+		if err := rows.Scan(&row.ID, &row.LeaseGeneration, &row.BodyBytes, &row.MessageID, &row.ConversationID, &row.Sequence, &row.CreatedAt); err != nil {
 			_ = rows.Close()
-			return err
+			return 0, err
 		}
-		retired = append(retired, row)
+		row.Recipient = recipient
+		pending = append(pending, row)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
-	for _, row := range retired {
-		if err := releaseQuota(tx, recipient, row.bytes); err != nil {
-			return err
+	closed := 0
+	for _, row := range pending {
+		ok, err := closePendingDelivery(tx, row, ClosedRevoked, now)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			closed++
 		}
 	}
-	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), recipient, conversationID); err != nil {
-		return fmt.Errorf("retire revoked deliveries: %w", err)
-	}
-	return nil
+	return closed, nil
 }
 
-func (s *Store) refreshPendingMetrics() {
+func (s *Store) refreshPendingMetrics(now time.Time) {
 	s.pendingMetricsMu.Lock()
 	defer s.pendingMetricsMu.Unlock()
 	counters, err := readInstallQuota(context.Background(), s.db)
@@ -199,6 +198,27 @@ func (s *Store) refreshPendingMetrics() {
 		return
 	}
 	s.metrics.SetPending(counters.Count, counters.Bytes)
+	var oldest sql.NullInt64
+	if err := s.db.QueryRowContext(context.Background(), `SELECT MIN(message.created_at)
+		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
+		WHERE delivery.acked_at IS NULL`).Scan(&oldest); err != nil {
+		return
+	}
+	var age int64
+	if oldest.Valid && !now.IsZero() {
+		age = now.UTC().UnixMilli() - oldest.Int64
+		if age < 0 {
+			age = 0
+		} else {
+			age = age / 1000
+		}
+	}
+	s.metrics.SetPendingOldestAge(age)
+	var retained int64
+	if err := s.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM delivery_terminals`).Scan(&retained); err != nil {
+		return
+	}
+	s.metrics.SetTerminalsRetained(retained)
 }
 
 func readInstallQuota(ctx context.Context, q interface {
@@ -335,12 +355,12 @@ func ReconcilePendingQuota(store *Store) (QuotaCounters, error) {
 	if err := tx.Commit(); err != nil {
 		return QuotaCounters{}, err
 	}
-	store.refreshPendingMetrics()
+	store.refreshPendingMetrics(time.Now().UTC())
 	return install, nil
 }
 
 func isOperationalQuotaTable(name string) bool {
-	return name == "pending_quota_recipients" || name == "pending_quota_install"
+	return name == "pending_quota_recipients" || name == "pending_quota_install" || name == "delivery_terminals"
 }
 
 func filterOperationalQuotaTables(names []string) []string {
