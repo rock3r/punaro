@@ -168,10 +168,7 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)
 	}
-	if err := rememberHealthyGeneration(request.Directory, identity.Generation); err != nil {
-		return err
-	}
-	return waitChild(ctx, request, child, identity)
+	return superviseHealthyChild(ctx, request, child, identity)
 }
 
 func waitRecoveryCleared(ctx context.Context, directory string) error {
@@ -615,7 +612,15 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	return waitChild(ctx, request, child, rolled)
+	return superviseHealthyChild(ctx, request, child, rolled)
+}
+
+func superviseHealthyChild(ctx context.Context, request RunRequest, child Process, started slotState) error {
+	if err := rememberHealthyGeneration(request.Directory, started.Generation); err != nil {
+		_ = stopChild(child)
+		return err
+	}
+	return waitChild(ctx, request, child, started)
 }
 
 func waitChild(ctx context.Context, request RunRequest, child Process, started slotState) error {
