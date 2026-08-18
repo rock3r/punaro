@@ -543,6 +543,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		}
 		names = append(names, name)
 	}
+	names = filterOperationalQuotaTables(names)
 	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
@@ -575,6 +576,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 		names = append(names, name)
 	}
+	names = filterOperationalQuotaTables(names)
 	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles"}
 	switch {
 	case rateBuckets:
@@ -808,6 +810,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		wantTriggers = 48
 	case !controls:
 		wantTriggers = 36
+	}
+	var quotaTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 {
+		return errors.New("relay migration source schema is unavailable")
+	}
+	if quotaTables == 2 {
+		wantTriggers += 6
 	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")

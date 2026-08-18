@@ -813,6 +813,17 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		}
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		writeError(w, http.StatusTooManyRequests, "rate limited")
+	case errors.Is(err, ErrCapacityExceeded):
+		retryAfter := RateLimitRetryAfterMin
+		var limited *CapacityError
+		if errors.As(err, &limited) && limited.RetryAfterSeconds > retryAfter {
+			retryAfter = limited.RetryAfterSeconds
+		}
+		if retryAfter > RateLimitRetryAfterMaxBound {
+			retryAfter = RateLimitRetryAfterMaxBound
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeError(w, http.StatusTooManyRequests, "capacity exceeded")
 	case errors.Is(err, ErrMaintenance):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")

@@ -244,6 +244,7 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	}
 	runLeasePageContract(t, backend, namespace, now)
 	RunRateLimits(t, backend, namespace+"-rate")
+	RunPendingQuota(t, backend, namespace+"-quota")
 }
 
 // RateLimitSetter is implemented by durable stores that keep token-bucket
@@ -395,6 +396,175 @@ func RunRateLimits(t *testing.T, backend relay.Backend, namespace string) {
 		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
 	}
 	if err := limiter.SetRateLimits(relay.DefaultRateLimitConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// QuotaSetter is implemented by durable stores that keep pending-delivery
+// ceilings in process and explicit counters in the database.
+type QuotaSetter interface {
+	relay.Backend
+	SetQuotaLimits(relay.QuotaConfig) error
+}
+
+// RunPendingQuota proves the same recipient and fan-out capacity contract
+// against every backend. Installation-wide ceilings are covered by store tests
+// because this shared namespace may already hold pending deliveries.
+func RunPendingQuota(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	limiter, ok := backend.(QuotaSetter)
+	if !ok {
+		t.Fatal("backend does not expose durable pending quota")
+	}
+	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = limiter.SetQuotaLimits(relay.DefaultQuotaConfig())
+	})
+	now := time.Date(2026, time.August, 18, 19, 0, 0, 0, time.UTC)
+	cfg := relay.QuotaConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 10_000_000, InstallationBytes: 64 << 30, RetryAfterSeconds: 9}
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil || duplicate {
+		t.Fatalf("first append message=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-2", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("recipient exhaustion err=%v", err)
+	}
+	replay, duplicate, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil || !duplicate || replay.ID != first.ID {
+		t.Fatalf("committed retry message=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 {
+		t.Fatalf("lease=%#v err=%v", page, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "three", IdempotencyKey: namespace + "-3", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.RecipientCount = 8
+	cfg.RecipientBytes = 3
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineC := namespace + "-c"
+	endpointC := "agent/" + namespace + "/c"
+	if err := backend.AdvertiseEndpoints(machineC, []string{endpointC}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	bytesConversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-bytes", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: bytesConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-bytes-1", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: bytesConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-bytes-2", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("recipient byte exhaustion err=%v", err)
+	}
+
+	cfg.RecipientCount = 1
+	cfg.RecipientBytes = 1024
+	if err := limiter.SetQuotaLimits(cfg); err != nil {
+		t.Fatal(err)
+	}
+	machineD := namespace + "-d"
+	endpointD := "agent/" + namespace + "/d"
+	if err := backend.AdvertiseEndpoints(machineD, []string{endpointD}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	broadcast, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-broadcast", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+			{Endpoint: endpointD, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{ConversationID: broadcast.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "fan", IdempotencyKey: namespace + "-fan", Now: now})
+	if !errors.Is(err, relay.ErrCapacityExceeded) {
+		t.Fatalf("broadcast atomic denial err=%v", err)
+	}
+	held, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(held.Deliveries) != 1 {
+		t.Fatalf("held lease=%#v err=%v", held, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, held.Deliveries[0].ID, held.Deliveries[0].LeaseToken, held.Deliveries[0].LeaseGeneration, now); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 6
+	var started, running sync.WaitGroup
+	started.Add(workers)
+	running.Add(workers)
+	results := make(chan error, workers)
+	concurrentNow := now.Add(time.Second)
+	for index := 0; index < workers; index++ {
+		go func(index int) {
+			defer running.Done()
+			started.Done()
+			started.Wait()
+			_, _, err := backend.AppendMessage(relay.AppendInput{
+				ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+				Body: fmt.Sprintf("conc-%d", index), IdempotencyKey: fmt.Sprintf("%s-conc-%d", namespace, index),
+				Now: concurrentNow,
+			})
+			results <- err
+		}(index)
+	}
+	running.Wait()
+	close(results)
+	var accepted, limited int
+	for err := range results {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, relay.ErrCapacityExceeded):
+			limited++
+		default:
+			t.Fatalf("concurrent append err=%v", err)
+		}
+	}
+	if accepted != 1 || limited != workers-1 {
+		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
+	}
+	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
 		t.Fatal(err)
 	}
 }

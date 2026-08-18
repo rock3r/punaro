@@ -2331,6 +2331,8 @@ OR EXISTS (SELECT 1 FROM relay.idempotency_records WHERE resource_id=$1 AND resu
 		{"upload", `DELETE FROM attachment.uploads WHERE artifact_id=$1`, artifactID},
 		{"ready manifest", `DELETE FROM attachment.ready_blob_manifest WHERE storage_path=$1`, storagePath},
 		{"mail delivery", `DELETE FROM relay.mail_deliveries WHERE message_id=$1`, messageID},
+		{"pending quota recipients", `DELETE FROM relay.mail_pending_recipients WHERE $1::text IS NOT NULL`, messageID},
+		{"pending quota install", `DELETE FROM relay.mail_pending_install WHERE $1::text IS NOT NULL`, messageID},
 		{"mail message idempotency", `DELETE FROM relay.mail_message_idempotency WHERE message_id=$1`, messageID},
 		{"conversation project", `DELETE FROM attachment.conversation_projects WHERE conversation_id=$1`, conversationID},
 		{"mail message", `DELETE FROM relay.mail_messages WHERE id=$1`, messageID},

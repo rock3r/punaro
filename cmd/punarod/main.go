@@ -750,6 +750,20 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 			return nil, nil, err
 		}
 	}
+	if setter, ok := backend.(interface {
+		SetQuotaLimits(relay.QuotaConfig) error
+	}); ok {
+		limits := cfg.RelayQuotaLimits()
+		if limits == (relay.QuotaConfig{}) {
+			limits = relay.DefaultQuotaConfig()
+		}
+		if err := setter.SetQuotaLimits(limits); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {

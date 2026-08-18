@@ -185,6 +185,9 @@ func boundRetryAfter(wait time.Duration, maxSeconds int) int {
 // only; bodies, endpoints, roles, and conversation IDs are never recorded.
 type Metrics struct {
 	rateLimitRejections atomic.Uint64
+	capacityRejections  atomic.Uint64
+	pendingDeliveries   atomic.Uint64
+	pendingBytes        atomic.Uint64
 }
 
 // ObserveRateLimited increments the rate-rejection counter.
@@ -198,6 +201,9 @@ func (m *Metrics) ObserveRateLimited() {
 // MetricsSnapshot is the bounded JSON body served on the local health listener.
 type MetricsSnapshot struct {
 	RelayRateLimitRejections uint64 `json:"relay_rate_limit_rejections"`
+	RelayCapacityRejections  uint64 `json:"relay_capacity_rejections"`
+	RelayPendingDeliveries   uint64 `json:"relay_pending_deliveries"`
+	RelayPendingBytes        uint64 `json:"relay_pending_bytes"`
 }
 
 // Snapshot returns the current content-free counters.
@@ -205,7 +211,12 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	if m == nil {
 		return MetricsSnapshot{}
 	}
-	return MetricsSnapshot{RelayRateLimitRejections: m.rateLimitRejections.Load()}
+	return MetricsSnapshot{
+		RelayRateLimitRejections: m.rateLimitRejections.Load(),
+		RelayCapacityRejections:  m.capacityRejections.Load(),
+		RelayPendingDeliveries:   m.pendingDeliveries.Load(),
+		RelayPendingBytes:        m.pendingBytes.Load(),
+	}
 }
 
 // SetRateLimits replaces the in-process bucket policy. Token state remains in
@@ -223,6 +234,7 @@ func (s *Store) SetRateLimits(cfg RateLimitConfig) error {
 // SetMetrics attaches the shared content-free counter sink.
 func (s *Store) SetMetrics(metrics *Metrics) {
 	s.metrics = metrics
+	s.refreshPendingMetrics()
 }
 
 func (s *Store) rateLimitConfig() RateLimitConfig {
@@ -232,4 +244,25 @@ func (s *Store) rateLimitConfig() RateLimitConfig {
 		return DefaultRateLimitConfig()
 	}
 	return s.rateLimits
+}
+
+// SetQuotaLimits replaces the in-process pending-delivery ceilings. Durable
+// counters remain in the store; this does not release reserved capacity.
+func (s *Store) SetQuotaLimits(cfg QuotaConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	s.quotaMu.Lock()
+	s.quota = cfg
+	s.quotaMu.Unlock()
+	return nil
+}
+
+func (s *Store) quotaConfig() QuotaConfig {
+	s.quotaMu.Lock()
+	defer s.quotaMu.Unlock()
+	if s.quota == (QuotaConfig{}) {
+		return DefaultQuotaConfig()
+	}
+	return s.quota
 }

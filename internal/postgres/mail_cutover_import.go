@@ -613,6 +613,9 @@ func (a *Administration) ActivateMailCutover(ctx context.Context, actorPrincipal
 	if err := scanMailCutover(tx.QueryRowContext(ctx, `UPDATE relay.mail_cutover_epochs SET phase='active',updated_at=statement_timestamp(),activated_at=statement_timestamp() WHERE epoch_id=$1 AND phase='verified' RETURNING epoch_id::text,source_id::text,target_identity,source_fingerprint,source_manifest,manifest_sha256,phase,created_at,updated_at,verified_at,activated_at,aborted_at`, epochID), &epoch); err != nil {
 		return MailCutoverEpoch{}, errors.New("mail cutover cannot activate")
 	}
+	if err := postgresRebuildPendingQuota(tx); err != nil {
+		return MailCutoverEpoch{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return MailCutoverEpoch{}, errors.New("mail cutover activation cannot commit")
 	}

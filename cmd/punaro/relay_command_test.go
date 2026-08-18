@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/rock3r/punaro/internal/operator"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 func TestRelayConfigureRequiresExplicitProtectedInputAndConfirmation(t *testing.T) {
@@ -55,6 +56,35 @@ func TestRelayRegisterRequiresConfirmationAndUsesOwnerWorkflow(t *testing.T) {
 	}
 	if code := runRelayRegister([]string{"--directory", "/install", "--machine-enrollment-file", "/private/machine.json", "--yes"}, &stdout, &stderr, func(string, string) (operator.Installation, error) {
 		return operator.Installation{}, errors.New("unsafe")
+	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
+
+func TestRelayReconcileCapacityRequiresConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	reconcile := func(string) (relay.QuotaCounters, error) {
+		called = true
+		return relay.QuotaCounters{}, nil
+	}
+	if code := runRelayReconcileCapacity([]string{"--directory", "/install"}, &stdout, &stderr, reconcile); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+}
+
+func TestRelayReconcileCapacityPublishesContentFreeOutcome(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	reconcile := func(directory string) (relay.QuotaCounters, error) {
+		called = directory == "/install"
+		return relay.QuotaCounters{Count: 3, Bytes: 12}, nil
+	}
+	if code := runRelayReconcileCapacity([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, reconcile); code != 0 || !called || !bytes.Contains(stdout.Bytes(), []byte(`"capacity_reconciled"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"pending_count": 3`)) {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	if code := runRelayReconcileCapacity([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.QuotaCounters, error) {
+		return relay.QuotaCounters{}, errors.New("unsafe")
 	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
