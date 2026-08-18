@@ -49,6 +49,10 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 	now = now.UTC()
 	expireCutoff := now.Add(-time.Duration(cfg.PendingMaxAgeSeconds) * time.Second)
 	var result relay.MaintenanceResult
+	defer func() {
+		d.metrics.ObserveTerminals(relay.ClosedExpired, result.Expired)
+		d.refreshPendingMetrics(context.Background(), now)
+	}()
 	for i := 0; i < cfg.MaintenanceBatch; i++ {
 		found, closed, err := d.expireOneDueDelivery(expireCutoff, now)
 		if err != nil {
@@ -62,12 +66,10 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 			result.Expired++
 		}
 	}
-	d.metrics.ObserveTerminals(relay.ClosedExpired, result.Expired)
 	pruneCutoff := now.Add(-time.Duration(cfg.TerminalRetentionSeconds) * time.Second)
 	for i := 0; i < cfg.MaintenanceBatch; i++ {
 		found, err := d.pruneOneTerminal(pruneCutoff)
 		if err != nil {
-			d.refreshPendingMetrics(context.Background(), now)
 			return result, err
 		}
 		if !found {
@@ -75,7 +77,6 @@ func (d *Database) MaintainDeliveries(now time.Time) (relay.MaintenanceResult, e
 		}
 		result.Pruned++
 	}
-	d.refreshPendingMetrics(context.Background(), now)
 	return result, nil
 }
 

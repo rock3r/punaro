@@ -47,6 +47,10 @@ func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 	now = now.UTC().Truncate(time.Millisecond)
 	cutoff := now.Add(-time.Duration(cfg.PendingMaxAgeSeconds) * time.Second).UnixMilli()
 	var result MaintenanceResult
+	defer func() {
+		s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
+		s.refreshPendingMetrics(now)
+	}()
 	for i := 0; i < cfg.MaintenanceBatch; i++ {
 		found, closed, err := s.expireOneDueDelivery(cutoff, now)
 		if err != nil {
@@ -64,8 +68,6 @@ func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 	for i := 0; i < cfg.MaintenanceBatch; i++ {
 		found, err := s.pruneOneTerminal(pruneCutoff)
 		if err != nil {
-			s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
-			s.refreshPendingMetrics(now)
 			return result, err
 		}
 		if !found {
@@ -73,8 +75,6 @@ func (s *Store) MaintainDeliveries(now time.Time) (MaintenanceResult, error) {
 		}
 		result.Pruned++
 	}
-	s.metrics.ObserveTerminals(ClosedExpired, result.Expired)
-	s.refreshPendingMetrics(now)
 	return result, nil
 }
 

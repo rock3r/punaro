@@ -548,6 +548,39 @@ func TestStoreRetentionSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestStorePartialExpireFailurePublishesCommittedMetrics(t *testing.T) {
+	t.Parallel()
+	metrics := &Metrics{}
+	store := openRetentionStore(t, tightRetention(60, 3600, 10))
+	store.SetMetrics(metrics)
+	now := retentionNow()
+	conversation := createQuotaConversation(t, store, now, "machine-a", "machine-b", "agent/a", "agent/b")
+	for i, key := range []string{"send-1", "send-2"} {
+		if _, _, err := store.AppendMessage(quotaAppend(conversation, "machine-a", "agent/a", key, key, now.Add(time.Duration(i)*time.Millisecond))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_second_terminal BEFORE INSERT ON delivery_terminals
+		WHEN (SELECT COUNT(*) FROM delivery_terminals) >= 1
+		BEGIN SELECT RAISE(ABORT, 'injected terminal insert failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.MaintainDeliveries(now.Add(61 * time.Second))
+	if err == nil {
+		t.Fatal("expected injected expire failure")
+	}
+	if result.Expired != 1 {
+		t.Fatalf("committed expires=%#v", result)
+	}
+	if pending := quotaInstallCounters(t, store); pending.Count != 1 {
+		t.Fatalf("pending after partial expire=%#v", pending)
+	}
+	snap := metrics.Snapshot()
+	if snap.RelayTerminalTransitionsExpired != 1 || snap.RelayPendingDeliveries != 1 || snap.RelayTerminalsRetained != 1 {
+		t.Fatalf("partial expire dropped metrics=%#v", snap)
+	}
+}
+
 func TestStoreMetricsAreContentFreeAndBounded(t *testing.T) {
 	t.Parallel()
 	metrics := &Metrics{}
