@@ -1425,6 +1425,26 @@ func TestUpdatePersistsDirectoryKeys(t *testing.T) {
 	}
 }
 
+func TestUpdateSucceedsAfterKeysDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, directoryKeysFile))
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadDirectoryKeys(dir)
+	if err != nil || len(loaded) != 1 {
+		t.Fatalf("persisted keys=%v err=%v", loaded, err)
+	}
+}
+
 func TestUpdateSucceedsAfterGenerationDirectoryNode(t *testing.T) {
 	dir := privateDir(t)
 	writeNonFileMarker(t, filepath.Join(dir, generationHighWaterFile))

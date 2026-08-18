@@ -836,7 +836,11 @@ func persistDirectoryKeys(directory string, keys map[string]ed25519.PublicKey) e
 	if err != nil {
 		return errors.New("bootstrap keys file is invalid")
 	}
-	return writeAtomic(filepath.Join(directory, directoryKeysFile), body, 0o600)
+	path := filepath.Join(directory, directoryKeysFile)
+	if err := removeNonRegular(path); err != nil {
+		return err
+	}
+	return writeAtomic(path, body, 0o600)
 }
 
 func loadDirectoryKeys(directory string) (map[string]ed25519.PublicKey, error) {

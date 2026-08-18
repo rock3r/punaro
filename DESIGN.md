@@ -1508,9 +1508,9 @@ The implementation is not internet-exposure-ready until these cases pass:
   The supervisor stays
   parked until a later signed update or seed clears that marker, then exits so
   the platform service restarts onto the repaired slot. An unreadable update
-  journal also enters recovery-only. Invalid `generation.json` or
-  `healthy-generation.json` nodes are quarantined so signed repair and
-  supervision can continue. `run` holds a separate `run.lock` lease for
+  journal also enters recovery-only. Invalid `generation.json`,
+  `healthy-generation.json`, or `release.pub` nodes are quarantined so signed
+  repair and supervision can continue. `run` holds a separate `run.lock` lease for
   the child's lifetime so two supervisors cannot share the same mailbox and
   ready file; the transaction lock stays free for `update`. A crash-safe
   `run.pid` records the child's pid and image path. The next supervisor kills
