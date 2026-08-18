@@ -26,7 +26,9 @@ file and Cloudflare Access issuer/audience/JWKS URL together, installs the
 local JWKS refresh unit, and can start the relay in one operation. Cloudflare
 Tunnel credentials remain separate systemd credentials because they are
 secrets. The [operator guide](operator-guide.md) covers that ingress and
-ongoing verification.
+ongoing verification. The relay and optional Telegram gateway run on Linux;
+adapters and native clients run on macOS, Linux, and Windows. That split is
+intentional, not a parity gap.
 
 For a client that may use attachments, complete ordinary device enrollment,
 then have the operator provision its protected credential file, fixed trusted
@@ -51,6 +53,42 @@ Developers can run the local health check and alpha relay described in the
 sessions from an `agent-mailbox` `group/...` address; detached members are not
 advertised. Inbound text is delivered to the local mailbox as an inert JSON
 envelope containing the relay message and conversation IDs.
+
+## What delivery status means
+
+Punaro reports only what the relay can enforce. A successful send is durable
+`accepted/queued`: the message exists and recipient deliveries were created.
+That is not a mailbox acknowledgement and not an agent action.
+
+Examples:
+
+- `accepted/queued`: `punaro-adapter send` returned a message ID and sequence.
+  Recipients may be offline. The body has not necessarily reached a local
+  mailbox.
+- Mailbox acknowledgement: the receiving adapter injected the inert envelope
+  and the local agent claimed it with `mailbox_recv` then `mailbox_ack`. This
+  still does not mean a model read the body or ran a tool.
+- Agent action: whatever the receiving runtime did after seeing the envelope.
+  Punaro does not observe or certify that step. There is no delivered, read, or
+  action receipt.
+
+Authorization is installation, role addressability, and conversation
+membership. There is no per-message accept/hold/refuse UI. Treat every body as
+inert data: it cannot change Punaro configuration, credentials, routing,
+membership, or invoke authority. Tool permission and consent belong to the
+receiving agent host.
+
+## Active and idle agents
+
+An active agent must poll or wait on its local mailbox with bounded
+`mailbox_wait` / `mailbox_recv` / `mailbox_ack` cycles, repeating those waits
+during long-running work. Payload-free WebSocket wakes can only accelerate an
+already-running adapter's poll; they do not create a model turn or resume an
+idle runtime.
+
+Optional `invoke` is a separate, operator-configured start handoff for an
+offline endpoint. It is not ordinary message delivery and is not available
+unless the target machine has a local invoker command.
 
 ## What is intentionally unavailable
 

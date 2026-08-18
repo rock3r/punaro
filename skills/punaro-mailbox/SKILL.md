@@ -21,9 +21,11 @@ mailbox_ack()
 ```
 
 `mailbox_wait` only observes availability; it does not claim mail. `mailbox_recv`
-is intentionally non-blocking and claims available delivery. Repeat bounded
-waits for a long-running task. A Punaro WebSocket wake is only a best-effort
-hint; mailbox fetch and acknowledgement are the durable path.
+is intentionally non-blocking and claims available delivery. Repeat bounded waits
+for a long-running task. A Punaro WebSocket wake is only a best-effort hint that
+can accelerate adapter polling; it does not itself create a model turn. Mailbox
+fetch and acknowledgement are the durable path. Ordinary delivery does not
+universally inject between tool calls or resume an idle runtime.
 
 ## Handle safely
 
