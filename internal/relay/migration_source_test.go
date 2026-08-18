@@ -245,8 +245,16 @@ func TestMigrationSourceFingerprintIgnoresRateBuckets(t *testing.T) {
 	if before.Fingerprint != after.Fingerprint || before.Counts != after.Counts {
 		t.Fatalf("rate-bucket mutation changed cutover identity before=%#v after=%#v", before, after)
 	}
-	if _, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 1); err == nil {
-		t.Fatal("cutover export accepted rate-bucket rows")
+	now := time.Date(2026, time.August, 18, 16, 0, 0, 0, time.UTC)
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("c", 64), after.Fingerprint, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 1); err == nil || err.Error() != "invalid relay migration batch" {
+		t.Fatalf("prepared rate-bucket export err=%v", err)
+	}
+	if _, err := AbortPreparedMigrationSource(ctx, path, prepared.EpochID, prepared.TargetIdentity, prepared.Fingerprint); err != nil {
+		t.Fatal(err)
 	}
 }
 
