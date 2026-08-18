@@ -304,7 +304,7 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, started 
 		status, err := readReadyFile(filepath.Join(request.Directory, readyFile))
 		switch {
 		case err == nil && status == "healthy":
-			return waitHealthWindow(ctx, request, child)
+			return waitHealthWindow(ctx, request, child, started)
 		case err != nil && !errors.Is(err, os.ErrNotExist):
 			return err
 		}
@@ -441,23 +441,31 @@ func waitChild(ctx context.Context, request RunRequest, child Process, started s
 	}
 }
 
-func waitHealthWindow(ctx context.Context, request RunRequest, child Process) error {
+func waitHealthWindow(ctx context.Context, request RunRequest, child Process, started slotState) error {
 	if request.HealthWindow <= 0 {
 		return nil
 	}
 	timer := time.NewTimer(request.HealthWindow)
 	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-child.Done():
-		return errChildExited
-	case <-timer.C:
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-child.Done():
 			return errChildExited
-		default:
-			return nil
+		case <-ticker.C:
+			if err := failIfSlotChanged(request.Directory, started); err != nil {
+				return err
+			}
+		case <-timer.C:
+			select {
+			case <-child.Done():
+				return errChildExited
+			default:
+				return nil
+			}
 		}
 	}
 }
