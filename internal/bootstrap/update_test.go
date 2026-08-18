@@ -69,6 +69,35 @@ func TestUpdateInstallsSignedPlatformArtifacts(t *testing.T) {
 	}
 }
 
+func TestUpdateQuarantinesInvalidCurrentNode(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, currentSlot), []byte("not-a-slot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release != "v0.1.0" || result.Sequence != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
 	dir := privateDir(t)

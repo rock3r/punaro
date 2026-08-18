@@ -233,9 +233,12 @@ func recoverJournal(directory string) error {
 		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return failInvalidJournal(directory)
 		}
-		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
+		exists, invalid, err := existsOrQuarantineSlot(directory, candidateSlot)
 		if err != nil {
 			return err
+		}
+		if invalid {
+			return failInvalidJournal(directory)
 		}
 		if exists {
 			if err := replaceCurrent(directory, record.Release, record.Sequence, record.ManifestSHA256); err != nil {
@@ -247,9 +250,12 @@ func recoverJournal(directory string) error {
 		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return failInvalidJournal(directory)
 		}
-		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
+		exists, invalid, err := existsOrQuarantineSlot(directory, candidateSlot)
 		if err != nil {
 			return err
+		}
+		if invalid {
+			return failInvalidJournal(directory)
 		}
 		if exists {
 			if record.Phase == "repairing" {
@@ -376,11 +382,11 @@ func repairOrphanSwap(directory string) (bool, error) {
 	current := filepath.Join(directory, currentSlot)
 	previous := filepath.Join(directory, previousSlot)
 	swap := filepath.Join(directory, swapSlot)
-	currentExists, err := existsRealDir(current)
+	currentExists, _, err := existsOrQuarantineSlot(directory, currentSlot)
 	if err != nil {
 		return false, err
 	}
-	previousExists, err := existsRealDir(previous)
+	previousExists, _, err := existsOrQuarantineSlot(directory, previousSlot)
 	if err != nil {
 		return false, err
 	}
@@ -966,24 +972,29 @@ func requireRealDir(path string) error {
 }
 
 func existsOrQuarantineSwap(directory string) (bool, error) {
-	path := filepath.Join(directory, swapSlot)
-	info, err := os.Lstat(path) // #nosec G703 -- swap is a fixed child of the bootstrap directory.
+	exists, _, err := existsOrQuarantineSlot(directory, swapSlot)
+	return exists, err
+}
+
+func existsOrQuarantineSlot(directory, name string) (bool, bool, error) {
+	path := filepath.Join(directory, name)
+	info, err := os.Lstat(path) // #nosec G703 -- slot is a fixed child of the bootstrap directory.
 	if os.IsNotExist(err) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
 	if info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		return true, nil
+		return true, false, nil
 	}
-	if err := os.RemoveAll(path); err != nil { // #nosec G703 -- swap is a fixed child of the bootstrap directory.
-		return false, err
+	if err := os.RemoveAll(path); err != nil { // #nosec G703 -- slot is a fixed child of the bootstrap directory.
+		return false, false, err
 	}
 	if err := syncDir(directory); err != nil {
-		return false, err
+		return false, false, err
 	}
-	return false, nil
+	return false, true, nil
 }
 
 func existsRealDir(path string) (bool, error) {

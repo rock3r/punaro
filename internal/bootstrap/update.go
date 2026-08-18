@@ -91,7 +91,7 @@ func Update(request Request) (Result, error) {
 		accepted = acceptedState{}
 	}
 	if accepted.ReleaseSequence < 1 {
-		exists, slotErr := existsRealDir(filepath.Join(request.Directory, currentSlot))
+		exists, _, slotErr := existsOrQuarantineSlot(request.Directory, currentSlot)
 		if slotErr != nil {
 			return Result{}, slotErr
 		}

@@ -1073,9 +1073,11 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 		return err
 	}
 	current := filepath.Join(directory, currentSlot)
-	if exists, err := existsRealDir(current); err != nil {
+	exists, _, err := existsOrQuarantineSlot(directory, currentSlot)
+	if err != nil {
 		return err
-	} else if exists {
+	}
+	if exists {
 		slot, err := readSlot(current)
 		if err == nil && slot.Release != localCheckoutRelease {
 			recovery, recErr := loadRecovery(directory)

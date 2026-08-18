@@ -1357,6 +1357,27 @@ func TestRunRejectsReadySymlink(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutQuarantinesInvalidCurrentNode(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, currentSlot), []byte("not-a-slot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != localCheckoutRelease {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestSeedLocalCheckoutRejectsWritableAncestor(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("writable-ancestor policy is Unix-specific")

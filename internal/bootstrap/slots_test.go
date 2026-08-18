@@ -247,6 +247,33 @@ func TestRecoverRepairableJournalCompletesPartialRollback(t *testing.T) {
 	}
 }
 
+func TestRecoverJournalQuarantinesInvalidCandidateNode(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	if err := os.WriteFile(filepath.Join(dir, candidateSlot), []byte("not-a-slot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJournal(dir, journal{Schema: 1, Phase: "publishing", Release: "v0.3.0", Sequence: 3, CatalogSequence: 3, ManifestSHA256: repeatC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverRepairableJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, candidateSlot)); !os.IsNotExist(err) {
+		t.Fatalf("invalid candidate was kept: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("interrupted journal survived an invalid candidate")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRecoverJournalQuarantinesInvalidSwapNode(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
