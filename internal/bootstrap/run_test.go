@@ -75,6 +75,35 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotEnterRecoveryWhenCurrentSlotChanged(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			if err := os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot)); err != nil {
+				return nil, err
+			}
+			writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "next-adapter")
+			return finishedProcess(errors.New("adapter exited")), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("concurrent publish err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("concurrent publish entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || status.Previous != "v0.1.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunEntersRecoveryWhenFirstSlotHealthIsInvalid(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")

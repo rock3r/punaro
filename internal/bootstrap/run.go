@@ -94,13 +94,7 @@ func Run(ctx context.Context, request RunRequest) error {
 	}
 	identity, adapter, err := prepareRun(&request)
 	if errors.Is(err, errNoAdapter) {
-		if request.hasPrevious(identity) {
-			return failOrRollback(ctx, request, startOrDefault(request), identity, recoveryUnhealthy)
-		}
-		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
-			return recErr
-		}
-		return ErrRecoveryOnly
+		return failCurrent(ctx, request, startOrDefault(request), identity, errChildExited)
 	}
 	if err != nil {
 		return err
@@ -108,13 +102,7 @@ func Run(ctx context.Context, request RunRequest) error {
 	start := startOrDefault(request)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
-		if request.hasPrevious(identity) {
-			return failOrRollback(ctx, request, start, identity, recoveryUnhealthy)
-		}
-		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
-			return recErr
-		}
-		return ErrRecoveryOnly
+		return failCurrent(ctx, request, start, identity, errChildExited)
 	}
 	if err := waitHealth(ctx, request, child, request.hasPrevious(identity)); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -122,17 +110,7 @@ func Run(ctx context.Context, request RunRequest) error {
 		}
 		_ = child.Kill()
 		<-child.Done()
-		if request.hasPrevious(identity) {
-			return failOrRollback(ctx, request, start, identity, recoveryUnhealthy)
-		}
-		reason := recoveryCurrentExited
-		if !errors.Is(err, errChildExited) {
-			reason = recoveryUnhealthy
-		}
-		if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
-			return recErr
-		}
-		return ErrRecoveryOnly
+		return failCurrent(ctx, request, start, identity, err)
 	}
 	return waitChild(ctx, child)
 }
@@ -227,6 +205,7 @@ func startAdapter(ctx context.Context, request RunRequest, start func(context.Co
 var (
 	errChildExited = errors.New("bootstrap child exited")
 	errNoAdapter   = errors.New("bootstrap has no current adapter")
+	errSlotChanged = errors.New("bootstrap slot changed")
 )
 
 func startOrDefault(request RunRequest) func(context.Context, ChildSpec) (Process, error) {
@@ -272,8 +251,42 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, required
 	}
 }
 
+func failCurrent(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, cause error) error {
+	if err := failIfSlotChanged(request.Directory, started); err != nil {
+		return err
+	}
+	if request.hasPrevious(started) {
+		return failOrRollback(ctx, request, start, started, recoveryUnhealthy)
+	}
+	reason := recoveryCurrentExited
+	if !errors.Is(cause, errChildExited) {
+		reason = recoveryUnhealthy
+	}
+	if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
+		return recErr
+	}
+	return ErrRecoveryOnly
+}
+
+func failIfSlotChanged(directory string, started slotState) error {
+	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
+	if err != nil {
+		return err
+	}
+	if current.Release == "" {
+		return nil
+	}
+	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 {
+		return errSlotChanged
+	}
+	return nil
+}
+
 func failOrRollback(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, reason string) error {
 	unlocked, _, err := rollbackIfAllowed(request, started)
+	if errors.Is(err, errSlotChanged) {
+		return err
+	}
 	if !unlocked || err != nil {
 		if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
 			return recErr
@@ -357,7 +370,7 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 		return false, slotState{}, err
 	}
 	if current.Release != started.Release || current.Sequence != started.Sequence || current.ManifestSHA256 != started.ManifestSHA256 {
-		return false, slotState{}, errors.New("bootstrap slot changed")
+		return false, slotState{}, errSlotChanged
 	}
 	previous, err := readSlot(filepath.Join(request.Directory, previousSlot))
 	if err != nil {
@@ -620,25 +633,13 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 	if err := replaceCurrent(directory, localCheckoutRelease, 1, digest); err != nil {
 		return err
 	}
-	accepted, err := loadAccepted(directory)
-	if err != nil {
-		return err
-	}
-	if accepted.Release == "" || accepted.Release == localCheckoutRelease {
-		if err := saveAccepted(directory, acceptedState{
-			Schema:          1,
-			Release:         localCheckoutRelease,
-			ReleaseSequence: 1,
-			CatalogSequence: 1,
-			ManifestSHA256:  digest,
-		}); err != nil {
-			return err
-		}
-	}
-	if err := clearRecovery(directory); err != nil {
-		return err
-	}
-	return clearJournal(directory)
+	return finishSeed(directory, journal{
+		Schema:         1,
+		Phase:          "seeding",
+		Release:        localCheckoutRelease,
+		Sequence:       1,
+		ManifestSHA256: digest,
+	})
 }
 
 func withReadyEnv(ready string) []string {

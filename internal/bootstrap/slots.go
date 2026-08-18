@@ -198,7 +198,7 @@ func recoverJournal(directory string) error {
 				return err
 			}
 		}
-		return clearJournal(directory)
+		return finishSeed(directory, record)
 	case "publishing", "repairing":
 		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
 			return errors.New("bootstrap journal is invalid")
@@ -323,6 +323,31 @@ func applyRollbackCatalogSequence(directory string, catalogSequence int64) error
 	}
 	accepted.CatalogSequence = catalogSequence
 	return saveAccepted(directory, accepted)
+}
+
+func finishSeed(directory string, record journal) error {
+	if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+		return errors.New("bootstrap journal is invalid")
+	}
+	accepted, err := loadAccepted(directory)
+	if err != nil {
+		return err
+	}
+	if accepted.Release == "" || accepted.Release == localCheckoutRelease {
+		if err := saveAccepted(directory, acceptedState{
+			Schema:          1,
+			Release:         record.Release,
+			ReleaseSequence: record.Sequence,
+			CatalogSequence: 1,
+			ManifestSHA256:  record.ManifestSHA256,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := clearRecovery(directory); err != nil {
+		return err
+	}
+	return clearJournal(directory)
 }
 
 func finishPublication(directory string, accepted acceptedState) error {

@@ -107,6 +107,32 @@ func TestRecoverJournalPersistsAcceptedAfterPublishWithoutCandidate(t *testing.T
 	}
 }
 
+func TestRecoverJournalClearsRecoveryAfterCompletedSeed(t *testing.T) {
+	dir := privateDir(t)
+	current := filepath.Join(dir, currentSlot)
+	if err := os.Mkdir(current, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(filepath.Join(current, slotRecord), []byte(`{"schema":1,"release":"`+localCheckoutRelease+`","sequence":1,"manifest_sha256":"`+repeatC()+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRecoveryRecord(dir, recoveryUnhealthy); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJournal(dir, journal{Schema: 1, Phase: "seeding", Release: localCheckoutRelease, Sequence: 1, ManifestSHA256: repeatC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, recoveryFile)); !os.IsNotExist(err) {
+		t.Fatal("recovery marker retained after completed seed recovery")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("seeding journal retained after completed seed recovery")
+	}
+}
+
 func TestRecoverJournalCompletesInterruptedRollback(t *testing.T) {
 	dir := privateDir(t)
 	previous := filepath.Join(dir, previousSlot)
