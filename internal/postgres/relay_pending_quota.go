@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -150,33 +151,30 @@ func postgresAppendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, 
 	return recipients, nil
 }
 
-func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, ackedAt any) error {
-	rows, err := tx.QueryContext(context.Background(), `SELECT `+postgresPendingBodyBytes+`
+func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, now time.Time, metrics *relay.Metrics) error {
+	rows, err := tx.QueryContext(context.Background(), `SELECT delivery.id::text, delivery.recipient_endpoint, message.id::text, message.conversation_id::text, message.sequence, delivery.lease_generation, `+postgresPendingBodyBytes+`, message.created_at
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint=$1 AND delivery.acked_at IS NULL AND message.conversation_id=$2::uuid
 		FOR UPDATE OF delivery`, recipient, conversationID)
 	if err != nil {
 		return errors.New("revoked deliveries cannot be inspected")
 	}
-	var bodies []int64
+	var retired []postgresPendingClose
 	for rows.Next() {
-		var bodyBytes int64
-		if err := rows.Scan(&bodyBytes); err != nil {
+		var row postgresPendingClose
+		if err := rows.Scan(&row.ID, &row.Recipient, &row.MessageID, &row.ConversationID, &row.Sequence, &row.LeaseGeneration, &row.BodyBytes, &row.CreatedAt); err != nil {
 			_ = rows.Close()
 			return errors.New("revoked deliveries cannot be inspected")
 		}
-		bodies = append(bodies, bodyBytes)
+		retired = append(retired, row)
 	}
 	if err := rows.Close(); err != nil || rows.Err() != nil {
 		return errors.New("revoked deliveries cannot be inspected")
 	}
-	for _, bodyBytes := range bodies {
-		if err := postgresReleaseQuota(tx, recipient, bodyBytes); err != nil {
+	for _, row := range retired {
+		if _, err := postgresClosePendingDelivery(tx, row, relay.ClosedRevoked, now, metrics); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, recipient, conversationID, ackedAt); err != nil {
-		return relayDatabaseError(err, "retire revoked deliveries")
 	}
 	return nil
 }
@@ -189,6 +187,22 @@ func (d *Database) refreshPendingMetrics(ctx context.Context) {
 		return
 	}
 	d.metrics.SetPending(counters.Count, counters.Bytes)
+	var oldest sql.NullTime
+	if err := d.relayPool().QueryRowContext(ctx, `SELECT MIN(message.created_at)
+		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+		WHERE delivery.acked_at IS NULL`).Scan(&oldest); err == nil && oldest.Valid {
+		age := time.Now().UTC().Sub(oldest.Time.UTC()).Seconds()
+		if age < 0 {
+			age = 0
+		}
+		d.metrics.SetPendingOldestAge(int64(age))
+	} else {
+		d.metrics.SetPendingOldestAge(0)
+	}
+	var retained int64
+	if err := d.relayPool().QueryRowContext(ctx, `SELECT COUNT(*) FROM relay.mail_delivery_terminals`).Scan(&retained); err == nil {
+		d.metrics.SetTerminalsRetained(retained)
+	}
 }
 
 func postgresReadInstallQuota(ctx context.Context, q interface {

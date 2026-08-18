@@ -433,6 +433,26 @@ Startup and readiness verify counter consistency or fail closed. The operator
 that fail-closed path while rebuilding drifted counters. Bodies are
 never hashed, compared, or parsed for loop detection.
 
+Pending deliveries also have a startup-validated maximum age. Conservative
+defaults expire work after seven days. Maintenance uses injected or database
+time, never sleep-based tests, and processes expiry and terminal prune in
+bounded pages with stable continuation. A delivery older than the inclusive
+age boundary transitions atomically from pending to terminal `expired`,
+releases pending capacity once, and advances only that recipient's contiguous
+cursor through the expired sequence. Another recipient of the same message is
+unchanged. An expired active lease cannot later acknowledge. Closed reasons
+are `acked`, `expired`, and `revoked`. Terminal records keep opaque
+message, conversation, and recipient identifiers, sequence, closed reason,
+lease generation, and timestamps; they never duplicate bodies or credentials.
+A separate terminal retention period, default thirty days, then prunes that
+metadata in bounded pages. Host-local `punaro relay list-terminals` and
+`punaro relay maintain-deliveries --yes` inspect and trigger that work.
+Ordinary agent HTTP exposes neither dead-letter inventory nor delivery
+receipts. Sender-facing append remains accepted/queued or rejected only.
+The loopback health listener publishes unlabeled counters for pending count
+and bytes, oldest pending age, terminal transitions by closed reason, retained
+terminals, and lease redeliveries.
+
 The guarantee is **at-least-once delivery**: a crash after a
 local mailbox injection but before the relay receives the acknowledgement can
 produce a redelivery.
@@ -1466,7 +1486,12 @@ adds explicit pending-delivery capacity counters per recipient identity and
 installation-wide. Quota tables are derived operational
 state, not cutover content: inspect and fingerprint ignore them, and activation
 rebuilds them from pending deliveries. Capacity denial is distinct from rate
-limiting. Expiry and dead-letter policies remain later slices.
+limiting. Schema version 49 adds content-free `mail_delivery_terminals` for
+acked, expired, and revoked deliveries. Terminal tables are the same class of
+derived operational state: inspect and fingerprint ignore them, abort still
+deletes them, and they are not cutover content. Pending-age expiry and
+terminal prune run in bounded host-local maintenance; they are not an agent
+receipt API.
 
 The supported cutover action is `punaro mail cutover`. Its dry-run reads the
 service-owned `relay.db` from the installation data directory and prints the

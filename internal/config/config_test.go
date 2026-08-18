@@ -573,6 +573,33 @@ func TestLoadRejectsInvalidRelayQuotaLimits(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending max age was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "604800")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer terminal retention was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRetention(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "90")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "180")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "7")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRetentionPolicy()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
 func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "2")
 	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", "64")

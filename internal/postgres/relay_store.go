@@ -825,7 +825,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		}
 	}
 	if input.Operation == relay.ControlUpsertMember && err == nil && previous&relay.CapReceive != 0 && input.Member.Capabilities&relay.CapReceive == 0 {
-		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC(), d.metrics); err != nil {
 			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -842,7 +842,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			}
 		}
 	} else {
-		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC(), d.metrics); err != nil {
 			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -1443,12 +1443,16 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		return relay.DeliveryLeasePage{}, errors.New("pending deliveries are unavailable")
 	}
 	deliveries := make([]relay.Delivery, 0, len(pending))
+	redeliveries := 0
 	for _, row := range pending {
 		delivery := row.delivery
 		if row.leaseMachine.Valid && row.leaseMachine.String == machineID && row.leaseToken.Valid && row.leaseOwnership.Valid && row.leaseOwnership.Int64 == ownershipGeneration && row.leaseConsumer.Valid && row.leaseConsumer.Int64 == consumerGeneration && row.leaseUntil.Valid && row.leaseUntil.Time.After(now) {
 			delivery.LeaseToken = row.leaseToken.String
 			delivery.LeaseUntil = row.leaseUntil.Time.UTC()
 		} else {
+			if row.leaseUntil.Valid && !row.leaseUntil.Time.After(now) {
+				redeliveries++
+			}
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = uuid.NewString()
 			delivery.LeaseUntil = now.Add(ttl).UTC()
@@ -1476,6 +1480,7 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 	if err := tx.Commit(); err != nil {
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "commit delivery lease")
 	}
+	d.metrics.ObserveLeaseRedeliveries(redeliveries)
 	return relay.DeliveryLeasePage{Deliveries: deliveries, Cursors: cursors}, nil
 }
 
@@ -1628,6 +1633,10 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 		if err := postgresReleaseQuota(tx, recipient, bodyBytes); err != nil {
 			return err
 		}
+		if err := postgresRecordAckedTerminal(tx, deliveryID, now); err != nil {
+			return err
+		}
+		d.metrics.ObserveTerminal(relay.ClosedAcked)
 	}
 	if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
 		return err

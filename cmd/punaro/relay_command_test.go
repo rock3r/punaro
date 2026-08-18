@@ -89,3 +89,32 @@ func TestRelayReconcileCapacityPublishesContentFreeOutcome(t *testing.T) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
 }
+
+func TestRelayListTerminalsPublishesContentFreePages(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	list := func(directory, after string, limit int) (relay.TerminalPage, error) {
+		called = directory == "/install" && after == "cursor-1" && limit == 2
+		return relay.TerminalPage{Terminals: []relay.TerminalRecord{{DeliveryID: "d1", MessageID: "m1", ConversationID: "c1", RecipientID: "r1", Sequence: 1, ClosedReason: relay.ClosedExpired}}, NextCursor: "d1"}, nil
+	}
+	if code := runRelayListTerminals([]string{"--directory", "/install", "--after", "cursor-1", "--limit", "2"}, &stdout, &stderr, list); code != 0 || !called || !bytes.Contains(stdout.Bytes(), []byte(`"closed_reason": "expired"`)) || bytes.Contains(stdout.Bytes(), []byte("body")) {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+}
+
+func TestRelayMaintainDeliveriesRequiresConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(string) (relay.MaintenanceResult, error) {
+		called = true
+		return relay.MaintenanceResult{}, nil
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install"}, &stdout, &stderr, maintain); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+	if code := runRelayMaintainDeliveries([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.MaintenanceResult, error) {
+		return relay.MaintenanceResult{Expired: 1, Pruned: 0, Scanned: 1}, nil
+	}); code != 0 || !bytes.Contains(stdout.Bytes(), []byte(`"deliveries_maintained"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"expired": 1`)) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}

@@ -501,6 +501,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
 	testRelayRateLimitSchemaDrift(ctx, t, app, ownerDB)
 	testRelayPendingQuotaSchemaDrift(ctx, t, app, ownerDB)
+	testRelayDeliveryTerminalSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1687,6 +1688,22 @@ func testRelayRateLimitSchemaDrift(ctx context.Context, t *testing.T, app *Datab
 	}
 	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
 		t.Fatalf("restored rate-limit tokens constraint state=%#v err=%v", restored, err)
+	}
+}
+
+func testRelayDeliveryTerminalSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_delivery_terminals DROP CONSTRAINT mail_delivery_terminals_sequence_check; ALTER TABLE relay.mail_delivery_terminals ADD CONSTRAINT mail_delivery_terminals_sequence_check CHECK (sequence IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive terminal sequence constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_delivery_terminals DROP CONSTRAINT mail_delivery_terminals_sequence_check; ALTER TABLE relay.mail_delivery_terminals ADD CONSTRAINT mail_delivery_terminals_sequence_check CHECK (sequence >= 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored terminal sequence constraint state=%#v err=%v", restored, err)
 	}
 }
 

@@ -866,6 +866,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	if quotaTables == 2 {
 		wantTriggers += 6
 	}
+	var terminalTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='delivery_terminals'`).Scan(&terminalTables); err != nil || terminalTables != 0 && terminalTables != 1 {
+		return errors.New("relay migration source schema is unavailable")
+	}
+	if terminalTables == 1 {
+		wantTriggers += 3
+	}
 	if err := triggerRows.Close(); err != nil || triggerRows.Err() != nil || len(seenTriggers) != wantTriggers {
 		return errors.New("relay migration source guard inventory is incomplete")
 	}

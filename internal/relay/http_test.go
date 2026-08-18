@@ -835,6 +835,31 @@ func TestHTTPAppendCapacityExceededIsRetryableAndContentFree(t *testing.T) {
 	}
 }
 
+func TestHTTPDoesNotExposeTerminalInventory(t *testing.T) {
+	t.Parallel()
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	auth, err := NewAuthenticator(store, []Machine{{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }})
+	for _, path := range []string{"/v1/terminals", "/v1/deliveries/terminals"} {
+		response := serveSigned(t, handler, privateA, "machine-a", http.MethodGet, path, "", "term-"+strings.ReplaceAll(path, "/", "-"), "")
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), "route not found") {
+			t.Fatalf("path=%s status=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+}
+
 func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey, machineID, method, path, body, nonce, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)

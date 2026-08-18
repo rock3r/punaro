@@ -245,6 +245,7 @@ func Run(t *testing.T, backend relay.Backend, namespace string) {
 	runLeasePageContract(t, backend, namespace, now)
 	RunRateLimits(t, backend, namespace+"-rate")
 	RunPendingQuota(t, backend, namespace+"-quota")
+	RunDeliveryRetention(t, backend, namespace+"-retain")
 }
 
 // RateLimitSetter is implemented by durable stores that keep token-bucket
@@ -565,6 +566,113 @@ func RunPendingQuota(t *testing.T, backend relay.Backend, namespace string) {
 		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
 	}
 	if err := limiter.SetQuotaLimits(relay.DefaultQuotaConfig()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// RetentionSetter is implemented by durable stores that expire pending
+// deliveries and retain content-free terminal metadata.
+type RetentionSetter interface {
+	relay.Backend
+	SetRetentionPolicy(relay.RetentionConfig) error
+	MaintainDeliveries(time.Time) (relay.MaintenanceResult, error)
+	ListTerminalDeliveries(string, int) (relay.TerminalPage, error)
+}
+
+// RunDeliveryRetention proves pending-age expiry, exact-once capacity release,
+// and contiguous cursor advancement against every backend.
+func RunDeliveryRetention(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(RetentionSetter)
+	if !ok {
+		t.Fatal("backend does not expose delivery retention")
+	}
+	if err := store.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = store.SetRetentionPolicy(relay.DefaultRetentionConfig())
+	})
+	now := time.Date(2026, time.August, 18, 21, 0, 0, 0, time.UTC)
+	cfg := relay.RetentionConfig{PendingMaxAgeSeconds: 60, TerminalRetentionSeconds: relay.RetentionAgeMaxSeconds, MaintenanceBatch: 100}
+	if err := store.SetRetentionPolicy(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 32; i++ {
+		result, err := store.MaintainDeliveries(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Expired == 0 && result.Pruned == 0 {
+			break
+		}
+	}
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "one", IdempotencyKey: namespace + "-1", Now: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := backend.AppendMessage(relay.AppendInput{ConversationID: conversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "two", IdempotencyKey: namespace + "-2", Now: now.Add(30 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, now, time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 2 {
+		t.Fatalf("lease=%#v err=%v", page, err)
+	}
+	before := now.Add(59 * time.Second)
+	if result, err := store.MaintainDeliveries(before); err != nil || result.Expired != 0 {
+		t.Fatalf("before expiry=%#v err=%v", result, err)
+	}
+	expireAt := now.Add(60 * time.Second)
+	result, err := store.MaintainDeliveries(expireAt)
+	if err != nil || result.Expired != 1 {
+		t.Fatalf("at expiry=%#v err=%v", result, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, page.Deliveries[0].ID, page.Deliveries[0].LeaseToken, page.Deliveries[0].LeaseGeneration, expireAt); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("expired lease ack err=%v", err)
+	}
+	cursor, err := backend.RecipientCursor(machineB, endpointB, conversation.ID, expireAt)
+	if err != nil || cursor != first.Sequence {
+		t.Fatalf("cursor after expiry=%d want=%d err=%v", cursor, first.Sequence, err)
+	}
+	remaining, err := backend.LeaseDeliveries(machineB, namespace+"-consumer", endpointB, conversation.ID, expireAt, time.Minute, 10)
+	if err != nil || len(remaining.Deliveries) != 1 || remaining.Deliveries[0].Message.ID != second.ID {
+		t.Fatalf("remaining=%#v err=%v", remaining, err)
+	}
+	if err := backend.AckDelivery(machineB, endpointB, remaining.Deliveries[0].ID, remaining.Deliveries[0].LeaseToken, remaining.Deliveries[0].LeaseGeneration, expireAt); err != nil {
+		t.Fatal(err)
+	}
+	cursor, err = backend.RecipientCursor(machineB, endpointB, conversation.ID, expireAt)
+	if err != nil || cursor != second.Sequence {
+		t.Fatalf("cursor after ack across expiry=%d want=%d err=%v", cursor, second.Sequence, err)
+	}
+	listed, err := store.ListTerminalDeliveries("", 10)
+	if err != nil || len(listed.Terminals) < 1 {
+		t.Fatalf("terminals=%#v err=%v", listed, err)
+	}
+	encoded := fmt.Sprintf("%#v", listed)
+	if strings.Contains(encoded, "one") || strings.Contains(encoded, "two") {
+		t.Fatalf("terminal listing leaked body: %s", encoded)
+	}
+	if err := store.SetRetentionPolicy(relay.DefaultRetentionConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
