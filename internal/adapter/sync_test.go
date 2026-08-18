@@ -34,6 +34,24 @@ func TestSyncOnceAdvertisesAttachmentsForwardsThenAcknowledges(t *testing.T) {
 	}
 }
 
+func TestSyncOncePreservesDirectRoleSenderWithoutSessionIdentity(t *testing.T) {
+	t.Parallel()
+	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = journal.Close() })
+	mailbox := &fakeMailbox{attached: []string{"agent/implementer"}}
+	relayClient := &fakeRelay{deliveries: map[string][]relay.Delivery{"agent/implementer": {{ID: "delivery-1", RecipientRole: "role/machine-b/implementer", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", Sequence: 1, FromRole: "role/machine-a/reviewer", Body: "please review"}, LeaseToken: "lease", LeaseGeneration: 1}}}}
+	sync := Syncer{Mailbox: mailbox, Relay: relayClient, Journal: journal, Now: func() time.Time { return time.Date(2026, 8, 18, 18, 0, 0, 0, time.UTC) }}
+	if err := sync.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailbox.sent) != 1 || mailbox.sent[0].FromRole != "role/machine-a/reviewer" || mailbox.sent[0].FromEndpoint != "" || mailbox.sent[0].RecipientRole != "role/machine-b/implementer" {
+		t.Fatalf("mailbox sent = %#v", mailbox.sent)
+	}
+}
+
 func TestSyncOnceRetriesAckWithoutSendingForwardedMessageAgain(t *testing.T) {
 	t.Parallel()
 	journal, err := OpenJournal(filepath.Join(t.TempDir(), "adapter.db"))

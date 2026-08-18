@@ -66,6 +66,21 @@ punaro-adapter contacts resolve reviewer
 punaro-adapter contacts resolve role/workstation-review/reviewer
 ```
 
+Send to a resolved canonical handle from a currently bound source role. The
+target may be offline; the message stays durable until that role binds and
+leases it:
+
+```sh
+punaro-adapter send \
+  --to role/workstation-implement/implementer \
+  --from-role role/workstation-review/reviewer \
+  --body-file ./note.txt \
+  --idempotency-key dm-reviewer-1
+```
+
+Keep the existing conversation send form (`--conversation` / `--from`) for
+rooms already in progress. The two forms cannot be combined.
+
 ## What delivery status means
 
 Punaro reports only what the relay can enforce. A successful send is durable

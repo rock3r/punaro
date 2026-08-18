@@ -359,6 +359,36 @@ func TestStoreQuotaSurvivesRestartAndReadiness(t *testing.T) {
 	}
 }
 
+func TestStoreDirectMessageChargesTargetRoleAndDeniesAtCeiling(t *testing.T) {
+	t.Parallel()
+	store := openQuotaStore(t, tightQuota(1, 1024, 8, 4096))
+	now := quotaNow()
+	fromRole, toRole := prepareDirectPair(t, store, now, true)
+	first, duplicate, err := store.SendDirectMessage(DirectMessageInput{
+		SenderMachineID: "machine-a", FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: "dm-cap-1", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("first send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	if got := quotaRecipientCounters(t, store, roleRecipient(toRole)); got != (QuotaCounters{Count: 1, Bytes: int64(len("please review"))}) {
+		t.Fatalf("target role counters=%#v", got)
+	}
+	if got := quotaRecipientCounters(t, store, "agent/b"); got != (QuotaCounters{}) {
+		t.Fatalf("session recipient charged for direct send: %#v", got)
+	}
+	_, _, err = store.SendDirectMessage(DirectMessageInput{
+		SenderMachineID: "machine-a", FromRole: fromRole, ToRole: toRole, Body: "again", IdempotencyKey: "dm-cap-2", Now: now.Add(time.Second),
+	})
+	assertCapacityExceeded(t, err, 9)
+	if first.Sequence != 1 {
+		t.Fatalf("sequence=%d", first.Sequence)
+	}
+	page, err := store.LeaseDeliveries("machine-b", "consumer-b", "agent/b", first.ConversationID, now.Add(time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.ID != first.ID {
+		t.Fatalf("denied send left extra delivery page=%#v err=%v", page, err)
+	}
+}
+
 func TestStoreOpenRejectsDriftedQuotaAndRepairOpenerCanReconcile(t *testing.T) {
 	t.Parallel()
 	database := filepath.Join(t.TempDir(), "relay.db")

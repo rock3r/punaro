@@ -157,8 +157,8 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 47 and supports an intact schema
-from version 10 through 47 as an update boundary. Versions 10 through 46 are
+The current binary requires schema version 48 and supports an intact schema
+from version 10 through 48 as an update boundary. Versions 10 through 47 are
 reported as `upgrade_required`; versions below the compatibility floor, newer
 versions, and damaged objects are `incompatible`. The embedded manifest and
 target release metadata are authoritative; check them instead of assuming a
@@ -167,8 +167,9 @@ durable conversation roles, migration 41 adds relay membership controls,
 migration 42 applies those controls to mail cutover, migration 43 adds the
 relay invocation capability, migration 44 adds client lifecycle authority,
 migration 45 adds opt-in canonical role profiles, migration 46 adds durable
-mail rate-limit buckets, and migration 47 adds explicit pending-delivery
-capacity counters. After migration 47, `punaro relay reconcile-capacity
+mail rate-limit buckets, migration 47 adds idempotent direct-role
+conversations, and migration 48 adds explicit pending-delivery capacity
+counters. After migration 48, `punaro relay reconcile-capacity
 --directory DIR --yes` rebuilds those counters from pending deliveries if
 startup readiness reports inconsistency. Ordinary SQLite `Open` and PostgreSQL
 `Ready` still fail closed on drift; the reconcile command is the only supported
