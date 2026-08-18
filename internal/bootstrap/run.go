@@ -924,7 +924,7 @@ func SeedLocalCheckout(directory, adapterPath string) error {
 		return err
 	}
 	defer unlock()
-	if err := recoverJournal(directory); err != nil {
+	if err := recoverRepairableJournal(directory); err != nil {
 		return err
 	}
 	current := filepath.Join(directory, currentSlot)

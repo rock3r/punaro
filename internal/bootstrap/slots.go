@@ -147,7 +147,7 @@ func Rollback(directory string) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(directory); err != nil {
+	if err := recoverRepairableJournal(directory); err != nil {
 		return Result{}, err
 	}
 	current := filepath.Join(directory, currentSlot)
@@ -184,23 +184,36 @@ func Rollback(directory string) (Result, error) {
 	return Result{Release: slot.Release, Sequence: slot.Sequence, Manifest: slot.ManifestSHA256}, nil
 }
 
+var errInvalidJournal = errors.New("bootstrap journal is invalid")
+
+func recoverRepairableJournal(directory string) error {
+	err := recoverJournal(directory)
+	if errors.Is(err, errInvalidJournal) {
+		return nil
+	}
+	return err
+}
+
 func recoverJournal(directory string) error {
 	if err := removeAbandonedTemps(directory); err != nil {
 		return err
 	}
 	record, err := readJournal(directory)
+	if errors.Is(err, errInvalidJournal) {
+		return failInvalidJournal(directory)
+	}
 	if err != nil {
 		return err
 	}
 	if record.Phase != "" && record.Schema != 1 {
-		return errors.New("bootstrap journal is invalid")
+		return failInvalidJournal(directory)
 	}
 	switch record.Phase {
 	case "", "staging":
 		return os.RemoveAll(filepath.Join(directory, candidateSlot))
 	case "seeding":
 		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-			return errors.New("bootstrap journal is invalid")
+			return failInvalidJournal(directory)
 		}
 		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
 		if err != nil {
@@ -214,7 +227,7 @@ func recoverJournal(directory string) error {
 		return finishSeed(directory, record)
 	case "publishing", "repairing":
 		if record.Release == "" || record.Sequence < 1 || record.CatalogSequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-			return errors.New("bootstrap journal is invalid")
+			return failInvalidJournal(directory)
 		}
 		exists, err := existsRealDir(filepath.Join(directory, candidateSlot))
 		if err != nil {
@@ -238,7 +251,7 @@ func recoverJournal(directory string) error {
 		})
 	case "rolling-back":
 		if record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-			return errors.New("bootstrap journal is invalid")
+			return failInvalidJournal(directory)
 		}
 		if err := completeRollback(directory, slotState{Release: record.Release, Sequence: record.Sequence, ManifestSHA256: record.ManifestSHA256}); err != nil {
 			return err
@@ -254,8 +267,18 @@ func recoverJournal(directory string) error {
 		}
 		return clearJournal(directory)
 	default:
-		return errors.New("bootstrap journal is invalid")
+		return failInvalidJournal(directory)
 	}
+}
+
+func failInvalidJournal(directory string) error {
+	if err := os.Remove(filepath.Join(directory, journalFile)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := syncDir(directory); err != nil {
+		return err
+	}
+	return errInvalidJournal
 }
 
 func recordRolledAwayCurrent(directory string) error {
@@ -485,17 +508,17 @@ func readJournal(directory string) (journal, error) {
 
 func parseJournal(body []byte) (journal, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var record journal
 	if err := decoder.Decode(&record); err != nil {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return journal{}, errors.New("bootstrap journal is invalid")
+		return journal{}, errInvalidJournal
 	}
 	return record, nil
 }
@@ -559,7 +582,7 @@ func Status(directory string) (State, error) {
 		return State{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(directory); err != nil {
+	if err := recoverRepairableJournal(directory); err != nil {
 		return State{}, err
 	}
 	accepted, err := loadAccepted(directory)

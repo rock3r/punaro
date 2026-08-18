@@ -667,6 +667,34 @@ func TestRunEntersRecoveryWhenJournalIsUnreadable(t *testing.T) {
 	if !recoveryOnly(t, dir) {
 		t.Fatal("unreadable journal did not enter recovery-only")
 	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("unreadable journal was not quarantined")
+	}
+}
+
+func TestUpdateSucceedsAfterMalformedJournalRecovery(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, journalFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryOnly(t, dir)
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	if _, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("signed update left recovery-only after a malformed journal")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("malformed journal survived a signed update")
+	}
 }
 
 func TestRunClearsHealthDirectoryBeforeStart(t *testing.T) {

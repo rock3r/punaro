@@ -78,7 +78,7 @@ func Update(request Request) (Result, error) {
 		return Result{}, err
 	}
 	defer unlock()
-	if err := recoverJournal(request.Directory); err != nil {
+	if err := recoverRepairableJournal(request.Directory); err != nil {
 		return Result{}, err
 	}
 	accepted, err := loadAccepted(request.Directory)
