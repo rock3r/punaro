@@ -57,6 +57,19 @@ PUNARO_LISTEN_ADDR=127.0.0.1:8080
 PUNARO_DATA_DIR=/var/lib/punaro
 ```
 
+Distinct authorized messages are bounded by durable token buckets. Defaults are
+60 sender messages per minute with burst 60, and 120 conversation messages per
+minute with burst 120. Override with
+`PUNARO_RELAY_SENDER_RATE_BURST`, `PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE`,
+`PUNARO_RELAY_CONVERSATION_RATE_BURST`,
+`PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE`, and
+`PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS`. Invalid values fail startup. A
+rate-limited append is HTTP 429 with integer `Retry-After` and the content-free
+error `rate limited`. Exact committed retries never consume tokens. The
+loopback health listener exposes `GET /metrics` with
+`relay_rate_limit_rejections` only; it has no body, endpoint, role, or
+conversation labels.
+
 For a Cloudflare-protected remote route, additionally set the Access issuer,
 application audience tag, and JWKS URL. Configure the tunnel origin to require
 the Access assertion. The process validates `Cf-Access-Jwt-Assertion` itself;

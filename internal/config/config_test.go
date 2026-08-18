@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 func TestLoadUsesExplicitDotEnvWithoutOverridingProcess(t *testing.T) {
@@ -35,6 +37,9 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 	if cfg.PostgresEnabled || cfg.PostgresDSNFile != "" {
 		t.Fatalf("PostgreSQL unexpectedly enabled: %#v", cfg)
+	}
+	if got, want := cfg.RelayRateLimits(), relay.DefaultRateLimitConfig(); got != want {
+		t.Fatalf("unexpected default rate limits: %#v", got)
 	}
 }
 
@@ -511,5 +516,39 @@ func TestLoadAcceptsExactlyOneCloudflareAccessJWKSSource(t *testing.T) {
 	t.Setenv("PUNARO_ACCESS_JWKS_FILE", "relative/current.json")
 	if _, err := Load(""); err == nil {
 		t.Fatal("relative Access JWKS snapshot was accepted")
+	}
+}
+
+func TestLoadRejectsInvalidRelayRateLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero sender burst was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "60")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "10001")
+	if _, err := Load(""); err == nil {
+		t.Fatal("oversized conversation refill was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "120")
+	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer retry-after cap was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayRateLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "4")
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "12")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_BURST", "8")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "24")
+	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "9")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayRateLimits()
+	want := relay.RateLimitConfig{SenderBurst: 4, SenderRefillPerMinute: 12, ConversationBurst: 8, ConversationRefillPerMinute: 24, RetryAfterMaxSeconds: 9}
+	if got != want {
+		t.Fatalf("rate limits=%#v want %#v", got, want)
 	}
 }

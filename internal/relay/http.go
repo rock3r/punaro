@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type HandlerOptions struct {
 	DeliveryLeaseTTL          time.Duration
 	Notifier                  *Notifier
 	SessionRevalidateInterval time.Duration
+	Metrics                   *Metrics
 }
 
 // NewHandler returns the authenticated relay API, including the wake-metadata
@@ -47,8 +49,14 @@ func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http
 	if options.SessionRevalidateInterval <= 0 || options.SessionRevalidateInterval > maximumSessionFenceAge/2 {
 		options.SessionRevalidateInterval = defaultSessionRevalidateInterval
 	}
-	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval}
-	return http.HandlerFunc(h.serveHTTP)
+	if options.Metrics == nil {
+		options.Metrics = &Metrics{}
+	}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval, metrics: options.Metrics}
+	if setter, ok := store.(interface{ SetMetrics(*Metrics) }); ok {
+		setter.SetMetrics(options.Metrics)
+	}
+	return h
 }
 
 type handler struct {
@@ -59,6 +67,16 @@ type handler struct {
 	endpointLeaseTTL          time.Duration
 	deliveryLeaseTTL          time.Duration
 	sessionRevalidateInterval time.Duration
+	metrics                   *Metrics
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.serveHTTP(w, r)
+}
+
+// MetricsSnapshot returns content-free relay counters for the local health listener.
+func (h *handler) MetricsSnapshot() MetricsSnapshot {
+	return h.metrics.Snapshot()
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -784,6 +802,17 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "authorization denied")
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "request conflicts with durable state")
+	case errors.Is(err, ErrRateLimited):
+		retryAfter := RateLimitRetryAfterMin
+		var limited *RateLimitedError
+		if errors.As(err, &limited) && limited.RetryAfterSeconds > retryAfter {
+			retryAfter = limited.RetryAfterSeconds
+		}
+		if retryAfter > RateLimitRetryAfterMaxBound {
+			retryAfter = RateLimitRetryAfterMaxBound
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		writeError(w, http.StatusTooManyRequests, "rate limited")
 	case errors.Is(err, ErrMaintenance):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")

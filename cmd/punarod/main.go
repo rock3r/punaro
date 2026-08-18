@@ -213,6 +213,10 @@ func run(args []string, stderr io.Writer) int {
 	if relayStore != nil {
 		defer func() { _ = relayStore.Close() }()
 	}
+	relayMetricsSnapshot := func() relay.MetricsSnapshot { return relay.MetricsSnapshot{} }
+	if provider, ok := relayHandler.(interface{ MetricsSnapshot() relay.MetricsSnapshot }); ok {
+		relayMetricsSnapshot = provider.MetricsSnapshot
+	}
 	trustedAttachmentHandler, err := buildTrustedAttachmentHandler(cfg, platformDB)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "punarod trusted attachment configuration error: %v\n", err)
@@ -240,6 +244,11 @@ func run(args []string, stderr io.Writer) int {
 			return
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}\n`))
+	})
+	healthMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(relayMetricsSnapshot())
 	})
 	mux := http.NewServeMux()
 	var transportPolicy *ingress.Policy
@@ -727,6 +736,21 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		backend = store
 	}
+	if setter, ok := backend.(interface {
+		SetRateLimits(relay.RateLimitConfig) error
+	}); ok {
+		limits := cfg.RelayRateLimits()
+		if limits == (relay.RateLimitConfig{}) {
+			limits = relay.DefaultRateLimitConfig()
+		}
+		if err := setter.SetRateLimits(limits); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
+	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {
 		transitionDatabase, ok := backend.(credentialTransitionDatabase)
@@ -746,7 +770,7 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		return nil, nil, err
 	}
-	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{})
+	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{Metrics: metrics})
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -757,7 +781,16 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		handler = verifier.Middleware(handler)
 	}
-	return handler, store, nil
+	return relayMetricsHandler{Handler: handler, metrics: metrics}, store, nil
+}
+
+type relayMetricsHandler struct {
+	http.Handler
+	metrics *relay.Metrics
+}
+
+func (h relayMetricsHandler) MetricsSnapshot() relay.MetricsSnapshot {
+	return h.metrics.Snapshot()
 }
 
 func newAccessVerifier(cfg config.Config) (*access.Verifier, error) {

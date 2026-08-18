@@ -1013,6 +1013,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, errors.New("message retry state is unavailable")
 	}
+	if err := d.consumeRateLimits(tx, input.SenderMachineID, input.ConversationID, input.Now); err != nil {
+		return relay.Message{}, false, err
+	}
 	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
@@ -1059,6 +1062,78 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 		return relay.Message{}, false, relayDatabaseError(err, "commit message")
 	}
 	return message, false, nil
+}
+
+// SetRateLimits replaces the in-process bucket policy without resetting durable depletion.
+func (d *Database) SetRateLimits(cfg relay.RateLimitConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	d.rateMu.Lock()
+	d.rateLimits = cfg
+	d.rateMu.Unlock()
+	return nil
+}
+
+// SetMetrics attaches the shared content-free counter sink.
+func (d *Database) SetMetrics(metrics *relay.Metrics) {
+	d.metrics = metrics
+}
+
+func (d *Database) rateLimitConfig() relay.RateLimitConfig {
+	d.rateMu.Lock()
+	defer d.rateMu.Unlock()
+	if d.rateLimits == (relay.RateLimitConfig{}) {
+		return relay.DefaultRateLimitConfig()
+	}
+	return d.rateLimits
+}
+
+func (d *Database) consumeRateLimits(tx *sql.Tx, senderMachineID, conversationID string, now time.Time) error {
+	cfg := d.rateLimitConfig()
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('rate-sender',$1::text)::text, 579001230613))`, senderMachineID); err != nil {
+		return errors.New("sender rate lock is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('rate-conversation',$1::text)::text, 579001230614))`, conversationID); err != nil {
+		return errors.New("conversation rate lock is unavailable")
+	}
+	sender, err := postgresLoadRateBucket(tx, "sender", senderMachineID, now, int64(cfg.SenderBurst))
+	if err != nil {
+		return err
+	}
+	conversation, err := postgresLoadRateBucket(tx, "conversation", conversationID, now, int64(cfg.ConversationBurst))
+	if err != nil {
+		return err
+	}
+	decision := relay.DecideRateLimit(cfg, sender, conversation, now)
+	if !decision.Allowed {
+		d.metrics.ObserveRateLimited()
+		return &relay.RateLimitedError{RetryAfterSeconds: decision.RetryAfterSeconds}
+	}
+	if err := postgresSaveRateBucket(tx, "sender", senderMachineID, decision.Sender); err != nil {
+		return err
+	}
+	return postgresSaveRateBucket(tx, "conversation", conversationID, decision.Conversation)
+}
+
+func postgresLoadRateBucket(tx *sql.Tx, kind, key string, now time.Time, burst int64) (relay.RateBucket, error) {
+	now = now.UTC().Truncate(time.Millisecond)
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_rate_buckets(kind,bucket_key,tokens,updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT (kind, bucket_key) DO NOTHING`, kind, key, burst, now); err != nil {
+		return relay.RateBucket{}, errors.New("rate bucket initialize is unavailable")
+	}
+	var tokens int64
+	var updatedAt time.Time
+	if err := tx.QueryRowContext(context.Background(), `SELECT tokens,updated_at FROM relay.mail_rate_buckets WHERE kind=$1 AND bucket_key=$2 FOR UPDATE`, kind, key).Scan(&tokens, &updatedAt); err != nil {
+		return relay.RateBucket{}, errors.New("rate bucket read is unavailable")
+	}
+	return relay.RateBucket{Tokens: tokens, UpdatedAt: updatedAt.UTC()}, nil
+}
+
+func postgresSaveRateBucket(tx *sql.Tx, kind, key string, bucket relay.RateBucket) error {
+	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_rate_buckets SET tokens=$1,updated_at=$2 WHERE kind=$3 AND bucket_key=$4`, bucket.Tokens, bucket.UpdatedAt.UTC().Truncate(time.Millisecond), kind, key); err != nil {
+		return errors.New("rate bucket update is unavailable")
+	}
+	return nil
 }
 
 // LeaseDeliveries claims a bounded fenced PostgreSQL delivery page.
