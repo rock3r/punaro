@@ -188,7 +188,7 @@ func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID str
 		MachineID: machineID, Role: request.Role, DisplayName: displayName, DirectAddressable: directAddressable, IdempotencyKey: idempotencyKey, Now: now,
 	})
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	status := http.StatusOK
