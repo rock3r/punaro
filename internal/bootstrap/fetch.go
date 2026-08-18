@@ -58,7 +58,8 @@ func (transport *httpFetcher) Get(ctx context.Context, relative string, limit in
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -66,8 +67,8 @@ func (transport *httpFetcher) Get(ctx context.Context, relative string, limit in
 	}
 	response, err := transport.client.Do(request) // #nosec G107 -- target is origin plus a validated relative path.
 	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if parent.Err() != nil {
+			return nil, parent.Err()
 		}
 		return nil, errors.New("release download failed")
 	}

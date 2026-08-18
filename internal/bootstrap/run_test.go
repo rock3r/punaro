@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -108,6 +109,25 @@ func TestRunTreatsCanceledStartAsCleanShutdown(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("canceled start entered recovery-only")
+	}
+}
+
+func TestFailOrRollbackKeepsRecoveryWhenCatalogTimesOut(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	err := failOrRollback(context.Background(), RunRequest{
+		Directory: dir,
+		Origin:    "https://127.0.0.1:1/releases",
+		Keys:      map[string]ed25519.PublicKey{"k": make(ed25519.PublicKey, ed25519.PublicKeySize)},
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}, startOrDefault(RunRequest{}), slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")}, recoveryUnhealthy)
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("timed-out catalog rollback err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("timed-out catalog rollback did not enter recovery-only")
 	}
 }
 
