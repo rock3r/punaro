@@ -325,7 +325,62 @@ func startAdapter(ctx context.Context, request RunRequest, start func(context.Co
 	if err != nil {
 		return nil, err
 	}
+	if proc, ok := child.(*osProcess); ok && proc.cmd != nil && proc.cmd.Process != nil {
+		_ = writeRunPID(request.Directory, proc.cmd.Process.Pid, adapter)
+	}
 	return child, nil
+}
+
+type runPIDRecord struct {
+	Schema int64  `json:"schema"`
+	PID    int    `json:"pid"`
+	Path   string `json:"path"`
+}
+
+func writeRunPID(directory string, pid int, path string) error {
+	if pid <= 0 || path == "" {
+		return nil
+	}
+	body, err := json.Marshal(runPIDRecord{Schema: 1, PID: pid, Path: path})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, runPIDFile), body, 0o600)
+}
+
+func terminateStaleRun(directory string) error {
+	proc := staleRunProcess(directory)
+	if proc == nil {
+		return nil
+	}
+	if runtime.GOOS != "windows" {
+		_ = proc.Signal(syscall.SIGTERM)
+		deadline := time.Now().Add(childStopTimeout)
+		for time.Now().Before(deadline) && proc.Signal(syscall.Signal(0)) == nil {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	_ = proc.Kill()
+	return nil
+}
+
+func staleRunProcess(directory string) *os.Process {
+	body, err := os.ReadFile(filepath.Join(directory, runPIDFile)) // #nosec G304,G703 -- run pid file is a fixed child of the bootstrap directory.
+	if err != nil {
+		return nil
+	}
+	var record runPIDRecord
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.PID <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(record.PID)
+	if err != nil || proc == nil {
+		return nil
+	}
+	if runtime.GOOS != "windows" && proc.Signal(syscall.Signal(0)) != nil {
+		return nil
+	}
+	return proc
 }
 
 var (

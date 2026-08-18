@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestLockDirectoryRejectsSecondProcess(t *testing.T) {
@@ -43,6 +44,30 @@ func TestLockDirectoryRejectsSecondProcess(t *testing.T) {
 	_ = stdin.Close()
 	if err := helper.Wait(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAcquireRunLeaseTerminatesStaleChild(t *testing.T) {
+	dir := privateDir(t)
+	cmd := exec.CommandContext(context.Background(), "sleep", "30") // #nosec G204,G702 -- local test helper.
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	if err := writeRunPID(dir, cmd.Process.Pid, cmd.Path); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale child was not terminated")
 	}
 }
 

@@ -30,6 +30,7 @@ const (
 	journalFile      = "journal.json"
 	lockFile         = "bootstrap.lock"
 	runLeaseFile     = "run.lock"
+	runPIDFile       = "run.pid"
 	autoRollbackFile = "auto-rollback.json"
 )
 

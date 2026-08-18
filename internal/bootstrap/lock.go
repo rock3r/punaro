@@ -11,7 +11,15 @@ func lockDirectory(directory string) (func(), error) {
 }
 
 func acquireRunLease(directory string) (func(), error) {
-	return lockNamedFile(directory, runLeaseFile, "bootstrap run is already active")
+	unlock, err := lockNamedFile(directory, runLeaseFile, "bootstrap run is already active")
+	if err != nil {
+		return nil, err
+	}
+	if err := terminateStaleRun(directory); err != nil {
+		unlock()
+		return nil, err
+	}
+	return unlock, nil
 }
 
 func lockNamedFile(directory, name, busy string) (func(), error) {
