@@ -75,6 +75,27 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunEntersRecoveryWhenFirstSlotHealthIsInvalid(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			if err := os.WriteFile(readyPathFromEnv(spec.Env), []byte(`{"schema":2,"status":"healthy"}`), 0o600); err != nil {
+				return nil, err
+			}
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("invalid first-slot health err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("invalid first-slot health did not enter recovery-only")
+	}
+}
+
 func TestRunRecoversWhenCurrentExitsBeforeReady(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "broken-adapter")

@@ -125,10 +125,11 @@ func Run(ctx context.Context, request RunRequest) error {
 		if request.hasPrevious(identity) {
 			return failOrRollback(ctx, request, start, identity, recoveryUnhealthy)
 		}
+		reason := recoveryCurrentExited
 		if !errors.Is(err, errChildExited) {
-			return err
+			reason = recoveryUnhealthy
 		}
-		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited); recErr != nil {
+		if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
