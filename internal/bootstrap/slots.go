@@ -39,6 +39,7 @@ type autoRollbackState struct {
 	Release        string `json:"release"`
 	Sequence       int64  `json:"sequence"`
 	ManifestSHA256 string `json:"manifest_sha256"`
+	Generation     int64  `json:"generation,omitempty"`
 }
 
 func prepareDirectory(directory string) error {
@@ -301,6 +302,7 @@ func saveAutoRollback(directory string, away slotState) error {
 		Release:        away.Release,
 		Sequence:       away.Sequence,
 		ManifestSHA256: away.ManifestSHA256,
+		Generation:     away.Generation,
 	})
 	if err != nil {
 		return err
@@ -316,7 +318,7 @@ func blocksAutoRollback(directory string, previous slotState) (bool, error) {
 	if record.Release == "" {
 		return false, nil
 	}
-	return record.Release == previous.Release && record.Sequence == previous.Sequence && record.ManifestSHA256 == previous.ManifestSHA256, nil
+	return record.Release == previous.Release && record.Sequence == previous.Sequence && record.ManifestSHA256 == previous.ManifestSHA256 && record.Generation == previous.Generation, nil
 }
 
 func applyRollbackCatalogSequence(directory string, catalogSequence int64) error {

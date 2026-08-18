@@ -267,6 +267,24 @@ func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	}
 }
 
+func TestBlocksAutoRollbackAllowsLaterGeneration(t *testing.T) {
+	dir := privateDir(t)
+	away := slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: repeatC(), Generation: 1}
+	if err := saveAutoRollback(dir, away); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := blocksAutoRollback(dir, away)
+	if err != nil || !blocked {
+		t.Fatalf("same publication blocked=%v err=%v", blocked, err)
+	}
+	later := away
+	later.Generation = 2
+	blocked, err = blocksAutoRollback(dir, later)
+	if err != nil || blocked {
+		t.Fatalf("later publication blocked=%v err=%v", blocked, err)
+	}
+}
+
 func repeatC() string {
 	return "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 }
