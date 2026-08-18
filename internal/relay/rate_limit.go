@@ -184,16 +184,16 @@ func boundRetryAfter(wait time.Duration, maxSeconds int) int {
 // Metrics counts content-free relay pressure signals. Labels are fixed names
 // only; bodies, endpoints, roles, and conversation IDs are never recorded.
 type Metrics struct {
-	rateLimitRejections         atomic.Uint64
-	capacityRejections          atomic.Uint64
-	pendingDeliveries           atomic.Uint64
-	pendingBytes                atomic.Uint64
-	pendingOldestAgeSeconds     atomic.Uint64
-	terminalTransitionsAcked    atomic.Uint64
-	terminalTransitionsExpired  atomic.Uint64
-	terminalTransitionsRevoked  atomic.Uint64
-	terminalsRetained           atomic.Uint64
-	leaseRedeliveries           atomic.Uint64
+	rateLimitRejections        atomic.Uint64
+	capacityRejections         atomic.Uint64
+	pendingDeliveries          atomic.Uint64
+	pendingBytes               atomic.Uint64
+	pendingOldestAgeSeconds    atomic.Uint64
+	terminalTransitionsAcked   atomic.Uint64
+	terminalTransitionsExpired atomic.Uint64
+	terminalTransitionsRevoked atomic.Uint64
+	terminalsRetained          atomic.Uint64
+	leaseRedeliveries          atomic.Uint64
 }
 
 // ObserveRateLimited increments the rate-rejection counter.
@@ -206,16 +206,16 @@ func (m *Metrics) ObserveRateLimited() {
 
 // MetricsSnapshot is the bounded JSON body served on the local health listener.
 type MetricsSnapshot struct {
-	RelayRateLimitRejections         uint64 `json:"relay_rate_limit_rejections"`
-	RelayCapacityRejections          uint64 `json:"relay_capacity_rejections"`
-	RelayPendingDeliveries           uint64 `json:"relay_pending_deliveries"`
-	RelayPendingBytes                uint64 `json:"relay_pending_bytes"`
-	RelayPendingOldestAgeSeconds     uint64 `json:"relay_pending_oldest_age_seconds"`
-	RelayTerminalTransitionsAcked    uint64 `json:"relay_terminal_transitions_acked"`
-	RelayTerminalTransitionsExpired  uint64 `json:"relay_terminal_transitions_expired"`
-	RelayTerminalTransitionsRevoked  uint64 `json:"relay_terminal_transitions_revoked"`
-	RelayTerminalsRetained           uint64 `json:"relay_terminals_retained"`
-	RelayLeaseRedeliveries           uint64 `json:"relay_lease_redeliveries"`
+	RelayRateLimitRejections        uint64 `json:"relay_rate_limit_rejections"`
+	RelayCapacityRejections         uint64 `json:"relay_capacity_rejections"`
+	RelayPendingDeliveries          uint64 `json:"relay_pending_deliveries"`
+	RelayPendingBytes               uint64 `json:"relay_pending_bytes"`
+	RelayPendingOldestAgeSeconds    uint64 `json:"relay_pending_oldest_age_seconds"`
+	RelayTerminalTransitionsAcked   uint64 `json:"relay_terminal_transitions_acked"`
+	RelayTerminalTransitionsExpired uint64 `json:"relay_terminal_transitions_expired"`
+	RelayTerminalTransitionsRevoked uint64 `json:"relay_terminal_transitions_revoked"`
+	RelayTerminalsRetained          uint64 `json:"relay_terminals_retained"`
+	RelayLeaseRedeliveries          uint64 `json:"relay_lease_redeliveries"`
 }
 
 // Snapshot returns the current content-free counters.
