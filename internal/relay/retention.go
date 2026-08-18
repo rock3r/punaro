@@ -119,7 +119,7 @@ func (m *Metrics) SetOldestPendingAge(age time.Duration) {
 	if age < 0 {
 		age = 0
 	}
-	m.oldestPendingAgeSeconds.Store(uint64(age / time.Second))
+	m.oldestPendingAgeSeconds.Store(unsignedPending(int64(age / time.Second)))
 }
 
 // SetTerminalRetained replaces the unlabeled retained-terminal gauge.
