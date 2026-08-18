@@ -366,6 +366,7 @@ func RunRoleProfiles(t *testing.T, backend relay.Backend, namespace string) {
 	}
 	for _, invalid := range []relay.RegisterRoleInput{
 		{MachineID: machineA, Role: "role/" + machineB + "/reviewer", IdempotencyKey: namespace + "-prefix", Now: now},
+		{MachineID: namespace, Role: "role/" + machineA + "/reviewer", IdempotencyKey: namespace + "-overlap", Now: now},
 		{MachineID: machineA, Role: "role/plan-reviewer", IdempotencyKey: namespace + "-legacy", Now: now},
 		{MachineID: machineA, Role: "role/" + machineA + "/Reviewer", IdempotencyKey: namespace + "-slug", Now: now},
 		{MachineID: machineA, Role: "role/" + machineA + "/_bad", IdempotencyKey: namespace + "-invalid", Now: now},

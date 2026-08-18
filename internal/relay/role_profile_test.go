@@ -8,6 +8,25 @@ import (
 	"time"
 )
 
+func TestCanonicalRoleForMachineRequiresExactOwnerSegment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		role, machineID string
+		want            bool
+	}{
+		{role: "role/machine-a/reviewer", machineID: "machine-a", want: true},
+		{role: "role/machine-a/reviewer", machineID: "machine-b", want: false},
+		{role: "role/machine-a/reviewer", machineID: "machine", want: false},
+		{role: "role/machine/reviewer", machineID: "machine-a", want: false},
+		{role: "role/plan-reviewer", machineID: "machine-a", want: false},
+	}
+	for _, test := range tests {
+		if got := CanonicalRoleForMachine(test.role, test.machineID); got != test.want {
+			t.Fatalf("CanonicalRoleForMachine(%q,%q)=%t want=%t", test.role, test.machineID, got, test.want)
+		}
+	}
+}
+
 func TestStoreRegistersCanonicalRoleAndExactRetry(t *testing.T) {
 	t.Parallel()
 	store := openRoleProfileStore(t)
@@ -51,6 +70,10 @@ func TestStoreRoleRegistrationRejectsInvalidHandlesAndDisplayNames(t *testing.T)
 		input RegisterRoleInput
 	}{
 		{name: "wrong machine prefix", input: withRoleRegister(base, func(input *RegisterRoleInput) { input.Role = "role/machine-b/reviewer" })},
+		{name: "overlapping machine prefix", input: withRoleRegister(base, func(input *RegisterRoleInput) {
+			input.MachineID = "machine"
+			input.Role = "role/machine-a/reviewer"
+		})},
 		{name: "legacy role name", input: withRoleRegister(base, func(input *RegisterRoleInput) { input.Role = "role/plan-reviewer" })},
 		{name: "uppercase slug", input: withRoleRegister(base, func(input *RegisterRoleInput) { input.Role = "role/machine-a/Reviewer" })},
 		{name: "invalid slug", input: withRoleRegister(base, func(input *RegisterRoleInput) { input.Role = "role/machine-a/_bad" })},

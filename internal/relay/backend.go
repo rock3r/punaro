@@ -54,7 +54,9 @@ func CanonicalRoleForMachine(role, machineID string) bool {
 	if !ValidMachineID(machineID) || !CanonicalRoleHandle(role) {
 		return false
 	}
-	return strings.HasPrefix(role, "role/"+machineID+"/")
+	rest, _ := strings.CutPrefix(role, "role/")
+	machine, _, _ := strings.Cut(rest, "/")
+	return machine == machineID
 }
 
 // NormalizeRoleDisplayName trims an optional portable display name. Empty after

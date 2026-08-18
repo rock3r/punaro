@@ -55,6 +55,7 @@ func TestHTTPRoleRegisterRejectsChangedIdempotencyAndMalformedJSON(t *testing.T)
 		{name: "trailing json", body: `{"role":"role/machine-a/reviewer"}{"extra":true}`, nonce: "trailing", key: "trailing-1", want: http.StatusBadRequest},
 		{name: "invalid slug", body: `{"role":"role/machine-a/Reviewer"}`, nonce: "slug", key: "slug-1", want: http.StatusBadRequest},
 		{name: "wrong prefix", body: `{"role":"role/machine-b/reviewer"}`, nonce: "prefix", key: "prefix-1", want: http.StatusBadRequest},
+		{name: "overlapping prefix", body: `{"role":"role/machine/reviewer"}`, nonce: "overlap", key: "overlap-1", want: http.StatusBadRequest},
 		{name: "oversized display name", body: `{"role":"role/machine-a/reviewer","display_name":"` + strings.Repeat("n", 129) + `"}`, nonce: "display", key: "display-1", want: http.StatusBadRequest},
 		{name: "missing idempotency key", body: `{"role":"role/machine-a/reviewer"}`, nonce: "missing-key", key: "", want: http.StatusBadRequest},
 	}
