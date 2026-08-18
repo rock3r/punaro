@@ -82,6 +82,20 @@ func TestParseCreateArgsAcceptsDurableRoleMemberAndBinding(t *testing.T) {
 	if _, err := parseBindRoleArgs([]string{"--role", "role/plan-reviewer"}); err == nil {
 		t.Fatal("incomplete role binding accepted")
 	}
+	registered, err := parseRegisterRoleArgs([]string{"--role", "role/machine-a/reviewer", "--display-name", "  Reviewer  ", "--idempotency-key", "register-1"})
+	if err != nil || registered.role != "role/machine-a/reviewer" || registered.displayName != "  Reviewer  " || registered.directAddressable || registered.idempotencyKey != "register-1" {
+		t.Fatalf("register role=%#v err=%v", registered, err)
+	}
+	addressable, err := parseRegisterRoleArgs([]string{"--role", "role/machine-a/reviewer", "--direct-addressable", "--idempotency-key", "register-2"})
+	if err != nil || !addressable.directAddressable {
+		t.Fatalf("addressable register=%#v err=%v", addressable, err)
+	}
+	if _, err := parseRegisterRoleArgs([]string{"--role", "role/machine-a/reviewer"}); err == nil {
+		t.Fatal("register-role without idempotency key was accepted")
+	}
+	if _, err := parseRegisterRoleArgs([]string{"--role", "role/plan-reviewer", "--idempotency-key", "register-legacy"}); err == nil {
+		t.Fatal("legacy role handle was accepted")
+	}
 }
 
 func TestParseInvokeArgsRequiresExplicitContentFreeTargetAndRetryKey(t *testing.T) {

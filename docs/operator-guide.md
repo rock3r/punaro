@@ -157,16 +157,16 @@ database and investigate. The digest-pinned `make test-postgres` stack is epheme
 test infrastructure, publishes no database port, and deletes its volume on
 exit.
 
-The current binary requires schema version 44 and supports an intact schema
-from version 10 through 44 as an update boundary. Versions 10 through 43 are
+The current binary requires schema version 45 and supports an intact schema
+from version 10 through 45 as an update boundary. Versions 10 through 44 are
 reported as `upgrade_required`; versions below the compatibility floor, newer
 versions, and damaged objects are `incompatible`. The embedded manifest and
 target release metadata are authoritative; check them instead of assuming a
 version from this guide when preparing a future release. Migration 40 adds
 durable conversation roles, migration 41 adds relay membership controls,
 migration 42 applies those controls to mail cutover, migration 43 adds the
-relay invocation capability, and migration 44 adds client lifecycle authority.
-Migration 44 invalidates unredeemed legacy enrollment invitations while
+relay invocation capability, migration 44 adds client lifecycle authority,
+and migration 45 adds opt-in canonical role profiles. Migration 44 invalidates unredeemed legacy enrollment invitations while
 converting existing device credentials into lifecycle-managed client records,
 so it must not be applied as an ad hoc repair. The host wrapper's one-shot
 executor is the only supported authority transition. It always reads `relay.db`

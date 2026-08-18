@@ -92,6 +92,8 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.advertiseEndpoints(w, body, machineID, authority, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/bindings":
 		h.bindRole(w, body, machineID, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/register":
+		h.registerRole(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
 		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
@@ -150,6 +152,47 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "route not found")
 	}
+}
+
+func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Role              string  `json:"role"`
+		DisplayName       *string `json:"display_name"`
+		DirectAddressable *bool   `json:"direct_addressable"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role registration")
+		return
+	}
+	displayName := ""
+	if request.DisplayName != nil {
+		displayName = *request.DisplayName
+	}
+	directAddressable := false
+	if request.DirectAddressable != nil {
+		directAddressable = *request.DirectAddressable
+	}
+	profile, created, err := store.RegisterRoleProfile(RegisterRoleInput{
+		MachineID: machineID, Role: request.Role, DisplayName: displayName, DirectAddressable: directAddressable, IdempotencyKey: idempotencyKey, Now: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, profile)
 }
 
 func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string, now time.Time) {

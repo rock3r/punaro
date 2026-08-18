@@ -16,4 +16,5 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	contracttest.Run(t, store, "sqlite-contract")
 	contracttest.RunRoleTargeting(t, store, "sqlite-target")
+	contracttest.RunRoleProfiles(t, store, "sqlite-profile")
 }

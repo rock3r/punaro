@@ -158,6 +158,21 @@ func (c *HTTPRelayClient) BindRole(ctx context.Context, role, sessionEndpoint st
 	return err
 }
 
+// RegisterRole creates or updates one machine-owned canonical role profile.
+// The authenticated machine is the owner; callers never send a machine field.
+func (c *HTTPRelayClient) RegisterRole(ctx context.Context, role, displayName string, directAddressable bool, idempotencyKey string) (relay.RoleProfile, error) {
+	if !relay.CanonicalRoleHandle(role) || !relay.ValidRequestToken(idempotencyKey) {
+		return relay.RoleProfile{}, fmt.Errorf("canonical role and idempotency key are required")
+	}
+	request := map[string]any{"role": role, "direct_addressable": directAddressable}
+	if displayName != "" {
+		request["display_name"] = displayName
+	}
+	var profile relay.RoleProfile
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/roles/register", request, idempotencyKey, &profile)
+	return profile, err
+}
+
 // LeaseInvocations obtains content-free, server-authorized local runtime work.
 func (c *HTTPRelayClient) LeaseInvocations(ctx context.Context) ([]relay.Invocation, error) {
 	var response struct {
