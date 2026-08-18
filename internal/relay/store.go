@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -241,7 +242,9 @@ type InvocationAuditEvent struct {
 
 // Store owns SQLite-backed relay state.
 type Store struct {
-	db *sql.DB
+	db        *sql.DB
+	rateMu    sync.Mutex
+	rateLimit RateLimitPolicy
 }
 
 // Open creates or opens a SQLite WAL database with the full durable delivery
@@ -262,7 +265,7 @@ func Open(database string) (*Store, error) {
 	// from surfacing SQLITE_BUSY instead of orderly transactional serialization.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db}
+	store := &Store{db: db, rateLimit: DefaultRateLimitPolicy()}
 	var migrationControlExists bool
 	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
 		_ = db.Close()
@@ -313,6 +316,26 @@ func Open(database string) (*Store, error) {
 
 // Close closes the durable state database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// SetRateLimitPolicy replaces the durable limiter bounds after startup validation.
+func (s *Store) SetRateLimitPolicy(policy RateLimitPolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	s.rateMu.Lock()
+	s.rateLimit = policy
+	s.rateMu.Unlock()
+	return nil
+}
+
+func (s *Store) rateLimitPolicy() RateLimitPolicy {
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	if s.rateLimit == (RateLimitPolicy{}) {
+		return DefaultRateLimitPolicy()
+	}
+	return s.rateLimit
+}
 
 // ConsumeRequestNonce atomically prunes expired replay records and records one
 // signed request nonce. A duplicate is intentionally indistinguishable from
@@ -465,6 +488,13 @@ func (s *Store) migrate(ctx context.Context) error {
 			expires_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, nonce)
 		)`,
+		`CREATE TABLE IF NOT EXISTS rate_buckets (
+			scope TEXT NOT NULL CHECK (scope IN ('sender_machine', 'conversation')),
+			bucket_key TEXT NOT NULL,
+			tokens_milli INTEGER NOT NULL CHECK (tokens_milli >= 0),
+			last_refill_unix_milli INTEGER NOT NULL,
+			PRIMARY KEY (scope, bucket_key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS relay_migration_control (
 			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 			source_id TEXT NOT NULL,
@@ -497,7 +527,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -1257,6 +1287,9 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, fmt.Errorf("read idempotency key: %w", err)
 	}
+	if err := consumeSQLiteRateLimits(tx, s.rateLimitPolicy(), input.SenderMachineID, input.ConversationID, input.Now); err != nil {
+		return Message{}, false, err
+	}
 	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
@@ -1845,6 +1878,51 @@ func createConversationHash(creatorEndpoint string, members []Member) string {
 	}
 	digest := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(digest[:])
+}
+
+func consumeSQLiteRateLimits(tx *sql.Tx, policy RateLimitPolicy, senderMachineID, conversationID string, now time.Time) error {
+	senderRetry, senderOK, err := consumeSQLiteRateBucket(tx, rateScopeSenderMachine, senderMachineID, now, policy.SenderBurst, policy.SenderRefillPerMinute, policy.MaxRetryAfterSeconds)
+	if err != nil {
+		return err
+	}
+	conversationRetry, conversationOK, err := consumeSQLiteRateBucket(tx, rateScopeConversation, conversationID, now, policy.ConversationBurst, policy.ConversationRefillPerMinute, policy.MaxRetryAfterSeconds)
+	if err != nil {
+		return err
+	}
+	if senderOK && conversationOK {
+		return nil
+	}
+	retryAfter := senderRetry
+	if !conversationOK && conversationRetry > retryAfter {
+		retryAfter = conversationRetry
+	}
+	if senderOK {
+		retryAfter = conversationRetry
+	}
+	if conversationOK {
+		retryAfter = senderRetry
+	}
+	return newRateLimitedError(retryAfter, policy.MaxRetryAfterSeconds)
+}
+
+func consumeSQLiteRateBucket(tx *sql.Tx, scope, key string, now time.Time, burst, refillPerMinute, maxRetryAfterSeconds int) (time.Duration, bool, error) {
+	nowMilli := now.UTC().UnixMilli()
+	if _, err := tx.ExecContext(context.Background(), `INSERT OR IGNORE INTO rate_buckets(scope, bucket_key, tokens_milli, last_refill_unix_milli) VALUES (?, ?, ?, ?)`, scope, key, initialRateBucketTokens(burst), nowMilli); err != nil {
+		return 0, false, fmt.Errorf("create rate bucket: %w", err)
+	}
+	var snapshot rateBucketSnapshot
+	if err := tx.QueryRowContext(context.Background(), `SELECT tokens_milli, last_refill_unix_milli FROM rate_buckets WHERE scope=? AND bucket_key=?`, scope, key).Scan(&snapshot.TokensMilli, &snapshot.LastRefillUnixMilli); err != nil {
+		return 0, false, fmt.Errorf("read rate bucket: %w", err)
+	}
+	refilled := refillRateBucket(snapshot, now, burst, refillPerMinute)
+	consumed, retryAfter, ok := consumeRefilledBucket(refilled, burst, refillPerMinute, maxRetryAfterSeconds)
+	if !ok {
+		return retryAfter, false, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE rate_buckets SET tokens_milli=?, last_refill_unix_milli=? WHERE scope=? AND bucket_key=?`, consumed.TokensMilli, consumed.LastRefillUnixMilli, scope, key); err != nil {
+		return 0, false, fmt.Errorf("update rate bucket: %w", err)
+	}
+	return 0, true, nil
 }
 
 func memberIdentity(member Member) string {

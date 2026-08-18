@@ -177,3 +177,4 @@ type NonceStore interface {
 
 var _ Backend = (*Store)(nil)
 var _ RoleProfileBackend = (*Store)(nil)
+var _ RateLimitConfigurer = (*Store)(nil)

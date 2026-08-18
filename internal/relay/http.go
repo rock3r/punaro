@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ type HandlerOptions struct {
 	DeliveryLeaseTTL          time.Duration
 	Notifier                  *Notifier
 	SessionRevalidateInterval time.Duration
+	Metrics                   *Metrics
 }
 
 // NewHandler returns the authenticated relay API, including the wake-metadata
@@ -47,7 +49,7 @@ func NewHandler(store Backend, auth *Authenticator, options HandlerOptions) http
 	if options.SessionRevalidateInterval <= 0 || options.SessionRevalidateInterval > maximumSessionFenceAge/2 {
 		options.SessionRevalidateInterval = defaultSessionRevalidateInterval
 	}
-	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval}
+	h := &handler{store: store, auth: auth, notifier: options.Notifier, now: options.Now, endpointLeaseTTL: options.EndpointLeaseTTL, deliveryLeaseTTL: options.DeliveryLeaseTTL, sessionRevalidateInterval: options.SessionRevalidateInterval, metrics: options.Metrics}
 	return http.HandlerFunc(h.serveHTTP)
 }
 
@@ -59,6 +61,7 @@ type handler struct {
 	endpointLeaseTTL          time.Duration
 	deliveryLeaseTTL          time.Duration
 	sessionRevalidateInterval time.Duration
+	metrics                   *Metrics
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -74,7 +77,7 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	session, err := h.authenticate(r, body)
 	if err != nil {
 		if errors.Is(err, ErrMaintenance) {
-			writeStoreError(w, err)
+			h.writeStoreError(w, err)
 			return
 		}
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -210,7 +213,7 @@ func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string,
 		return
 	}
 	if err := store.BindRoleToSession(machineID, request.Role, request.SessionEndpoint, now, h.endpointLeaseTTL); err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -255,7 +258,7 @@ func (h *handler) applyControl(w http.ResponseWriter, body []byte, machineID, co
 	}
 	event, duplicate, err := store.ApplyControl(ControlInput{ConversationID: conversationID, ActorMachineID: machineID, ActorEndpoint: request.ActorEndpoint, Operation: request.Operation, Member: Member{Endpoint: request.Member.Endpoint, Capabilities: capabilities}, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	status := http.StatusCreated
@@ -280,7 +283,7 @@ func (h *handler) controlAudit(w http.ResponseWriter, body []byte, machineID, co
 	}
 	events, err := store.ControlAudit(conversationID, machineID, request.ActorEndpoint, now)
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
@@ -299,7 +302,7 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 		return
 	}
 	if err := h.store.AuthorizeSender(conversationID, machineID, request.FromEndpoint, now); err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"authorized": true})
@@ -308,7 +311,7 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {
 	conversations, err := h.store.ConversationsForMachine(machineID, now)
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"conversations": conversations})
@@ -420,7 +423,7 @@ func (h *handler) advertiseEndpoints(w http.ResponseWriter, body []byte, machine
 		err = h.store.AdvertiseEndpoints(machineID, request.Endpoints, now, h.endpointLeaseTTL)
 	}
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lease_until": now.Add(h.endpointLeaseTTL).Format(time.RFC3339Nano)})
@@ -450,7 +453,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		return
 	}
 	if err := h.store.AssertEndpointOwnership(machineID, request.CreatorEndpoint, now); err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	members := make([]Member, 0, len(request.Members))
@@ -474,7 +477,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	}
 	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, conversation)
@@ -501,13 +504,13 @@ func (h *handler) appendMessage(w http.ResponseWriter, body []byte, machineID st
 	}
 	message, duplicate, err := h.store.AppendMessage(AppendInput{ConversationID: conversationID, SenderMachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, FromEndpoint: request.FromEndpoint, TargetRole: request.TargetRole, Body: request.Body, ArtifactIDs: request.ArtifactIDs, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	if !duplicate {
 		machines, err := h.store.RecipientMachines(message.ID, now)
 		if err != nil {
-			writeStoreError(w, err)
+			h.writeStoreError(w, err)
 			return
 		}
 		for _, recipientMachine := range machines {
@@ -528,7 +531,7 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 	}
 	invocations, ok := h.store.(InvocationBackend)
 	if !ok {
-		writeStoreError(w, ErrMaintenance)
+		h.writeStoreError(w, ErrMaintenance)
 		return
 	}
 	var request struct {
@@ -545,7 +548,7 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 	}
 	invocation, duplicate, err := invocations.RequestInvocation(InvokeInput{ConversationID: conversationID, SenderMachineID: machineID, FromEndpoint: request.FromEndpoint, TargetEndpoint: request.TargetEndpoint, IdempotencyKey: idempotencyKey, Now: now})
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	status := http.StatusCreated
@@ -564,7 +567,7 @@ func (h *handler) requestInvocation(w http.ResponseWriter, body []byte, machineI
 func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
 	invocations, ok := h.store.(InvocationBackend)
 	if !ok {
-		writeStoreError(w, ErrMaintenance)
+		h.writeStoreError(w, ErrMaintenance)
 		return
 	}
 	var request struct {
@@ -580,7 +583,7 @@ func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID
 	}
 	leased, err := invocations.LeaseInvocations(machineID, request.ConsumerID, now, h.deliveryLeaseTTL, request.Limit)
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	allowed := leased[:0]
@@ -594,7 +597,7 @@ func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID
 		// scope. This is terminal policy rejection, not a runtime failure, so it
 		// must not consume the bounded runtime retry budget.
 		if err := invocations.RejectInvocation(machineID, invocation.ID, invocation.LeaseToken, invocation.LeaseGeneration, now); err != nil {
-			writeStoreError(w, err)
+			h.writeStoreError(w, err)
 			return
 		}
 	}
@@ -604,7 +607,7 @@ func (h *handler) leaseInvocations(w http.ResponseWriter, body []byte, machineID
 func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID, invocationID string, now time.Time) {
 	invocations, ok := h.store.(InvocationBackend)
 	if !ok {
-		writeStoreError(w, ErrMaintenance)
+		h.writeStoreError(w, ErrMaintenance)
 		return
 	}
 	var request struct {
@@ -617,7 +620,7 @@ func (h *handler) reportInvocation(w http.ResponseWriter, body []byte, machineID
 		return
 	}
 	if err := invocations.ReportInvocation(machineID, invocationID, request.LeaseToken, request.LeaseGeneration, request.Accepted, now); err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -647,7 +650,7 @@ func (h *handler) leaseDeliveries(w http.ResponseWriter, body []byte, machineID 
 	}
 	page, err := h.store.LeaseDeliveries(machineID, request.ConsumerID, request.Endpoint, request.ConversationID, now, h.deliveryLeaseTTL, request.Limit)
 	if err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, page)
@@ -668,7 +671,7 @@ func (h *handler) ackDelivery(w http.ResponseWriter, body []byte, machineID, del
 		return
 	}
 	if err := h.store.AckDelivery(machineID, request.Endpoint, deliveryID, request.LeaseToken, request.LeaseGeneration, now); err != nil {
-		writeStoreError(w, err)
+		h.writeStoreError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -720,12 +723,21 @@ func parseCapabilities(values []string) (Capability, error) {
 	return capabilities, nil
 }
 
-func writeStoreError(w http.ResponseWriter, err error) {
+func (h *handler) writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrForbidden):
 		writeError(w, http.StatusForbidden, "authorization denied")
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "request conflicts with durable state")
+	case errors.Is(err, ErrRateLimited):
+		seconds := minRateRetryAfterSeconds
+		var limited *RateLimitedError
+		if errors.As(err, &limited) {
+			seconds = limited.RetryAfterSeconds()
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(seconds))
+		h.metrics.AddRateRejection()
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 	case errors.Is(err, ErrMaintenance):
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusServiceUnavailable, "relay maintenance in progress")

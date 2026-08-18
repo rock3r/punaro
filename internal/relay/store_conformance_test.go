@@ -17,4 +17,5 @@ func TestSQLiteStoreConformance(t *testing.T) {
 	contracttest.Run(t, store, "sqlite-contract")
 	contracttest.RunRoleTargeting(t, store, "sqlite-target")
 	contracttest.RunRoleProfiles(t, store, "sqlite-profile")
+	contracttest.RunRateLimits(t, store, "sqlite-rate")
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib" // Register the audited pgx database/sql driver.
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 const operationTimeout = 5 * time.Second
@@ -31,6 +32,8 @@ type Database struct {
 	memoryUsageWrites         chan memoryUsageWrite
 	memoryUsageStop           chan struct{}
 	memoryUsageDone           chan struct{}
+	rateMu                    sync.Mutex
+	rateLimit                 relay.RateLimitPolicy
 	memoryUsageStopOnce       sync.Once
 }
 
@@ -97,6 +100,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
 		memoryUsageDone:           make(chan struct{}),
+		rateLimit:                 relay.DefaultRateLimitPolicy(),
 	}
 	go database.runMemoryUsageWriter(ctx)
 	return database, nil
@@ -1253,6 +1257,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL relay role-profile schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = profileObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 46 {
+		rateLimitObjectsPresent, err := relayRateLimitControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay rate-limit schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = rateLimitObjectsPresent
 	}
 	return snapshot, nil
 }

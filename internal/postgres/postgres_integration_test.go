@@ -1583,6 +1583,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.Run(t, app, "postgres-contract")
 	contracttest.RunRoleTargeting(t, app, "postgres-target")
 	contracttest.RunRoleProfiles(t, app, "postgres-profile")
+	contracttest.RunRateLimits(t, app, "postgres-rate")
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)

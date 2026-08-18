@@ -57,6 +57,18 @@ PUNARO_LISTEN_ADDR=127.0.0.1:8080
 PUNARO_DATA_DIR=/var/lib/punaro
 ```
 
+Optional relay rate-limit overrides are startup-validated. Defaults are 60
+sender tokens refilling at 60/minute, 120 conversation tokens refilling at
+120/minute, and a 60-second Retry-After ceiling:
+
+```text
+PUNARO_RELAY_SENDER_RATE_BURST=60
+PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE=60
+PUNARO_RELAY_CONVERSATION_RATE_BURST=120
+PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE=120
+PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS=60
+```
+
 For a Cloudflare-protected remote route, additionally set the Access issuer,
 application audience tag, and JWKS URL. Configure the tunnel origin to require
 the Access assertion. The process validates `Cf-Access-Jwt-Assertion` itself;

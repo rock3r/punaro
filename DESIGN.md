@@ -390,6 +390,23 @@ transactionally at acceptance. The guarantee is **at-least-once delivery**: a cr
 local mailbox injection but before the relay receives the acknowledgement can
 produce a redelivery.
 
+Accepted appends consume one token from independent durable buckets for the
+authenticated sender machine and the conversation. The limiter uses server time
+supplied by `punarod`, never a client timestamp, and stores enough state that a
+daemon restart cannot restore a depleted bucket. Exact retries of a committed
+idempotency key return the original message without charging. A new request
+consumes both buckets in the same transaction as sequence allocation; a
+rate-limit, authorization, or conflict refusal creates no sequence, message,
+delivery, idempotency, or audit row. HTTP maps that refusal to `429` with a
+bounded integer `Retry-After` and the stable content-free error
+`rate limit exceeded`. Bodies are never hashed, compared, or parsed for loop
+detection. Defaults are 60 sender tokens with a 60/minute refill, 120
+conversation tokens with a 120/minute refill, and a 60-second Retry-After
+ceiling; hard bounds are 1–10000 tokens/refill and 1–3600 Retry-After seconds.
+SQLite and PostgreSQL implement the same observable contract. Metrics count
+rate rejections without labels derived from bodies, endpoints, roles, or
+conversation IDs.
+
 An adapter does not receive a message merely because it has opened a WebSocket.
 It fetches durable deliveries, injects them into its local `agent_mailbox`, and
 acknowledges each only after local acceptance succeeds.

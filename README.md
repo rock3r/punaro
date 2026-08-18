@@ -133,6 +133,11 @@ precedence over dotenv values.
 | `PUNARO_RELAY_ENABLED` | `false` | Enables the loopback text relay; requires public machine enrollment records. |
 | `PUNARO_RELAY_STORE` | `sqlite` | Explicit relay backend selector. Before cutover, `postgres` is limited to empty-destination parity/qualification. The supported one-shot executor publishes `postgres` marker-last only after verified import, SQLite retirement, legacy-gate closure, and PostgreSQL activation. It never dual-writes. |
 | `PUNARO_RELAY_MACHINES_JSON` | unset | Explicit public-key machine enrollment records. `endpoint_prefixes` claims disjoint machine namespaces; `endpoints` can grant a named exact endpoint without creating a prefix. |
+| `PUNARO_RELAY_SENDER_RATE_BURST` | `60` | Startup-validated sender-machine token-bucket burst. Integer 1–10000. |
+| `PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE` | `60` | Startup-validated sender-machine refill. Integer 1–10000 tokens/minute. |
+| `PUNARO_RELAY_CONVERSATION_RATE_BURST` | `120` | Startup-validated conversation token-bucket burst. Integer 1–10000. |
+| `PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE` | `120` | Startup-validated conversation refill. Integer 1–10000 tokens/minute. |
+| `PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS` | `60` | Ceiling for the integer `Retry-After` advertised on a `429` rate-limit refusal. Integer 1–3600. |
 | `PUNARO_TRUSTED_ATTACHMENTS_ENABLED` | `false` | Separately gates the authenticated trusted-relay attachment surface; requires PostgreSQL device authentication, a valid ingress policy, schema v13, and successful startup reconciliation. |
 | `PUNARO_TRUSTED_ATTACHMENT_BLOB_DIR` | unset | Required with trusted attachments: absolute private (`0700`) daemon-owned blob root. |
 

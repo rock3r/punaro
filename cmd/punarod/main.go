@@ -746,7 +746,14 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		}
 		return nil, nil, err
 	}
-	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{})
+	if err := applyRelayRateLimitPolicy(cfg, backend); err != nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		return nil, nil, err
+	}
+	metrics := &relay.Metrics{}
+	handler := relay.NewHandler(backend, authenticator, relay.HandlerOptions{Metrics: metrics})
 	if cfg.AccessIssuer != "" {
 		verifier, err := newAccessVerifier(cfg)
 		if err != nil {
@@ -758,6 +765,27 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		handler = verifier.Middleware(handler)
 	}
 	return handler, store, nil
+}
+
+func applyRelayRateLimitPolicy(cfg config.Config, backend relay.Backend) error {
+	policy := relay.DefaultRateLimitPolicy()
+	if cfg.RelaySenderRateBurst != 0 || cfg.RelaySenderRateRefillPerMinute != 0 || cfg.RelayConversationRateBurst != 0 || cfg.RelayConversationRateRefillPerMinute != 0 || cfg.RelayRateRetryAfterMaxSeconds != 0 {
+		policy = relay.RateLimitPolicy{
+			SenderBurst:                 cfg.RelaySenderRateBurst,
+			SenderRefillPerMinute:       cfg.RelaySenderRateRefillPerMinute,
+			ConversationBurst:           cfg.RelayConversationRateBurst,
+			ConversationRefillPerMinute: cfg.RelayConversationRateRefillPerMinute,
+			MaxRetryAfterSeconds:        cfg.RelayRateRetryAfterMaxSeconds,
+		}
+	}
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	configurer, ok := backend.(relay.RateLimitConfigurer)
+	if !ok {
+		return errors.New("relay rate limiter is unavailable")
+	}
+	return configurer.SetRateLimitPolicy(policy)
 }
 
 func newAccessVerifier(cfg config.Config) (*access.Verifier, error) {

@@ -21,38 +21,43 @@ import (
 
 // Config is the explicit environment-derived daemon configuration.
 type Config struct {
-	ListenAddr                      string
-	HealthListenAddr                string
-	DataDir                         string
-	LogLevel                        string
-	RelayEnabled                    bool
-	RelayMachinesJSON               string
-	RelayStore                      string
-	AccessIssuer                    string
-	AccessAudience                  string
-	AccessJWKSURL                   string
-	AccessJWKSFile                  string
-	PostgresEnabled                 bool
-	PostgresDSNFile                 string
-	DeviceAuthEnabled               bool
-	MemoryAPIEnabled                bool
-	MemoryMutationsEnabled          bool
-	RemoteMCPMetadataEnabled        bool
-	RemoteMCPResourceURL            string
-	RemoteMCPAuthorizationServers   string
-	RemoteMCPTokenValidationEnabled bool
-	RemoteMCPIssuer                 string
-	RemoteMCPJWKSURL                string
-	RemoteMCPSubjectBindingsJSON    string
-	MemoryOpenAIEmbeddingsURL       string
-	MemoryOpenAIAPIKeyFile          string
-	TrustedAttachmentsEnabled       bool
-	TrustedAttachmentBlobDir        string
-	CredentialTransitionEnabled     bool
-	IngressMode                     string
-	PublicURL                       string
-	TrustedLANCIDR                  string
-	TrustedLANHTTP                  bool
+	ListenAddr                           string
+	HealthListenAddr                     string
+	DataDir                              string
+	LogLevel                             string
+	RelayEnabled                         bool
+	RelayMachinesJSON                    string
+	RelayStore                           string
+	AccessIssuer                         string
+	AccessAudience                       string
+	AccessJWKSURL                        string
+	AccessJWKSFile                       string
+	PostgresEnabled                      bool
+	PostgresDSNFile                      string
+	DeviceAuthEnabled                    bool
+	MemoryAPIEnabled                     bool
+	MemoryMutationsEnabled               bool
+	RemoteMCPMetadataEnabled             bool
+	RemoteMCPResourceURL                 string
+	RemoteMCPAuthorizationServers        string
+	RemoteMCPTokenValidationEnabled      bool
+	RemoteMCPIssuer                      string
+	RemoteMCPJWKSURL                     string
+	RemoteMCPSubjectBindingsJSON         string
+	MemoryOpenAIEmbeddingsURL            string
+	MemoryOpenAIAPIKeyFile               string
+	TrustedAttachmentsEnabled            bool
+	TrustedAttachmentBlobDir             string
+	CredentialTransitionEnabled          bool
+	IngressMode                          string
+	PublicURL                            string
+	TrustedLANCIDR                       string
+	TrustedLANHTTP                       bool
+	RelaySenderRateBurst                 int
+	RelaySenderRateRefillPerMinute       int
+	RelayConversationRateBurst           int
+	RelayConversationRateRefillPerMinute int
+	RelayRateRetryAfterMaxSeconds        int
 }
 
 // Load reads configuration and optionally loads an explicitly named dotenv file.
@@ -138,6 +143,26 @@ func Load(explicitEnvFile string) (Config, error) {
 	trustedLANHTTP, err := strconv.ParseBool(value("PUNARO_TRUSTED_LAN_HTTP", "false"))
 	if err != nil {
 		return Config{}, fmt.Errorf("parse PUNARO_TRUSTED_LAN_HTTP: %w", err)
+	}
+	senderBurst, err := parseBoundedInt("PUNARO_RELAY_SENDER_RATE_BURST", value("PUNARO_RELAY_SENDER_RATE_BURST", "60"), 1, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	senderRefill, err := parseBoundedInt("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", value("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "60"), 1, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	conversationBurst, err := parseBoundedInt("PUNARO_RELAY_CONVERSATION_RATE_BURST", value("PUNARO_RELAY_CONVERSATION_RATE_BURST", "120"), 1, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	conversationRefill, err := parseBoundedInt("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", value("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "120"), 1, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	retryAfterMax, err := parseBoundedInt("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", value("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "60"), 1, 3600)
+	if err != nil {
+		return Config{}, err
 	}
 	listenAddr := value("PUNARO_LISTEN_ADDR", "127.0.0.1:8080")
 	healthListenAddr := value("PUNARO_HEALTH_LISTEN_ADDR", "127.0.0.1:8081")
@@ -227,7 +252,7 @@ func Load(explicitEnvFile string) (Config, error) {
 	if !postgresEnabled && postgresDSNFile != "" {
 		return Config{}, fmt.Errorf("PUNARO_POSTGRES_DSN_FILE requires PUNARO_POSTGRES_ENABLED")
 	}
-	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP}, nil
+	return Config{ListenAddr: listenAddr, HealthListenAddr: healthListenAddr, DataDir: dataDir, LogLevel: level, RelayEnabled: relayEnabled, RelayMachinesJSON: relayMachines, RelayStore: relayStore, AccessIssuer: accessIssuer, AccessAudience: accessAudience, AccessJWKSURL: accessJWKSURL, AccessJWKSFile: accessJWKSFile, PostgresEnabled: postgresEnabled, PostgresDSNFile: postgresDSNFile, DeviceAuthEnabled: deviceAuthEnabled, MemoryAPIEnabled: memoryAPIEnabled, MemoryMutationsEnabled: memoryMutationsEnabled, RemoteMCPMetadataEnabled: remoteMCPMetadataEnabled, RemoteMCPResourceURL: remoteMCPResourceURL, RemoteMCPAuthorizationServers: remoteMCPAuthorizationServers, RemoteMCPTokenValidationEnabled: remoteMCPTokenValidationEnabled, RemoteMCPIssuer: remoteMCPIssuer, RemoteMCPJWKSURL: remoteMCPJWKSURL, RemoteMCPSubjectBindingsJSON: remoteMCPSubjectBindingsJSON, MemoryOpenAIEmbeddingsURL: memoryOpenAIEmbeddingsURL, MemoryOpenAIAPIKeyFile: memoryOpenAIAPIKeyFile, TrustedAttachmentsEnabled: trustedAttachmentsEnabled, TrustedAttachmentBlobDir: trustedAttachmentBlobDir, CredentialTransitionEnabled: credentialTransitionEnabled, IngressMode: ingressMode, PublicURL: publicURL, TrustedLANCIDR: trustedLANCIDR, TrustedLANHTTP: trustedLANHTTP, RelaySenderRateBurst: senderBurst, RelaySenderRateRefillPerMinute: senderRefill, RelayConversationRateBurst: conversationBurst, RelayConversationRateRefillPerMinute: conversationRefill, RelayRateRetryAfterMaxSeconds: retryAfterMax}, nil
 }
 
 func validRemoteMCPHTTPSURL(raw string, permitPath bool) bool {
@@ -356,6 +381,14 @@ func value(name, fallback string) string {
 		return strings.TrimSpace(v)
 	}
 	return fallback
+}
+
+func parseBoundedInt(name, raw string, min, max int) (int, error) {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < min || value > max {
+		return 0, fmt.Errorf("%s must be an integer between %d and %d", name, min, max)
+	}
+	return value, nil
 }
 func parseLogLevel(raw string) (string, error) {
 	switch strings.ToLower(raw) {

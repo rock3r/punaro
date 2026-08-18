@@ -18,8 +18,29 @@ var _ relay.Backend = (*Database)(nil)
 var _ relay.RoleBindingBackend = (*Database)(nil)
 var _ relay.RoleProfileBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
+var _ relay.RateLimitConfigurer = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
+
+// SetRateLimitPolicy replaces the durable limiter bounds after startup validation.
+func (d *Database) SetRateLimitPolicy(policy relay.RateLimitPolicy) error {
+	if err := policy.Validate(); err != nil {
+		return err
+	}
+	d.rateMu.Lock()
+	d.rateLimit = policy
+	d.rateMu.Unlock()
+	return nil
+}
+
+func (d *Database) rateLimitPolicy() relay.RateLimitPolicy {
+	d.rateMu.Lock()
+	defer d.rateMu.Unlock()
+	if d.rateLimit == (relay.RateLimitPolicy{}) {
+		return relay.DefaultRateLimitPolicy()
+	}
+	return d.rateLimit
+}
 
 // ConsumeRequestNonce atomically consumes one signed-request replay token
 // through the schema-owner routine. The application role cannot delete nonce
@@ -836,6 +857,12 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, errors.New("message retry state is unavailable")
 	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('rate-sender',$1::text)::text, 579001230613))`, input.SenderMachineID); err != nil {
+		return relay.Message{}, false, errors.New("message sender rate lock is unavailable")
+	}
+	if err := consumePostgresRateLimits(tx, d.rateLimitPolicy(), input.SenderMachineID, input.ConversationID, input.Now); err != nil {
+		return relay.Message{}, false, err
+	}
 	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
@@ -1361,6 +1388,58 @@ func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string)
 		}
 	}
 	return nil
+}
+
+func consumePostgresRateLimits(tx *sql.Tx, policy relay.RateLimitPolicy, senderMachineID, conversationID string, now time.Time) error {
+	senderRetry, senderOK, err := consumePostgresRateBucket(tx, "sender_machine", senderMachineID, now, policy.SenderBurst, policy.SenderRefillPerMinute, policy.MaxRetryAfterSeconds)
+	if err != nil {
+		return err
+	}
+	conversationRetry, conversationOK, err := consumePostgresRateBucket(tx, "conversation", conversationID, now, policy.ConversationBurst, policy.ConversationRefillPerMinute, policy.MaxRetryAfterSeconds)
+	if err != nil {
+		return err
+	}
+	if senderOK && conversationOK {
+		return nil
+	}
+	retryAfter := senderRetry
+	if !conversationOK && conversationRetry > retryAfter {
+		retryAfter = conversationRetry
+	}
+	if senderOK {
+		retryAfter = conversationRetry
+	}
+	if conversationOK {
+		retryAfter = senderRetry
+	}
+	seconds := int((retryAfter + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	if policy.MaxRetryAfterSeconds > 0 && seconds > policy.MaxRetryAfterSeconds {
+		seconds = policy.MaxRetryAfterSeconds
+	}
+	return &relay.RateLimitedError{RetryAfter: time.Duration(seconds) * time.Second}
+}
+
+func consumePostgresRateBucket(tx *sql.Tx, scope, key string, now time.Time, burst, refillPerMinute, maxRetryAfterSeconds int) (time.Duration, bool, error) {
+	nowUTC := now.UTC()
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_rate_buckets(scope, bucket_key, tokens_milli, last_refill_at) VALUES ($1, $2, $3, $4) ON CONFLICT (scope, bucket_key) DO NOTHING`, scope, key, int64(burst)*1000, nowUTC); err != nil {
+		return 0, false, errors.New("rate bucket cannot be created")
+	}
+	var tokensMilli int64
+	var lastRefill time.Time
+	if err := tx.QueryRowContext(context.Background(), `SELECT tokens_milli, last_refill_at FROM relay.mail_rate_buckets WHERE scope=$1 AND bucket_key=$2 FOR UPDATE`, scope, key).Scan(&tokensMilli, &lastRefill); err != nil {
+		return 0, false, errors.New("rate bucket is unavailable")
+	}
+	nextTokens, nextRefillMilli, retryAfter, ok := relay.ApplyRateBucket(tokensMilli, lastRefill.UTC().UnixMilli(), nowUTC, burst, refillPerMinute, maxRetryAfterSeconds)
+	if !ok {
+		return retryAfter, false, nil
+	}
+	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_rate_buckets SET tokens_milli=$1, last_refill_at=$2 WHERE scope=$3 AND bucket_key=$4`, nextTokens, time.UnixMilli(nextRefillMilli).UTC(), scope, key); err != nil {
+		return 0, false, errors.New("rate bucket cannot be updated")
+	}
+	return 0, true, nil
 }
 
 func postgresAdvanceSkippedTargetCursors(tx *sql.Tx, conversationID, senderEndpoint, targetRole string) error {

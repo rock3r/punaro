@@ -73,6 +73,26 @@ func TestBuildRelayHandlerRejectsInvalidEnrollment(t *testing.T) {
 	}
 }
 
+func TestBuildRelayHandlerRejectsInvalidRateLimitPolicy(t *testing.T) {
+	public, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machines := `[{"id":"machine-a","public_key":"` + base64.RawURLEncoding.EncodeToString(public) + `","endpoint_prefixes":["agent/a/"]}]`
+	_, closer, err := buildRelayHandler(config.Config{
+		DataDir: t.TempDir(), RelayEnabled: true, RelayMachinesJSON: machines,
+		RelaySenderRateBurst: 0, RelaySenderRateRefillPerMinute: 60,
+		RelayConversationRateBurst: 60, RelayConversationRateRefillPerMinute: 60,
+		RelayRateRetryAfterMaxSeconds: 60,
+	})
+	if closer != nil {
+		t.Fatal("invalid rate-limit policy returned a closer")
+	}
+	if err == nil {
+		t.Fatal("invalid rate-limit policy enabled relay routes")
+	}
+}
+
 func TestBuildRelayHandlerRevokedEnrollmentFailsClosedAfterRestart(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

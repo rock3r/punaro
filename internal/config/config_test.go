@@ -38,6 +38,41 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadRelayRateLimitDefaultsAndBounds(t *testing.T) {
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RelaySenderRateBurst != 60 || cfg.RelaySenderRateRefillPerMinute != 60 || cfg.RelayConversationRateBurst != 120 || cfg.RelayConversationRateRefillPerMinute != 120 || cfg.RelayRateRetryAfterMaxSeconds != 60 {
+		t.Fatalf("rate-limit defaults=%#v", cfg)
+	}
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_BURST", "2")
+	t.Setenv("PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "30")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_BURST", "4")
+	t.Setenv("PUNARO_RELAY_CONVERSATION_RATE_REFILL_PER_MINUTE", "15")
+	t.Setenv("PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "9")
+	cfg, err = Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RelaySenderRateBurst != 2 || cfg.RelaySenderRateRefillPerMinute != 30 || cfg.RelayConversationRateBurst != 4 || cfg.RelayConversationRateRefillPerMinute != 15 || cfg.RelayRateRetryAfterMaxSeconds != 9 {
+		t.Fatalf("configured rate limits=%#v", cfg)
+	}
+	for _, env := range []struct{ name, value string }{
+		{"PUNARO_RELAY_SENDER_RATE_BURST", "0"},
+		{"PUNARO_RELAY_SENDER_RATE_BURST", "10001"},
+		{"PUNARO_RELAY_SENDER_RATE_REFILL_PER_MINUTE", "-1"},
+		{"PUNARO_RELAY_CONVERSATION_RATE_BURST", "nope"},
+		{"PUNARO_RELAY_RATE_RETRY_AFTER_MAX_SECONDS", "3601"},
+	} {
+		t.Setenv(env.name, env.value)
+		if _, err := Load(""); err == nil {
+			t.Fatalf("%s=%q was accepted", env.name, env.value)
+		}
+		t.Setenv(env.name, "")
+	}
+}
+
 func TestLoadAcceptsProductionComposeRuntimeConfiguration(t *testing.T) {
 	for key, value := range map[string]string{
 		"PUNARO_LISTEN_ADDR":         "127.0.0.1:8080",
