@@ -53,6 +53,7 @@ type RunRequest struct {
 	HealthWindow  time.Duration
 	Start         func(context.Context, ChildSpec) (Process, error)
 	afterPrepare  func()
+	clockStart    time.Time
 }
 
 // ChildSpec is the closed-list adapter launch. Release metadata cannot add
@@ -145,6 +146,9 @@ func (request *RunRequest) normalizeRun() error {
 	if request.HealthWindow < 0 {
 		request.HealthWindow = DefaultHealthWindow
 	}
+	if request.clockStart.IsZero() {
+		request.clockStart = time.Now()
+	}
 	return nil
 }
 
@@ -190,8 +194,8 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	if err != nil {
 		return identity, "", err
 	}
-	if err := os.Remove(filepath.Join(request.Directory, readyFile)); err != nil && !os.IsNotExist(err) {
-		return slotState{}, "", errors.New("bootstrap ready file is invalid")
+	if err := removeReadyFile(request.Directory); err != nil {
+		return slotState{}, "", err
 	}
 	return identity, adapter, nil
 }
@@ -225,6 +229,21 @@ func (request RunRequest) hasPrevious(current slotState) bool {
 		return false
 	}
 	return previous.Release != current.Release || previous.Sequence != current.Sequence || previous.ManifestSHA256 != current.ManifestSHA256
+}
+
+func (request RunRequest) currentNow() time.Time {
+	if request.clockStart.IsZero() {
+		return request.Now
+	}
+	return request.Now.Add(time.Since(request.clockStart))
+}
+
+func removeReadyFile(directory string) error {
+	path := filepath.Join(directory, readyFile)
+	if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+		return errors.New("bootstrap ready file is invalid")
+	}
+	return nil
 }
 
 func startAdapter(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), adapter string) (Process, error) {
@@ -349,8 +368,8 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	if err := os.Remove(filepath.Join(request.Directory, readyFile)); err != nil && !os.IsNotExist(err) {
-		return errors.New("bootstrap ready file is invalid")
+	if err := removeReadyFile(request.Directory); err != nil {
+		return err
 	}
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
@@ -444,7 +463,7 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 		Directory: request.Directory,
 		Origin:    request.Origin,
 		Keys:      request.Keys,
-		Now:       request.Now,
+		Now:       request.currentNow(),
 		HTTP:      request.HTTP,
 	})
 	if err != nil {

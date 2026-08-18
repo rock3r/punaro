@@ -375,6 +375,7 @@ type originSpec struct {
 	sequence        int64
 	catalogSequence int64
 	criticalBlocks  []int64
+	expiresAt       time.Time
 }
 
 type signedOrigin struct {
@@ -421,6 +422,9 @@ func (origin *signedOrigin) republish(t *testing.T, spec originSpec) {
 	if spec.catalogSequence == 0 {
 		spec.catalogSequence = 1
 	}
+	if spec.expiresAt.IsZero() {
+		spec.expiresAt = time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	}
 	build := t.TempDir()
 	name := artifactName("punaro-adapter", spec.goos, spec.goarch)
 	if err := os.WriteFile(filepath.Join(build, name), []byte(spec.payload), 0o600); err != nil {
@@ -431,7 +435,7 @@ func (origin *signedOrigin) republish(t *testing.T, spec originSpec) {
 		Release:                 spec.release,
 		Sequence:                spec.sequence,
 		PublishedAt:             time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
-		ExpiresAt:               time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		ExpiresAt:               spec.expiresAt,
 		MinimumSafeSequence:     1,
 		CatalogSequence:         spec.catalogSequence,
 		ComposeSHA256:           testCompose,

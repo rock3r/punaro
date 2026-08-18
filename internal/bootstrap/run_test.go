@@ -193,6 +193,73 @@ func TestRunDoesNotEnterRecoveryWhenCurrentSlotChanged(t *testing.T) {
 	}
 }
 
+func TestRunClearsHealthDirectoryBeforeStart(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	if err := os.Mkdir(filepath.Join(dir, readyFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var started bool
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 20 * time.Millisecond,
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			started = true
+			if _, err := os.Lstat(filepath.Join(dir, readyFile)); !os.IsNotExist(err) {
+				t.Errorf("ready path still present: %v", err)
+			}
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			return finishedProcess(nil), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !started {
+		t.Fatal("did not start after clearing health directory")
+	}
+}
+
+func TestRunRejectsExpiredCatalogOnRollback(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	start := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	origin := newSignedOrigin(t, originSpec{
+		payload:         "current-adapter",
+		goos:            runtime.GOOS,
+		goarch:          runtime.GOARCH,
+		release:         "v0.2.0",
+		sequence:        2,
+		catalogSequence: 2,
+		expiresAt:       start.Add(30 * time.Millisecond),
+	})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		Origin:        origin.URL,
+		Keys:          origin.Keys,
+		HealthTimeout: 80 * time.Millisecond,
+		Now:           start,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("expired catalog rollback err=%v", err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || !status.RecoveryOnly {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunEntersRecoveryWhenFirstSlotHealthIsInvalid(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
