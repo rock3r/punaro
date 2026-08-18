@@ -314,15 +314,28 @@ type InvocationAuditEvent struct {
 
 // Store owns SQLite-backed relay state.
 type Store struct {
-	db         *sql.DB
-	rateMu     sync.Mutex
-	rateLimits RateLimitConfig
-	metrics    *Metrics
+	db               *sql.DB
+	rateMu           sync.Mutex
+	rateLimits       RateLimitConfig
+	quotaMu          sync.Mutex
+	quota            QuotaConfig
+	pendingMetricsMu sync.Mutex
+	metrics          *Metrics
 }
 
 // Open creates or opens a SQLite WAL database with the full durable delivery
 // schema. The database directory is private to the service account.
 func Open(database string) (*Store, error) {
+	return openStore(database, true)
+}
+
+// OpenForCapacityRepair opens a SQLite relay without the fail-closed quota
+// consistency check so a confirmed operator reconcile can rebuild counters.
+func OpenForCapacityRepair(database string) (*Store, error) {
+	return openStore(database, false)
+}
+
+func openStore(database string, verifyQuota bool) (*Store, error) {
 	if strings.TrimSpace(database) == "" {
 		return nil, fmt.Errorf("relay database path is required")
 	}
@@ -338,7 +351,7 @@ func Open(database string) (*Store, error) {
 	// from surfacing SQLITE_BUSY instead of orderly transactional serialization.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	store := &Store{db: db, rateLimits: DefaultRateLimitConfig()}
+	store := &Store{db: db, rateLimits: DefaultRateLimitConfig(), quota: DefaultQuotaConfig()}
 	var migrationControlExists bool
 	if err := db.QueryRowContext(context.Background(), `SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type='table' AND name='relay_migration_control')`).Scan(&migrationControlExists); err != nil {
 		_ = db.Close()
@@ -383,6 +396,12 @@ func Open(database string) (*Store, error) {
 	default:
 		_ = db.Close()
 		return nil, errors.New("relay migration source control is invalid")
+	}
+	if verifyQuota {
+		if err := store.VerifyPendingQuota(); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	return store, nil
 }
@@ -548,6 +567,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at INTEGER NOT NULL,
 			PRIMARY KEY (kind, bucket_key)
 		)`,
+		`CREATE TABLE IF NOT EXISTS pending_quota_recipients (
+			recipient_endpoint TEXT PRIMARY KEY,
+			pending_count INTEGER NOT NULL CHECK (pending_count >= 0),
+			pending_bytes INTEGER NOT NULL CHECK (pending_bytes >= 0)
+		)`,
+		`CREATE TABLE IF NOT EXISTS pending_quota_install (
+			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+			pending_count INTEGER NOT NULL CHECK (pending_count >= 0),
+			pending_bytes INTEGER NOT NULL CHECK (pending_bytes >= 0)
+		)`,
 		`CREATE TABLE IF NOT EXISTS direct_conversations (
 			role_low TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
 			role_high TEXT NOT NULL REFERENCES roles(role) ON DELETE RESTRICT,
@@ -604,7 +633,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "direct_conversations", "message_from_roles", "direct_message_idempotency"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "direct_conversations", "message_from_roles", "direct_message_idempotency"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -635,7 +664,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.bootstrapPendingQuota(ctx)
 }
 
 // ApplyControl performs one explicit membership mutation after rechecking that
@@ -713,8 +742,8 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 			}
 		}
 		if err == nil && previous&CapReceive != 0 && input.Member.Capabilities&CapReceive == 0 {
-			if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
-				return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+			if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+				return ControlEvent{}, false, err
 			}
 			if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 				return ControlEvent{}, false, err
@@ -749,8 +778,8 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 				return ControlEvent{}, false, ErrConflict
 			}
 		}
-		if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", input.Now.UTC().UnixMilli(), input.Member.Endpoint, input.ConversationID); err != nil {
-			return ControlEvent{}, false, fmt.Errorf("retire revoked deliveries: %w", err)
+		if err := retireRecipientDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now); err != nil {
+			return ControlEvent{}, false, err
 		}
 		if err := advanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 			return ControlEvent{}, false, err
@@ -780,6 +809,7 @@ func (s *Store) ApplyControl(input ControlInput) (ControlEvent, bool, error) {
 	if err := tx.Commit(); err != nil {
 		return ControlEvent{}, false, err
 	}
+	s.refreshPendingMetrics()
 	return event, false, nil
 }
 
@@ -1191,6 +1221,9 @@ func (s *Store) SendDirectMessage(input DirectMessageInput) (Message, bool, erro
 	if err := s.consumeRateLimits(tx, input.SenderMachineID, conversationID, now); err != nil {
 		return Message{}, false, err
 	}
+	if err := s.consumeQuota(tx, []string{roleRecipient(input.ToRole)}, int64(len(input.Body))); err != nil {
+		return Message{}, false, err
+	}
 	message := Message{ID: uuid.NewString(), ConversationID: conversationID, FromRole: input.FromRole, Body: input.Body, CreatedAt: now}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", conversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
@@ -1218,6 +1251,7 @@ func (s *Store) SendDirectMessage(input DirectMessageInput) (Message, bool, erro
 	if err := tx.Commit(); err != nil {
 		return Message{}, false, err
 	}
+	s.refreshPendingMetrics()
 	return message, false, nil
 }
 
@@ -1684,6 +1718,13 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if err := s.consumeRateLimits(tx, input.SenderMachineID, input.ConversationID, input.Now); err != nil {
 		return Message{}, false, err
 	}
+	deliveryRecipients, err := appendDeliveryRecipients(tx, input.ConversationID, input.FromEndpoint, input.TargetRole)
+	if err != nil {
+		return Message{}, false, err
+	}
+	if err := s.consumeQuota(tx, deliveryRecipients, int64(len(input.Body))); err != nil {
+		return Message{}, false, err
+	}
 	message := Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), "UPDATE conversations SET next_sequence = next_sequence + 1 WHERE id = ? RETURNING next_sequence", input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, ErrForbidden
@@ -1753,6 +1794,7 @@ func (s *Store) AppendMessage(input AppendInput) (Message, bool, error) {
 	if err := tx.Commit(); err != nil {
 		return Message{}, false, err
 	}
+	s.refreshPendingMetrics()
 	return message, false, nil
 }
 
@@ -1991,19 +2033,34 @@ func (s *Store) AckDelivery(machineID, endpoint, deliveryID, token string, gener
 	if !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || token != leaseToken.String || leaseGeneration != generation || !leaseOwnership.Valid || leaseOwnership.Int64 != ownershipGeneration || !leaseConsumer.Valid || leaseConsumer.Int64 != currentConsumerGeneration || !leaseUntil.Valid || leaseUntil.Int64 <= now.UnixMilli() {
 		return ErrForbidden
 	}
-	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), deliveryID); err != nil {
+	result, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at = ? WHERE id = ? AND acked_at IS NULL", now.UnixMilli(), deliveryID)
+	if err != nil {
+		return fmt.Errorf("acknowledge delivery: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
 		return fmt.Errorf("acknowledge delivery: %w", err)
 	}
 	var conversationID string
-	if err := tx.QueryRowContext(context.Background(), `SELECT message.conversation_id
+	var bodyBytes int64
+	if err := tx.QueryRowContext(context.Background(), `SELECT message.conversation_id, length(CAST(message.body AS BLOB))
 		FROM deliveries AS delivery JOIN messages AS message ON message.id = delivery.message_id
-		WHERE delivery.id = ?`, deliveryID).Scan(&conversationID); err != nil {
+		WHERE delivery.id = ?`, deliveryID).Scan(&conversationID, &bodyBytes); err != nil {
 		return fmt.Errorf("read delivery conversation: %w", err)
+	}
+	if affected == 1 {
+		if err := releaseQuota(tx, recipient.String, bodyBytes); err != nil {
+			return err
+		}
 	}
 	if err := advanceRecipientCursor(tx, recipient.String, conversationID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.refreshPendingMetrics()
+	return nil
 }
 
 // RecipientCursor returns the highest conversation sequence for which this

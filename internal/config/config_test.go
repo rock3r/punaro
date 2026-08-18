@@ -41,6 +41,9 @@ func TestLoadPostgresDefaultsDisabled(t *testing.T) {
 	if got, want := cfg.RelayRateLimits(), relay.DefaultRateLimitConfig(); got != want {
 		t.Fatalf("unexpected default rate limits: %#v", got)
 	}
+	if got, want := cfg.RelayQuotaLimits(), relay.DefaultQuotaConfig(); got != want {
+		t.Fatalf("unexpected default pending quota: %#v", got)
+	}
 }
 
 func TestLoadAcceptsProductionComposeRuntimeConfiguration(t *testing.T) {
@@ -550,5 +553,39 @@ func TestLoadAcceptsExplicitRelayRateLimits(t *testing.T) {
 	want := relay.RateLimitConfig{SenderBurst: 4, SenderRefillPerMinute: 12, ConversationBurst: 8, ConversationRefillPerMinute: 24, RetryAfterMaxSeconds: 9}
 	if got != want {
 		t.Fatalf("rate limits=%#v want %#v", got, want)
+	}
+}
+
+func TestLoadRejectsInvalidRelayQuotaLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending recipient count was accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "10000")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "0")
+	if _, err := Load(""); err == nil {
+		t.Fatal("zero pending installation bytes were accepted")
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "268435456")
+	t.Setenv("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", "nope")
+	if _, err := Load(""); err == nil {
+		t.Fatal("non-integer pending retry-after was accepted")
+	}
+}
+
+func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "2")
+	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", "64")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_COUNT", "8")
+	t.Setenv("PUNARO_RELAY_PENDING_INSTALLATION_BYTES", "256")
+	t.Setenv("PUNARO_RELAY_PENDING_RETRY_AFTER_SECONDS", "9")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.RelayQuotaLimits()
+	want := relay.QuotaConfig{RecipientCount: 2, RecipientBytes: 64, InstallationCount: 8, InstallationBytes: 256, RetryAfterSeconds: 9}
+	if got != want {
+		t.Fatalf("quota limits=%#v want %#v", got, want)
 	}
 }

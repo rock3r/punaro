@@ -500,6 +500,7 @@ RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog AS 
 	testMailCutoverSubstrate(ctx, t, app, ownerDB)
 	testRelayMembershipControlSchemaDrift(ctx, t, app, ownerDB)
 	testRelayRateLimitSchemaDrift(ctx, t, app, ownerDB)
+	testRelayPendingQuotaSchemaDrift(ctx, t, app, ownerDB)
 	testRelayIntegration(t, app)
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
@@ -1689,6 +1690,22 @@ func testRelayRateLimitSchemaDrift(ctx context.Context, t *testing.T, app *Datab
 	}
 }
 
+func testRelayPendingQuotaSchemaDrift(ctx context.Context, t *testing.T, app *Database, ownerDB *sql.DB) {
+	t.Helper()
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_pending_install DROP CONSTRAINT mail_pending_install_pending_count_check; ALTER TABLE relay.mail_pending_install ADD CONSTRAINT mail_pending_install_pending_count_check CHECK (pending_count IS NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if drifted, err := app.SchemaState(ctx); err != nil || drifted.Classification != Incompatible {
+		t.Fatalf("permissive pending-quota count constraint state=%#v err=%v", drifted, err)
+	}
+	if _, err := ownerDB.ExecContext(ctx, `ALTER TABLE relay.mail_pending_install DROP CONSTRAINT mail_pending_install_pending_count_check; ALTER TABLE relay.mail_pending_install ADD CONSTRAINT mail_pending_install_pending_count_check CHECK (pending_count >= 0)`); err != nil {
+		t.Fatal(err)
+	}
+	if restored, err := app.SchemaState(ctx); err != nil || restored.Classification != Compatible {
+		t.Fatalf("restored pending-quota count constraint state=%#v err=%v", restored, err)
+	}
+}
+
 func testDurableRoleRebindFencesPostgresDelivery(t *testing.T, app *Database) {
 	t.Helper()
 	now := time.Date(2026, time.July, 20, 17, 0, 0, 0, time.UTC)
@@ -1936,6 +1953,9 @@ func testRecipientCursorDoesNotCrossUncommittedAppend(t *testing.T, app *Databas
 		t.Fatal(err)
 	}
 	if _, err := appendTx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,$2)`, messageID, endpointB); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.consumeQuota(appendTx, []string{endpointB}, int64(len("must remain pending"))); err != nil {
 		t.Fatal(err)
 	}
 	cursorTx, cursorCancel, err := app.beginRelayTransaction(nil)

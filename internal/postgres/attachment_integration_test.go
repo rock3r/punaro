@@ -674,6 +674,9 @@ func testTrustedAttachmentIntegration(ctx context.Context, t *testing.T, app *Da
 	if err := cleanupTx.Commit(); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := app.ReconcilePendingQuota(ctx); err != nil {
+		t.Fatalf("reconcile leftover mail pending quota: %v", err)
+	}
 }
 
 func assertAttachmentProjectBeforeUpload(

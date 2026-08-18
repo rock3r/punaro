@@ -776,6 +776,65 @@ func TestHTTPAppendRateLimitIsRetryableAndContentFree(t *testing.T) {
 	}
 }
 
+func TestHTTPAppendCapacityExceededIsRetryableAndContentFree(t *testing.T) {
+	publicA, privateA, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicB, privateB, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetQuotaLimits(tightQuota(1, 1024, 8, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := NewAuthenticator(store, []Machine{
+		{ID: "machine-a", PublicKey: publicA, EndpointPrefixes: []string{"agent/a/"}},
+		{ID: "machine-b", PublicKey: publicB, EndpointPrefixes: []string{"agent/b/"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)
+	metrics := &Metrics{}
+	handler := NewHandler(store, auth, HandlerOptions{Now: func() time.Time { return clock }, EndpointLeaseTTL: time.Minute, DeliveryLeaseTTL: time.Minute, Metrics: metrics})
+	serveSigned(t, handler, privateA, "machine-a", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/a/session"]}`, "quota-advertise-a", "")
+	serveSigned(t, handler, privateB, "machine-b", http.MethodPut, "/v1/machines/me/endpoints", `{"endpoints":["agent/b/session"]}`, "quota-advertise-b", "")
+	create := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations", `{"creator_endpoint":"agent/a/session","members":[{"endpoint":"agent/a/session","capabilities":["send","receive","admin"]},{"endpoint":"agent/b/session","capabilities":["receive"]}]}`, "quota-create", "quota-create")
+	var conversation Conversation
+	if create.Code != http.StatusCreated || json.NewDecoder(create.Body).Decode(&conversation) != nil {
+		t.Fatalf("create status=%d body=%s", create.Code, create.Body.String())
+	}
+	first := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "quota-send-1", "quota-send-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("accepted status=%d body=%s", first.Code, first.Body.String())
+	}
+	replay := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"one"}`, "quota-send-1-retry", "quota-send-1")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("committed retry status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	limited := serveSigned(t, handler, privateA, "machine-a", http.MethodPost, "/v1/conversations/"+conversation.ID+"/messages", `{"from_endpoint":"agent/a/session","body":"two"}`, "quota-send-2", "quota-send-2")
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("limited status=%d body=%s", limited.Code, limited.Body.String())
+	}
+	if limited.Header().Get("Retry-After") != "9" {
+		t.Fatalf("Retry-After=%q", limited.Header().Get("Retry-After"))
+	}
+	body := limited.Body.String()
+	if !strings.Contains(body, `"error":"capacity exceeded"`) || strings.Contains(body, "rate limited") || strings.Contains(body, conversation.ID) || strings.Contains(body, "two") || strings.Contains(body, "agent/") {
+		t.Fatalf("limited body leaked content: %s", body)
+	}
+	snapshot := metrics.Snapshot()
+	if snapshot.RelayCapacityRejections != 1 || snapshot.RelayPendingDeliveries != 1 || snapshot.RelayPendingBytes != 3 {
+		t.Fatalf("metrics=%#v", snapshot)
+	}
+}
+
 func serveSigned(t *testing.T, handler http.Handler, private ed25519.PrivateKey, machineID, method, path, body, nonce, idempotencyKey string) *httptest.ResponseRecorder {
 	t.Helper()
 	clock := time.Date(2026, time.July, 13, 12, 0, 0, 0, time.UTC)

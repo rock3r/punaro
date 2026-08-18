@@ -606,6 +606,9 @@ func (d *Database) SendDirectMessage(input relay.DirectMessageInput) (relay.Mess
 	if err := d.consumeRateLimits(tx, input.SenderMachineID, conversationID, now); err != nil {
 		return relay.Message{}, false, err
 	}
+	if err := d.consumeQuota(tx, []string{"\x1erole:" + input.ToRole}, int64(len(input.Body))); err != nil {
+		return relay.Message{}, false, err
+	}
 	message := relay.Message{ID: uuid.NewString(), ConversationID: conversationID, FromRole: input.FromRole, Body: input.Body, CreatedAt: now}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, conversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
@@ -633,6 +636,7 @@ func (d *Database) SendDirectMessage(input relay.DirectMessageInput) (relay.Mess
 	if err := tx.Commit(); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "commit direct message")
 	}
+	d.refreshPendingMetrics(context.Background())
 	return message, false, nil
 }
 
@@ -821,8 +825,8 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		}
 	}
 	if input.Operation == relay.ControlUpsertMember && err == nil && previous&relay.CapReceive != 0 && input.Member.Capabilities&relay.CapReceive == 0 {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
-			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 			return relay.ControlEvent{}, false, err
@@ -838,8 +842,8 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			}
 		}
 	} else {
-		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
-			return relay.ControlEvent{}, false, relayDatabaseError(err, "retire revoked deliveries")
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
 			return relay.ControlEvent{}, false, err
@@ -866,6 +870,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 	if err := tx.Commit(); err != nil {
 		return relay.ControlEvent{}, false, relayDatabaseError(err, "commit control")
 	}
+	d.refreshPendingMetrics(context.Background())
 	return event, false, nil
 }
 
@@ -1208,6 +1213,13 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if err := d.consumeRateLimits(tx, input.SenderMachineID, input.ConversationID, input.Now); err != nil {
 		return relay.Message{}, false, err
 	}
+	deliveryRecipients, err := postgresAppendDeliveryRecipients(tx, input.ConversationID, input.FromEndpoint, input.TargetRole, rolesAvailable)
+	if err != nil {
+		return relay.Message{}, false, err
+	}
+	if err := d.consumeQuota(tx, deliveryRecipients, int64(len(input.Body))); err != nil {
+		return relay.Message{}, false, err
+	}
 	message := relay.Message{ID: uuid.NewString(), ConversationID: input.ConversationID, FromEndpoint: input.FromEndpoint, Body: input.Body, CreatedAt: input.Now.UTC().Truncate(time.Millisecond)}
 	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, input.ConversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
 		return relay.Message{}, false, relay.ErrForbidden
@@ -1253,6 +1265,7 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	if err := tx.Commit(); err != nil {
 		return relay.Message{}, false, relayDatabaseError(err, "commit message")
 	}
+	d.refreshPendingMetrics(context.Background())
 	return message, false, nil
 }
 
@@ -1270,6 +1283,7 @@ func (d *Database) SetRateLimits(cfg relay.RateLimitConfig) error {
 // SetMetrics attaches the shared content-free counter sink.
 func (d *Database) SetMetrics(metrics *relay.Metrics) {
 	d.metrics = metrics
+	d.refreshPendingMetrics(context.Background())
 }
 
 func (d *Database) rateLimitConfig() relay.RateLimitConfig {
@@ -1606,12 +1620,22 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$1 WHERE id=$2::uuid AND acked_at IS NULL`, now.UTC(), deliveryID); err != nil {
 		return relayDatabaseError(err, "acknowledge delivery")
 	}
+	if !acknowledged.Valid {
+		var bodyBytes int64
+		if err := tx.QueryRowContext(context.Background(), `SELECT octet_length(message.body) FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id WHERE delivery.id=$1::uuid`, deliveryID).Scan(&bodyBytes); err != nil {
+			return errors.New("delivery body length is unavailable")
+		}
+		if err := postgresReleaseQuota(tx, recipient, bodyBytes); err != nil {
+			return err
+		}
+	}
 	if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return relayDatabaseError(err, "commit delivery acknowledgement")
 	}
+	d.refreshPendingMetrics(context.Background())
 	return nil
 }
 

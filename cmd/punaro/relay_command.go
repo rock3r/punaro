@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
+	"github.com/rock3r/punaro/internal/relay"
 )
 
 type relayConfigureCommand func(string, string) (operator.Installation, error)
@@ -75,4 +80,49 @@ func registerPostCutoverRelayMachine(directory, machineFile string) (operator.In
 		_, err := admin.RegisterPostCutoverLegacyMachine(ctx, installation.OwnerPrincipalID, name, publicKey)
 		return err
 	})
+}
+
+type relayReconcileCapacityCommand func(string) (relay.QuotaCounters, error)
+
+func runRelayReconcileCapacity(args []string, stdout, stderr io.Writer, reconcile relayReconcileCapacityCommand) int {
+	flags := flag.NewFlagSet("relay reconcile-capacity", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	directory := flags.String("directory", "", "absolute Punaro installation directory")
+	confirmed := flags.Bool("yes", false, "confirm rebuilding pending-delivery capacity counters")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || !*confirmed || reconcile == nil {
+		return 2
+	}
+	counters, err := reconcile(*directory)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "relay capacity reconciliation did not complete; rerun the exact command to recover safely")
+		return 1
+	}
+	return writeJSON(stdout, stderr, map[string]any{"status": "capacity_reconciled", "directory": *directory, "pending_count": counters.Count, "pending_bytes": counters.Bytes})
+}
+
+func reconcileRelayCapacity(directory string) (relay.QuotaCounters, error) {
+	installation, err := operator.Load(directory)
+	if err != nil {
+		return relay.QuotaCounters{}, err
+	}
+	if installation.MailCutover != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		database, err := punaropostgres.OpenApplication(ctx, punaropostgres.Config{DSNFile: installation.AppDSNFile})
+		if err != nil {
+			return relay.QuotaCounters{}, err
+		}
+		defer func() { _ = database.Close() }()
+		return database.ReconcilePendingQuota(ctx)
+	}
+	path := filepath.Join(installation.DataDir, "relay.db")
+	if _, err := os.Stat(path); err != nil {
+		return relay.QuotaCounters{}, errors.New("relay capacity store is unavailable")
+	}
+	store, err := relay.OpenForCapacityRepair(path)
+	if err != nil {
+		return relay.QuotaCounters{}, err
+	}
+	defer func() { _ = store.Close() }()
+	return relay.ReconcilePendingQuota(store)
 }

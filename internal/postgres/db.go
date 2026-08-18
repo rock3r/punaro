@@ -35,6 +35,9 @@ type Database struct {
 	memoryUsageStopOnce       sync.Once
 	rateMu                    sync.Mutex
 	rateLimits                relay.RateLimitConfig
+	quotaMu                   sync.Mutex
+	quota                     relay.QuotaConfig
+	pendingMetricsMu          sync.Mutex
 	metrics                   *relay.Metrics
 }
 
@@ -96,7 +99,7 @@ func OpenApplication(ctx context.Context, cfg Config) (*Database, error) {
 		return nil, err
 	}
 	database := &Database{
-		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(),
+		db: db, relayDB: relayDB, brainDB: brainDB, embeddingDB: embeddingDB, manifest: CurrentManifest(), rateLimits: relay.DefaultRateLimitConfig(), quota: relay.DefaultQuotaConfig(),
 		attachmentPhysicalGCSlots: make(chan struct{}, 1),
 		memoryUsageWrites:         make(chan memoryUsageWrite, maxMemoryRecallQueue),
 		memoryUsageStop:           make(chan struct{}),
@@ -179,7 +182,13 @@ func (d *Database) Ready(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return state.Ready()
+	if err := state.Ready(); err != nil {
+		return err
+	}
+	if state.Version >= 48 {
+		return d.VerifyPendingQuota(checkCtx)
+	}
+	return nil
 }
 
 // TrustedAttachmentRuntimeReady requires the exact current schema because the
@@ -1271,6 +1280,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 			return Snapshot{}, errors.New("PostgreSQL relay direct-message schema cannot be inspected")
 		}
 		snapshot.CurrentObjectsPresent = directObjectsPresent
+	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 48 {
+		quotaObjectsPresent, err := relayPendingQuotaControlsAvailable(ctx, q)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay pending-quota schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = quotaObjectsPresent
 	}
 	return snapshot, nil
 }
