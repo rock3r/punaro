@@ -407,7 +407,10 @@ request creates no sequence, message, delivery, idempotency, or audit row.
 Pending deliveries are additionally bounded by explicit per-recipient and
 installation count and body-byte ceilings. Capacity is reserved in the same
 transaction as append for the complete fan-out; broadcast denial creates no
-partial recipient state. Ack, membership-revocation retirement, and other
+partial recipient state. Occupancy keys are the same polymorphic recipient
+identities as deliveries: a mailbox endpoint, or the internal
+`chr(30)||'role:'||role` encoding for a durable role. Installation occupancy
+uses the empty scope key. Ack, membership-revocation retirement, and other
 terminal pending transitions release exactly once. Lease and redelivery do not
 change charged occupancy. Exact committed retries return the original result
 without reserving again. Capacity denial returns HTTP `429` with a bounded

@@ -186,7 +186,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 		predicates := make([]string, len(parts))
 		placeholders := make([]string, len(parts))
 		for index, part := range parts {
-			if part == "" || strings.ContainsRune(part, 0) || strings.ContainsRune(part, '\x1f') {
+			if strings.ContainsRune(part, 0) || strings.ContainsRune(part, '\x1f') {
 				return MigrationSourceBatch{}, errors.New("relay migration resume key is invalid")
 			}
 			keyValues[index] = part
@@ -242,7 +242,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 		keyValues := make([]string, len(keyIndexes))
 		for index, columnIndex := range keyIndexes {
 			value, ok := values[columnIndex].(string)
-			if !ok || value == "" || strings.ContainsRune(value, 0) || strings.ContainsRune(value, '\x1f') {
+			if !ok || strings.ContainsRune(value, 0) || strings.ContainsRune(value, '\x1f') {
 				return MigrationSourceBatch{}, errors.New("relay migration batch key is invalid")
 			}
 			keyValues[index] = value
@@ -276,9 +276,10 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 	return batch, nil
 }
 
-// encodeMigrationRowKey preserves SQLite's binary string ordering. Source key
-// columns reject control characters, so unit separator is an unambiguous tuple
-// delimiter and the raw UTF-8 cursor remains within the 4096-byte bound.
+// encodeMigrationRowKey preserves SQLite's binary string ordering. Composite
+// keys use unit separator as the delimiter, so key columns may be empty
+// (installation pending-capacity uses "") and may include the internal
+// role-recipient record separator, but they cannot contain NUL or the delimiter.
 func encodeMigrationRowKey(values []string) string {
 	return strings.Join(values, "\x1f")
 }

@@ -913,7 +913,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if pendingCapacity {
 		logicalStateQuery += `
-		OR EXISTS (SELECT 1 FROM pending_capacity WHERE scope NOT IN ('installation','recipient') OR typeof(scope)<>'text' OR typeof(scope_key)<>'text' OR typeof(pending_count)<>'integer' OR pending_count<0 OR typeof(pending_bytes)<>'integer' OR pending_bytes<0 OR (scope='installation' AND scope_key<>'') OR (scope='recipient' AND scope_key=''))`
+		OR EXISTS (SELECT 1 FROM pending_capacity WHERE scope NOT IN ('installation','recipient') OR typeof(scope)<>'text' OR typeof(scope_key)<>'text' OR typeof(pending_count)<>'integer' OR pending_count<0 OR typeof(pending_bytes)<>'integer' OR pending_bytes<0 OR (scope='installation' AND scope_key<>'') OR (scope='recipient' AND scope_key='') OR (scope='recipient' AND NOT ((substr(scope_key,1,6)=char(30)||'role:' AND length(substr(scope_key,7)) BETWEEN 1 AND 512 AND length(CAST(substr(scope_key,7) AS blob))<=2048) OR (substr(scope_key,1,6)<>char(30)||'role:' AND length(scope_key) BETWEEN 1 AND 512 AND length(CAST(scope_key AS blob))<=2048))))`
 	}
 	if profiles {
 		logicalStateQuery += `

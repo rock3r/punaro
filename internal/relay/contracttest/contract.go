@@ -546,6 +546,69 @@ func RunPendingCapacity(t *testing.T, backend relay.Backend, namespace string) {
 	if accepted != 1 || limited != workers-1 {
 		t.Fatalf("concurrent accepted=%d limited=%d", accepted, limited)
 	}
+	leftover, err := backend.LeaseDeliveries(machineA, namespace+"-consumer-a", endpointA, concurrent.ID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(leftover.Deliveries) != 1 {
+		t.Fatalf("concurrent leftover lease=%#v err=%v", leftover, err)
+	}
+	if err := backend.AckDelivery(machineA, endpointA, leftover.Deliveries[0].ID, leftover.Deliveries[0].LeaseToken, leftover.Deliveries[0].LeaseGeneration, now.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	cfg.RecipientCount = 1
+	cfg.InstallationCount = 8
+	if err := limiter.SetPendingCapacity(cfg); err != nil {
+		t.Fatal(err)
+	}
+	reviewerRole := "role/" + namespace + "/reviewer"
+	roleConversation, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-role", CreatorEndpoint: endpointA, Now: now.Add(3 * time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+			{Role: reviewerRole, RoleMachineID: machineB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineB, reviewerRole, endpointB, now.Add(3*time.Second), time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRole, duplicate, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: roleConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+		TargetRole: reviewerRole, Body: "role-one", IdempotencyKey: namespace + "-role-one", Now: now.Add(3 * time.Second),
+	})
+	if err != nil || duplicate {
+		t.Fatalf("targeted-role append message=%#v duplicate=%t err=%v", firstRole, duplicate, err)
+	}
+	direct, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-create-direct", CreatorEndpoint: endpointA, Now: now.Add(4 * time.Second),
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: direct.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+		Body: "endpoint-b", IdempotencyKey: namespace + "-endpoint-b", Now: now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatalf("endpoint recipient after role occupancy err=%v", err)
+	}
+	_, _, err = backend.AppendMessage(relay.AppendInput{
+		ConversationID: roleConversation.ID, SenderMachineID: machineA, FromEndpoint: endpointA,
+		TargetRole: reviewerRole, Body: "role-two", IdempotencyKey: namespace + "-role-two", Now: now.Add(4 * time.Second),
+	})
+	if !errors.Is(err, relay.ErrAtCapacity) {
+		t.Fatalf("targeted-role recipient ceiling err=%v", err)
+	}
+
 	if err := limiter.SetPendingCapacity(relay.DefaultPendingCapacityConfig()); err != nil {
 		t.Fatal(err)
 	}

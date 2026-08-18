@@ -11,9 +11,21 @@ CREATE TABLE relay.mail_pending_capacity (
         (scope = 'installation' AND scope_key = '')
         OR (
             scope = 'recipient'
-            AND char_length(scope_key) >= 1 AND char_length(scope_key) <= 512
-            AND octet_length(scope_key) <= 2048
-            AND scope_key !~ '[[:cntrl:]]'
+            AND char_length(scope_key) >= 1
+            AND (
+                (
+                    char_length(scope_key) <= 512
+                    AND octet_length(scope_key) <= 2048
+                    AND scope_key !~ '[[:cntrl:]]'
+                )
+                OR (
+                    substr(scope_key, 1, 6) = chr(30) || 'role:'
+                    AND char_length(substr(scope_key, 7)) >= 1
+                    AND char_length(substr(scope_key, 7)) <= 512
+                    AND octet_length(substr(scope_key, 7)) <= 2048
+                    AND substr(scope_key, 7) !~ '[[:cntrl:]]'
+                )
+            )
         )
     )
 );

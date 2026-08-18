@@ -27,7 +27,7 @@ WITH objects AS (
         (capacity_oid,'mail_pending_capacity_scope_check','c'::"char",ARRAY[1]::smallint[],'(scope = ANY (ARRAY[''installation''::text, ''recipient''::text]))'),
         (capacity_oid,'mail_pending_capacity_pending_count_check','c'::"char",ARRAY[3]::smallint[],'(pending_count >= 0)'),
         (capacity_oid,'mail_pending_capacity_pending_bytes_check','c'::"char",ARRAY[4]::smallint[],'(pending_bytes >= 0)'),
-        (capacity_oid,'mail_pending_capacity_shape_check','c'::"char",ARRAY[1,2]::smallint[],'(((scope = ''installation''::text) AND (scope_key = ''''::text)) OR ((scope = ''recipient''::text) AND (char_length(scope_key) >= 1) AND (char_length(scope_key) <= 512) AND (octet_length(scope_key) <= 2048) AND (scope_key !~ ''[[:cntrl:]]''::text)))')
+        (capacity_oid,'mail_pending_capacity_shape_check','c'::"char",ARRAY[1,2]::smallint[],'(((scope = ''installation''::text) AND (scope_key = ''''::text)) OR ((scope = ''recipient''::text) AND (char_length(scope_key) >= 1) AND (((char_length(scope_key) <= 512) AND (octet_length(scope_key) <= 2048) AND (scope_key !~ ''[[:cntrl:]]''::text)) OR ((substr(scope_key, 1, 6) = (chr(30) || ''role:''::text)) AND (char_length(substr(scope_key, 7)) >= 1) AND (char_length(substr(scope_key, 7)) <= 512) AND (octet_length(substr(scope_key, 7)) <= 2048) AND (substr(scope_key, 7) !~ ''[[:cntrl:]]''::text)))))')
     ) AS expected(table_oid,constraint_name,constraint_type,column_keys,check_expression)
 ), actual_constraints AS (
     SELECT constraint_.conrelid,constraint_.conname,constraint_.contype,constraint_.conkey,

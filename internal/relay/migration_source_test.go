@@ -1044,6 +1044,126 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 	}
 }
 
+func TestInspectMigrationSourceAcceptsRoleRecipientPendingCapacity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 19, 45, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.SetPendingCapacity(PendingCapacityConfig{
+		RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 8, InstallationBytes: 8192, RetryAfterSeconds: 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	role := "role/inspect/reviewer"
+	conversation, err := store.CreateConversation("agent/a", []Member{
+		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
+		{Endpoint: "agent/b", Capabilities: CapReceive},
+		{Role: role, RoleMachineID: "machine-b", Capabilities: CapReceive},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindRoleToSession("machine-b", role, "agent/b", now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: role, Body: "targeted", IdempotencyKey: "targeted", Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 6 || inspected.Counts.PendingCapacity != 2 {
+		t.Fatalf("role-recipient inspect=%#v err=%v", inspected, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_pending_capacity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("f", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 6 {
+		t.Fatalf("role-recipient prepare=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_pending_capacity", "", 10)
+	if err != nil || len(batch.Rows) != 2 || !batch.Done {
+		t.Fatalf("role-recipient pending-capacity batch=%#v err=%v", batch, err)
+	}
+	firstPage, err := ReadMigrationSourceBatch(ctx, path, "mail_pending_capacity", "", 1)
+	if err != nil || len(firstPage.Rows) != 1 || firstPage.Done || firstPage.NextKey == "" {
+		t.Fatalf("pending-capacity first page=%#v err=%v", firstPage, err)
+	}
+	secondPage, err := ReadMigrationSourceBatch(ctx, path, "mail_pending_capacity", firstPage.NextKey, 1)
+	if err != nil || len(secondPage.Rows) != 1 || !secondPage.Done {
+		t.Fatalf("pending-capacity resume page=%#v err=%v", secondPage, err)
+	}
+	var sawRoleKey bool
+	for _, row := range batch.Rows {
+		if err := hasher.Add(row); err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			Scope string `json:"scope"`
+			Key   string `json:"scope_key"`
+		}
+		if err := json.Unmarshal(row.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Scope == "recipient" && payload.Key == roleRecipient(role) {
+			sawRoleKey = true
+		}
+	}
+	if !sawRoleKey {
+		t.Fatalf("pending-capacity export omitted role recipient: %#v", batch.Rows)
+	}
+	count, digest := hasher.Evidence()
+	if count != inspected.Counts.PendingCapacity || digest != inspected.TableSHA256.PendingCapacity {
+		t.Fatalf("pending-capacity evidence count=%d digest=%s want count=%d digest=%s", count, digest, inspected.Counts.PendingCapacity, inspected.TableSHA256.PendingCapacity)
+	}
+}
+
+func TestInspectMigrationSourceRejectsControlCharPendingCapacityKey(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 18, 19, 46, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO pending_capacity(scope,scope_key,pending_count,pending_bytes) VALUES ('recipient', char(1)||'evil', 0, 0)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectMigrationSource(ctx, path); err == nil {
+		t.Fatal("inspect accepted a control-character recipient capacity key")
+	}
+}
+
 func migrationSourcePhase(t *testing.T, store *Store) MigrationSourcePhase {
 	t.Helper()
 	var phase MigrationSourcePhase
