@@ -840,9 +840,11 @@ func startDeliveryMaintenance(store *relay.Store, postgresRelay relay.Backend) f
 	if maintainer == nil {
 		return nil
 	}
+	//nolint:gosec // the returned stop function owns this cancellation for the daemon lifetime.
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
+		defer cancel()
 		defer close(done)
 		ticker := time.NewTicker(deliveryMaintenanceInterval)
 		defer ticker.Stop()

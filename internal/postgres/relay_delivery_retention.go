@@ -21,6 +21,7 @@ type postgresPendingClose struct {
 	CreatedAt       time.Time
 }
 
+// SetRetentionPolicy replaces the in-process pending-age and terminal-retention policy.
 func (d *Database) SetRetentionPolicy(cfg relay.RetentionConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -165,7 +166,10 @@ func postgresClosePendingDelivery(tx *sql.Tx, row postgresPendingClose, reason s
 		return false, relayDatabaseError(err, "close pending delivery")
 	}
 	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
+	if err != nil {
+		return false, relayDatabaseError(err, "close pending delivery")
+	}
+	if affected != 1 {
 		return false, nil
 	}
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_delivery_terminals(delivery_id,message_id,conversation_id,recipient_endpoint,sequence,closed_reason,lease_generation,created_at,closed_at)

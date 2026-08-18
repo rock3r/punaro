@@ -237,6 +237,7 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 	}
 }
 
+// ObserveTerminal increments one closed-reason transition counter.
 func (m *Metrics) ObserveTerminal(reason string) {
 	if m == nil {
 		return
@@ -251,6 +252,7 @@ func (m *Metrics) ObserveTerminal(reason string) {
 	}
 }
 
+// ObserveLeaseRedeliveries counts deliveries whose previous lease had expired.
 func (m *Metrics) ObserveLeaseRedeliveries(count int) {
 	if m == nil || count <= 0 {
 		return
@@ -258,6 +260,7 @@ func (m *Metrics) ObserveLeaseRedeliveries(count int) {
 	m.leaseRedeliveries.Add(uint64(count)) // #nosec G115 -- redelivery counts are bounded by the lease page size.
 }
 
+// SetPendingOldestAge publishes the oldest pending delivery age in seconds.
 func (m *Metrics) SetPendingOldestAge(seconds int64) {
 	if m == nil {
 		return
@@ -265,6 +268,7 @@ func (m *Metrics) SetPendingOldestAge(seconds int64) {
 	m.pendingOldestAgeSeconds.Store(unsignedPending(seconds))
 }
 
+// SetTerminalsRetained publishes the number of retained terminal rows.
 func (m *Metrics) SetTerminalsRetained(count int64) {
 	if m == nil {
 		return

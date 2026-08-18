@@ -18,6 +18,7 @@ type pendingClose struct {
 	CreatedAt       int64
 }
 
+// SetRetentionPolicy replaces the in-process pending-age and terminal-retention policy.
 func (s *Store) SetRetentionPolicy(cfg RetentionConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return err
