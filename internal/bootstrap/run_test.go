@@ -1354,6 +1354,20 @@ func TestSeedLocalCheckoutRequiresKeysWhenSignedPreviousExists(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutRequiresKeysWhenLocalCurrentHasSignedPrevious(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "local-adapter")
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := SeedLocalCheckout(dir, adapter, nil)
+	if err == nil || !strings.Contains(err.Error(), "persisted release keys") {
+		t.Fatalf("local current with signed previous err=%v", err)
+	}
+}
+
 func TestSeedLocalCheckoutAcceptsSignedPreviousWhenKeysPresent(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")

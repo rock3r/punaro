@@ -962,6 +962,9 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 	if err := persistDirectoryKeys(directory, keys); err != nil {
 		return err
 	}
+	if err := requirePersistedRollbackKeys(directory); err != nil {
+		return err
+	}
 	current := filepath.Join(directory, currentSlot)
 	if exists, err := existsRealDir(current); err != nil {
 		return err
@@ -971,9 +974,6 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 			recovery, recErr := loadRecovery(directory)
 			if recErr != nil || recovery.Mode == recoveryMode {
 				return errors.New("bootstrap is recovery-only; use a signed update")
-			}
-			if err := requirePersistedRollbackKeys(directory); err != nil {
-				return err
 			}
 			return nil
 		}
