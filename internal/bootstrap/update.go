@@ -6,6 +6,7 @@
 package bootstrap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
@@ -101,7 +102,7 @@ func Update(request Request) (Result, error) {
 			}
 		}
 	}
-	catalog, err := fetchVerifiedCatalog(request)
+	catalog, err := fetchVerifiedCatalog(context.Background(), request)
 	if err != nil {
 		return Result{}, err
 	}
@@ -138,7 +139,7 @@ func Update(request Request) (Result, error) {
 	if err := writeJournal(request.Directory, journal{Schema: 1, Phase: "staging", Release: listed.Release, Sequence: listed.Sequence, ManifestSHA256: listed.ManifestSHA256}); err != nil {
 		return Result{}, err
 	}
-	manifestBody, err := client.Get(listed.ManifestPath, listed.ManifestLength)
+	manifestBody, err := client.Get(context.Background(), listed.ManifestPath, listed.ManifestLength)
 	if err != nil {
 		return Result{}, err
 	}
@@ -149,7 +150,7 @@ func Update(request Request) (Result, error) {
 	if hex.EncodeToString(sum[:]) != listed.ManifestSHA256 {
 		return Result{}, errors.New("release manifest digest mismatch")
 	}
-	manifestSig, err := client.Get(listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	manifestSig, err := client.Get(context.Background(), listed.Release+"/"+punarorelease.ReleaseSignatureFile, punarorelease.MaximumEnvelopeBytes)
 	if err != nil {
 		return Result{}, err
 	}
@@ -206,7 +207,7 @@ func Update(request Request) (Result, error) {
 	}
 	var installed []string
 	for _, artifact := range artifacts {
-		body, err := client.Get(artifact.Path, artifact.Length)
+		body, err := client.Get(context.Background(), artifact.Path, artifact.Length)
 		if err != nil {
 			return Result{}, err
 		}
@@ -281,7 +282,10 @@ func (request *Request) normalize() error {
 	return nil
 }
 
-func fetchVerifiedCatalog(request Request) (punarorelease.Catalog, error) {
+func fetchVerifiedCatalog(ctx context.Context, request Request) (punarorelease.Catalog, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	client := request.HTTP
 	if client == nil {
 		transport, err := newFetcher(request.Origin)
@@ -290,11 +294,11 @@ func fetchVerifiedCatalog(request Request) (punarorelease.Catalog, error) {
 		}
 		client = transport
 	}
-	catalogBody, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
+	catalogBody, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, punarorelease.MaximumManifestBytes)
 	if err != nil {
 		return punarorelease.Catalog{}, err
 	}
-	catalogSig, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
+	catalogSig, err := client.Get(ctx, punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogSignatureFile, punarorelease.MaximumEnvelopeBytes)
 	if err != nil {
 		return punarorelease.Catalog{}, err
 	}

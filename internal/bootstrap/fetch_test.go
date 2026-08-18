@@ -1,6 +1,7 @@
 package bootstrap
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,7 +39,7 @@ func TestHTTPFetcherRejectsOversizedBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 4); err == nil {
+	if _, err := client.Get(context.Background(), punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 4); err == nil {
 		t.Fatal("oversized body accepted")
 	}
 }
@@ -52,10 +53,10 @@ func TestHTTPFetcherRejectsInvalidRelativePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Get("../evil/punaro-catalog.json", 64); err == nil {
+	if _, err := client.Get(context.Background(), "../evil/punaro-catalog.json", 64); err == nil {
 		t.Fatal("parent relative path accepted")
 	}
-	if _, err := client.Get("latest/punaro-release.json", 64); err == nil {
+	if _, err := client.Get(context.Background(), "latest/punaro-release.json", 64); err == nil {
 		t.Fatal("latest pointer accepted")
 	}
 }
@@ -69,7 +70,7 @@ func TestHTTPFetcherRejectsNonLocalHTTPRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 64); err == nil {
+	if _, err := client.Get(context.Background(), punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 64); err == nil {
 		t.Fatal("non-local HTTP redirect accepted")
 	}
 }
@@ -87,7 +88,7 @@ func TestHTTPFetcherFollowsLocalhostRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := client.Get(punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 64)
+	body, err := client.Get(context.Background(), punarorelease.CatalogReleaseName+"/"+punarorelease.CatalogFile, 64)
 	if err != nil {
 		t.Fatal(err)
 	}

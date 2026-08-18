@@ -65,6 +65,57 @@ func TestRunHoldsLeaseUntilSupervisorExits(t *testing.T) {
 	}
 }
 
+func TestRunTreatsCanceledStartAsCleanShutdown(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	err := Run(ctx, RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		afterPrepare:  cancel,
+		Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+			return nil, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("canceled start err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("canceled start entered recovery-only")
+	}
+}
+
+func TestRollbackIfAllowedAbortsWhenContextCanceled(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	unlocked, _, err := rollbackIfAllowed(ctx, RunRequest{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	}, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")})
+	if unlocked || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled rollback unlocked=%v err=%v", unlocked, err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("canceled rollback entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || status.Previous != "v0.1.0" {
+		t.Fatalf("canceled rollback mutated slots status=%#v", status)
+	}
+}
+
 func TestRunRequiresCurrentAdapter(t *testing.T) {
 	dir := privateDir(t)
 	err := Run(context.Background(), RunRequest{Directory: dir, HealthTimeout: time.Millisecond})
@@ -642,7 +693,7 @@ func TestRunRollsBackUnhealthyCurrentWhenCatalogAllowsPrevious(t *testing.T) {
 	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
 	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
 	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
-	catalog, err := fetchVerifiedCatalog(Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)})
+	catalog, err := fetchVerifiedCatalog(context.Background(), Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)})
 	if err != nil {
 		t.Fatalf("catalog: %v", err)
 	}

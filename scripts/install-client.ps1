@@ -16,6 +16,21 @@ $ErrorActionPreference = 'Stop'
 
 function Stop-Install([string]$Message) { throw "punaro installer: $Message" }
 
+function Wait-PunaroReplaceableBinary([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $deadline = (Get-Date).AddSeconds(30)
+    do {
+        try {
+            $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            $stream.Dispose()
+            return
+        } catch {
+            Start-Sleep -Milliseconds 200
+        }
+    } while ((Get-Date) -lt $deadline)
+    Stop-Install "could not replace a still-running Punaro binary at $Path"
+}
+
 function Get-FullPath([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { Stop-Install 'path is required' }
     return [System.IO.Path]::GetFullPath($Path)
@@ -190,6 +205,7 @@ $MailboxStateDir = Get-FullPath $MailboxStateDir
 
 $adapterTaskName = 'Punaro Adapter'
 $adapterTaskWasRunning = $false
+$adapterTaskRestored = $false
 $existingAdapterTask = Get-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
 if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running') {
     $adapterTaskWasRunning = $true
@@ -204,6 +220,9 @@ if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running'
     }
 }
 
+try {
+Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-adapter.exe')
+Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-bootstrap') -Output (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-trusted-attachment') -Output (Join-Path $binDir 'punaro-trusted-attachment.exe')
@@ -275,8 +294,11 @@ $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -Ru
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.RestartCount = 3
 $settings.RestartInterval = [TimeSpan]::FromMinutes(1)
-Register-ScheduledTask -TaskName 'Punaro Adapter' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
-if ($Enable -or $adapterTaskWasRunning) { Start-ScheduledTask -TaskName $adapterTaskName }
+Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
+if ($Enable -or $adapterTaskWasRunning) {
+    Start-ScheduledTask -TaskName $adapterTaskName
+    $adapterTaskRestored = $true
+}
 
 if (-not [string]::IsNullOrWhiteSpace($AgentGuidanceDir)) {
     & (Join-Path $repoDir 'scripts\install-agent-guidance.ps1') -Directory $AgentGuidanceDir
@@ -288,3 +310,8 @@ Get-Content -LiteralPath $enrollmentFile
 Write-Output 'Next: add this machine''s distinct Access token pair to adapter.env; bind and attach desired aliases; then rerun with -Enable.'
 Write-Output 'After device-credential enrollment, use punaro-trusted-attachment.exe with a protected credential file and safe download root.'
 Write-Output 'Run punaro-enroll.exe prepare before the server owner issues the one-time enrollment for this device; redeem only a protected enrollment-material file.'
+} finally {
+    if ($adapterTaskWasRunning -and -not $adapterTaskRestored) {
+        Start-ScheduledTask -TaskName $adapterTaskName -ErrorAction SilentlyContinue
+    }
+}

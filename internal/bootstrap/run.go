@@ -148,6 +148,9 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 	start := startOrDefault(request)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // SIGINT/SIGTERM before the child starts is a clean supervisor stop
+		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
 	if err := waitHealth(ctx, request, child, identity, hadPrevious); err != nil {
@@ -424,7 +427,10 @@ func failIfSlotChanged(directory string, started slotState) error {
 }
 
 func failOrRollback(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, reason string) error {
-	unlocked, rolled, err := rollbackIfAllowed(request, started)
+	unlocked, rolled, err := rollbackIfAllowed(ctx, request, started)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
 	if errors.Is(err, errSlotChanged) {
 		return err
 	}
@@ -446,6 +452,9 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 	}
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // SIGINT/SIGTERM before the rolled child starts is a clean supervisor stop
+		}
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
@@ -535,7 +544,10 @@ func waitHealthWindow(ctx context.Context, request RunRequest, child Process, st
 	}
 }
 
-func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, error) {
+func rollbackIfAllowed(ctx context.Context, request RunRequest, started slotState) (bool, slotState, error) {
+	if err := ctx.Err(); err != nil {
+		return false, slotState{}, err
+	}
 	if err := prepareDirectory(request.Directory); err != nil {
 		return false, slotState{}, err
 	}
@@ -573,7 +585,7 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 	if err != nil {
 		return false, slotState{}, err
 	}
-	catalog, err := fetchVerifiedCatalog(Request{
+	catalog, err := fetchVerifiedCatalog(ctx, Request{
 		Directory: request.Directory,
 		Origin:    request.Origin,
 		Keys:      request.Keys,
@@ -583,11 +595,17 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 	if err != nil {
 		return false, slotState{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return false, slotState{}, err
+	}
 	if accepted.CatalogSequence > 0 && catalog.Sequence < accepted.CatalogSequence {
 		return false, slotState{}, errors.New("release catalog sequence downgrade")
 	}
 	if !catalog.Allows(previous.Release, previous.Sequence, previous.ManifestSHA256) {
 		return false, slotState{}, errors.New("catalog does not allow the release")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, slotState{}, err
 	}
 	if err := writeJournal(request.Directory, journal{
 		Schema:          1,
