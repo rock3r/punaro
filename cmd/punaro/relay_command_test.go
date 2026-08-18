@@ -180,6 +180,19 @@ func TestRelayUsesPostgresWhenEnabledWithoutCutover(t *testing.T) {
 	}
 }
 
+func TestRelayUsesPostgresHonorsExplicitSQLite(t *testing.T) {
+	if relayUsesPostgres(operator.Installation{RelayEnabled: true}, "sqlite") {
+		t.Fatal("explicit sqlite store was ignored for a relay-enabled installation")
+	}
+	cutover := &operator.MailCutoverPublication{Version: 1}
+	if relayUsesPostgres(operator.Installation{RelayEnabled: true, MailCutover: cutover}, "sqlite") {
+		t.Fatal("explicit sqlite store was ignored during pre-cutover rollback")
+	}
+	if !relayUsesPostgres(operator.Installation{RelayEnabled: true}, "postgres") {
+		t.Fatal("explicit postgres store was ignored for a relay-enabled installation")
+	}
+}
+
 func TestRetentionPolicyFromInstallationEnvIgnoresProcessOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "punarod.env")
 	if err := os.WriteFile(path, []byte("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=60\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=120\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"), 0o600); err != nil {

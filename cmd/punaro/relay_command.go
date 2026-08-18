@@ -226,10 +226,14 @@ func openRelayTerminalStore(directory string) (relayTerminalStore, error) {
 }
 
 func relayUsesPostgres(installation operator.Installation, store string) bool {
-	if strings.EqualFold(strings.TrimSpace(store), "postgres") {
+	switch strings.ToLower(strings.TrimSpace(store)) {
+	case "postgres":
 		return true
+	case "sqlite":
+		return false
+	default:
+		return installation.RelayEnabled || installation.MailCutover != nil
 	}
-	return installation.RelayEnabled || installation.MailCutover != nil
 }
 
 func retentionPolicyFromEnvFile(path string) (relay.RetentionConfig, error) {
