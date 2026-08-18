@@ -94,9 +94,16 @@ func main() {
 		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
-		log.Printf("punaro-adapter stopped: %v", err)
+		if shouldLogAdapterStop(err) {
+			log.Printf("punaro-adapter stopped: %v", err)
+		}
 		os.Exit(exitStatus(err))
 	}
+}
+
+func shouldLogAdapterStop(err error) bool {
+	var status *contactsStatusError
+	return !errors.As(err, &status)
 }
 
 func exitStatus(err error) int {

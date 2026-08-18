@@ -508,6 +508,10 @@ func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.R
 	switch {
 	case len(matches) == 1:
 		contact, err := d.lookupAddressableContact(tx, matches[0].Role, now)
+		if errors.Is(err, relay.ErrForbidden) {
+			result = relay.RoleResolveResult{Status: relay.RoleResolveNotFound}
+			break
+		}
 		if err != nil {
 			return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
 		}

@@ -127,6 +127,18 @@ func TestStoreResolvesQualifiedUniqueAndAmbiguousNames(t *testing.T) {
 	}
 }
 
+func TestResolvedRoleContactMapsForbiddenToNotFound(t *testing.T) {
+	result, err := resolvedRoleContact(RoleContact{Role: "role/machine-a/hidden"}, ErrForbidden)
+	if err != nil || result.Status != RoleResolveNotFound || result.Role != "" {
+		t.Fatalf("forbidden lookup=%#v err=%v", result, err)
+	}
+	contact := RoleContact{Role: "role/machine-a/unique", MachineID: "machine-a", Online: true}
+	resolved, err := resolvedRoleContact(contact, nil)
+	if err != nil || resolved.Status != RoleResolveResolved || resolved.Role != contact.Role || !resolved.Online {
+		t.Fatalf("resolved lookup=%#v err=%v", resolved, err)
+	}
+}
+
 func TestStoreRoleResolveCapsAmbiguityAtTwenty(t *testing.T) {
 	t.Parallel()
 	store := openRoleProfileStore(t)

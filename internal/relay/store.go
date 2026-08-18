@@ -1169,6 +1169,16 @@ func (s *Store) ListAddressableRoles(input RoleListInput) (RoleListPage, error) 
 	return page, nil
 }
 
+func resolvedRoleContact(contact RoleContact, err error) (RoleResolveResult, error) {
+	if errors.Is(err, ErrForbidden) {
+		return RoleResolveResult{Status: RoleResolveNotFound}, nil
+	}
+	if err != nil {
+		return RoleResolveResult{}, err
+	}
+	return RoleResolveResult{Status: RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+}
+
 func (s *Store) lookupAddressableContact(role string, now int64) (RoleContact, error) {
 	row := s.db.QueryRowContext(context.Background(), lookupAddressableContactSQL, now, now, role)
 	contact, err := scanRoleContact(row)
@@ -1183,14 +1193,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 	name := strings.TrimSpace(input.Name)
 	now := input.Now.UnixMilli()
 	if CanonicalRoleHandle(name) {
-		contact, err := s.lookupAddressableContact(name, now)
-		if errors.Is(err, ErrForbidden) {
-			return RoleResolveResult{Status: RoleResolveNotFound}, nil
-		}
-		if err != nil {
-			return RoleResolveResult{}, err
-		}
-		return RoleResolveResult{Status: RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+		return resolvedRoleContact(s.lookupAddressableContact(name, now))
 	}
 	if !ValidRoleSlug(name) {
 		return RoleResolveResult{Status: RoleResolveNotFound}, nil
@@ -1219,11 +1222,7 @@ func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResul
 	case len(matches) == 0:
 		return RoleResolveResult{Status: RoleResolveNotFound}, nil
 	case len(matches) == 1:
-		contact, err := s.lookupAddressableContact(matches[0].Role, now)
-		if err != nil {
-			return RoleResolveResult{}, err
-		}
-		return RoleResolveResult{Status: RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+		return resolvedRoleContact(s.lookupAddressableContact(matches[0].Role, now))
 	default:
 		if len(matches) > MaxRoleResolveMatches {
 			matches = matches[:MaxRoleResolveMatches]

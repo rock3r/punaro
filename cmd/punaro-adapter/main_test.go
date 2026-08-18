@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -144,6 +145,18 @@ func TestContactsResolveExitCodes(t *testing.T) {
 	}
 	if code := contactsResolveExit(relay.RoleResolveResult{Status: relay.RoleResolveAmbiguous}); code != 2 {
 		t.Fatalf("ambiguous exit=%d", code)
+	}
+}
+
+func TestContactsStatusErrorDoesNotLogAdapterStop(t *testing.T) {
+	if shouldLogAdapterStop(&contactsStatusError{message: relay.RoleResolveNotFound, code: 1}) {
+		t.Fatal("expected directory status was logged as a stop")
+	}
+	if shouldLogAdapterStop(&contactsStatusError{message: relay.RoleResolveAmbiguous, code: 2}) {
+		t.Fatal("ambiguous directory status was logged as a stop")
+	}
+	if !shouldLogAdapterStop(fmt.Errorf("configuration: missing")) {
+		t.Fatal("real failure was silenced")
 	}
 }
 
