@@ -96,7 +96,14 @@ func Run(ctx context.Context, request RunRequest) error {
 	}
 	identity, adapter, err := prepareRun(&request)
 	if errors.Is(err, errNoAdapter) {
-		return failCurrent(ctx, request, startOrDefault(request), identity, request.hasPrevious(identity), errChildExited)
+		hadPrevious, prevErr := request.hasPrevious(identity)
+		if prevErr != nil {
+			if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited, identity); recErr != nil {
+				return recErr
+			}
+			return ErrRecoveryOnly
+		}
+		return failCurrent(ctx, request, startOrDefault(request), identity, hadPrevious, errChildExited)
 	}
 	if err != nil {
 		return err
@@ -107,7 +114,13 @@ func Run(ctx context.Context, request RunRequest) error {
 	if err := failIfSlotChanged(request.Directory, identity); err != nil {
 		return err
 	}
-	hadPrevious := request.hasPrevious(identity)
+	hadPrevious, err := request.hasPrevious(identity)
+	if err != nil {
+		if recErr := enterRecoveryOnly(request.Directory, recoveryCurrentExited, identity); recErr != nil {
+			return recErr
+		}
+		return ErrRecoveryOnly
+	}
 	start := startOrDefault(request)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
@@ -223,12 +236,15 @@ func snapshotAdapter(directory, slotDir, goos, goarch string) (string, error) {
 	return dest, nil
 }
 
-func (request RunRequest) hasPrevious(current slotState) bool {
+func (request RunRequest) hasPrevious(current slotState) (bool, error) {
 	previous, err := readOptionalSlot(filepath.Join(request.Directory, previousSlot))
-	if err != nil || previous.Release == "" {
-		return false
+	if err != nil {
+		return false, err
 	}
-	return previous.Release != current.Release || previous.Sequence != current.Sequence || previous.ManifestSHA256 != current.ManifestSHA256
+	if previous.Release == "" {
+		return false, nil
+	}
+	return previous.Release != current.Release || previous.Sequence != current.Sequence || previous.ManifestSHA256 != current.ManifestSHA256, nil
 }
 
 func (request RunRequest) currentNow() time.Time {

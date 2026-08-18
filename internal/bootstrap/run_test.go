@@ -75,6 +75,31 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunEntersRecoveryWhenPreviousSlotIsCorrupt(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	previous := filepath.Join(dir, previousSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 20 * time.Millisecond,
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			return blockingProcess(context.Background()), nil
+		},
+	})
+	if !errors.Is(err, ErrRecoveryOnly) {
+		t.Fatalf("corrupt previous err=%v", err)
+	}
+	if !recoveryOnly(t, dir) {
+		t.Fatal("corrupt previous did not enter recovery-only")
+	}
+}
+
 func TestRunEntersRecoveryWhenCurrentSlotMissing(t *testing.T) {
 	dir := privateDir(t)
 	err := Run(context.Background(), RunRequest{Directory: dir, HealthTimeout: time.Millisecond})
@@ -851,11 +876,11 @@ func writeRecoveryOnly(t *testing.T, directory string) {
 
 func recoveryOnly(t *testing.T, directory string) bool {
 	t.Helper()
-	status, err := Status(directory)
+	recovery, err := loadRecovery(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return status.RecoveryOnly
+	return recovery.Mode == recoveryMode
 }
 
 func runningAdapterPath(directory string) string {
