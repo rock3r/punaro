@@ -351,6 +351,173 @@ func (d *Database) RoleProfile(role string) (relay.RoleProfile, error) {
 	return relay.RoleProfile{Role: role, DisplayName: display.String, DirectAddressable: addressable, UpdatedAt: updatedAt.UTC()}, nil
 }
 
+func postgresRoleDirectoryOnlineSQL() string {
+	return `EXISTS (
+		SELECT 1 FROM relay.mail_role_bindings AS binding
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+			AND endpoint.machine_id=binding.machine_id
+			AND endpoint.ownership_generation=binding.ownership_generation
+		WHERE binding.role=profiles.role
+			AND binding.machine_id=roles.machine_id
+			AND binding.lease_until>$1
+			AND endpoint.lease_until>$1
+	)`
+}
+
+func scanPostgresRoleContact(scanner interface{ Scan(dest ...any) error }) (relay.RoleContact, error) {
+	var contact relay.RoleContact
+	var display sql.NullString
+	if err := scanner.Scan(&contact.Role, &display, &contact.MachineID, &contact.Online); err != nil {
+		return relay.RoleContact{}, err
+	}
+	contact.DisplayName = display.String
+	return contact, nil
+}
+
+func (d *Database) ListAddressableRoles(input relay.RoleListInput) (relay.RoleListPage, error) {
+	after, ok := relay.DecodeRoleListCursor(input.Cursor)
+	if !ok || input.Limit < 1 || input.Limit > relay.MaxRoleListLimit {
+		return relay.RoleListPage{}, fmt.Errorf("invalid role directory request")
+	}
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return relay.RoleListPage{}, errors.New("role directory cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	profilesAvailable, err := postgresRoleProfilesAvailable(tx)
+	if err != nil || !profilesAvailable {
+		return relay.RoleListPage{}, errors.New("durable role profiles are unavailable")
+	}
+	now := input.Now.UTC()
+	rows, err := tx.QueryContext(context.Background(), `SELECT profiles.role,profiles.display_name,roles.machine_id,`+postgresRoleDirectoryOnlineSQL()+`
+		FROM relay.mail_role_profiles AS profiles
+		JOIN relay.mail_roles AS roles ON roles.role=profiles.role
+		WHERE profiles.direct_addressable AND ($2='' OR profiles.role COLLATE "C" > $2)
+		ORDER BY profiles.role COLLATE "C"
+		LIMIT $3`, now, after, input.Limit+1)
+	if err != nil {
+		return relay.RoleListPage{}, errors.New("role directory is unavailable")
+	}
+	defer rows.Close()
+	var contacts []relay.RoleContact
+	for rows.Next() {
+		contact, err := scanPostgresRoleContact(rows)
+		if err != nil {
+			return relay.RoleListPage{}, errors.New("role directory is unavailable")
+		}
+		contacts = append(contacts, contact)
+	}
+	if err := rows.Err(); err != nil {
+		return relay.RoleListPage{}, errors.New("role directory is unavailable")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.RoleListPage{}, errors.New("role directory cannot commit")
+	}
+	page := relay.RoleListPage{Roles: contacts}
+	if len(page.Roles) > input.Limit {
+		last := page.Roles[input.Limit-1]
+		page.Roles = page.Roles[:input.Limit]
+		page.NextCursor = relay.EncodeRoleListCursor(last.Role)
+	}
+	if page.Roles == nil {
+		page.Roles = []relay.RoleContact{}
+	}
+	return page, nil
+}
+
+func (d *Database) lookupAddressableContact(q queryer, role string, now time.Time) (relay.RoleContact, error) {
+	row := q.QueryRowContext(context.Background(), `SELECT profiles.role,profiles.display_name,roles.machine_id,`+postgresRoleDirectoryOnlineSQL()+`
+		FROM relay.mail_role_profiles AS profiles
+		JOIN relay.mail_roles AS roles ON roles.role=profiles.role
+		WHERE profiles.direct_addressable AND profiles.role=$2`, now.UTC(), role)
+	contact, err := scanPostgresRoleContact(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return relay.RoleContact{}, relay.ErrForbidden
+	}
+	return contact, err
+}
+
+func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.RoleResolveResult, error) {
+	name := strings.TrimSpace(input.Name)
+	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return relay.RoleResolveResult{}, errors.New("role resolution cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	profilesAvailable, err := postgresRoleProfilesAvailable(tx)
+	if err != nil || !profilesAvailable {
+		return relay.RoleResolveResult{}, errors.New("durable role profiles are unavailable")
+	}
+	now := input.Now.UTC()
+	if relay.CanonicalRoleHandle(name) {
+		contact, err := d.lookupAddressableContact(tx, name, now)
+		if errors.Is(err, relay.ErrForbidden) {
+			if err := tx.Commit(); err != nil {
+				return relay.RoleResolveResult{}, errors.New("role resolution cannot commit")
+			}
+			return relay.RoleResolveResult{Status: relay.RoleResolveNotFound}, nil
+		}
+		if err != nil {
+			return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.RoleResolveResult{}, errors.New("role resolution cannot commit")
+		}
+		return relay.RoleResolveResult{Status: relay.RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+	}
+	if !relay.ValidRoleSlug(name) {
+		if err := tx.Commit(); err != nil {
+			return relay.RoleResolveResult{}, errors.New("role resolution cannot commit")
+		}
+		return relay.RoleResolveResult{Status: relay.RoleResolveNotFound}, nil
+	}
+	like := "%/" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
+	rows, err := tx.QueryContext(context.Background(), `SELECT profiles.role,profiles.display_name,roles.machine_id,`+postgresRoleDirectoryOnlineSQL()+`
+		FROM relay.mail_role_profiles AS profiles
+		JOIN relay.mail_roles AS roles ON roles.role=profiles.role
+		WHERE profiles.direct_addressable AND profiles.role LIKE $2 ESCAPE '\'
+		ORDER BY profiles.role COLLATE "C"
+		LIMIT $3`, now, like, relay.MaxRoleResolveMatches+1)
+	if err != nil {
+		return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
+	}
+	defer rows.Close()
+	var matches []relay.RoleContact
+	for rows.Next() {
+		contact, err := scanPostgresRoleContact(rows)
+		if err != nil {
+			return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
+		}
+		if slug, ok := relay.CanonicalRoleSlug(contact.Role); !ok || slug != name {
+			continue
+		}
+		matches = append(matches, relay.RoleContact{Role: contact.Role, DisplayName: contact.DisplayName})
+	}
+	if err := rows.Err(); err != nil {
+		return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
+	}
+	result := relay.RoleResolveResult{Status: relay.RoleResolveNotFound}
+	switch {
+	case len(matches) == 1:
+		contact, err := d.lookupAddressableContact(tx, matches[0].Role, now)
+		if err != nil {
+			return relay.RoleResolveResult{}, errors.New("role resolution is unavailable")
+		}
+		result = relay.RoleResolveResult{Status: relay.RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}
+	case len(matches) > 1:
+		if len(matches) > relay.MaxRoleResolveMatches {
+			matches = matches[:relay.MaxRoleResolveMatches]
+		}
+		result = relay.RoleResolveResult{Status: relay.RoleResolveAmbiguous, Matches: matches}
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.RoleResolveResult{}, errors.New("role resolution cannot commit")
+	}
+	return result, nil
+}
+
 func postgresRoleProfilesAvailable(q queryer) (bool, error) {
 	var available bool
 	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_profiles') IS NOT NULL AND to_regclass('relay.mail_role_profile_idempotency') IS NOT NULL`).Scan(&available); err != nil {

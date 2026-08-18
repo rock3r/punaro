@@ -260,6 +260,17 @@ name this role. Exact retries reuse the same idempotency key. Legacy names such
 as `role/plan-reviewer` remain conversation members until you register a
 canonical handle; registration does not rename them.
 
+List and resolve only those opted-in addresses. An unqualified slug succeeds
+only when exactly one visible role has it; otherwise use the qualified handle.
+Display names cannot resolve a role, and the directory never returns sessions
+or conversations:
+
+```sh
+punaro-adapter contacts list
+punaro-adapter contacts resolve reviewer
+punaro-adapter contacts resolve role/workstation-review/reviewer
+```
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production

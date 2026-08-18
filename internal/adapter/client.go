@@ -173,6 +173,42 @@ func (c *HTTPRelayClient) RegisterRole(ctx context.Context, role, displayName st
 	return profile, err
 }
 
+// ListRoles returns one bounded page of opted-in public roles.
+func (c *HTTPRelayClient) ListRoles(ctx context.Context, cursor string, limit int) (relay.RoleListPage, error) {
+	if limit == 0 {
+		limit = relay.DefaultRoleListLimit
+	}
+	var page relay.RoleListPage
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/roles/list", map[string]any{"cursor": cursor, "limit": limit}, &page)
+	if page.Roles == nil {
+		page.Roles = []relay.RoleContact{}
+	}
+	return page, err
+}
+
+// ResolveRole answers one public name. Ambiguity and not-found are result
+// statuses, not guessed targets.
+func (c *HTTPRelayClient) ResolveRole(ctx context.Context, name string) (relay.RoleResolveResult, error) {
+	var result relay.RoleResolveResult
+	status, err := c.doJSONAllowing(ctx, http.MethodPost, "/v1/roles/resolve", map[string]any{"name": name}, &result, http.StatusOK, http.StatusNotFound, http.StatusConflict)
+	if err != nil {
+		return relay.RoleResolveResult{}, err
+	}
+	switch status {
+	case http.StatusNotFound:
+		result.Status = relay.RoleResolveNotFound
+	case http.StatusConflict:
+		if result.Status == "" {
+			result.Status = relay.RoleResolveAmbiguous
+		}
+	case http.StatusOK:
+		if result.Status == "" {
+			result.Status = relay.RoleResolveResolved
+		}
+	}
+	return result, nil
+}
+
 // LeaseInvocations obtains content-free, server-authorized local runtime work.
 func (c *HTTPRelayClient) LeaseInvocations(ctx context.Context) ([]relay.Invocation, error) {
 	var response struct {
@@ -633,10 +669,18 @@ func (c *HTTPRelayClient) addAccessCookies(headers http.Header) {
 }
 
 func (c *HTTPRelayClient) doJSON(ctx context.Context, method, path string, requestValue, responseValue any) (int, error) {
-	return c.doJSONWithIdempotency(ctx, method, path, requestValue, "", responseValue)
+	return c.doJSONAllowing(ctx, method, path, requestValue, responseValue)
 }
 
 func (c *HTTPRelayClient) doJSONWithIdempotency(ctx context.Context, method, path string, requestValue any, idempotencyKey string, responseValue any) (int, error) {
+	return c.doJSONAllowingWithIdempotency(ctx, method, path, requestValue, idempotencyKey, responseValue)
+}
+
+func (c *HTTPRelayClient) doJSONAllowing(ctx context.Context, method, path string, requestValue, responseValue any, allowed ...int) (int, error) {
+	return c.doJSONAllowingWithIdempotency(ctx, method, path, requestValue, "", responseValue, allowed...)
+}
+
+func (c *HTTPRelayClient) doJSONAllowingWithIdempotency(ctx context.Context, method, path string, requestValue any, idempotencyKey string, responseValue any, allowed ...int) (int, error) {
 	body, err := json.Marshal(requestValue)
 	if err != nil {
 		return 0, fmt.Errorf("encode relay request: %w", err)
@@ -675,7 +719,7 @@ func (c *HTTPRelayClient) doJSONWithIdempotency(ctx context.Context, method, pat
 		return 0, fmt.Errorf("relay request failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+	if !allowedHTTPStatus(response.StatusCode, allowed) {
 		return response.StatusCode, fmt.Errorf("relay rejected request with HTTP %d", response.StatusCode)
 	}
 	if responseValue == nil || response.StatusCode == http.StatusNoContent {
@@ -687,6 +731,18 @@ func (c *HTTPRelayClient) doJSONWithIdempotency(ctx context.Context, method, pat
 		return response.StatusCode, fmt.Errorf("decode relay response: %w", err)
 	}
 	return response.StatusCode, nil
+}
+
+func allowedHTTPStatus(status int, allowed []int) bool {
+	if len(allowed) == 0 {
+		return status >= http.StatusOK && status < http.StatusMultipleChoices
+	}
+	for _, code := range allowed {
+		if status == code {
+			return true
+		}
+	}
+	return false
 }
 
 const maxRelayResponseBytes = 128 << 10

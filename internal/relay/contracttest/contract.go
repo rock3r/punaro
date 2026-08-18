@@ -516,6 +516,37 @@ func RunRoleProfiles(t *testing.T, backend relay.Backend, namespace string) {
 			t.Fatalf("concurrent worker %d profile=%#v want=%#v", i, profile, concurrentFirst)
 		}
 	}
+	if _, _, err := store.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineA, Role: role, DirectAddressable: true, IdempotencyKey: namespace + "-list-enable", Now: now.Add(6 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := store.ListAddressableRoles(relay.RoleListInput{Limit: 50, Now: now.Add(6 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]bool{}
+	for _, contact := range listed.Roles {
+		found[contact.Role] = true
+		if contact.Role == role && contact.Online {
+			t.Fatalf("unbound listed role was online: %#v", contact)
+		}
+	}
+	if !found[role] || !found["role/"+machineB+"/reviewer"] || found[legacyRole] || found[preciseRole] {
+		t.Fatalf("directory visibility=%v page=%#v", found, listed)
+	}
+	exact, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: role, Now: now.Add(6 * time.Minute)})
+	if err != nil || exact.Status != relay.RoleResolveResolved || exact.Role != role {
+		t.Fatalf("exact resolve=%#v err=%v", exact, err)
+	}
+	ambiguous, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: "reviewer", Now: now.Add(6 * time.Minute)})
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) < 2 {
+		t.Fatalf("ambiguous resolve=%#v err=%v", ambiguous, err)
+	}
+	missing, err := store.ResolveAddressableRole(relay.RoleResolveInput{Name: legacyRole, Now: now.Add(6 * time.Minute)})
+	if err != nil || missing.Status != relay.RoleResolveNotFound {
+		t.Fatalf("legacy resolve=%#v err=%v", missing, err)
+	}
 }
 
 func sameRoleProfile(got, want relay.RoleProfile) bool {

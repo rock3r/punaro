@@ -76,6 +76,8 @@ func main() {
 		err = runBindRole(os.Args[2:])
 	case os.Args[1] == "register-role":
 		err = runRegisterRole(os.Args[2:])
+	case os.Args[1] == "contacts":
+		err = runContacts(os.Args[2:])
 	case os.Args[1] == "invoke":
 		err = runInvoke(os.Args[2:])
 	case os.Args[1] == "member" && len(os.Args) > 2 && os.Args[2] == "set":
@@ -89,12 +91,20 @@ func main() {
 	case os.Args[1] == "validate-relay-transport":
 		err = validateRelayTransport(os.Args[2:])
 	default:
-		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, register-role, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
+		err = fmt.Errorf("unknown command %q (supported: send, create, bind-role, register-role, contacts list, contacts resolve, invoke, member set, member remove, attachment-notify, mailbox-mcp, validate-relay-transport)", os.Args[1])
 	}
 	if err != nil {
 		log.Printf("punaro-adapter stopped: %v", err)
-		os.Exit(1)
+		os.Exit(exitStatus(err))
 	}
+}
+
+func exitStatus(err error) int {
+	var coded interface{ ExitCode() int }
+	if errors.As(err, &coded) {
+		return coded.ExitCode()
+	}
+	return 1
 }
 
 func mailboxMCPCommand() ([]string, error) {
@@ -480,6 +490,123 @@ func runRegisterRole(args []string) error {
 	}
 	_, err = fmt.Fprintf(os.Stdout, "%s\n", encoded)
 	return err
+}
+
+type contactsListRequest struct {
+	cursor string
+	limit  int
+}
+
+type contactsStatusError struct {
+	message string
+	code    int
+}
+
+func (e *contactsStatusError) Error() string { return e.message }
+func (e *contactsStatusError) ExitCode() int { return e.code }
+
+func parseContactsListArgs(args []string) (contactsListRequest, error) {
+	flags := flag.NewFlagSet("punaro-adapter contacts list", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var request contactsListRequest
+	flags.StringVar(&request.cursor, "cursor", "", "opaque directory cursor")
+	flags.IntVar(&request.limit, "limit", relay.DefaultRoleListLimit, "page size from 1 to 100")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return contactsListRequest{}, fmt.Errorf("contacts list accepts optional --cursor and --limit")
+	}
+	if request.limit < 1 || request.limit > relay.MaxRoleListLimit {
+		return contactsListRequest{}, fmt.Errorf("contacts list --limit must be between 1 and 100")
+	}
+	return request, nil
+}
+
+func parseContactsResolveArgs(args []string) (string, error) {
+	flags := flag.NewFlagSet("punaro-adapter contacts resolve", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	if err := flags.Parse(args); err != nil || flags.NArg() != 1 || strings.TrimSpace(flags.Arg(0)) == "" {
+		return "", fmt.Errorf("contacts resolve requires NAME")
+	}
+	return flags.Arg(0), nil
+}
+
+func contactsResolveExit(result relay.RoleResolveResult) int {
+	switch result.Status {
+	case relay.RoleResolveResolved:
+		return 0
+	case relay.RoleResolveAmbiguous:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func runContacts(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("contacts requires list or resolve")
+	}
+	switch args[0] {
+	case "list":
+		return runContactsList(args[1:])
+	case "resolve":
+		return runContactsResolve(args[1:])
+	default:
+		return fmt.Errorf("unknown contacts command %q", args[0])
+	}
+}
+
+func newRelayClient() (*adapter.HTTPRelayClient, error) {
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("configuration: %w", err)
+	}
+	return adapter.NewHTTPRelayClientWithPolicy(config.relayURL, config.machineID, config.privateKey, nil, config.accessToken, config.transportPolicy)
+}
+
+func writeJSONLine(value any) error {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "%s\n", encoded)
+	return err
+}
+
+func runContactsList(args []string) error {
+	request, err := parseContactsListArgs(args)
+	if err != nil {
+		return err
+	}
+	client, err := newRelayClient()
+	if err != nil {
+		return err
+	}
+	page, err := client.ListRoles(context.Background(), request.cursor, request.limit)
+	if err != nil {
+		return err
+	}
+	return writeJSONLine(page)
+}
+
+func runContactsResolve(args []string) error {
+	name, err := parseContactsResolveArgs(args)
+	if err != nil {
+		return err
+	}
+	client, err := newRelayClient()
+	if err != nil {
+		return err
+	}
+	result, err := client.ResolveRole(context.Background(), name)
+	if err != nil {
+		return err
+	}
+	if err := writeJSONLine(result); err != nil {
+		return err
+	}
+	if code := contactsResolveExit(result); code != 0 {
+		return &contactsStatusError{message: result.Status, code: code}
+	}
+	return nil
 }
 
 type sendRequest struct {

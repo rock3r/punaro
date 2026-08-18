@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/base64"
 	"regexp"
 	"strings"
 	"time"
@@ -57,6 +58,45 @@ func CanonicalRoleForMachine(role, machineID string) bool {
 	rest, _ := strings.CutPrefix(role, "role/")
 	machine, _, _ := strings.Cut(rest, "/")
 	return machine == machineID
+}
+
+// CanonicalRoleSlug returns the immutable trailing slug of a canonical handle.
+func CanonicalRoleSlug(role string) (string, bool) {
+	if !CanonicalRoleHandle(role) {
+		return "", false
+	}
+	rest, _ := strings.CutPrefix(role, "role/")
+	_, slug, _ := strings.Cut(rest, "/")
+	return slug, true
+}
+
+// ValidRoleSlug reports whether value is a canonical role slug, not a display name.
+func ValidRoleSlug(value string) bool {
+	return canonicalRoleSlug.MatchString(value)
+}
+
+// EncodeRoleListCursor hides the last canonical role behind an opaque page token.
+func EncodeRoleListCursor(role string) string {
+	if !CanonicalRoleHandle(role) {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(role))
+}
+
+// DecodeRoleListCursor reports the last canonical role of an opaque page token.
+func DecodeRoleListCursor(cursor string) (string, bool) {
+	if cursor == "" {
+		return "", true
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", false
+	}
+	role := string(raw)
+	if !CanonicalRoleHandle(role) {
+		return "", false
+	}
+	return role, true
 }
 
 // NormalizeRoleDisplayName trims an optional portable display name. Empty after
@@ -158,6 +198,8 @@ type RoleBindingBackend interface {
 type RoleProfileBackend interface {
 	RegisterRoleProfile(RegisterRoleInput) (RoleProfile, bool, error)
 	RoleProfile(role string) (RoleProfile, error)
+	ListAddressableRoles(RoleListInput) (RoleListPage, error)
+	ResolveAddressableRole(RoleResolveInput) (RoleResolveResult, error)
 }
 
 // PrincipalAuthority is the non-secret, generation-fenced result of device

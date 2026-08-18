@@ -54,6 +54,18 @@ sessions from an `agent-mailbox` `group/...` address; detached members are not
 advertised. Inbound text is delivered to the local mailbox as an inert JSON
 envelope containing the relay message and conversation IDs.
 
+Enrolled machines can list opted-in durable roles and resolve a name without
+seeing sessions or conversations. An unqualified slug such as `reviewer`
+succeeds only when exactly one visible role has that slug; otherwise use the
+qualified handle. Display names cannot resolve a role, and listing does not
+send messages:
+
+```sh
+punaro-adapter contacts list
+punaro-adapter contacts resolve reviewer
+punaro-adapter contacts resolve role/workstation-review/reviewer
+```
+
 ## What delivery status means
 
 Punaro reports only what the relay can enforce. A successful send is durable

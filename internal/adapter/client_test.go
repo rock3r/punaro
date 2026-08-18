@@ -718,6 +718,79 @@ func TestHTTPRelayClientRegistersCanonicalRoleAndExactRetry(t *testing.T) {
 	}
 }
 
+func TestHTTPRelayClientListsAndResolvesPublicRoles(t *testing.T) {
+	t.Parallel()
+	public, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := mustReadAll(t, r)
+		request := signedRequestFromHTTP(t, r, body)
+		if !ed25519.Verify(public, relay.CanonicalRequest(request), request.Signature) {
+			t.Fatal("directory request was not signed")
+		}
+		if r.URL.RawQuery != "" {
+			t.Fatal("directory request used a query string")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/list":
+			var payload struct {
+				Cursor string `json:"cursor"`
+				Limit  int    `json:"limit"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil || payload.Cursor != "" || payload.Limit != relay.DefaultRoleListLimit {
+				t.Fatalf("list payload=%s err=%v", body, err)
+			}
+			_, _ = w.Write([]byte(`{"roles":[{"role":"role/machine-a/reviewer","display_name":"Reviewer","machine_id":"machine-a","online":true}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/resolve":
+			var payload struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("resolve payload=%s err=%v", body, err)
+			}
+			switch payload.Name {
+			case "role/machine-a/reviewer":
+				_, _ = w.Write([]byte(`{"status":"resolved","role":"role/machine-a/reviewer","display_name":"Reviewer","machine_id":"machine-a","online":true}`))
+			case "reviewer":
+				w.WriteHeader(http.StatusConflict)
+				_, _ = w.Write([]byte(`{"status":"ambiguous","matches":[{"role":"role/machine-a/reviewer","display_name":"Reviewer"},{"role":"role/machine-b/reviewer"}]}`))
+			default:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"role not found"}`))
+			}
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client, err := NewHTTPRelayClient(server.URL, "machine-a", private, server.Client(), AccessServiceToken{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.ListRoles(context.Background(), "", 0)
+	if err != nil || len(page.Roles) != 1 || page.Roles[0].Role != "role/machine-a/reviewer" || !page.Roles[0].Online {
+		t.Fatalf("list=%#v err=%v", page, err)
+	}
+	if encoded, err := json.Marshal(page); err != nil || strings.Contains(string(encoded), "agent/") || strings.Contains(string(encoded), "conversation") {
+		t.Fatalf("list leaked inventory: %s err=%v", encoded, err)
+	}
+	exact, err := client.ResolveRole(context.Background(), "role/machine-a/reviewer")
+	if err != nil || exact.Status != relay.RoleResolveResolved || exact.Role != "role/machine-a/reviewer" {
+		t.Fatalf("exact=%#v err=%v", exact, err)
+	}
+	ambiguous, err := client.ResolveRole(context.Background(), "reviewer")
+	if err != nil || ambiguous.Status != relay.RoleResolveAmbiguous || len(ambiguous.Matches) != 2 {
+		t.Fatalf("ambiguous=%#v err=%v", ambiguous, err)
+	}
+	missing, err := client.ResolveRole(context.Background(), "role/plan-reviewer")
+	if err != nil || missing.Status != relay.RoleResolveNotFound {
+		t.Fatalf("missing=%#v err=%v", missing, err)
+	}
+}
+
 func TestHTTPRelayClientEncodesDurableRoleMemberWithoutChangingEndpointMember(t *testing.T) {
 	public, private, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

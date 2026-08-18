@@ -98,6 +98,55 @@ func TestParseCreateArgsAcceptsDurableRoleMemberAndBinding(t *testing.T) {
 	}
 }
 
+func TestParseContactsListArgsDefaultsAndBounds(t *testing.T) {
+	request, err := parseContactsListArgs(nil)
+	if err != nil || request.cursor != "" || request.limit != relay.DefaultRoleListLimit {
+		t.Fatalf("default list=%#v err=%v", request, err)
+	}
+	request, err = parseContactsListArgs([]string{"--cursor", "page-2", "--limit", "10"})
+	if err != nil || request.cursor != "page-2" || request.limit != 10 {
+		t.Fatalf("paged list=%#v err=%v", request, err)
+	}
+	if _, err := parseContactsListArgs([]string{"--limit", "0"}); err == nil {
+		t.Fatal("limit 0 was accepted")
+	}
+	if _, err := parseContactsListArgs([]string{"--limit", "101"}); err == nil {
+		t.Fatal("limit 101 was accepted")
+	}
+	if _, err := parseContactsListArgs([]string{"extra"}); err == nil {
+		t.Fatal("positional list argument was accepted")
+	}
+}
+
+func TestParseContactsResolveArgsRequiresName(t *testing.T) {
+	name, err := parseContactsResolveArgs([]string{"reviewer"})
+	if err != nil || name != "reviewer" {
+		t.Fatalf("short name=%q err=%v", name, err)
+	}
+	name, err = parseContactsResolveArgs([]string{"role/workstation-review/reviewer"})
+	if err != nil || name != "role/workstation-review/reviewer" {
+		t.Fatalf("qualified name=%q err=%v", name, err)
+	}
+	if _, err := parseContactsResolveArgs(nil); err == nil {
+		t.Fatal("missing resolve name was accepted")
+	}
+	if _, err := parseContactsResolveArgs([]string{"reviewer", "extra"}); err == nil {
+		t.Fatal("extra resolve argument was accepted")
+	}
+}
+
+func TestContactsResolveExitCodes(t *testing.T) {
+	if code := contactsResolveExit(relay.RoleResolveResult{Status: relay.RoleResolveResolved}); code != 0 {
+		t.Fatalf("resolved exit=%d", code)
+	}
+	if code := contactsResolveExit(relay.RoleResolveResult{Status: relay.RoleResolveNotFound}); code != 1 {
+		t.Fatalf("not-found exit=%d", code)
+	}
+	if code := contactsResolveExit(relay.RoleResolveResult{Status: relay.RoleResolveAmbiguous}); code != 2 {
+		t.Fatalf("ambiguous exit=%d", code)
+	}
+}
+
 func TestParseInvokeArgsRequiresExplicitContentFreeTargetAndRetryKey(t *testing.T) {
 	if _, err := parseInvokeArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b"}); err == nil {
 		t.Fatal("invoke without idempotency key was accepted")
@@ -341,6 +390,10 @@ func TestDirectCommandsLoadInstallerProfileBeforeTheirTransportBoundary(t *testi
 			_, _ = w.Write([]byte(`{"id":"message-1","conversation_id":"conversation-1","sequence":1,"from_endpoint":"agent/a","body":"ignored","created_at":"2026-08-03T00:00:00Z"}`))
 		case "/v1/conversations/conversation-1/invocations":
 			_, _ = w.Write([]byte(`{"id":"invocation-1","status":"pending"}`))
+		case "/v1/roles/list":
+			_, _ = w.Write([]byte(`{"roles":[]}`))
+		case "/v1/roles/resolve":
+			_, _ = w.Write([]byte(`{"status":"resolved","role":"role/profile-machine/reviewer","machine_id":"profile-machine"}`))
 		default:
 			t.Fatalf("unexpected transport boundary %s %s", r.Method, r.URL.Path)
 		}
@@ -369,6 +422,12 @@ func TestDirectCommandsLoadInstallerProfileBeforeTheirTransportBoundary(t *testi
 	}
 	if err := runInvoke([]string{"--conversation", "conversation-1", "--from", "agent/a", "--target", "agent/b", "--idempotency-key", "invoke-1"}); err != nil {
 		t.Fatalf("invoke did not reach its transport boundary: %v", err)
+	}
+	if err := runContacts([]string{"list"}); err != nil {
+		t.Fatalf("contacts list did not reach its transport boundary: %v", err)
+	}
+	if err := runContacts([]string{"resolve", "role/profile-machine/reviewer"}); err != nil {
+		t.Fatalf("contacts resolve did not reach its transport boundary: %v", err)
 	}
 }
 

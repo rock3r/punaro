@@ -190,6 +190,53 @@ type RoleProfile struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+const (
+	DefaultRoleListLimit  = 50
+	MaxRoleListLimit      = 100
+	MaxRoleResolveMatches = 20
+	RoleResolveResolved   = "resolved"
+	RoleResolveNotFound   = "not_found"
+	RoleResolveAmbiguous  = "ambiguous"
+)
+
+// RoleContact is one opted-in public role. It never includes sessions or membership.
+type RoleContact struct {
+	Role        string `json:"role"`
+	DisplayName string `json:"display_name,omitempty"`
+	MachineID   string `json:"machine_id,omitempty"`
+	Online      bool   `json:"online,omitempty"`
+}
+
+// RoleListInput is one authenticated, bounded directory page request.
+type RoleListInput struct {
+	Cursor string
+	Limit  int
+	Now    time.Time
+}
+
+// RoleListPage is one cursor-stable page of opted-in roles.
+type RoleListPage struct {
+	Roles      []RoleContact `json:"roles"`
+	NextCursor string        `json:"next_cursor,omitempty"`
+}
+
+// RoleResolveInput looks up one public name. Display names are never keys.
+type RoleResolveInput struct {
+	Name string
+	Now  time.Time
+}
+
+// RoleResolveResult is a deterministic directory answer. Ambiguous matches
+// contain only canonical roles and display names.
+type RoleResolveResult struct {
+	Status      string        `json:"status"`
+	Role        string        `json:"role,omitempty"`
+	DisplayName string        `json:"display_name,omitempty"`
+	MachineID   string        `json:"machine_id,omitempty"`
+	Online      bool          `json:"online,omitempty"`
+	Matches     []RoleContact `json:"matches,omitempty"`
+}
+
 // InvocationStatus is the durable state of a server-authorized runtime
 // handoff. A runtime receives no message body: it attaches the endpoint and
 // then obtains pending delivery through the normal path.
@@ -1028,6 +1075,144 @@ func (s *Store) RoleProfile(role string) (RoleProfile, error) {
 		return RoleProfile{}, fmt.Errorf("read role profile: %w", err)
 	}
 	return RoleProfile{Role: role, DisplayName: display.String, DirectAddressable: addressable == 1, UpdatedAt: fromMillis(updatedAt)}, nil
+}
+
+func roleDirectoryOnlineSQL() string {
+	return `EXISTS (
+		SELECT 1 FROM role_bindings AS binding
+		JOIN endpoints AS endpoint ON endpoint.endpoint = binding.session_endpoint
+			AND endpoint.machine_id = binding.machine_id
+			AND endpoint.ownership_generation = binding.ownership_generation
+		WHERE binding.role = profiles.role
+			AND binding.machine_id = roles.machine_id
+			AND binding.lease_until > ?
+			AND endpoint.lease_until > ?
+	)`
+}
+
+func scanRoleContact(scanner interface {
+	Scan(dest ...any) error
+}) (RoleContact, error) {
+	var contact RoleContact
+	var display sql.NullString
+	var online int
+	if err := scanner.Scan(&contact.Role, &display, &contact.MachineID, &online); err != nil {
+		return RoleContact{}, err
+	}
+	contact.DisplayName = display.String
+	contact.Online = online == 1
+	return contact, nil
+}
+
+// ListAddressableRoles returns one bounded page of opted-in public roles.
+func (s *Store) ListAddressableRoles(input RoleListInput) (RoleListPage, error) {
+	after, ok := DecodeRoleListCursor(input.Cursor)
+	if !ok || input.Limit < 1 || input.Limit > MaxRoleListLimit {
+		return RoleListPage{}, fmt.Errorf("invalid role directory request")
+	}
+	now := input.Now.UnixMilli()
+	rows, err := s.db.QueryContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND (? = '' OR profiles.role > ?)
+		ORDER BY profiles.role ASC
+		LIMIT ?`, now, now, after, after, input.Limit+1)
+	if err != nil {
+		return RoleListPage{}, fmt.Errorf("list addressable roles: %w", err)
+	}
+	defer rows.Close()
+	var contacts []RoleContact
+	for rows.Next() {
+		contact, err := scanRoleContact(rows)
+		if err != nil {
+			return RoleListPage{}, err
+		}
+		contacts = append(contacts, contact)
+	}
+	if err := rows.Err(); err != nil {
+		return RoleListPage{}, err
+	}
+	page := RoleListPage{Roles: contacts}
+	if len(page.Roles) > input.Limit {
+		last := page.Roles[input.Limit-1]
+		page.Roles = page.Roles[:input.Limit]
+		page.NextCursor = EncodeRoleListCursor(last.Role)
+	}
+	if page.Roles == nil {
+		page.Roles = []RoleContact{}
+	}
+	return page, nil
+}
+
+func (s *Store) lookupAddressableContact(role string, now int64) (RoleContact, error) {
+	row := s.db.QueryRowContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND profiles.role = ?`, now, now, role)
+	contact, err := scanRoleContact(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RoleContact{}, ErrForbidden
+	}
+	return contact, err
+}
+
+// ResolveAddressableRole answers one public name without guessing.
+func (s *Store) ResolveAddressableRole(input RoleResolveInput) (RoleResolveResult, error) {
+	name := strings.TrimSpace(input.Name)
+	now := input.Now.UnixMilli()
+	if CanonicalRoleHandle(name) {
+		contact, err := s.lookupAddressableContact(name, now)
+		if errors.Is(err, ErrForbidden) {
+			return RoleResolveResult{Status: RoleResolveNotFound}, nil
+		}
+		if err != nil {
+			return RoleResolveResult{}, err
+		}
+		return RoleResolveResult{Status: RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+	}
+	if !ValidRoleSlug(name) {
+		return RoleResolveResult{Status: RoleResolveNotFound}, nil
+	}
+	like := "%/" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(name)
+	rows, err := s.db.QueryContext(context.Background(), `SELECT profiles.role, profiles.display_name, roles.machine_id, `+roleDirectoryOnlineSQL()+`
+		FROM role_profiles AS profiles
+		JOIN roles ON roles.role = profiles.role
+		WHERE profiles.direct_addressable = 1 AND profiles.role LIKE ? ESCAPE '\'
+		ORDER BY profiles.role ASC
+		LIMIT ?`, now, now, like, MaxRoleResolveMatches+1)
+	if err != nil {
+		return RoleResolveResult{}, fmt.Errorf("resolve addressable role: %w", err)
+	}
+	defer rows.Close()
+	var matches []RoleContact
+	for rows.Next() {
+		contact, err := scanRoleContact(rows)
+		if err != nil {
+			return RoleResolveResult{}, err
+		}
+		if slug, ok := CanonicalRoleSlug(contact.Role); !ok || slug != name {
+			continue
+		}
+		matches = append(matches, RoleContact{Role: contact.Role, DisplayName: contact.DisplayName})
+	}
+	if err := rows.Err(); err != nil {
+		return RoleResolveResult{}, err
+	}
+	switch {
+	case len(matches) == 0:
+		return RoleResolveResult{Status: RoleResolveNotFound}, nil
+	case len(matches) == 1:
+		contact, err := s.lookupAddressableContact(matches[0].Role, now)
+		if err != nil {
+			return RoleResolveResult{}, err
+		}
+		return RoleResolveResult{Status: RoleResolveResolved, Role: contact.Role, DisplayName: contact.DisplayName, MachineID: contact.MachineID, Online: contact.Online}, nil
+	default:
+		if len(matches) > MaxRoleResolveMatches {
+			matches = matches[:MaxRoleResolveMatches]
+		}
+		return RoleResolveResult{Status: RoleResolveAmbiguous, Matches: matches}, nil
+	}
 }
 
 type roleProfileIdempotency struct {
