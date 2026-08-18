@@ -36,6 +36,7 @@ for expected in \
 	'could not stop the running Punaro Adapter task' \
 	'Wait-PunaroReplaceableBinary' \
 	'Stop-PunaroOrphanAdapter' \
+	'run.pid is invalid' \
 	'run.pid' \
 	'FileShare]::None' \
 	'adapterTaskRestored'; do

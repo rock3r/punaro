@@ -244,12 +244,15 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 	if len(request.Keys) == 0 {
 		keys, err := loadDirectoryKeys(request.Directory)
 		if err != nil {
-			if recErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); recErr != nil {
-				return slotState{}, "", recErr
+			if recErr := requirePersistedRollbackKeys(request.Directory); recErr != nil {
+				if writeErr := writeRecoveryRecord(request.Directory, recoveryCurrentExited); writeErr != nil {
+					return slotState{}, "", writeErr
+				}
+				return slotState{}, "", ErrRecoveryOnly
 			}
-			return slotState{}, "", ErrRecoveryOnly
+		} else {
+			request.Keys = keys
 		}
-		request.Keys = keys
 	}
 	current := filepath.Join(request.Directory, currentSlot)
 	if err := requireRealDir(current); err != nil {
@@ -828,6 +831,24 @@ func readReadyFile(path string) (string, error) {
 	return record.Status, nil
 }
 
+func clearUnusedDirectoryKeys(directory string) error {
+	previous, err := readOptionalSlot(filepath.Join(directory, previousSlot))
+	if err != nil {
+		return err
+	}
+	if previous.Release != "" && previous.Release != localCheckoutRelease {
+		return nil
+	}
+	_, err = loadDirectoryKeys(directory)
+	if err == nil {
+		return nil
+	}
+	if removeErr := os.RemoveAll(filepath.Join(directory, directoryKeysFile)); removeErr != nil {
+		return removeErr
+	}
+	return syncDir(directory)
+}
+
 func requirePersistedRollbackKeys(directory string) error {
 	previous, err := readOptionalSlot(filepath.Join(directory, previousSlot))
 	if err != nil {
@@ -960,6 +981,9 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 		return err
 	}
 	if err := persistDirectoryKeys(directory, keys); err != nil {
+		return err
+	}
+	if err := clearUnusedDirectoryKeys(directory); err != nil {
 		return err
 	}
 	if err := requirePersistedRollbackKeys(directory); err != nil {

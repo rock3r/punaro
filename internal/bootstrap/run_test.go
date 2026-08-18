@@ -615,7 +615,8 @@ func TestRunExitsWhenCurrentChangesDuringHealth(t *testing.T) {
 
 func TestRunEntersRecoveryWhenKeysFileInvalid(t *testing.T) {
 	dir := privateDir(t)
-	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
 	if err := os.WriteFile(filepath.Join(dir, directoryKeysFile), []byte("not-a-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1337,6 +1338,58 @@ func TestSeedLocalCheckoutClearsRecoveryOnly(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("seed left recovery-only")
+	}
+}
+
+func TestSeedLocalCheckoutQuarantinesUnusedInvalidKeys(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, directoryKeysFile))
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, directoryKeysFile)); !os.IsNotExist(err) {
+		t.Fatal("invalid unused keys node survived a local seed")
+	}
+}
+
+func TestRunKeepsLocalCheckoutDespiteInvalidKeys(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "current-adapter")
+	writeNonFileMarker(t, filepath.Join(dir, directoryKeysFile))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
+				if err := writeReady(spec.Env); err != nil {
+					return nil, err
+				}
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("local checkout entered recovery-only because unused keys were invalid")
 	}
 }
 

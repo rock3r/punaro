@@ -21,8 +21,8 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $pidFile = Join-Path $BootstrapDirectory 'run.pid'
     if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return }
     $raw = Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue
-    if ([string]::IsNullOrWhiteSpace($raw)) { return }
-    try { $record = $raw | ConvertFrom-Json } catch { return }
+    if ([string]::IsNullOrWhiteSpace($raw)) { Stop-Install 'run.pid is invalid' }
+    try { $record = $raw | ConvertFrom-Json } catch { Stop-Install 'run.pid is invalid' }
     $schema = $null
     $orphanPid = 0
     $orphanPath = ''
@@ -30,12 +30,12 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
         $schemaProp = $record.PSObject.Properties['schema']
         $pidProp = $record.PSObject.Properties['pid']
         $pathProp = $record.PSObject.Properties['path']
-        if ($null -eq $schemaProp -or $null -eq $pidProp -or $null -eq $pathProp) { return }
+        if ($null -eq $schemaProp -or $null -eq $pidProp -or $null -eq $pathProp) { Stop-Install 'run.pid is invalid' }
         $schema = $schemaProp.Value
         $orphanPid = [int]$pidProp.Value
         $orphanPath = [string]$pathProp.Value
-    } catch { return }
-    if ($schema -ne 1 -or $orphanPid -le 0 -or [string]::IsNullOrWhiteSpace($orphanPath)) { return }
+    } catch { Stop-Install 'run.pid is invalid' }
+    if ($schema -ne 1 -or $orphanPid -le 0 -or [string]::IsNullOrWhiteSpace($orphanPath)) { Stop-Install 'run.pid is invalid' }
     $proc = Get-Process -Id $orphanPid -ErrorAction SilentlyContinue
     if ($null -eq $proc) { return }
     $image = $null
