@@ -366,30 +366,54 @@ func recordRolledAwayCurrent(directory string) error {
 }
 
 func loadAutoRollback(directory string) (autoRollbackState, error) {
-	body, err := os.ReadFile(filepath.Join(directory, autoRollbackFile)) // #nosec G304 -- auto-rollback record is a fixed child of the bootstrap directory.
+	path := filepath.Join(directory, autoRollbackFile)
+	info, err := os.Lstat(path) // #nosec G703 -- auto-rollback record is a fixed child of the bootstrap directory.
 	if os.IsNotExist(err) {
 		return autoRollbackState{}, nil
 	}
 	if err != nil {
 		return autoRollbackState{}, err
 	}
+	if !info.Mode().IsRegular() {
+		if err := os.RemoveAll(path); err != nil {
+			return autoRollbackState{}, err
+		}
+		if err := syncDir(directory); err != nil {
+			return autoRollbackState{}, err
+		}
+		return autoRollbackState{}, nil
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- auto-rollback record is a fixed child of the bootstrap directory.
+	if err != nil {
+		return autoRollbackState{}, err
+	}
 	if err := rejectDuplicateJSONFields(body); err != nil {
-		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+		return quarantineInvalidAutoRollback(directory)
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.DisallowUnknownFields()
 	var record autoRollbackState
 	if err := decoder.Decode(&record); err != nil {
-		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+		return quarantineInvalidAutoRollback(directory)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+		return quarantineInvalidAutoRollback(directory)
 	}
 	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
-		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+		return quarantineInvalidAutoRollback(directory)
 	}
 	return record, nil
+}
+
+func quarantineInvalidAutoRollback(directory string) (autoRollbackState, error) {
+	if err := os.RemoveAll(filepath.Join(directory, autoRollbackFile)); err != nil {
+		return autoRollbackState{}, err
+	}
+	if err := syncDir(directory); err != nil {
+		return autoRollbackState{}, err
+	}
+	return autoRollbackState{}, nil
 }
 
 func saveAutoRollback(directory string, away slotState) error {

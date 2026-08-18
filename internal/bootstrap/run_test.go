@@ -342,16 +342,25 @@ func TestRunDoesNotRememberHealthWithoutReadyFile(t *testing.T) {
 	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.1.0", 1, payloadDigest("current-adapter"), 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	started := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- Run(ctx, RunRequest{
 			Directory:     dir,
 			HealthTimeout: 20 * time.Millisecond,
 			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				close(started)
 				return blockingProcess(ctx), nil
 			},
 		})
 	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	if err := <-errCh; err != nil {
@@ -999,6 +1008,44 @@ func TestRunRollsBackUnhealthyCurrentWhenCatalogAllowsPrevious(t *testing.T) {
 	}
 }
 
+func TestRunRollsBackAfterInvalidAutoRollbackNode(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))
+	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	var starts int
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		Origin:        origin.URL,
+		Keys:          origin.Keys,
+		HealthTimeout: 40 * time.Millisecond,
+		Now:           time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		Start: func(_ context.Context, spec ChildSpec) (Process, error) {
+			starts++
+			if starts == 1 {
+				return blockingProcess(context.Background()), nil
+			}
+			if err := writeReady(spec.Env); err != nil {
+				return nil, err
+			}
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("rollback start err=%v", err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" || status.RecoveryOnly {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunLoadsKeysFromDirectory(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
@@ -1390,6 +1437,25 @@ func TestRunKeepsLocalCheckoutDespiteInvalidKeys(t *testing.T) {
 	}
 	if recoveryOnly(t, dir) {
 		t.Fatal("local checkout entered recovery-only because unused keys were invalid")
+	}
+}
+
+func TestSeedLocalCheckoutSucceedsWithUnreadablePrevious(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "local-adapter")
+	previous := filepath.Join(dir, previousSlot)
+	if err := os.Mkdir(previous, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(previous, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -398,6 +398,18 @@ func TestNextSlotGenerationRejectsExhaustedHighWater(t *testing.T) {
 	}
 }
 
+func TestLoadAutoRollbackQuarantinesDirectoryNode(t *testing.T) {
+	dir := privateDir(t)
+	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))
+	record, err := loadAutoRollback(dir)
+	if err != nil || record.Release != "" {
+		t.Fatalf("quarantined auto-rollback=%+v err=%v", record, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, autoRollbackFile)); !os.IsNotExist(err) {
+		t.Fatal("invalid auto-rollback node survived load")
+	}
+}
+
 func TestSaveAutoRollbackReplacesDirectoryNode(t *testing.T) {
 	dir := privateDir(t)
 	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))

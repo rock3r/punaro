@@ -834,7 +834,7 @@ func readReadyFile(path string) (string, error) {
 func clearUnusedDirectoryKeys(directory string) error {
 	previous, err := readOptionalSlot(filepath.Join(directory, previousSlot))
 	if err != nil {
-		return err
+		previous = slotState{}
 	}
 	if previous.Release != "" && previous.Release != localCheckoutRelease {
 		return nil
@@ -852,7 +852,7 @@ func clearUnusedDirectoryKeys(directory string) error {
 func requirePersistedRollbackKeys(directory string) error {
 	previous, err := readOptionalSlot(filepath.Join(directory, previousSlot))
 	if err != nil {
-		return err
+		return nil //nolint:nilerr // unreadable previous is quarantined by seed/update, not a signed rollback target
 	}
 	if previous.Release == "" || previous.Release == localCheckoutRelease {
 		return nil
