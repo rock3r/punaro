@@ -18,6 +18,7 @@ for expected in \
 	'RestartCount = 255' \
 	'RepetitionInterval' \
 	'RepetitionDuration' \
+	'Do not attach it until -Enable' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \

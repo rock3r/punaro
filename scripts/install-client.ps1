@@ -385,12 +385,16 @@ $action = New-ScheduledTaskAction -Execute $windowsPowerShell -Argument ('-NoPro
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
 # RestartCount is an unsignedByte (max 255). A one-minute repeating trigger
 # re-arms the task after that budget so a later signed repair can start it.
+# Do not attach it until -Enable (or an already-running task) so a fresh
+# install cannot start during the Access-credential setup window.
 $repeatTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval ([TimeSpan]::FromMinutes(1)) -RepetitionDuration ([TimeSpan]::FromDays(3650))
+$triggers = @($logonTrigger)
+if ($Enable -or $adapterTaskWasRunning) { $triggers += $repeatTrigger }
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden -ExecutionTimeLimit ([TimeSpan]::Zero)
 $settings.RestartCount = 255
 $settings.RestartInterval = [TimeSpan]::FromMinutes(1)
-Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger @($logonTrigger, $repeatTrigger) -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
+Register-ScheduledTask -TaskName $adapterTaskName -Action $action -Trigger $triggers -Principal $principal -Settings $settings -Description 'Punaro local mailbox adapter' -Force | Out-Null
 if ($Enable -or $adapterTaskWasRunning) {
     Start-ScheduledTask -TaskName $adapterTaskName
     $adapterTaskRestored = $true
