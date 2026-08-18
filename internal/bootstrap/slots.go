@@ -506,7 +506,10 @@ func finishPublication(directory string, accepted acceptedState) error {
 
 func quarantineUnreadablePrevious(directory string) error {
 	if _, err := readOptionalSlot(filepath.Join(directory, previousSlot)); err != nil {
-		return os.RemoveAll(filepath.Join(directory, previousSlot))
+		if err := os.RemoveAll(filepath.Join(directory, previousSlot)); err != nil {
+			return err
+		}
+		return syncDir(directory)
 	}
 	return nil
 }

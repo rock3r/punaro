@@ -1440,6 +1440,27 @@ func TestRunKeepsLocalCheckoutDespiteInvalidKeys(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutReconstructsInvalidAcceptedState(t *testing.T) {
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, acceptedFile), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := loadAccepted(dir)
+	if err != nil || accepted.Release != localCheckoutRelease {
+		t.Fatalf("accepted=%#v err=%v", accepted, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("seeding journal survived after reconstructing accepted state")
+	}
+}
+
 func TestSeedLocalCheckoutQuarantinesUnreadablePreviousOnSignedCurrent(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")

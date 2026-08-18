@@ -1107,6 +1107,14 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 	if err := writeAtomic(filepath.Join(candidate, slotRecord), record, 0o600); err != nil {
 		return err
 	}
+	if _, err := loadAccepted(directory); err != nil {
+		if err := os.RemoveAll(filepath.Join(directory, acceptedFile)); err != nil {
+			return err
+		}
+		if err := syncDir(directory); err != nil {
+			return err
+		}
+	}
 	if err := writeJournal(directory, journal{
 		Schema:         1,
 		Phase:          "seeding",
