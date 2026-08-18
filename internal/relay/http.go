@@ -94,6 +94,10 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		h.bindRole(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/register":
 		h.registerRole(w, body, machineID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/list":
+		h.listRoles(w, body, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/roles/resolve":
+		h.resolveRole(w, body, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/conversations":
 		h.createConversation(w, body, machineID, authority, now, r.Header.Get("Idempotency-Key"))
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/messages"):
@@ -193,6 +197,60 @@ func (h *handler) registerRole(w http.ResponseWriter, body []byte, machineID str
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, profile)
+}
+
+func (h *handler) listRoles(w http.ResponseWriter, body []byte, now time.Time) {
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Cursor string `json:"cursor"`
+		Limit  *int   `json:"limit"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role directory request")
+		return
+	}
+	limit := DefaultRoleListLimit
+	if request.Limit != nil {
+		limit = *request.Limit
+	}
+	page, err := store.ListAddressableRoles(RoleListInput{Cursor: request.Cursor, Limit: limit, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func (h *handler) resolveRole(w http.ResponseWriter, body []byte, now time.Time) {
+	store, ok := h.store.(RoleProfileBackend)
+	if !ok {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	var request struct {
+		Name string `json:"name"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid role resolution request")
+		return
+	}
+	result, err := store.ResolveAddressableRole(RoleResolveInput{Name: request.Name, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	switch result.Status {
+	case RoleResolveResolved:
+		writeJSON(w, http.StatusOK, result)
+	case RoleResolveAmbiguous:
+		writeJSON(w, http.StatusConflict, result)
+	default:
+		writeError(w, http.StatusNotFound, "role not found")
+	}
 }
 
 func (h *handler) bindRole(w http.ResponseWriter, body []byte, machineID string, now time.Time) {

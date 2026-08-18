@@ -310,7 +310,17 @@ return the first result. Legacy roles such as `role/plan-reviewer` stay valid
 conversation members and are not silently renamed; they remain hidden from
 addressable identity until explicitly registered under a canonical handle.
 Registration never returns bindings, endpoints, credentials, or membership.
-Listing and direct send remain separate operations.
+Authenticated machines list opted-in addresses with `POST /v1/roles/list` and
+resolve a name with `POST /v1/roles/resolve`. Listing is cursor-stable, bounded
+to 1–100 rows (default 50), ordered by canonical role, and includes only
+`direct_addressable` profiles plus a server-computed `online` flag from the
+current valid binding and endpoint ownership generation. Resolve accepts a
+fully qualified handle such as `role/workstation-review/reviewer` or an
+unqualified slug such as `reviewer`. Display names are never keys. Zero matches
+are indistinguishable from hidden or legacy roles. Multiple slug matches return
+a typed ambiguity result with at most 20 qualified roles and display names,
+never sessions or conversation inventory. Direct send remains a separate
+operation.
 
 The owning machine renews that binding with `POST /v1/roles/bindings`, supplying
 the role and one of its currently advertised endpoints. The server verifies the
@@ -839,6 +849,8 @@ API client and reaches the relay using its own enrolled machine credential.
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
 | `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
+| `POST` | `/v1/roles/list` | Bounded listing of opted-in addressable roles; no session inventory. |
+| `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. |
