@@ -27,7 +27,7 @@ WITH objects AS (
         (terminals_oid,'mail_delivery_terminals_pkey','p'::"char",ARRAY[1]::smallint[],NULL::text),
         (terminals_oid,'mail_delivery_terminals_recipient_endpoint_check','c'::"char",ARRAY[4]::smallint[],'((char_length(recipient_endpoint) >= 1) AND (char_length(recipient_endpoint) <= 512) AND (octet_length(recipient_endpoint) <= 2048))'),
         (terminals_oid,'mail_delivery_terminals_sequence_check','c'::"char",ARRAY[5]::smallint[],'(sequence >= 1)'),
-        (terminals_oid,'mail_delivery_terminals_closed_reason_check','c'::"char",ARRAY[6]::smallint[],'((closed_reason = ANY (ARRAY[''acked''::text, ''expired''::text, ''revoked''::text])))'),
+        (terminals_oid,'mail_delivery_terminals_closed_reason_check','c'::"char",ARRAY[6]::smallint[],'(closed_reason = ANY (ARRAY[''acked''::text, ''expired''::text, ''revoked''::text]))'),
         (terminals_oid,'mail_delivery_terminals_lease_generation_check','c'::"char",ARRAY[7]::smallint[],'(lease_generation >= 0)')
     ) AS expected(table_oid,constraint_name,constraint_type,column_keys,check_expression)
 ), actual_constraints AS (
