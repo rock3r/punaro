@@ -834,20 +834,25 @@ func startRelayTerminalMaintenance(candidates ...any) context.CancelFunc {
 	if maintainer == nil {
 		return nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(relayTerminalMaintenanceInterval)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-done:
 				return
 			case <-ticker.C:
 				_, _ = maintainer.MaintainTerminalDeliveries(time.Now().UTC())
 			}
 		}
 	}()
-	return cancel
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
 }
 
 type relayMetricsHandler struct {

@@ -13,8 +13,8 @@ const (
 	// ClosedReasonRevoked is membership-revocation retirement of a pending delivery.
 	ClosedReasonRevoked = "revoked"
 
-	// RetentionAgeMin is the smallest accepted pending-max-age or terminal retention.
-	RetentionAgeMin = time.Second
+	// RetentionAgeMinimum is the smallest accepted pending-max-age or terminal retention.
+	RetentionAgeMinimum = time.Second
 	// RetentionPendingMaxAgeMax is 90 days.
 	RetentionPendingMaxAgeMax = 90 * 24 * time.Hour
 	// RetentionTerminalMax is 365 days.
@@ -44,10 +44,10 @@ func DefaultRetentionConfig() RetentionConfig {
 
 // Validate reports whether every bound is an explicit value in range.
 func (c RetentionConfig) Validate() error {
-	if err := boundedRetentionDuration("pending max age", c.PendingMaxAge, RetentionAgeMin, RetentionPendingMaxAgeMax); err != nil {
+	if err := boundedRetentionDuration("pending max age", c.PendingMaxAge, RetentionAgeMinimum, RetentionPendingMaxAgeMax); err != nil {
 		return err
 	}
-	if err := boundedRetentionDuration("terminal retention", c.TerminalRetention, RetentionAgeMin, RetentionTerminalMax); err != nil {
+	if err := boundedRetentionDuration("terminal retention", c.TerminalRetention, RetentionAgeMinimum, RetentionTerminalMax); err != nil {
 		return err
 	}
 	if err := boundedRateInt("terminal maintenance batch", c.MaintenanceBatch, RetentionBatchMin, RetentionBatchMax); err != nil {

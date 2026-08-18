@@ -285,11 +285,11 @@ func Load(explicitEnvFile string) (Config, error) {
 		return Config{}, err
 	}
 	retentionDefaults := relay.DefaultRetentionConfig()
-	pendingMaxAgeSeconds, err := parseBoundedInt("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", value("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", strconv.Itoa(int(retentionDefaults.PendingMaxAge/time.Second))), int(relay.RetentionAgeMin/time.Second), int(relay.RetentionPendingMaxAgeMax/time.Second))
+	pendingMaxAgeSeconds, err := parseBoundedInt("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", value("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", strconv.Itoa(int(retentionDefaults.PendingMaxAge/time.Second))), int(relay.RetentionAgeMinimum/time.Second), int(relay.RetentionPendingMaxAgeMax/time.Second))
 	if err != nil {
 		return Config{}, err
 	}
-	terminalRetentionSeconds, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", value("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(int(retentionDefaults.TerminalRetention/time.Second))), int(relay.RetentionAgeMin/time.Second), int(relay.RetentionTerminalMax/time.Second))
+	terminalRetentionSeconds, err := parseBoundedInt("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", value("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", strconv.Itoa(int(retentionDefaults.TerminalRetention/time.Second))), int(relay.RetentionAgeMinimum/time.Second), int(relay.RetentionTerminalMax/time.Second))
 	if err != nil {
 		return Config{}, err
 	}
