@@ -788,3 +788,114 @@ func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string,
 		}
 	}
 }
+
+// RunDirectMessages proves idempotent unordered-role send, targeted delivery,
+// and sender-role envelopes against every durable backend.
+func RunDirectMessages(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	store, ok := backend.(relay.DirectMessageBackend)
+	if !ok {
+		t.Fatal("backend does not implement direct messages")
+	}
+	profiles, ok := backend.(relay.RoleProfileBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role profiles")
+	}
+	bindings, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	now := time.Date(2026, time.August, 18, 18, 0, 0, 0, time.UTC)
+	machineA, machineB := namespace+"-a", namespace+"-b"
+	endpointA, endpointB := "agent/"+namespace+"/a", "agent/"+namespace+"/b"
+	fromRole := "role/" + machineA + "/reviewer"
+	toRole := "role/" + machineB + "/implementer"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineA, Role: fromRole, DirectAddressable: true, IdempotencyKey: namespace + "-reg-a", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{MachineID: machineB, Role: toRole, DirectAddressable: true, IdempotencyKey: namespace + "-reg-b", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineA, fromRole, endpointA, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := bindings.BindRoleToSession(machineB, toRole, endpointB, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: namespace + "-dm", Now: now,
+	})
+	if err != nil || duplicate || first.FromRole != fromRole || first.FromEndpoint != "" || first.ConversationID == "" {
+		t.Fatalf("first=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	retry, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "please review", IdempotencyKey: namespace + "-dm", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || retry.ID != first.ID || retry.ConversationID != first.ConversationID {
+		t.Fatalf("retry=%#v duplicate=%t err=%v", retry, duplicate, err)
+	}
+	changed := relay.DirectMessageInput{SenderMachineID: machineA, FromRole: fromRole, ToRole: toRole, Body: "other", IdempotencyKey: namespace + "-dm", Now: now}
+	if _, _, err := store.SendDirectMessage(changed); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("changed body err=%v", err)
+	}
+	reply, duplicate, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineB, FromRole: toRole, ToRole: fromRole, Body: "done", IdempotencyKey: namespace + "-reply", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || duplicate || reply.ConversationID != first.ConversationID {
+		t.Fatalf("reply=%#v duplicate=%t err=%v", reply, duplicate, err)
+	}
+	page, err := backend.LeaseDeliveries(machineB, namespace+"-consumer-b", endpointB, first.ConversationID, now.Add(2*time.Second), time.Minute, 10)
+	if err != nil || len(page.Deliveries) != 1 || page.Deliveries[0].Message.ID != first.ID || page.Deliveries[0].Message.FromRole != fromRole || page.Deliveries[0].Message.FromEndpoint != "" {
+		t.Fatalf("target page=%#v err=%v", page, err)
+	}
+	if _, _, err := store.SendDirectMessage(relay.DirectMessageInput{
+		SenderMachineID: machineA, FromRole: fromRole, ToRole: fromRole, Body: "self", IdempotencyKey: namespace + "-self", Now: now,
+	}); err == nil || errors.Is(err, relay.ErrForbidden) || errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("self-send err=%v", err)
+	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named", CreatorEndpoint: endpointA, Now: now,
+		Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "generic bypass", IdempotencyKey: namespace + "-append-direct", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append on direct room err=%v", err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, TargetRole: toRole, Body: "targeted bypass", IdempotencyKey: namespace + "-append-direct-target", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("targeted append on direct room err=%v", err)
+	}
+	if err := backend.AuthorizeSender(first.ConversationID, machineA, endpointA, now.Add(3*time.Second)); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("authorize sender on direct room err=%v", err)
+	}
+	if _, _, err := profiles.RegisterRoleProfile(relay.RegisterRoleInput{
+		MachineID: machineB, Role: toRole, DirectAddressable: false, IdempotencyKey: namespace + "-opt-out", Now: now.Add(4 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: first.ConversationID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "after opt-out", IdempotencyKey: namespace + "-append-opt-out", Now: now.Add(4 * time.Second),
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("generic append after opt-out err=%v", err)
+	}
+	namedMessage, duplicate, err := backend.AppendMessage(relay.AppendInput{
+		ConversationID: named.ID, SenderMachineID: machineA, FromEndpoint: endpointA, Body: "named room still works", IdempotencyKey: namespace + "-append-named", Now: now.Add(4 * time.Second),
+	})
+	if err != nil || duplicate || namedMessage.Body != "named room still works" {
+		t.Fatalf("named append=%#v duplicate=%t err=%v", namedMessage, duplicate, err)
+	}
+}

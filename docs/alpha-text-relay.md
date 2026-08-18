@@ -284,6 +284,20 @@ punaro-adapter contacts resolve reviewer
 punaro-adapter contacts resolve role/workstation-review/reviewer
 ```
 
+Send after resolve with canonical handles. The destination may be unbound;
+delivery stays durable until that role binds later:
+
+```sh
+punaro-adapter send \
+  --to role/workstation-implement/implementer \
+  --from-role role/workstation-review/reviewer \
+  --body-file ./note.txt \
+  --idempotency-key dm-reviewer-1
+```
+
+Do not mix `--to` / `--from-role` with `--conversation` / `--from` /
+`--target-role`. The envelope names the source role, not the bound session.
+
 ## Retired v3 attachment evidence
 
 V2/v3 file transfer is separate from text onboarding and has no production

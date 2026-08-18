@@ -1265,6 +1265,13 @@ FROM objects, table_ownership, routine_safety, routine_acl, table_acl, schema_ac
 		}
 		snapshot.CurrentObjectsPresent = rateObjectsPresent
 	}
+	if snapshot.CurrentObjectsPresent && len(snapshot.Records) > 0 && snapshot.Records[len(snapshot.Records)-1].Version >= 47 {
+		directObjectsPresent, err := relayDirectMessagesAvailable(ctx, q, snapshot.Records[len(snapshot.Records)-1].Version)
+		if err != nil {
+			return Snapshot{}, errors.New("PostgreSQL relay direct-message schema cannot be inspected")
+		}
+		snapshot.CurrentObjectsPresent = directObjectsPresent
+	}
 	return snapshot, nil
 }
 

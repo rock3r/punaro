@@ -311,6 +311,17 @@ func (c *HTTPRelayClient) SendToRole(ctx context.Context, conversationID, fromEn
 	return c.send(ctx, conversationID, fromEndpoint, targetRole, body, idempotencyKey)
 }
 
+// SendDirectMessage creates or reuses the unique opted-in role conversation and
+// appends one targeted body. The caller supplies canonical directory handles.
+func (c *HTTPRelayClient) SendDirectMessage(ctx context.Context, fromRole, toRole, body, idempotencyKey string) (relay.Message, error) {
+	if !relay.CanonicalRoleHandle(fromRole) || !relay.CanonicalRoleHandle(toRole) || !relay.ValidRequestToken(idempotencyKey) {
+		return relay.Message{}, fmt.Errorf("canonical roles and idempotency key are required")
+	}
+	var message relay.Message
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/direct-messages", map[string]any{"from_role": fromRole, "to_role": toRole, "body": body}, idempotencyKey, &message)
+	return message, err
+}
+
 func (c *HTTPRelayClient) send(ctx context.Context, conversationID, fromEndpoint, targetRole, body, idempotencyKey string) (relay.Message, error) {
 	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" || strings.TrimSpace(idempotencyKey) == "" {
 		return relay.Message{}, fmt.Errorf("conversation, sender endpoint, and idempotency key are required")

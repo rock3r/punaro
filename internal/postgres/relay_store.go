@@ -17,6 +17,7 @@ import (
 var _ relay.Backend = (*Database)(nil)
 var _ relay.RoleBindingBackend = (*Database)(nil)
 var _ relay.RoleProfileBackend = (*Database)(nil)
+var _ relay.DirectMessageBackend = (*Database)(nil)
 var _ relay.ControlBackend = (*Database)(nil)
 
 const postgresRelayMaxMessageBytes = 32 << 10
@@ -528,6 +529,190 @@ func (d *Database) ResolveAddressableRole(input relay.RoleResolveInput) (relay.R
 	return result, nil
 }
 
+// SendDirectMessage creates or reuses the unique unordered-role conversation
+// and appends one targeted PostgreSQL message. Exact retries return the original result.
+func (d *Database) SendDirectMessage(input relay.DirectMessageInput) (relay.Message, bool, error) {
+	if !relay.ValidMachineID(input.SenderMachineID) || !relay.ValidRequestToken(input.IdempotencyKey) || !relay.CanonicalRoleForMachine(input.FromRole, input.SenderMachineID) || !relay.CanonicalRoleHandle(input.ToRole) || input.FromRole == input.ToRole {
+		return relay.Message{}, false, fmt.Errorf("invalid direct message request")
+	}
+	if len(input.Body) > postgresRelayMaxMessageBytes {
+		return relay.Message{}, false, errors.New("message body exceeds limit")
+	}
+	if !relay.ValidMessageBody(input.Body) {
+		return relay.Message{}, false, errors.New("message body is not portable UTF-8 text")
+	}
+	roleLow, roleHigh, ok := relay.OrderedDirectRolePair(input.FromRole, input.ToRole)
+	if !ok {
+		return relay.Message{}, false, fmt.Errorf("invalid direct message request")
+	}
+	requestHash := relay.DirectMessageRequestHash(input.FromRole, input.ToRole, input.Body)
+	now := input.Now.UTC().Truncate(time.Millisecond)
+	tx, cancel, err := d.beginRelayTransaction(nil)
+	if err != nil {
+		return relay.Message{}, false, errors.New("direct message cannot start")
+	}
+	defer cancel()
+	defer func() { _ = tx.Rollback() }()
+	available, err := postgresDirectMessagesAvailable(tx)
+	if err != nil {
+		return relay.Message{}, false, errors.New("direct messages are unavailable")
+	}
+	if !available {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('direct-message-retry',$1::text,$2::text)::text, 579001230613))`, input.SenderMachineID, input.IdempotencyKey); err != nil {
+		return relay.Message{}, false, errors.New("direct message retry lock is unavailable")
+	}
+	var existingHash, existingMessageID string
+	err = tx.QueryRowContext(context.Background(), `SELECT request_hash,message_id::text FROM relay.mail_direct_message_idempotency WHERE machine_id=$1 AND key=$2`, input.SenderMachineID, input.IdempotencyKey).Scan(&existingHash, &existingMessageID)
+	if err == nil {
+		if existingHash != requestHash {
+			return relay.Message{}, false, relay.ErrConflict
+		}
+		message, err := postgresMessageByID(tx, existingMessageID)
+		if err != nil {
+			return relay.Message{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.Message{}, false, errors.New("direct message retry cannot commit")
+		}
+		return message, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.Message{}, false, errors.New("direct message retry state is unavailable")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('direct-conversation',$1::text,$2::text)::text, 579001230614))`, roleLow, roleHigh); err != nil {
+		return relay.Message{}, false, errors.New("direct conversation lock is unavailable")
+	}
+	session, err := postgresLiveBoundRoleSession(tx, input.SenderMachineID, input.FromRole, now)
+	if err != nil {
+		return relay.Message{}, false, err
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, input.ToRole); err != nil {
+		return relay.Message{}, false, errors.New("target role profile lock is unavailable")
+	}
+	var addressable bool
+	err = tx.QueryRowContext(context.Background(), `SELECT direct_addressable FROM relay.mail_role_profiles WHERE role=$1 FOR UPDATE`, input.ToRole).Scan(&addressable)
+	if errors.Is(err, sql.ErrNoRows) || !addressable {
+		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if err != nil {
+		return relay.Message{}, false, errors.New("target role profile is unavailable")
+	}
+	conversationID, err := postgresGetOrCreateDirectConversation(tx, roleLow, roleHigh, input.FromRole, input.ToRole, now)
+	if err != nil {
+		return relay.Message{}, false, err
+	}
+	if err := d.consumeRateLimits(tx, input.SenderMachineID, conversationID, now); err != nil {
+		return relay.Message{}, false, err
+	}
+	message := relay.Message{ID: uuid.NewString(), ConversationID: conversationID, FromRole: input.FromRole, Body: input.Body, CreatedAt: now}
+	if err := tx.QueryRowContext(context.Background(), `UPDATE relay.mail_conversations SET next_sequence=next_sequence+1 WHERE id=$1::uuid RETURNING next_sequence`, conversationID).Scan(&message.Sequence); errors.Is(err, sql.ErrNoRows) {
+		return relay.Message{}, false, relay.ErrForbidden
+	} else if err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "allocate direct message sequence")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at) VALUES($1::uuid,$2::uuid,$3,$4,$5,$6)`, message.ID, message.ConversationID, message.Sequence, session, message.Body, message.CreatedAt); err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "append direct message")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_message_from_roles(message_id,from_role) VALUES($1::uuid,$2)`, message.ID, input.FromRole); err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "record direct message sender role")
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_deliveries(message_id,recipient_endpoint) VALUES($1::uuid,chr(30)||'role:'||$2)`, message.ID, input.ToRole); err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "create direct role delivery")
+	}
+	if err := postgresAdvanceRecipientCursor(tx, "\x1erole:"+input.FromRole, conversationID); err != nil {
+		return relay.Message{}, false, err
+	}
+	if err := postgresAdvanceSessionCursors(tx, input.SenderMachineID, session, conversationID, now); err != nil {
+		return relay.Message{}, false, err
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_direct_message_idempotency(machine_id,key,request_hash,from_role,to_role,conversation_id,message_id,sequence,created_at) VALUES($1,$2,$3,$4,$5,$6::uuid,$7::uuid,$8,$9)`, input.SenderMachineID, input.IdempotencyKey, requestHash, input.FromRole, input.ToRole, conversationID, message.ID, message.Sequence, now); err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "record direct message retry")
+	}
+	if err := tx.Commit(); err != nil {
+		return relay.Message{}, false, relayDatabaseError(err, "commit direct message")
+	}
+	return message, false, nil
+}
+
+func postgresRejectDirectConversationAppend(tx *sql.Tx, conversationID string) error {
+	available, err := postgresDirectMessagesAvailable(tx)
+	if err != nil {
+		return errors.New("direct conversations are unavailable")
+	}
+	if !available {
+		return nil
+	}
+	var exists bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS(SELECT 1 FROM relay.mail_direct_conversations WHERE conversation_id=$1::uuid)`, conversationID).Scan(&exists); err != nil {
+		return errors.New("direct conversation lookup is unavailable")
+	}
+	if exists {
+		return relay.ErrForbidden
+	}
+	return nil
+}
+
+func postgresDirectMessagesAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_direct_conversations') IS NOT NULL AND to_regclass('relay.mail_message_from_roles') IS NOT NULL AND to_regclass('relay.mail_direct_message_idempotency') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
+}
+
+func postgresLiveBoundRoleSession(tx *sql.Tx, machineID, role string, now time.Time) (string, error) {
+	var session string
+	err := tx.QueryRowContext(context.Background(), `SELECT binding.session_endpoint FROM relay.mail_role_bindings AS binding
+		JOIN relay.mail_endpoints AS endpoint ON endpoint.endpoint=binding.session_endpoint
+		WHERE binding.role=$1 AND binding.machine_id=$2 AND endpoint.machine_id=$2
+		  AND binding.ownership_generation=endpoint.ownership_generation
+		  AND binding.lease_until>$3 AND endpoint.lease_until>$3`, role, machineID, now.UTC()).Scan(&session)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", relay.ErrForbidden
+	}
+	if err != nil {
+		return "", errors.New("live role binding is unavailable")
+	}
+	return session, nil
+}
+
+func postgresGetOrCreateDirectConversation(tx *sql.Tx, roleLow, roleHigh, fromRole, toRole string, now time.Time) (string, error) {
+	if _, err := tx.ExecContext(context.Background(), `SAVEPOINT create_direct_conversation`); err != nil {
+		return "", errors.New("direct conversation create cannot start")
+	}
+	conversationID := uuid.NewString()
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversations(id,created_at) VALUES($1::uuid,$2)`, conversationID, now.UTC()); err != nil {
+		return "", relayDatabaseError(err, "create direct conversation")
+	}
+	for _, role := range []string{fromRole, toRole} {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_role_memberships(conversation_id,role,capabilities) VALUES($1::uuid,$2,$3)`, conversationID, role, relay.CapSend|relay.CapReceive); err != nil {
+			return "", relayDatabaseError(err, "add direct conversation role member")
+		}
+	}
+	_, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_direct_conversations(role_low,role_high,conversation_id,created_at) VALUES($1,$2,$3::uuid,$4)`, roleLow, roleHigh, conversationID, now.UTC())
+	if err == nil {
+		if _, err := tx.ExecContext(context.Background(), `RELEASE SAVEPOINT create_direct_conversation`); err != nil {
+			return "", errors.New("direct conversation create cannot commit")
+		}
+		return conversationID, nil
+	}
+	if !isSQLState(err, "23505") {
+		return "", relayDatabaseError(err, "record direct conversation pair")
+	}
+	if _, err := tx.ExecContext(context.Background(), `ROLLBACK TO SAVEPOINT create_direct_conversation`); err != nil {
+		return "", errors.New("duplicate direct conversation cannot be discarded")
+	}
+	if _, err := tx.ExecContext(context.Background(), `RELEASE SAVEPOINT create_direct_conversation`); err != nil {
+		return "", errors.New("direct conversation savepoint cannot release")
+	}
+	if err := tx.QueryRowContext(context.Background(), `SELECT conversation_id::text FROM relay.mail_direct_conversations WHERE role_low=$1 AND role_high=$2`, roleLow, roleHigh).Scan(&conversationID); err != nil {
+		return "", errors.New("converged direct conversation is unavailable")
+	}
+	return conversationID, nil
+}
+
 func postgresRoleProfilesAvailable(q queryer) (bool, error) {
 	var available bool
 	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_role_profiles') IS NOT NULL AND to_regclass('relay.mail_role_profile_idempotency') IS NOT NULL`).Scan(&available); err != nil {
@@ -908,10 +1093,14 @@ func (d *Database) AuthorizeSender(conversationID, machineID, endpoint string, n
 	if capabilities&relay.CapSend == 0 {
 		return relay.ErrForbidden
 	}
+	if err := postgresRejectDirectConversationAppend(tx, conversationID); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 // AppendMessage transactionally appends one immutable PostgreSQL relay message.
+// Direct-role conversations are writable only through SendDirectMessage.
 func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.SenderMachineID) || !relay.ValidEndpoint(input.FromEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
 		return relay.Message{}, false, errors.New("invalid message request")
@@ -971,6 +1160,9 @@ func (d *Database) AppendMessage(input relay.AppendInput) (relay.Message, bool, 
 	}
 	if capabilities&relay.CapSend == 0 {
 		return relay.Message{}, false, relay.ErrForbidden
+	}
+	if err := postgresRejectDirectConversationAppend(tx, input.ConversationID); err != nil {
+		return relay.Message{}, false, err
 	}
 	if input.TargetRole != "" {
 		if !relay.ValidRole(input.TargetRole) || !rolesAvailable {
@@ -1188,8 +1380,9 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		return relay.DeliveryLeasePage{}, relayDatabaseError(err, "claim endpoint consumer lease")
 	}
 	query := `SELECT delivery.id::text,delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,
-		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at
+		message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+		LEFT JOIN relay.mail_message_from_roles AS sender ON sender.message_id=message.id
 		WHERE delivery.recipient_endpoint IN (SELECT value FROM jsonb_array_elements_text($1::jsonb)) AND delivery.acked_at IS NULL
 		  AND (delivery.lease_until IS NULL OR delivery.lease_until<=$2 OR delivery.ownership_generation IS NULL OR delivery.ownership_generation<>$3 OR delivery.consumer_generation IS NULL OR delivery.consumer_generation<>$4 OR delivery.lease_machine_id=$5)`
 	args := []any{string(encodedRecipientIDs), now.UTC(), ownershipGeneration, consumerGeneration, machineID}
@@ -1217,10 +1410,12 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 		var row leasedRow
 		var recipientID string
 		row.delivery.RecipientEndpoint = endpoint
-		if err := rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt); err != nil {
+		var fromRole sql.NullString
+		if err := rows.Scan(&row.delivery.ID, &recipientID, &row.leaseMachine, &row.leaseToken, &row.delivery.LeaseGeneration, &row.leaseOwnership, &row.leaseConsumer, &row.leaseUntil, &row.delivery.Message.ID, &row.delivery.Message.ConversationID, &row.delivery.Message.Sequence, &row.delivery.Message.FromEndpoint, &row.delivery.Message.Body, &row.delivery.Message.CreatedAt, &fromRole); err != nil {
 			_ = rows.Close()
 			return relay.DeliveryLeasePage{}, errors.New("pending delivery is malformed")
 		}
+		postgresApplyDirectSender(&row.delivery.Message, fromRole)
 		if role, isRole := postgresParseRoleRecipient(recipientID); isRole {
 			row.delivery.RecipientRole = role
 		}
@@ -1576,11 +1771,23 @@ func postgresEndpointOwnershipLocked(tx *sql.Tx, endpoint, machineID string, now
 
 func postgresMessageByID(tx *sql.Tx, messageID string) (relay.Message, error) {
 	var message relay.Message
-	if err := tx.QueryRowContext(context.Background(), `SELECT id::text,conversation_id::text,sequence,from_endpoint,body,created_at FROM relay.mail_messages WHERE id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &message.CreatedAt); err != nil {
+	var fromRole sql.NullString
+	if err := tx.QueryRowContext(context.Background(), `SELECT message.id::text,message.conversation_id::text,message.sequence,message.from_endpoint,message.body,message.created_at,sender.from_role
+		FROM relay.mail_messages AS message
+		LEFT JOIN relay.mail_message_from_roles AS sender ON sender.message_id=message.id
+		WHERE message.id=$1::uuid`, messageID).Scan(&message.ID, &message.ConversationID, &message.Sequence, &message.FromEndpoint, &message.Body, &message.CreatedAt, &fromRole); err != nil {
 		return relay.Message{}, errors.New("idempotent message is unavailable")
 	}
 	message.CreatedAt = message.CreatedAt.UTC()
+	postgresApplyDirectSender(&message, fromRole)
 	return message, nil
+}
+
+func postgresApplyDirectSender(message *relay.Message, fromRole sql.NullString) {
+	if fromRole.Valid && fromRole.String != "" {
+		message.FromRole = fromRole.String
+		message.FromEndpoint = ""
+	}
 }
 
 func postgresAdvanceRecipientCursor(tx *sql.Tx, endpoint, conversationID string) error {
