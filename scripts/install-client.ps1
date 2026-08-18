@@ -22,8 +22,20 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
     $raw = Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue
     if ([string]::IsNullOrWhiteSpace($raw)) { return }
     try { $record = $raw | ConvertFrom-Json } catch { return }
-    if ($null -eq $record -or $record.schema -ne 1 -or $record.pid -le 0 -or [string]::IsNullOrWhiteSpace([string]$record.path)) { return }
-    $proc = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    $schema = $null
+    $orphanPid = 0
+    $orphanPath = ''
+    try {
+        $schemaProp = $record.PSObject.Properties['schema']
+        $pidProp = $record.PSObject.Properties['pid']
+        $pathProp = $record.PSObject.Properties['path']
+        if ($null -eq $schemaProp -or $null -eq $pidProp -or $null -eq $pathProp) { return }
+        $schema = $schemaProp.Value
+        $orphanPid = [int]$pidProp.Value
+        $orphanPath = [string]$pathProp.Value
+    } catch { return }
+    if ($schema -ne 1 -or $orphanPid -le 0 -or [string]::IsNullOrWhiteSpace($orphanPath)) { return }
+    $proc = Get-Process -Id $orphanPid -ErrorAction SilentlyContinue
     if ($null -eq $proc) { return }
     $image = $null
     try { $image = $proc.Path } catch { }
@@ -31,14 +43,14 @@ function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
         try { $image = $proc.MainModule.FileName } catch { }
     }
     if ([string]::IsNullOrWhiteSpace($image)) { return }
-    $want = [System.IO.Path]::GetFullPath([string]$record.path)
+    $want = [System.IO.Path]::GetFullPath($orphanPath)
     $got = [System.IO.Path]::GetFullPath($image)
     if (-not $want.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
-    Stop-Process -Id $record.pid -Force -ErrorAction SilentlyContinue
+    Stop-Process -Id $orphanPid -Force -ErrorAction SilentlyContinue
     $deadline = (Get-Date).AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 200
-        $proc = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+        $proc = Get-Process -Id $orphanPid -ErrorAction SilentlyContinue
     } while ($null -ne $proc -and (Get-Date) -lt $deadline)
 }
 
