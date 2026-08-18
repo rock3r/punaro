@@ -299,7 +299,11 @@ case "$(uname -s)" in
 		mkdir -p "$service_dir"
 		install -m 600 "$repo_dir/deploy/launchd/punaro-adapter.plist" "$service_file"
 		plutil -lint "$service_file" >/dev/null
-if [ "$enable" -eq 1 ]; then
+		service_active=0
+		if launchctl print "gui/$(id -u)/org.punaro.adapter" >/dev/null 2>&1; then
+			service_active=1
+		fi
+		if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
 			launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
 			launchctl bootstrap "gui/$(id -u)" "$service_file"
 		fi
@@ -317,9 +321,16 @@ if [ "$enable" -eq 1 ]; then
 			chmod 600 "$service_file"
 			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
 		fi
+		service_active=0
+		if systemctl --user is-active --quiet punaro-adapter.service; then
+			service_active=1
+		fi
 		if [ "$enable" -eq 1 ]; then
 			systemctl --user daemon-reload
 			systemctl --user enable punaro-adapter.service
+			systemctl --user restart punaro-adapter.service
+		elif [ "$service_active" -eq 1 ]; then
+			systemctl --user daemon-reload
 			systemctl --user restart punaro-adapter.service
 		fi
 		service_hint='systemctl --user status punaro-adapter.service'
