@@ -207,6 +207,15 @@ func recoverJournal(directory string) error {
 	if err := removeAbandonedTemps(directory); err != nil {
 		return err
 	}
+	completed, err := repairOrphanSwap(directory)
+	if err != nil {
+		return err
+	}
+	if completed {
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
+	}
 	record, err := readJournal(directory)
 	if errors.Is(err, errInvalidJournal) {
 		return failInvalidJournal(directory)
@@ -345,10 +354,16 @@ func failInvalidJournal(directory string) error {
 	if err := writeRecoveryRecord(directory, recoveryCurrentExited); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(directory, journalFile)); err != nil {
+	completed, err := repairOrphanSwap(directory)
+	if err != nil {
 		return err
 	}
-	if err := repairOrphanSwap(directory); err != nil {
+	if completed {
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(directory, journalFile)); err != nil {
 		return err
 	}
 	if err := syncDir(directory); err != nil {
@@ -357,41 +372,47 @@ func failInvalidJournal(directory string) error {
 	return errInvalidJournal
 }
 
-func repairOrphanSwap(directory string) error {
+func repairOrphanSwap(directory string) (bool, error) {
 	current := filepath.Join(directory, currentSlot)
 	previous := filepath.Join(directory, previousSlot)
 	swap := filepath.Join(directory, swapSlot)
 	currentExists, err := existsRealDir(current)
 	if err != nil {
-		return err
+		return false, err
 	}
 	previousExists, err := existsRealDir(previous)
 	if err != nil {
-		return err
+		return false, err
 	}
 	swapExists, err := existsRealDir(swap)
 	if err != nil || !swapExists {
-		return err
+		return false, err
 	}
 	if previousExists && !currentExists {
 		if err := os.Rename(previous, current); err != nil {
-			return err
+			return false, err
 		}
 		if err := os.Rename(swap, previous); err != nil {
-			return err
+			return false, err
 		}
-		return syncDir(directory)
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if currentExists && !previousExists {
 		if err := os.Rename(swap, previous); err != nil {
-			return err
+			return false, err
 		}
-		return syncDir(directory)
+		if err := syncDir(directory); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	if err := os.RemoveAll(swap); err != nil {
-		return err
+		return false, err
 	}
-	return syncDir(directory)
+	return false, syncDir(directory)
 }
 
 func recordRolledAwayCurrent(directory string) error {
