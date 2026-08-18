@@ -372,23 +372,6 @@ func clearRunPID(directory string) {
 }
 
 func terminateStaleRun(directory string) error {
-	proc := staleRunProcess(directory)
-	if proc == nil {
-		return nil
-	}
-	if runtime.GOOS != "windows" {
-		_ = proc.Signal(syscall.SIGTERM)
-		deadline := time.Now().Add(childStopTimeout)
-		for time.Now().Before(deadline) && proc.Signal(syscall.Signal(0)) == nil {
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
-	_ = proc.Kill()
-	clearRunPID(directory)
-	return nil
-}
-
-func staleRunProcess(directory string) *os.Process {
 	record, ok := loadRunPID(directory)
 	if !ok {
 		return nil
@@ -400,11 +383,20 @@ func staleRunProcess(directory string) *os.Process {
 	case processImageMatch:
 		proc, err := os.FindProcess(record.PID)
 		if err != nil || proc == nil {
-			return nil
+			return errors.New("bootstrap run is already active")
 		}
-		return proc
-	default:
+		if runtime.GOOS != "windows" {
+			_ = proc.Signal(syscall.SIGTERM)
+			deadline := time.Now().Add(childStopTimeout)
+			for time.Now().Before(deadline) && proc.Signal(syscall.Signal(0)) == nil {
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
+		_ = proc.Kill()
+		clearRunPID(directory)
 		return nil
+	default:
+		return errors.New("bootstrap run is already active")
 	}
 }
 
@@ -418,14 +410,14 @@ const (
 )
 
 func matchProcessImage(pid int, recorded string) processImageResult {
-	if recorded == "" || pid <= 0 {
+	if pid <= 0 {
 		return processImageUnknown
 	}
 	live, err := processImagePath(pid)
 	if errors.Is(err, errProcessImageGone) {
 		return processImageGone
 	}
-	if err != nil || live == "" {
+	if recorded == "" || err != nil || live == "" {
 		return processImageUnknown
 	}
 	if sameImagePath(live, recorded) {

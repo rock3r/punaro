@@ -113,15 +113,15 @@ func TestAcquireRunLeaseClearsDeadPID(t *testing.T) {
 	}
 }
 
-func TestStaleRunProcessLeavesUnverifiableRecord(t *testing.T) {
+func TestAcquireRunLeaseRejectsUnverifiableChild(t *testing.T) {
 	dir := privateDir(t)
 	cmd, _ := startSleepProcess(t)
 	body := []byte(`{"schema":1,"pid":` + strconv.Itoa(cmd.Process.Pid) + `,"path":""}`)
 	if err := os.WriteFile(filepath.Join(dir, runPIDFile), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if proc := staleRunProcess(dir); proc != nil {
-		t.Fatal("unverifiable pid was selected for kill")
+	if _, err := acquireRunLease(dir); err == nil {
+		t.Fatal("unverifiable pid was leased")
 	}
 	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
 		t.Fatal("unverifiable pid was killed")

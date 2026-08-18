@@ -1512,7 +1512,7 @@ The implementation is not internet-exposure-ready until these cases pass:
   `run.pid` records the child's pid and image path. The next supervisor kills
   that process only when the live image still matches, and it removes the file
   when the child or supervisor exits. If the image cannot be verified, the
-  supervisor leaves the process alone. A later publish stops the old adapter
+  next supervisor refuses the run lease instead of launching a second adapter. A later publish stops the old adapter
   with SIGTERM and a bounded wait before SIGKILL so the service can restart
   onto the new slot. A healthy child that exits while the
   supervisor is still running is a supervisor failure so systemd/launchd restart
