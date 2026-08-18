@@ -1503,8 +1503,9 @@ The implementation is not internet-exposure-ready until these cases pass:
   Platform services launch `punaro-bootstrap run`, which supervises the
   current-slot adapter, requires a local ready signal within 60 seconds when a
   previous slot exists, rolls back once if the fresh catalog still allows that
-  previous release, and otherwise enters recovery-only. Enrollment is not
-  implemented yet.
+  previous release, and otherwise enters recovery-only. The one-shot decision
+  is durable across supervisor restarts so a later failure cannot swap back to
+  the known-unhealthy slot. Enrollment is not implemented yet.
 - PostgreSQL is the sole authoritative server database after cutover; SQLite is
   retained for client recovery, migration evidence, and parity tests only.
 - HTTP fetch/ack is authoritative; WebSocket carries topic ID and sequence only.

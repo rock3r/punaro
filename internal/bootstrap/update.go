@@ -19,14 +19,15 @@ import (
 )
 
 const (
-	acceptedFile  = "accepted.json"
-	currentSlot   = "current"
-	previousSlot  = "previous"
-	candidateSlot = "candidate"
-	swapSlot      = "swap"
-	slotRecord    = "slot.json"
-	journalFile   = "journal.json"
-	lockFile      = "bootstrap.lock"
+	acceptedFile     = "accepted.json"
+	currentSlot      = "current"
+	previousSlot     = "previous"
+	candidateSlot    = "candidate"
+	swapSlot         = "swap"
+	slotRecord       = "slot.json"
+	journalFile      = "journal.json"
+	lockFile         = "bootstrap.lock"
+	autoRollbackFile = "auto-rollback.json"
 )
 
 // Request is one host-local update from a fixed origin.

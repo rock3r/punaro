@@ -365,6 +365,11 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 	if previous.Release == localCheckoutRelease {
 		return false, slotState{}, errors.New("catalog does not allow the release")
 	}
+	if blocked, err := blocksAutoRollback(request.Directory, previous); err != nil {
+		return false, slotState{}, err
+	} else if blocked {
+		return false, slotState{}, errors.New("automatic rollback already used")
+	}
 	if len(request.Keys) == 0 {
 		return false, slotState{}, errors.New("bootstrap has no embedded release keys")
 	}
@@ -406,6 +411,9 @@ func rollbackIfAllowed(request RunRequest, started slotState) (bool, slotState, 
 		if err := saveAccepted(request.Directory, accepted); err != nil {
 			return false, slotState{}, err
 		}
+	}
+	if err := saveAutoRollback(request.Directory, started); err != nil {
+		return false, slotState{}, err
 	}
 	if err := clearJournal(request.Directory); err != nil {
 		return false, slotState{}, err

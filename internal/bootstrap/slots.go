@@ -33,6 +33,13 @@ type journal struct {
 	ManifestSHA256  string `json:"manifest_sha256,omitempty"`
 }
 
+type autoRollbackState struct {
+	Schema         int64  `json:"schema"`
+	Release        string `json:"release"`
+	Sequence       int64  `json:"sequence"`
+	ManifestSHA256 string `json:"manifest_sha256"`
+}
+
 func prepareDirectory(directory string) error {
 	info, err := os.Lstat(directory)
 	if err != nil {
@@ -148,6 +155,9 @@ func Rollback(directory string) (Result, error) {
 	if err := completeRollback(directory, target); err != nil {
 		return Result{}, err
 	}
+	if err := recordRolledAwayCurrent(directory); err != nil {
+		return Result{}, err
+	}
 	if err := clearRecovery(directory); err != nil {
 		return Result{}, err
 	}
@@ -223,6 +233,9 @@ func recoverJournal(directory string) error {
 		if err := applyRollbackCatalogSequence(directory, record.CatalogSequence); err != nil {
 			return err
 		}
+		if err := recordRolledAwayCurrent(directory); err != nil {
+			return err
+		}
 		if err := clearRecovery(directory); err != nil {
 			return err
 		}
@@ -230,6 +243,71 @@ func recoverJournal(directory string) error {
 	default:
 		return errors.New("bootstrap journal is invalid")
 	}
+}
+
+func recordRolledAwayCurrent(directory string) error {
+	away, err := readOptionalSlot(filepath.Join(directory, previousSlot))
+	if err != nil {
+		return err
+	}
+	if away.Release == "" {
+		return nil
+	}
+	return saveAutoRollback(directory, away)
+}
+
+func loadAutoRollback(directory string) (autoRollbackState, error) {
+	body, err := os.ReadFile(filepath.Join(directory, autoRollbackFile)) // #nosec G304 -- auto-rollback record is a fixed child of the bootstrap directory.
+	if os.IsNotExist(err) {
+		return autoRollbackState{}, nil
+	}
+	if err != nil {
+		return autoRollbackState{}, err
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var record autoRollbackState
+	if err := decoder.Decode(&record); err != nil {
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+	}
+	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+		return autoRollbackState{}, errors.New("bootstrap auto-rollback state is invalid")
+	}
+	return record, nil
+}
+
+func saveAutoRollback(directory string, away slotState) error {
+	if away.Release == "" || away.Sequence < 1 || !validManifestDigest(away.ManifestSHA256) {
+		return errors.New("bootstrap auto-rollback state is invalid")
+	}
+	body, err := json.Marshal(autoRollbackState{
+		Schema:         1,
+		Release:        away.Release,
+		Sequence:       away.Sequence,
+		ManifestSHA256: away.ManifestSHA256,
+	})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, autoRollbackFile), body, 0o600)
+}
+
+func blocksAutoRollback(directory string, previous slotState) (bool, error) {
+	record, err := loadAutoRollback(directory)
+	if err != nil {
+		return false, err
+	}
+	if record.Release == "" {
+		return false, nil
+	}
+	return record.Release == previous.Release && record.Sequence == previous.Sequence && record.ManifestSHA256 == previous.ManifestSHA256, nil
 }
 
 func applyRollbackCatalogSequence(directory string, catalogSequence int64) error {

@@ -138,7 +138,7 @@ publishes `current` / `previous` slots. Platform services launch
 existing host-local profile. After a previous slot exists, the new current
 must write a content-free ready file within 60 seconds; otherwise run rolls
 back once when the fresh catalog still lists that previous release, or enters
-recovery-only. It does not enroll or open PostgreSQL. HTTPS is required
+recovery-only. The one-shot decision is durable across supervisor restarts. It does not enroll or open PostgreSQL. HTTPS is required
 except for loopback test origins.
 
 ```sh

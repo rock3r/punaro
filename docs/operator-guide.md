@@ -16,7 +16,9 @@ catalog/manifest pair live on GitHub Releases; see
 signed catalog/manifest pairs; unsigned draft assets are not an automatic
 update source. Platform services launch `punaro-bootstrap run` against the
 current slot. An unhealthy candidate rolls back once when the fresh catalog
-still lists the previous release; otherwise the host stays recovery-only.
+still lists the previous release; that decision is durable across restarts
+so a later failure cannot swap back to the known-unhealthy slot. Otherwise
+the host stays recovery-only.
 
 ## Run locally
 

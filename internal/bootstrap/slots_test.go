@@ -176,6 +176,13 @@ func TestRecoverJournalAppliesRollbackCatalogSequence(t *testing.T) {
 	if accepted.CatalogSequence != 3 || accepted.Release != "v0.2.0" {
 		t.Fatalf("accepted=%#v", accepted)
 	}
+	away, err := loadAutoRollback(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if away.Release != "v0.2.0" || away.Sequence != 2 {
+		t.Fatalf("auto-rollback=%#v", away)
+	}
 }
 
 func TestRecoverJournalDoesNotReswapCompletedRollback(t *testing.T) {
