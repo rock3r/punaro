@@ -54,6 +54,38 @@ func TestBootstrapCLIRequiresAbsoluteDirectoryAndKeys(t *testing.T) {
 	}
 }
 
+func TestBootstrapCLIStatusPrintsRecoveryWithoutCurrent(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "state")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "recovery.json"), []byte(`{"schema":1,"mode":"recovery-only","reason":"current-exited"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outPath := filepath.Join(dir, "status.out")
+	out, err := os.Create(outPath) // #nosec G304 -- path is under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdout
+	os.Stdout = out
+	err = run([]string{"status", "--directory", state})
+	os.Stdout = old
+	_ = out.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(outPath) // #nosec G304 -- path is under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(body)
+	if !strings.Contains(got, "current none") || !strings.Contains(got, "recovery-only") {
+		t.Fatalf("status=%q", got)
+	}
+}
+
 func TestBootstrapCLIUpdateInstallsSignedRelease(t *testing.T) {
 	dir := t.TempDir()
 	state := filepath.Join(dir, "state")

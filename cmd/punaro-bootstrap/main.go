@@ -92,6 +92,9 @@ func runStatus(args []string) error {
 	}
 	if state.Current == "" {
 		fmt.Println("current none")
+		if state.RecoveryOnly {
+			fmt.Println("recovery-only")
+		}
 		return nil
 	}
 	fmt.Printf("current %s sequence %d\n", state.Current, state.CurrentSequence)
