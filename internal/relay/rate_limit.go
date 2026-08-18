@@ -184,10 +184,16 @@ func boundRetryAfter(wait time.Duration, maxSeconds int) int {
 // Metrics counts content-free relay pressure signals. Labels are fixed names
 // only; bodies, endpoints, roles, and conversation IDs are never recorded.
 type Metrics struct {
-	rateLimitRejections atomic.Uint64
-	capacityRejections  atomic.Uint64
-	pendingDeliveries   atomic.Uint64
-	pendingBytes        atomic.Uint64
+	rateLimitRejections        atomic.Uint64
+	capacityRejections         atomic.Uint64
+	pendingDeliveries          atomic.Uint64
+	pendingBytes               atomic.Uint64
+	oldestPendingAgeSeconds    atomic.Uint64
+	terminalTransitionsAcked   atomic.Uint64
+	terminalTransitionsExpired atomic.Uint64
+	terminalTransitionsRevoked atomic.Uint64
+	terminalRetained           atomic.Uint64
+	leaseRedeliveries          atomic.Uint64
 }
 
 // ObserveRateLimited increments the rate-rejection counter.
@@ -200,10 +206,16 @@ func (m *Metrics) ObserveRateLimited() {
 
 // MetricsSnapshot is the bounded JSON body served on the local health listener.
 type MetricsSnapshot struct {
-	RelayRateLimitRejections uint64 `json:"relay_rate_limit_rejections"`
-	RelayCapacityRejections  uint64 `json:"relay_capacity_rejections"`
-	RelayPendingDeliveries   uint64 `json:"relay_pending_deliveries"`
-	RelayPendingBytes        uint64 `json:"relay_pending_bytes"`
+	RelayRateLimitRejections        uint64 `json:"relay_rate_limit_rejections"`
+	RelayCapacityRejections         uint64 `json:"relay_capacity_rejections"`
+	RelayPendingDeliveries          uint64 `json:"relay_pending_deliveries"`
+	RelayPendingBytes               uint64 `json:"relay_pending_bytes"`
+	RelayOldestPendingAgeSeconds    uint64 `json:"relay_oldest_pending_age_seconds"`
+	RelayTerminalTransitionsAcked   uint64 `json:"relay_terminal_transitions_acked"`
+	RelayTerminalTransitionsExpired uint64 `json:"relay_terminal_transitions_expired"`
+	RelayTerminalTransitionsRevoked uint64 `json:"relay_terminal_transitions_revoked"`
+	RelayTerminalRetained           uint64 `json:"relay_terminal_retained"`
+	RelayLeaseRedeliveries          uint64 `json:"relay_lease_redeliveries"`
 }
 
 // Snapshot returns the current content-free counters.
@@ -212,10 +224,16 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		return MetricsSnapshot{}
 	}
 	return MetricsSnapshot{
-		RelayRateLimitRejections: m.rateLimitRejections.Load(),
-		RelayCapacityRejections:  m.capacityRejections.Load(),
-		RelayPendingDeliveries:   m.pendingDeliveries.Load(),
-		RelayPendingBytes:        m.pendingBytes.Load(),
+		RelayRateLimitRejections:        m.rateLimitRejections.Load(),
+		RelayCapacityRejections:         m.capacityRejections.Load(),
+		RelayPendingDeliveries:          m.pendingDeliveries.Load(),
+		RelayPendingBytes:               m.pendingBytes.Load(),
+		RelayOldestPendingAgeSeconds:    m.oldestPendingAgeSeconds.Load(),
+		RelayTerminalTransitionsAcked:   m.terminalTransitionsAcked.Load(),
+		RelayTerminalTransitionsExpired: m.terminalTransitionsExpired.Load(),
+		RelayTerminalTransitionsRevoked: m.terminalTransitionsRevoked.Load(),
+		RelayTerminalRetained:           m.terminalRetained.Load(),
+		RelayLeaseRedeliveries:          m.leaseRedeliveries.Load(),
 	}
 }
 

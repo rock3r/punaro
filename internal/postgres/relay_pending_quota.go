@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sort"
+	"time"
 
 	"github.com/rock3r/punaro/internal/relay"
 )
@@ -150,7 +151,7 @@ func postgresAppendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, 
 	return recipients, nil
 }
 
-func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, ackedAt any) error {
+func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID string, ackedAt any, metrics *relay.Metrics) error {
 	rows, err := tx.QueryContext(context.Background(), `SELECT `+postgresPendingBodyBytes+`
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
 		WHERE delivery.recipient_endpoint=$1 AND delivery.acked_at IS NULL AND message.conversation_id=$2::uuid
@@ -175,20 +176,27 @@ func postgresRetireConversationDeliveries(tx *sql.Tx, recipient, conversationID 
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`, recipient, conversationID, ackedAt); err != nil {
+	retireSQL := `UPDATE relay.mail_deliveries SET acked_at=$3 WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`
+	var present bool
+	if err := tx.QueryRowContext(context.Background(), `SELECT EXISTS (
+		SELECT 1 FROM pg_attribute WHERE attrelid='relay.mail_deliveries'::regclass AND attname='closed_reason' AND NOT attisdropped
+	)`).Scan(&present); err != nil {
+		return errors.New("revoked delivery schema is unavailable")
+	}
+	if present {
+		retireSQL = `UPDATE relay.mail_deliveries SET acked_at=$3, closed_reason='revoked' WHERE recipient_endpoint=$1 AND acked_at IS NULL AND message_id IN (SELECT id FROM relay.mail_messages WHERE conversation_id=$2::uuid)`
+	}
+	if _, err := tx.ExecContext(context.Background(), retireSQL, recipient, conversationID, ackedAt); err != nil {
 		return relayDatabaseError(err, "retire revoked deliveries")
+	}
+	for range bodies {
+		metrics.ObserveTerminalTransition(relay.ClosedReasonRevoked)
 	}
 	return nil
 }
 
 func (d *Database) refreshPendingMetrics(ctx context.Context) {
-	d.pendingMetricsMu.Lock()
-	defer d.pendingMetricsMu.Unlock()
-	counters, err := postgresReadInstallQuota(ctx, d.relayPool())
-	if err != nil {
-		return
-	}
-	d.metrics.SetPending(counters.Count, counters.Bytes)
+	d.refreshPendingMetricsAt(ctx, time.Now().UTC())
 }
 
 func postgresReadInstallQuota(ctx context.Context, q interface {

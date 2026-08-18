@@ -434,10 +434,15 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_messages(id,conversation_id,sequence,from_endpoint,body,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint,payload->>'from_endpoint',payload->>'body',TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_messages' ORDER BY row_key COLLATE "C"`,
-	`INSERT INTO relay.mail_deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at)
+	`INSERT INTO relay.mail_deliveries(id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at,closed_reason)
 	 SELECT (payload->>'id')::uuid,(payload->>'message_id')::uuid,payload->>'recipient_endpoint',payload->>'lease_machine_id',(payload->>'lease_token')::uuid,(payload->>'lease_generation')::bigint,(payload->>'ownership_generation')::bigint,(payload->>'consumer_generation')::bigint,
 	 CASE WHEN payload->>'lease_until' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'lease_until')::bigint*INTERVAL '1 millisecond' END,
-	 CASE WHEN payload->>'acked_at' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'acked_at')::bigint*INTERVAL '1 millisecond' END
+	 CASE WHEN payload->>'acked_at' IS NULL THEN NULL ELSE TIMESTAMPTZ 'epoch'+(payload->>'acked_at')::bigint*INTERVAL '1 millisecond' END,
+	 CASE
+	   WHEN payload->>'closed_reason' IN ('acked','expired','revoked') THEN payload->>'closed_reason'
+	   WHEN payload->>'acked_at' IS NULL THEN NULL
+	   ELSE 'acked'
+	 END
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_deliveries' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_recipient_cursors(recipient_endpoint,conversation_id,sequence)
 	 SELECT payload->>'recipient_endpoint',(payload->>'conversation_id')::uuid,(payload->>'sequence')::bigint

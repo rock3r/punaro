@@ -113,7 +113,7 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"role_memberships", "conversation_id,role,capabilities", "conversation_id,role"},
 	{"role_bindings", "role,session_endpoint,machine_id,ownership_generation,lease_until", "role"},
 	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
-	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
+	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at,closed_reason", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
 	{"conversation_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
@@ -142,7 +142,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"conversations", "id,next_sequence,created_at", "id"},
 	{"memberships", "conversation_id,endpoint,capabilities", "conversation_id,endpoint"},
 	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
-	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
+	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at,closed_reason", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
 	{"conversation_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
@@ -621,7 +621,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
 		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"rate_buckets":                     {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
-		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
+		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-", "closed_reason:TEXT:0:0:-"},
 		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
 		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
 		"conversation_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
@@ -900,7 +900,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
         OR EXISTS (SELECT 1 FROM messages WHERE sequence<1 OR length(CAST(body AS blob))>32768)
         OR EXISTS (SELECT 1 FROM messages AS message LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=message.from_endpoint WHERE endpoint.endpoint IS NULL)
         OR EXISTS (SELECT 1 FROM messages AS message JOIN conversations AS conversation ON conversation.id=message.conversation_id WHERE message.sequence>conversation.next_sequence)
-        OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))
+        OR EXISTS (SELECT 1 FROM deliveries WHERE lease_generation<0 OR (lease_token IS NOT NULL AND (ownership_generation<1 OR consumer_generation<0)) OR (acked_at IS NOT NULL AND lease_token IS NOT NULL) OR ((acked_at IS NULL)<>(closed_reason IS NULL)) OR (closed_reason IS NOT NULL AND closed_reason NOT IN ('acked','expired','revoked')) OR ((lease_machine_id IS NULL OR lease_token IS NULL OR ownership_generation IS NULL OR consumer_generation IS NULL OR lease_until IS NULL) AND NOT (lease_machine_id IS NULL AND lease_token IS NULL AND ownership_generation IS NULL AND consumer_generation IS NULL AND lease_until IS NULL)))
         OR EXISTS (SELECT 1 FROM deliveries AS delivery LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=delivery.recipient_endpoint LEFT JOIN roles AS role ON substr(delivery.recipient_endpoint,7)=role.role WHERE (substr(delivery.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(delivery.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
         OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor JOIN conversations AS conversation ON conversation.id=cursor.conversation_id WHERE cursor.sequence<0 OR cursor.sequence>conversation.next_sequence)
         OR EXISTS (SELECT 1 FROM recipient_cursors AS cursor LEFT JOIN endpoints AS endpoint ON endpoint.endpoint=cursor.recipient_endpoint LEFT JOIN roles AS role ON substr(cursor.recipient_endpoint,7)=role.role WHERE (substr(cursor.recipient_endpoint,1,6)=char(30)||'role:' AND role.role IS NULL) OR (substr(cursor.recipient_endpoint,1,6)<>char(30)||'role:' AND endpoint.endpoint IS NULL))
@@ -930,7 +930,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 				OR typeof(binding.lease_until)<>'integer' OR role.machine_id<>binding.machine_id
 				OR endpoint.machine_id<>binding.machine_id OR endpoint.ownership_generation<>binding.ownership_generation)
 		OR EXISTS (SELECT 1 FROM messages WHERE typeof(sequence)<>'integer' OR typeof(from_endpoint)<>'text' OR typeof(body)<>'text' OR typeof(created_at)<>'integer')
-		OR EXISTS (SELECT 1 FROM deliveries WHERE typeof(recipient_endpoint)<>'text' OR (lease_machine_id IS NOT NULL AND typeof(lease_machine_id)<>'text') OR typeof(lease_generation)<>'integer' OR (lease_token IS NOT NULL AND (typeof(lease_token)<>'text' OR length(lease_token)<>64 OR lease_token GLOB '*[^0-9a-f]*')) OR (ownership_generation IS NOT NULL AND typeof(ownership_generation)<>'integer') OR (consumer_generation IS NOT NULL AND typeof(consumer_generation)<>'integer') OR (lease_until IS NOT NULL AND typeof(lease_until)<>'integer') OR (acked_at IS NOT NULL AND typeof(acked_at)<>'integer'))
+		OR EXISTS (SELECT 1 FROM deliveries WHERE typeof(recipient_endpoint)<>'text' OR (lease_machine_id IS NOT NULL AND typeof(lease_machine_id)<>'text') OR typeof(lease_generation)<>'integer' OR (lease_token IS NOT NULL AND (typeof(lease_token)<>'text' OR length(lease_token)<>64 OR lease_token GLOB '*[^0-9a-f]*')) OR (ownership_generation IS NOT NULL AND typeof(ownership_generation)<>'integer') OR (consumer_generation IS NOT NULL AND typeof(consumer_generation)<>'integer') OR (lease_until IS NOT NULL AND typeof(lease_until)<>'integer') OR (acked_at IS NOT NULL AND typeof(acked_at)<>'integer') OR (closed_reason IS NOT NULL AND typeof(closed_reason)<>'text'))
 		OR EXISTS (SELECT 1 FROM recipient_cursors WHERE typeof(recipient_endpoint)<>'text' OR typeof(sequence)<>'integer')
 		OR EXISTS (SELECT 1 FROM idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
 		OR EXISTS (SELECT 1 FROM conversation_idempotency WHERE typeof(machine_id)<>'text' OR typeof(key)<>'text' OR typeof(request_hash)<>'text' OR typeof(created_at)<>'integer')
@@ -1023,6 +1023,8 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		_, valid = NormalizeRoleDisplayName(text)
 	case "rate_buckets.kind":
 		valid = text == "sender" || text == "conversation"
+	case "deliveries.closed_reason":
+		valid = text == ClosedReasonAcked || text == ClosedReasonExpired || text == ClosedReasonRevoked
 	case "rate_buckets.bucket_key":
 		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":

@@ -37,11 +37,12 @@ import (
 )
 
 const (
-	trustedReconcileBatch    = 100
-	trustedReconcileMaxPages = 1000
-	trustedOrphanGrace       = 24 * time.Hour
-	trustedGCClaimLifetime   = time.Minute
-	trustedReconcileInterval = 5 * time.Minute
+	trustedReconcileBatch            = 100
+	trustedReconcileMaxPages         = 1000
+	trustedOrphanGrace               = 24 * time.Hour
+	trustedGCClaimLifetime           = time.Minute
+	trustedReconcileInterval         = 5 * time.Minute
+	relayTerminalMaintenanceInterval = time.Minute
 )
 
 type platformDatabase interface {
@@ -212,6 +213,9 @@ func run(args []string, stderr io.Writer) int {
 	}
 	if relayStore != nil {
 		defer func() { _ = relayStore.Close() }()
+	}
+	if stop := startRelayTerminalMaintenance(relayStore, postgresRelay); stop != nil {
+		defer stop()
 	}
 	relayMetricsSnapshot := func() relay.MetricsSnapshot { return relay.MetricsSnapshot{} }
 	if provider, ok := relayHandler.(interface{ MetricsSnapshot() relay.MetricsSnapshot }); ok {
@@ -764,6 +768,20 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 			return nil, nil, err
 		}
 	}
+	if setter, ok := backend.(interface {
+		SetRetentionPolicy(relay.RetentionConfig) error
+	}); ok {
+		limits := cfg.RelayRetentionPolicy()
+		if limits == (relay.RetentionConfig{}) {
+			limits = relay.DefaultRetentionConfig()
+		}
+		if err := setter.SetRetentionPolicy(limits); err != nil {
+			if store != nil {
+				_ = store.Close()
+			}
+			return nil, nil, err
+		}
+	}
 	metrics := &relay.Metrics{}
 	var authenticator *relay.Authenticator
 	if cfg.CredentialTransitionEnabled {
@@ -796,6 +814,45 @@ func buildRelayHandler(cfg config.Config, postgresBackends ...relay.Backend) (ht
 		handler = verifier.Middleware(handler)
 	}
 	return relayMetricsHandler{Handler: handler, metrics: metrics}, store, nil
+}
+
+type terminalMaintainer interface {
+	MaintainTerminalDeliveries(time.Time) (relay.MaintenanceResult, error)
+}
+
+func startRelayTerminalMaintenance(candidates ...any) context.CancelFunc {
+	var maintainer terminalMaintainer
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if next, ok := candidate.(terminalMaintainer); ok {
+			maintainer = next
+			break
+		}
+	}
+	if maintainer == nil {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(relayTerminalMaintenanceInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				_, _ = maintainer.MaintainTerminalDeliveries(time.Now().UTC())
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			close(done)
+		})
+	}
 }
 
 type relayMetricsHandler struct {

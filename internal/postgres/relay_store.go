@@ -825,7 +825,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 		}
 	}
 	if input.Operation == relay.ControlUpsertMember && err == nil && previous&relay.CapReceive != 0 && input.Member.Capabilities&relay.CapReceive == 0 {
-		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC(), d.metrics); err != nil {
 			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -842,7 +842,7 @@ func (d *Database) ApplyControl(input relay.ControlInput) (relay.ControlEvent, b
 			}
 		}
 	} else {
-		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC()); err != nil {
+		if err := postgresRetireConversationDeliveries(tx, input.Member.Endpoint, input.ConversationID, input.Now.UTC(), d.metrics); err != nil {
 			return relay.ControlEvent{}, false, err
 		}
 		if err := postgresAdvanceRecipientCursor(tx, input.Member.Endpoint, input.ConversationID); err != nil {
@@ -1452,6 +1452,9 @@ func (d *Database) LeaseDeliveries(machineID, consumerID, endpoint, conversation
 			delivery.LeaseGeneration++
 			delivery.LeaseToken = uuid.NewString()
 			delivery.LeaseUntil = now.Add(ttl).UTC()
+			if row.leaseToken.Valid {
+				d.metrics.ObserveLeaseRedelivery()
+			}
 			if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET lease_machine_id=$1,lease_token=$2::uuid,lease_generation=$3,ownership_generation=$4,consumer_generation=$5,lease_until=$6 WHERE id=$7::uuid`, machineID, delivery.LeaseToken, delivery.LeaseGeneration, ownershipGeneration, consumerGeneration, delivery.LeaseUntil, delivery.ID); err != nil {
 				return relay.DeliveryLeasePage{}, relayDatabaseError(err, "lease delivery")
 			}
@@ -1596,15 +1599,26 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	var leaseGeneration int64
 	var leaseOwnership, leaseConsumer sql.NullInt64
 	var leaseUntil, acknowledged sql.NullTime
+	var closedReason sql.NullString
 	var conversationID string
-	err = tx.QueryRowContext(context.Background(), `SELECT delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,
-		delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,delivery.acked_at,message.conversation_id::text
+	selectSQL := `SELECT delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,
+		delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,delivery.acked_at,NULL,message.conversation_id::text
 		FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
-		WHERE delivery.id=$1::uuid FOR UPDATE OF delivery`, deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &acknowledged, &conversationID)
+		WHERE delivery.id=$1::uuid FOR UPDATE OF delivery`
+	if d.mailClosedReasonPresent() {
+		selectSQL = `SELECT delivery.recipient_endpoint,delivery.lease_machine_id,delivery.lease_token::text,
+			delivery.lease_generation,delivery.ownership_generation,delivery.consumer_generation,delivery.lease_until,delivery.acked_at,delivery.closed_reason,message.conversation_id::text
+			FROM relay.mail_deliveries AS delivery JOIN relay.mail_messages AS message ON message.id=delivery.message_id
+			WHERE delivery.id=$1::uuid FOR UPDATE OF delivery`
+	}
+	err = tx.QueryRowContext(context.Background(), selectSQL, deliveryID).Scan(&recipient, &leaseMachine, &leaseToken, &leaseGeneration, &leaseOwnership, &leaseConsumer, &leaseUntil, &acknowledged, &closedReason, &conversationID)
 	if errors.Is(err, sql.ErrNoRows) || !postgresContainsString(recipientIDs, recipient) {
 		return relay.ErrForbidden
 	}
 	if err != nil {
+		return relay.ErrForbidden
+	}
+	if closedReason.Valid && closedReason.String != relay.ClosedReasonAcked {
 		return relay.ErrForbidden
 	}
 	if acknowledged.Valid && leaseToken.Valid && leaseToken.String == token && leaseGeneration == generation {
@@ -1617,7 +1631,13 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 	if !leaseMachine.Valid || leaseMachine.String != machineID || !leaseToken.Valid || leaseToken.String != token || leaseGeneration != generation || !leaseOwnership.Valid || leaseOwnership.Int64 != ownershipGeneration || !leaseConsumer.Valid || leaseConsumer.Int64 != currentConsumerGeneration || !leaseUntil.Valid || !leaseUntil.Time.After(now) {
 		return relay.ErrForbidden
 	}
-	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_deliveries SET acked_at=$1 WHERE id=$2::uuid AND acked_at IS NULL`, now.UTC(), deliveryID); err != nil {
+	ackSQL := `UPDATE relay.mail_deliveries SET acked_at=$1 WHERE id=$2::uuid AND acked_at IS NULL`
+	if d.mailClosedReasonPresent() {
+		ackSQL = `UPDATE relay.mail_deliveries SET acked_at=$1, closed_reason=$3 WHERE id=$2::uuid AND acked_at IS NULL`
+		if _, err := tx.ExecContext(context.Background(), ackSQL, now.UTC(), deliveryID, relay.ClosedReasonAcked); err != nil {
+			return relayDatabaseError(err, "acknowledge delivery")
+		}
+	} else if _, err := tx.ExecContext(context.Background(), ackSQL, now.UTC(), deliveryID); err != nil {
 		return relayDatabaseError(err, "acknowledge delivery")
 	}
 	if !acknowledged.Valid {
@@ -1628,6 +1648,7 @@ func (d *Database) AckDelivery(machineID, endpoint, deliveryID, token string, ge
 		if err := postgresReleaseQuota(tx, recipient, bodyBytes); err != nil {
 			return err
 		}
+		d.metrics.ObserveTerminalTransition(relay.ClosedReasonAcked)
 	}
 	if err := postgresAdvanceRecipientCursor(tx, recipient, conversationID); err != nil {
 		return err
@@ -2100,6 +2121,7 @@ WITH objects AS (
         (deliveries_oid,'lease_machine_id','text'::regtype,false),(deliveries_oid,'lease_token','uuid'::regtype,false),(deliveries_oid,'lease_generation','bigint'::regtype,true),
         (deliveries_oid,'ownership_generation','bigint'::regtype,false),(deliveries_oid,'consumer_generation','bigint'::regtype,false),
         (deliveries_oid,'lease_until','timestamptz'::regtype,false),(deliveries_oid,'acked_at','timestamptz'::regtype,false),
+        (deliveries_oid,'closed_reason','text'::regtype,false),
         (cursors_oid,'recipient_endpoint','text'::regtype,true),(cursors_oid,'conversation_id','uuid'::regtype,true),(cursors_oid,'sequence','bigint'::regtype,true),
         (message_idempotency_oid,'machine_id','text'::regtype,true),(message_idempotency_oid,'key','text'::regtype,true),(message_idempotency_oid,'request_hash','bpchar'::regtype,true),
         (message_idempotency_oid,'message_id','uuid'::regtype,true),(message_idempotency_oid,'created_at','timestamptz'::regtype,true),
@@ -2107,7 +2129,8 @@ WITH objects AS (
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 49 OR expected.column_name IS DISTINCT FROM 'closed_reason')
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
@@ -2177,11 +2200,12 @@ WITH objects AS (
         (conversations_oid,ARRAY[2]::smallint[]),(memberships_oid,ARRAY[3]::smallint[]),
 		(roles_oid,ARRAY[1]::smallint[]),(roles_oid,ARRAY[2]::smallint[]),(role_memberships_oid,ARRAY[3]::smallint[]),(role_bindings_oid,ARRAY[4]::smallint[]),
         (messages_oid,ARRAY[3]::smallint[]),(messages_oid,ARRAY[5]::smallint[]),
-        (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),
+        (deliveries_oid,ARRAY[6]::smallint[]),(deliveries_oid,ARRAY[4,5,7,8,9]::smallint[]),(deliveries_oid,ARRAY[11]::smallint[]),(deliveries_oid,ARRAY[10,11]::smallint[]),
         (cursors_oid,ARRAY[3]::smallint[]),(message_idempotency_oid,ARRAY[2]::smallint[]),(message_idempotency_oid,ARRAY[3]::smallint[]),
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[])
     ) AS expected(table_oid,column_keys)
-    WHERE $1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid)
+    WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
+      AND ($1 >= 49 OR (expected.column_keys IS DISTINCT FROM ARRAY[11]::smallint[] AND expected.column_keys IS DISTINCT FROM ARRAY[10,11]::smallint[]))
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
@@ -2207,6 +2231,8 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=messages_oid AND contype='c' AND conkey=ARRAY[5]::smallint[] AND pg_get_expr(conbin,conrelid)='(octet_length(body) <= 32768)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[6]::smallint[] AND pg_get_expr(conbin,conrelid)='(lease_generation >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[4,5,7,8,9]::smallint[] AND conkey <@ ARRAY[4,5,7,8,9]::smallint[] AND pg_get_expr(conbin,conrelid)='(((lease_machine_id IS NULL) AND (lease_token IS NULL) AND (ownership_generation IS NULL) AND (consumer_generation IS NULL) AND (lease_until IS NULL)) OR ((lease_machine_id IS NOT NULL) AND (lease_token IS NOT NULL) AND (ownership_generation IS NOT NULL) AND (consumer_generation IS NOT NULL) AND (lease_until IS NOT NULL)))')
+	   AND ($1 < 49 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey=ARRAY[11]::smallint[] AND pg_get_expr(conbin,conrelid)='((closed_reason IS NULL) OR (closed_reason = ANY (ARRAY[''acked''::text, ''expired''::text, ''revoked''::text])))'))
+	   AND ($1 < 49 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=deliveries_oid AND contype='c' AND conkey @> ARRAY[10,11]::smallint[] AND conkey <@ ARRAY[10,11]::smallint[] AND pg_get_expr(conbin,conrelid)='((acked_at IS NULL) = (closed_reason IS NULL))'))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=cursors_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(sequence >= 0)')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=message_idempotency_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=message_idempotency_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(request_hash ~ ''^[0-9a-f]{64}$''::text)')
@@ -2218,7 +2244,7 @@ WITH objects AS (
     SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
 	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 40 THEN 12 ELSE 10 END
-	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 40 THEN 22 ELSE 18 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 49 THEN 24 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
@@ -2302,10 +2328,12 @@ WITH objects AS (
 		(role_bindings_oid,'session_endpoint','UPDATE'),(role_bindings_oid,'machine_id','UPDATE'),(role_bindings_oid,'ownership_generation','UPDATE'),(role_bindings_oid,'lease_until','UPDATE'),
         (deliveries_oid,'lease_machine_id','UPDATE'),(deliveries_oid,'lease_token','UPDATE'),(deliveries_oid,'lease_generation','UPDATE'),
         (deliveries_oid,'ownership_generation','UPDATE'),(deliveries_oid,'consumer_generation','UPDATE'),(deliveries_oid,'lease_until','UPDATE'),(deliveries_oid,'acked_at','UPDATE'),
+        (deliveries_oid,'closed_reason','UPDATE'),
         (cursors_oid,'sequence','UPDATE')
     ) AS expected(table_oid,column_name,privilege_type)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.column_name='capabilities'))
+      AND ($1 >= 49 OR NOT (expected.table_oid=deliveries_oid AND expected.column_name='closed_reason'))
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
@@ -2377,6 +2405,7 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	   AND has_column_privilege('punaro_app',deliveries_oid,'consumer_generation','UPDATE')
 	   AND has_column_privilege('punaro_app',deliveries_oid,'lease_until','UPDATE')
 	   AND has_column_privilege('punaro_app',deliveries_oid,'acked_at','UPDATE')
+	   AND ($1 < 49 OR has_column_privilege('punaro_app',deliveries_oid,'closed_reason','UPDATE'))
 	   AND NOT has_column_privilege('punaro_app',deliveries_oid,'id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',deliveries_oid,'message_id','UPDATE')
 	   AND NOT has_column_privilege('punaro_app',deliveries_oid,'recipient_endpoint','UPDATE')

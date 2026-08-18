@@ -89,3 +89,50 @@ func TestRelayReconcileCapacityPublishesContentFreeOutcome(t *testing.T) {
 		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
 	}
 }
+
+func TestRelayTerminalListDoesNotRequireConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	list := func(directory string, limit int, after string) (relay.TerminalPage, error) {
+		called = directory == "/install" && limit == 2 && after == "cursor-1"
+		return relay.TerminalPage{Records: []relay.TerminalRecord{{
+			DeliveryID: "d1", MessageID: "m1", ConversationID: "c1", RecipientID: "agent/b", Sequence: 1,
+			ClosedReason: relay.ClosedReasonExpired, LeaseGeneration: 3,
+		}}, NextCursor: "d1"}, nil
+	}
+	if code := runRelayTerminalList([]string{"--directory", "/install", "--limit", "2", "--after", "cursor-1"}, &stdout, &stderr, list); code != 0 || !called {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	if bytes.Contains(stdout.Bytes(), []byte(`"body"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"closed_reason": "expired"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"next_cursor": "d1"`)) {
+		t.Fatalf("stdout leaked body or omitted metadata: %s", stdout.String())
+	}
+}
+
+func TestRelayTerminalMaintainRequiresConfirmation(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(string) (relay.MaintenanceResult, error) {
+		called = true
+		return relay.MaintenanceResult{}, nil
+	}
+	if code := runRelayTerminalMaintain([]string{"--directory", "/install"}, &stdout, &stderr, maintain); code != 2 || called {
+		t.Fatalf("unconfirmed code=%d called=%t", code, called)
+	}
+}
+
+func TestRelayTerminalMaintainPublishesContentFreeOutcome(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	called := false
+	maintain := func(directory string) (relay.MaintenanceResult, error) {
+		called = directory == "/install"
+		return relay.MaintenanceResult{Expired: 2, Pruned: 1}, nil
+	}
+	if code := runRelayTerminalMaintain([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, maintain); code != 0 || !called || !bytes.Contains(stdout.Bytes(), []byte(`"terminal_maintained"`)) || !bytes.Contains(stdout.Bytes(), []byte(`"expired": 2`)) || !bytes.Contains(stdout.Bytes(), []byte(`"pruned": 1`)) {
+		t.Fatalf("code=%d called=%t stdout=%q stderr=%q", code, called, stdout.String(), stderr.String())
+	}
+	if code := runRelayTerminalMaintain([]string{"--directory", "/install", "--yes"}, &stdout, &stderr, func(string) (relay.MaintenanceResult, error) {
+		return relay.MaintenanceResult{}, errors.New("unsafe")
+	}); code != 1 || !bytes.Contains(stderr.Bytes(), []byte("rerun the exact command")) {
+		t.Fatalf("failure code=%d stderr=%q", code, stderr.String())
+	}
+}
