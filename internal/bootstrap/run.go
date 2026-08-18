@@ -52,6 +52,7 @@ type RunRequest struct {
 	HealthTimeout time.Duration
 	HealthWindow  time.Duration
 	Start         func(context.Context, ChildSpec) (Process, error)
+	afterPrepare  func()
 }
 
 // ChildSpec is the closed-list adapter launch. Release metadata cannot add
@@ -94,23 +95,30 @@ func Run(ctx context.Context, request RunRequest) error {
 	}
 	identity, adapter, err := prepareRun(&request)
 	if errors.Is(err, errNoAdapter) {
-		return failCurrent(ctx, request, startOrDefault(request), identity, errChildExited)
+		return failCurrent(ctx, request, startOrDefault(request), identity, request.hasPrevious(identity), errChildExited)
 	}
 	if err != nil {
 		return err
 	}
+	if request.afterPrepare != nil {
+		request.afterPrepare()
+	}
+	if err := failIfSlotChanged(request.Directory, identity); err != nil {
+		return err
+	}
+	hadPrevious := request.hasPrevious(identity)
 	start := startOrDefault(request)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
-		return failCurrent(ctx, request, start, identity, errChildExited)
+		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	if err := waitHealth(ctx, request, child, request.hasPrevious(identity)); err != nil {
+	if err := waitHealth(ctx, request, child, hadPrevious); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		_ = child.Kill()
 		<-child.Done()
-		return failCurrent(ctx, request, start, identity, err)
+		return failCurrent(ctx, request, start, identity, hadPrevious, err)
 	}
 	return waitChild(ctx, child)
 }
@@ -251,18 +259,15 @@ func waitHealth(ctx context.Context, request RunRequest, child Process, required
 	}
 }
 
-func failCurrent(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, cause error) error {
-	if err := failIfSlotChanged(request.Directory, started); err != nil {
-		return err
-	}
-	if request.hasPrevious(started) {
+func failCurrent(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, hadPrevious bool, cause error) error {
+	if hadPrevious {
 		return failOrRollback(ctx, request, start, started, recoveryUnhealthy)
 	}
 	reason := recoveryCurrentExited
 	if !errors.Is(cause, errChildExited) {
 		reason = recoveryUnhealthy
 	}
-	if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
+	if recErr := enterRecoveryOnly(request.Directory, reason, started); recErr != nil {
 		return recErr
 	}
 	return ErrRecoveryOnly
@@ -283,19 +288,19 @@ func failIfSlotChanged(directory string, started slotState) error {
 }
 
 func failOrRollback(ctx context.Context, request RunRequest, start func(context.Context, ChildSpec) (Process, error), started slotState, reason string) error {
-	unlocked, _, err := rollbackIfAllowed(request, started)
+	unlocked, rolled, err := rollbackIfAllowed(request, started)
 	if errors.Is(err, errSlotChanged) {
 		return err
 	}
 	if !unlocked || err != nil {
-		if recErr := enterRecoveryOnly(request.Directory, reason); recErr != nil {
+		if recErr := enterRecoveryOnly(request.Directory, reason, started); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
 	}
 	adapter, err := adapterBinary(filepath.Join(request.Directory, currentSlot), request.GOOS, request.GOARCH)
 	if err != nil {
-		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
+		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
@@ -305,7 +310,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 	}
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
-		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
+		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
@@ -316,7 +321,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		_ = child.Kill()
 		<-child.Done()
-		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed); recErr != nil {
+		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
@@ -550,7 +555,7 @@ func writeRecoveryRecord(directory, reason string) error {
 	return writeAtomic(filepath.Join(directory, recoveryFile), body, 0o600)
 }
 
-func enterRecoveryOnly(directory, reason string) error {
+func enterRecoveryOnly(directory, reason string, started slotState) error {
 	if err := prepareDirectory(directory); err != nil {
 		return err
 	}
@@ -559,6 +564,11 @@ func enterRecoveryOnly(directory, reason string) error {
 		return err
 	}
 	defer unlock()
+	if started.Release != "" {
+		if err := failIfSlotChanged(directory, started); err != nil {
+			return err
+		}
+	}
 	return writeRecoveryRecord(directory, reason)
 }
 

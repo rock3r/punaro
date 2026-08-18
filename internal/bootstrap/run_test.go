@@ -75,6 +75,47 @@ func TestRunKeepsAliveUnenrolledCurrent(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotStartAfterPreparedSlotChanged(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
+	var started bool
+	err := Run(context.Background(), RunRequest{
+		Directory:     dir,
+		HealthTimeout: 40 * time.Millisecond,
+		afterPrepare: func() {
+			if err := os.Rename(filepath.Join(dir, currentSlot), filepath.Join(dir, previousSlot)); err != nil {
+				t.Fatal(err)
+			}
+			writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "next-adapter")
+		},
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			started = true
+			return finishedProcess(nil), nil
+		},
+	})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("prepared slot change err=%v", err)
+	}
+	if started {
+		t.Fatal("started adapter after current slot changed")
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("prepared slot change entered recovery-only")
+	}
+}
+
+func TestEnterRecoveryOnlyRefusesWhenSlotChanged(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "next-adapter")
+	err := enterRecoveryOnly(dir, recoveryUnhealthy, slotState{Release: "v0.1.0", Sequence: 1, ManifestSHA256: payloadDigest("current-adapter")})
+	if !errors.Is(err, errSlotChanged) {
+		t.Fatalf("enter recovery err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("stale identity wrote recovery-only")
+	}
+}
+
 func TestRunDoesNotEnterRecoveryWhenCurrentSlotChanged(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "current-adapter")
@@ -666,7 +707,7 @@ func writeAccepted(t *testing.T, directory, release string, sequence, catalogSeq
 
 func writeRecoveryOnly(t *testing.T, directory string) {
 	t.Helper()
-	if err := enterRecoveryOnly(directory, "candidate-unhealthy"); err != nil {
+	if err := enterRecoveryOnly(directory, "candidate-unhealthy", slotState{}); err != nil {
 		t.Fatal(err)
 	}
 }
