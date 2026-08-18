@@ -33,6 +33,8 @@ for expected in \
 	'Get-ScheduledTask' \
 	'could not stop the running Punaro Adapter task' \
 	'Wait-PunaroReplaceableBinary' \
+	'Stop-PunaroOrphanAdapter' \
+	'run.pid' \
 	'FileShare]::None' \
 	'adapterTaskRestored'; do
 	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }

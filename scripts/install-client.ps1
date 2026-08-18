@@ -16,6 +16,32 @@ $ErrorActionPreference = 'Stop'
 
 function Stop-Install([string]$Message) { throw "punaro installer: $Message" }
 
+function Stop-PunaroOrphanAdapter([string]$BootstrapDirectory) {
+    $pidFile = Join-Path $BootstrapDirectory 'run.pid'
+    if (-not (Test-Path -LiteralPath $pidFile -PathType Leaf)) { return }
+    $raw = Get-Content -LiteralPath $pidFile -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($raw)) { return }
+    try { $record = $raw | ConvertFrom-Json } catch { return }
+    if ($null -eq $record -or $record.schema -ne 1 -or $record.pid -le 0 -or [string]::IsNullOrWhiteSpace([string]$record.path)) { return }
+    $proc = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    if ($null -eq $proc) { return }
+    $image = $null
+    try { $image = $proc.Path } catch { }
+    if ([string]::IsNullOrWhiteSpace($image)) {
+        try { $image = $proc.MainModule.FileName } catch { }
+    }
+    if ([string]::IsNullOrWhiteSpace($image)) { return }
+    $want = [System.IO.Path]::GetFullPath([string]$record.path)
+    $got = [System.IO.Path]::GetFullPath($image)
+    if (-not $want.Equals($got, [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    Stop-Process -Id $record.pid -Force -ErrorAction SilentlyContinue
+    $deadline = (Get-Date).AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 200
+        $proc = Get-Process -Id $record.pid -ErrorAction SilentlyContinue
+    } while ($null -ne $proc -and (Get-Date) -lt $deadline)
+}
+
 function Wait-PunaroReplaceableBinary([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     $deadline = (Get-Date).AddSeconds(30)
@@ -221,6 +247,7 @@ if ($null -ne $existingAdapterTask -and $existingAdapterTask.State -eq 'Running'
 }
 
 try {
+Stop-PunaroOrphanAdapter -BootstrapDirectory $bootstrapDir
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-adapter.exe')
 Wait-PunaroReplaceableBinary -Path (Join-Path $binDir 'punaro-bootstrap.exe')
 Build-PunaroBinary -Package (Join-Path $repoDir 'cmd\punaro-adapter') -Output (Join-Path $binDir 'punaro-adapter.exe')

@@ -327,6 +327,23 @@ func TestNextSlotGenerationUsesPreviousAndAutoRollback(t *testing.T) {
 	}
 }
 
+func TestNextSlotGenerationPersistsAfterCurrentRemoved(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 2)
+	got, err := nextSlotGeneration(dir)
+	if err != nil || got != 3 {
+		t.Fatalf("first next generation=%d err=%v", got, err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, currentSlot)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = nextSlotGeneration(dir)
+	if err != nil || got != 4 {
+		t.Fatalf("persisted next generation=%d err=%v", got, err)
+	}
+}
+
 func TestNextSlotGenerationUsesCandidate(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, candidateSlot, "v0.2.0", 2, "candidate-adapter")

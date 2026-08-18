@@ -265,6 +265,9 @@ func prepareRun(request *RunRequest) (slotState, string, error) {
 		}
 		return slotState{}, "", ErrRecoveryOnly
 	}
+	if err := observeGeneration(request.Directory, identity.Generation); err != nil {
+		return slotState{}, "", err
+	}
 	adapter, err := snapshotAdapter(request.Directory, current, request.GOOS, request.GOARCH)
 	if err != nil {
 		return identity, "", err

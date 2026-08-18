@@ -20,19 +20,20 @@ import (
 )
 
 const (
-	acceptedFile          = "accepted.json"
-	currentSlot           = "current"
-	previousSlot          = "previous"
-	candidateSlot         = "candidate"
-	swapSlot              = "swap"
-	runningSlot           = "running"
-	slotRecord            = "slot.json"
-	journalFile           = "journal.json"
-	lockFile              = "bootstrap.lock"
-	runLeaseFile          = "run.lock"
-	runPIDFile            = "run.pid"
-	autoRollbackFile      = "auto-rollback.json"
-	healthyGenerationFile = "healthy-generation.json"
+	acceptedFile            = "accepted.json"
+	currentSlot             = "current"
+	previousSlot            = "previous"
+	candidateSlot           = "candidate"
+	swapSlot                = "swap"
+	runningSlot             = "running"
+	slotRecord              = "slot.json"
+	journalFile             = "journal.json"
+	lockFile                = "bootstrap.lock"
+	runLeaseFile            = "run.lock"
+	runPIDFile              = "run.pid"
+	autoRollbackFile        = "auto-rollback.json"
+	healthyGenerationFile   = "healthy-generation.json"
+	generationHighWaterFile = "generation.json"
 )
 
 // Request is one host-local update from a fixed origin.

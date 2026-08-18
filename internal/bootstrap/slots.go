@@ -282,6 +282,9 @@ func recoverJournal(directory string) error {
 func readRepairableCurrent(directory string) (slotState, error) {
 	current, err := readOptionalSlot(filepath.Join(directory, currentSlot))
 	if err == nil {
+		if obsErr := observeGeneration(directory, current.Generation); obsErr != nil {
+			return slotState{}, obsErr
+		}
 		return current, nil
 	}
 	if recErr := writeRecoveryRecord(directory, recoveryCurrentExited); recErr != nil {
@@ -315,7 +318,10 @@ func rememberHealthyGeneration(directory string, current slotState) error {
 	if err != nil {
 		return err
 	}
-	return writeAtomic(filepath.Join(directory, healthyGenerationFile), body, 0o600)
+	if err := writeAtomic(filepath.Join(directory, healthyGenerationFile), body, 0o600); err != nil {
+		return err
+	}
+	return observeGeneration(directory, current.Generation)
 }
 
 func loadHealthyGeneration(directory string) (healthyGenerationState, error) {
@@ -681,6 +687,11 @@ func Status(directory string) (State, error) {
 	}, nil
 }
 
+type generationHighWaterState struct {
+	Schema     int64 `json:"schema"`
+	Generation int64 `json:"generation"`
+}
+
 func nextSlotGeneration(directory string) (int64, error) {
 	var high int64
 	for _, name := range []string{currentSlot, previousSlot, candidateSlot} {
@@ -698,7 +709,47 @@ func nextSlotGeneration(directory string) (int64, error) {
 	if record, err := loadHealthyGeneration(directory); err == nil && record.Generation > high {
 		high = record.Generation
 	}
-	return high + 1, nil
+	if record, err := loadGenerationHighWater(directory); err == nil && record.Generation > high {
+		high = record.Generation
+	}
+	next := high + 1
+	if err := observeGeneration(directory, next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func observeGeneration(directory string, generation int64) error {
+	if generation < 1 {
+		return nil
+	}
+	if record, err := loadGenerationHighWater(directory); err == nil && record.Generation >= generation {
+		return nil
+	}
+	return saveGenerationHighWater(directory, generation)
+}
+
+func loadGenerationHighWater(directory string) (generationHighWaterState, error) {
+	body, err := os.ReadFile(filepath.Join(directory, generationHighWaterFile)) // #nosec G304 -- generation high-water is a fixed child of the bootstrap directory.
+	if err != nil {
+		return generationHighWaterState{}, err
+	}
+	var record generationHighWaterState
+	if json.Unmarshal(body, &record) != nil || record.Schema != 1 || record.Generation < 1 {
+		return generationHighWaterState{}, errors.New("bootstrap generation high-water is invalid")
+	}
+	return record, nil
+}
+
+func saveGenerationHighWater(directory string, generation int64) error {
+	if generation < 1 {
+		return nil
+	}
+	body, err := json.Marshal(generationHighWaterState{Schema: 1, Generation: generation})
+	if err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(directory, generationHighWaterFile), body, 0o600)
 }
 
 func readOptionalSlot(directory string) (slotState, error) {
