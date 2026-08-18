@@ -603,6 +603,42 @@ func TestLoadAcceptsExplicitRelayRetention(t *testing.T) {
 	}
 }
 
+func TestRetentionPolicyFromFileIgnoresProcessEnv(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	if got != want {
+		t.Fatalf("retention=%#v want %#v", got, want)
+	}
+}
+
+func TestRetentionPolicyFromFileUsesDefaultsWhenKeysAbsent(t *testing.T) {
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("PUNARO_LOG_LEVEL=info\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RetentionPolicyFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != relay.DefaultRetentionConfig() {
+		t.Fatalf("retention=%#v want defaults", got)
+	}
+}
+
 func TestLoadAcceptsExplicitRelayQuotaLimits(t *testing.T) {
 	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_COUNT", "2")
 	t.Setenv("PUNARO_RELAY_PENDING_RECIPIENT_BYTES", "64")

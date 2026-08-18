@@ -153,6 +153,25 @@ func TestApplyInstallationRetentionHonorsDaemonEnvFile(t *testing.T) {
 	}
 }
 
+func TestApplyInstallationRetentionIgnoresProcessEnvOverrides(t *testing.T) {
+	directory := t.TempDir()
+	want := relay.RetentionConfig{PendingMaxAgeSeconds: 90, TerminalRetentionSeconds: 180, MaintenanceBatch: 7}
+	body := "PUNARO_RELAY_PENDING_MAX_AGE_SECONDS=90\nPUNARO_RELAY_TERMINAL_RETENTION_SECONDS=180\nPUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH=7\n"
+	if err := os.WriteFile(operator.EnvFile(directory), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PUNARO_RELAY_PENDING_MAX_AGE_SECONDS", "1")
+	t.Setenv("PUNARO_RELAY_TERMINAL_RETENTION_SECONDS", "2")
+	t.Setenv("PUNARO_RELAY_DELIVERY_MAINTENANCE_BATCH", "3")
+	store := &recordingOperatorStore{}
+	if err := applyInstallationRetention(directory, store); err != nil {
+		t.Fatal(err)
+	}
+	if store.policy != want {
+		t.Fatalf("policy=%#v want %#v", store.policy, want)
+	}
+}
+
 type recordingOperatorStore struct {
 	policy relay.RetentionConfig
 }

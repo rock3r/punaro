@@ -195,13 +195,9 @@ type operatorRelayStore interface {
 func applyInstallationRetention(directory string, store interface {
 	SetRetentionPolicy(relay.RetentionConfig) error
 }) error {
-	cfg, err := config.Load(operator.EnvFile(directory))
+	policy, err := config.RetentionPolicyFromFile(operator.EnvFile(directory))
 	if err != nil {
 		return err
-	}
-	policy := cfg.RelayRetentionPolicy()
-	if policy == (relay.RetentionConfig{}) {
-		policy = relay.DefaultRetentionConfig()
 	}
 	return store.SetRetentionPolicy(policy)
 }

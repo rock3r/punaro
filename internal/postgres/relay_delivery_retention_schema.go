@@ -47,7 +47,10 @@ WITH objects AS (
     FROM objects JOIN pg_trigger AS trigger ON trigger.tgrelid=terminals_oid
        AND trigger.tgname='mail_delivery_terminals_mutation_guard'
 ), acl AS (
-    SELECT has_table_privilege('punaro_app',terminals_oid,'SELECT,INSERT,UPDATE,DELETE')
+    SELECT has_table_privilege('punaro_app',terminals_oid,'SELECT')
+       AND has_table_privilege('punaro_app',terminals_oid,'INSERT')
+       AND has_table_privilege('punaro_app',terminals_oid,'UPDATE')
+       AND has_table_privilege('punaro_app',terminals_oid,'DELETE')
        AND NOT has_table_privilege('punaro_app',terminals_oid,'TRUNCATE,REFERENCES,TRIGGER') AS exact
     FROM objects
 )
