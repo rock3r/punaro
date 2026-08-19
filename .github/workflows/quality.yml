@@ -19,10 +19,10 @@ jobs:
           go-version-file: go.mod
       - name: Validate agent plugin
         run: make plugin-validate
-      # The suite normally completes in well under a minute. A bounded timeout
-      # turns any platform-specific deadlock into a useful goroutine dump rather
-      # than leaving the runner opaque for Go's default ten-minute timeout.
-      - run: go test -race -covermode=atomic -timeout 2m ./...
+      # Bounded well below Go's default ten-minute timeout so a deadlock still
+      # dumps goroutines. internal/relay with -race is ~75s on a fast runner and
+      # can exceed 2m when the suite shares a contended hosted runner.
+      - run: go test -race -covermode=atomic -timeout 4m ./...
       - run: go vet ./...
       - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
