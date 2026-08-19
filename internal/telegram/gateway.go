@@ -189,6 +189,14 @@ func (g Gateway) handleList(ctx context.Context) error {
 	if len(topics) == 0 {
 		return g.sendOperator(ctx, listEmptyText, nil)
 	}
+	labels := make(map[string]string, len(topics))
+	for _, topic := range topics {
+		label := truncateRunes(topic.DisplayName, maxButtonTextRunes)
+		if other, exists := labels[label]; exists && other != topic.ID {
+			return fmt.Errorf("telegram unclaimed topic labels are ambiguous")
+		}
+		labels[label] = topic.ID
+	}
 	keyboard := make([][]InlineKeyboardButton, 0, len(topics))
 	now := g.now()
 	for _, topic := range topics {

@@ -156,6 +156,37 @@ func TestGatewayStartAndListAreOperatorCommands(t *testing.T) {
 	}
 }
 
+func TestGatewayListFailsClosedOnAmbiguousButtonLabels(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	notify := &recordingNotify{}
+	prefix := strings.Repeat("名", maxButtonTextRunes)
+	gateway := Gateway{
+		AllowedUserID: 55,
+		State:         state,
+		Submit:        func(context.Context, Submission) error { t.Fatal("ambiguous list submitted"); return nil },
+		ListUnclaimed: func(context.Context) ([]relay.UnclaimedTopic, error) {
+			return []relay.UnclaimedTopic{
+				{ID: "conversation-1", DisplayName: prefix + "one"},
+				{ID: "conversation-2", DisplayName: prefix + "two"},
+			}, nil
+		},
+		Notify: notify,
+		Now:    func() time.Time { return testCallbackNow },
+		Log:    func(string, ...any) {},
+	}
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err == nil {
+		t.Fatal("ambiguous truncated labels were offered as buttons")
+	}
+	if len(notify.messages) != 0 {
+		t.Fatalf("ambiguous list sent keyboard: %#v", notify.messages)
+	}
+}
+
 func TestGatewayListEmptyHasNoKeyboard(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

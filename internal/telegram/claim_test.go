@@ -700,6 +700,43 @@ func TestStartPendingBoundsExecuteWorkPerCycle(t *testing.T) {
 	}
 }
 
+func TestResumeAllBoundsExecuteWorkPerCycle(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	for i := 1; i <= 11; i++ {
+		id := fmt.Sprintf("conversation-%02d", i)
+		if _, err := state.InsertPendingExecution(id, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	topics := &recordingTopicCreator{}
+	topics.onCreate = func() { topics.threadID++ }
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{Status: "pending", DisplayName: "room"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	eleventh, found, err := state.ClaimExecution("conversation-11")
+	if err != nil || !found || eleventh.Phase != ClaimPhaseReserved {
+		t.Fatalf("eleventh resume consumed the cycle budget: %#v found=%v err=%v", eleventh, found, err)
+	}
+	tenth, found, err := state.ClaimExecution("conversation-10")
+	if err != nil || !found || tenth.Phase != ClaimPhaseComplete {
+		t.Fatalf("tenth resume was not executed: %#v found=%v err=%v", tenth, found, err)
+	}
+	if err := executor.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	later, found, err := state.ClaimExecution("conversation-11")
+	if err != nil || !found || later.Phase != ClaimPhaseComplete {
+		t.Fatalf("next cycle did not resume remaining claim: %#v found=%v err=%v", later, found, err)
+	}
+}
+
 func TestAdoptRejectsRouteForDifferentTelegramChat(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

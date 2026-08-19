@@ -219,22 +219,29 @@ func (e ClaimExecutor) rejectMismatchedRoute(conversationID string) error {
 	return nil
 }
 
-// ResumeAll continues every local execution that is not complete.
+// ResumeAll continues incomplete local executions, at most pendingClaimPollLimit
+// per cycle, advancing a durable conversation cursor so later rows are not starved.
 func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
 	if err := e.rejectCompletedRouteMismatches(); err != nil {
 		return err
 	}
-	executions, err := e.State.IncompleteClaimExecutions()
+	after, err := e.State.resumeClaimCursor()
 	if err != nil {
 		return err
 	}
-	for _, execution := range executions {
-		if err := e.Execute(ctx, execution.ConversationID); err != nil {
-			// Keep later claims and outbound mail moving; the row stays retryable.
-			continue
-		}
+	executions, err := e.State.IncompleteClaimExecutionsAfter(after, pendingClaimPollLimit)
+	if err != nil {
+		return err
 	}
-	return nil
+	last := after
+	for _, execution := range executions {
+		_ = e.Execute(ctx, execution.ConversationID)
+		last = execution.ConversationID
+	}
+	if len(executions) < pendingClaimPollLimit {
+		return e.State.setResumeClaimCursor("")
+	}
+	return e.State.setResumeClaimCursor(last)
 }
 
 func (e ClaimExecutor) rejectCompletedRouteMismatches() error {

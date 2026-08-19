@@ -247,6 +247,36 @@ func TestStateSetRouteRefusesAfterConcurrentClaimProtectsThread(t *testing.T) {
 	}
 }
 
+func TestStateRouteBlockedTreatsCreatingAndTopicCreatedAsClaimed(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-creating"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimCreating("conversation-creating"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-creating"); err == nil {
+		t.Fatal("creating conversation remapped")
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-topic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-topic", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-topic"); err == nil {
+		t.Fatal("topic_created conversation remapped")
+	}
+	if err := state.RouteBlocked(55, 9, "conversation-free"); err != nil {
+		t.Fatalf("unclaimed remap blocked: %v", err)
+	}
+}
+
 func TestStateRouteBlockedTreatsRoutePersistedAsClaimed(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

@@ -332,6 +332,36 @@ func (s *State) IncompleteClaimExecutions() ([]ClaimExecution, error) {
 	return executions, rows.Err()
 }
 
+// IncompleteClaimExecutionsAfter lists incomplete rows after a conversation cursor.
+func (s *State) IncompleteClaimExecutionsAfter(after string, limit int) ([]ClaimExecution, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions
+		WHERE phase != ? AND (? = '' OR conversation_id > ?) ORDER BY conversation_id LIMIT ?`, ClaimPhaseComplete, after, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []ClaimExecution
+	for rows.Next() {
+		var execution ClaimExecution
+		var threadID sql.NullInt64
+		var displayName sql.NullString
+		var skip int
+		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
+			return nil, err
+		}
+		if threadID.Valid {
+			execution.ThreadID = threadID.Int64
+		}
+		execution.DisplayName = displayName.String
+		execution.SkipReserve = skip == 1
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
 // CompletedClaimExecutions lists finished local executions for route revalidation.
 func (s *State) CompletedClaimExecutions() ([]ClaimExecution, error) {
 	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE phase = ? ORDER BY conversation_id`, ClaimPhaseComplete)
@@ -466,6 +496,7 @@ const adoptExecutionSQL = `INSERT INTO claim_executions(conversation_id, thread_
 			skip_reserve = 1`
 
 const pendingClaimCursorName = "pending_claims"
+const resumeClaimCursorName = "resume_claims"
 
 func (s *State) pendingClaimCursor() (string, error) {
 	var value string
@@ -486,6 +517,28 @@ func (s *State) setPendingClaimCursor(after string) error {
 	}
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO gateway_cursors(name, value) VALUES (?, ?)
 		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, pendingClaimCursorName, after)
+	return err
+}
+
+func (s *State) resumeClaimCursor() (string, error) {
+	var value string
+	err := s.db.QueryRowContext(context.Background(), `SELECT value FROM gateway_cursors WHERE name = ?`, resumeClaimCursorName).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func (s *State) setResumeClaimCursor(after string) error {
+	if after == "" {
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM gateway_cursors WHERE name = ?`, resumeClaimCursorName)
+		return err
+	}
+	_, err := s.db.ExecContext(context.Background(), `INSERT INTO gateway_cursors(name, value) VALUES (?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, resumeClaimCursorName, after)
 	return err
 }
 
@@ -585,11 +638,11 @@ func claimProtectsRouteOn(q rowQueryer, conversationID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
+	return phase == ClaimPhaseCreating || phase == ClaimPhaseTopicCreated || phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
 }
 
 // RouteBlocked refuses remapping a claimed conversation or stealing its thread.
-// A route is claimed once claim_executions has persisted it (route_persisted or complete).
+// A route is claimed once createForumTopic is in flight or a topic/route exists.
 func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) error {
 	return routeBlockedOn(s.db, chatID, threadID, conversationID)
 }
