@@ -976,7 +976,9 @@ persists `message_thread_id` immediately, and never calls `getForumTopic`. A
 crash after Bot API success and before the thread id is stored keeps the
 fence, so resume does not create a second user-visible topic. An ambiguous
 createForumTopic error (timeout, lost response, or decode failure) also
-keeps the fence instead of retrying create. Agent-side pending reservations
+keeps the fence instead of retrying create. A completed 4xx Bot API
+rejection, including HTTP 429, returns the row to reserved so resume can
+retry createForumTopic; the topic was not created. Agent-side pending reservations
 are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
 reserve. `punaro-telegram adopt` completes an existing `topic_routes` row
 without creating a topic. `route` refuses a claimed conversation or a
