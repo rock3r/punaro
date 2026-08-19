@@ -839,25 +839,42 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
-// reconcileLegacyDuplicateTelegramClaimKeys keeps one claim per (machine, key)
-// before creating the unique index. Pre-v8 SQLite allowed the same key on
-// different conversations. Keep complete over pending, then earliest created_at,
-// then lexicographically smallest conversation_id.
+// reconcileLegacyDuplicateTelegramClaimKeys makes (machine, key) unique before
+// creating the index. Pre-v8 SQLite allowed the same key on different
+// conversations. Completed claims are never deleted: extra completes are
+// rekeyed. Extra pending rows are dropped (complete wins, else earliest).
 func reconcileLegacyDuplicateTelegramClaimKeys(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE telegram_claims
+		SET idempotency_key = 'legacy-dup-' || conversation_id
+		WHERE status = 'complete'
+		  AND EXISTS (
+			SELECT 1 FROM telegram_claims AS keeper
+			WHERE keeper.requested_by_machine = telegram_claims.requested_by_machine
+			  AND keeper.idempotency_key = telegram_claims.idempotency_key
+			  AND keeper.status = 'complete'
+			  AND keeper.conversation_id != telegram_claims.conversation_id
+			  AND (
+				keeper.created_at < telegram_claims.created_at
+				OR (keeper.created_at = telegram_claims.created_at AND keeper.conversation_id < telegram_claims.conversation_id)
+			  )
+		  )`); err != nil {
+		return fmt.Errorf("rekey legacy complete telegram claim keys: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM telegram_claims
-		WHERE EXISTS (
+		WHERE status != 'complete'
+		  AND EXISTS (
 			SELECT 1 FROM telegram_claims AS keeper
 			WHERE keeper.requested_by_machine = telegram_claims.requested_by_machine
 			  AND keeper.idempotency_key = telegram_claims.idempotency_key
 			  AND keeper.conversation_id != telegram_claims.conversation_id
 			  AND (
-				(keeper.status = 'complete' AND telegram_claims.status != 'complete')
-				OR (keeper.status = telegram_claims.status AND (
+				keeper.status = 'complete'
+				OR (keeper.status != 'complete' AND (
 					keeper.created_at < telegram_claims.created_at
 					OR (keeper.created_at = telegram_claims.created_at AND keeper.conversation_id < telegram_claims.conversation_id)
 				))
 			  )
-		)`); err != nil {
+		  )`); err != nil {
 		return fmt.Errorf("reconcile legacy telegram claim keys: %w", err)
 	}
 	return nil

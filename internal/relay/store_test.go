@@ -1933,6 +1933,172 @@ func TestStoreOpenReconcilesLegacyDuplicateTelegramClaimKeys(t *testing.T) {
 	}
 }
 
+func TestStoreOpenPreservesCompletedDuplicateTelegramClaimKeys(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 19, 22, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "legacy-complete-first", CreatorEndpoint: "agent/a",
+		DisplayName: "Complete first", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "legacy-complete-second", CreatorEndpoint: "agent/a",
+		DisplayName: "Complete second", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "legacy-complete-key", Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: firstRoom.ID, MachineID: "machine-telegram", Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `DROP INDEX IF EXISTS telegram_claims_machine_key`); err != nil {
+		t.Fatal(err)
+	}
+	completedAt := now.Add(time.Second).UTC().UnixMilli()
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO telegram_claims(conversation_id, status, requested_by_machine, requested_by_endpoint, idempotency_key, request_hash, created_at, completed_at)
+		VALUES (?, 'complete', 'machine-telegram', ?, 'legacy-complete-key', ?, ?, ?)`, secondRoom.ID, TelegramGatewayEndpoint, telegramClaimRequestHash(secondRoom.ID), completedAt, completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO telegram_participants(conversation_id, label, created_at) VALUES (?, ?, ?)`, secondRoom.ID, TelegramUserParticipant, completedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("open after completed duplicate keys: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	first, err := reopened.TelegramClaim(firstRoom.ID)
+	if err != nil || first.Status != "complete" {
+		t.Fatalf("first claim=%#v err=%v", first, err)
+	}
+	second, err := reopened.TelegramClaim(secondRoom.ID)
+	if err != nil || second.Status != "complete" {
+		t.Fatalf("second claim=%#v err=%v", second, err)
+	}
+	var participant string
+	if err := reopened.db.QueryRowContext(context.Background(), `SELECT label FROM telegram_participants WHERE conversation_id=?`, secondRoom.ID).Scan(&participant); err != nil || participant != TelegramUserParticipant {
+		t.Fatalf("second participant=%q err=%v", participant, err)
+	}
+	if _, duplicate, err := reopened.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: secondRoom.ID, MachineID: "machine-telegram", Now: now.Add(2 * time.Second)}); err != nil || !duplicate {
+		t.Fatalf("complete second after migrate duplicate=%t err=%v", duplicate, err)
+	}
+	if _, _, err := reopened.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: secondRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "legacy-complete-key", Now: now.Add(3 * time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("original key reused on second conversation err=%v", err)
+	}
+}
+
+func TestStoreOpenPreservesCompletedDuplicateTelegramClaimKeys(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 19, 21, 30, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "legacy-complete-dup-first", CreatorEndpoint: "agent/a",
+		DisplayName: "Complete first", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "legacy-complete-dup-second", CreatorEndpoint: "agent/b",
+		DisplayName: "Complete second", Members: []Member{{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "legacy-complete-key", Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{
+		ConversationID: firstRoom.ID, MachineID: "machine-telegram", Now: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `DROP INDEX IF EXISTS telegram_claims_machine_key`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO telegram_claims(conversation_id, status, requested_by_machine, requested_by_endpoint, idempotency_key, request_hash, created_at)
+		VALUES (?, 'pending', 'machine-telegram', ?, 'legacy-complete-key', ?, ?)`, secondRoom.ID, TelegramGatewayEndpoint, telegramClaimRequestHash(secondRoom.ID), now.Add(2*time.Second).UTC().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{
+		ConversationID: secondRoom.ID, MachineID: "machine-telegram", Now: now.Add(3 * time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatalf("open after completed duplicate keys: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var firstStatus, firstKey, secondStatus, secondKey string
+	if err := reopened.db.QueryRowContext(context.Background(), `SELECT status, idempotency_key FROM telegram_claims WHERE conversation_id=?`, firstRoom.ID).Scan(&firstStatus, &firstKey); err != nil {
+		t.Fatal(err)
+	}
+	if firstStatus != "complete" || firstKey != "legacy-complete-key" {
+		t.Fatalf("keeper status=%q key=%q", firstStatus, firstKey)
+	}
+	if err := reopened.db.QueryRowContext(context.Background(), `SELECT status, idempotency_key FROM telegram_claims WHERE conversation_id=?`, secondRoom.ID).Scan(&secondStatus, &secondKey); err != nil {
+		t.Fatal(err)
+	}
+	if secondStatus != "complete" || secondKey != "legacy-dup-"+secondRoom.ID {
+		t.Fatalf("rekeyed status=%q key=%q", secondStatus, secondKey)
+	}
+	var participants int
+	if err := reopened.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM telegram_participants").Scan(&participants); err != nil || participants != 2 {
+		t.Fatalf("participants=%d err=%v", participants, err)
+	}
+	replay, duplicate, err := reopened.CompleteTelegramClaim(TelegramClaimCompleteInput{
+		ConversationID: secondRoom.ID, MachineID: "machine-telegram", Now: now.Add(4 * time.Second),
+	})
+	if err != nil || !duplicate || replay.Status != "complete" {
+		t.Fatalf("complete replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
 func TestStoreReserveTelegramClaimOccupancyFence(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
