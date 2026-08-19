@@ -175,6 +175,30 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 	}
 }
 
+func TestPostgresBindTelegramClaimIdempotencyUsesOnConflictDoNothing(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func postgresBindTelegramClaimIdempotency(")
+	if start < 0 {
+		t.Fatal("postgresBindTelegramClaimIdempotency missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("postgresBindTelegramClaimIdempotency unbounded")
+	}
+	fn := rest[:end+1]
+	if !strings.Contains(fn, "ON CONFLICT (machine_id, key) DO NOTHING") && !strings.Contains(fn, "ON CONFLICT (machine_id,key) DO NOTHING") {
+		t.Fatal("postgres bind must insert with ON CONFLICT DO NOTHING so a racing unique key does not abort the transaction")
+	}
+	if strings.Contains(fn, `"23505"`) {
+		t.Fatal("postgres bind must not recover a unique violation from an aborted transaction")
+	}
+}
+
 func TestRelayInspectSQLIncludesTelegramClaimIdempotencyAfter56(t *testing.T) {
 	body, err := os.ReadFile("relay_store.go")
 	if err != nil {

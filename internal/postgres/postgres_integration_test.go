@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1591,6 +1592,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
 	testPostgresTelegramClaimReserveOccupancy(t, app)
 	testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t, app)
+	testPostgresTelegramClaimConcurrentEnsureBind(t, app)
 	testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
@@ -1720,6 +1722,60 @@ func testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t *testing.T, app *D
 	})
 	if err != nil || !duplicate || replay.ConversationID != firstRoom.ID {
 		t.Fatalf("postgres ensure-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
+func testPostgresTelegramClaimConcurrentEnsureBind(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 18, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-race-a"
+		machineTelegram = "postgres-claim-race-telegram"
+		endpointA       = "agent/postgres-claim-race/a"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	room, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-race-named", CreatorEndpoint: endpointA,
+		DisplayName: "Ensure race", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: room.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "postgres-claim-race-agent", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("postgres race first reserve duplicate=%t err=%v", duplicate, err)
+	}
+	const workers = 8
+	type result struct {
+		claim     relay.TelegramClaim
+		duplicate bool
+		err       error
+	}
+	results := make([]result, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			claim, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+				ConversationID: room.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+				IdempotencyKey: "postgres-race-ensure", Now: now.Add(time.Duration(i+1) * time.Second),
+			})
+			results[i] = result{claim: claim, duplicate: duplicate, err: err}
+		}(i)
+	}
+	wg.Wait()
+	for i, got := range results {
+		if got.err != nil || !got.duplicate || got.claim.ConversationID != room.ID {
+			t.Fatalf("concurrent ensure %d claim=%#v duplicate=%t err=%v", i, got.claim, got.duplicate, got.err)
+		}
 	}
 }
 

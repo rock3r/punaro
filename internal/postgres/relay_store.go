@@ -2829,28 +2829,15 @@ func postgresLookupTelegramClaimIdempotency(tx *sql.Tx, machineID, key string) (
 }
 
 func postgresBindTelegramClaimIdempotency(tx *sql.Tx, machineID, key, conversationID, requestHash string, now time.Time) error {
-	bound, err := postgresLookupTelegramClaimIdempotency(tx, machineID, key)
-	if err == nil {
-		if bound.conversationID != conversationID || bound.hash != requestHash {
-			return relay.ErrConflict
-		}
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claim_idempotency(machine_id,key,request_hash,conversation_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, machineID, key, requestHash, conversationID, now); err != nil {
-		if isSQLState(err, "23505") {
-			bound, lookupErr := postgresLookupTelegramClaimIdempotency(tx, machineID, key)
-			if lookupErr != nil {
-				return errors.New("telegram claim idempotency key is unavailable")
-			}
-			if bound.conversationID != conversationID || bound.hash != requestHash {
-				return relay.ErrConflict
-			}
-			return nil
-		}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claim_idempotency(machine_id,key,request_hash,conversation_id,created_at) VALUES($1,$2,$3,$4::uuid,$5) ON CONFLICT (machine_id, key) DO NOTHING`, machineID, key, requestHash, conversationID, now); err != nil {
 		return relayDatabaseError(err, "bind telegram claim idempotency key")
+	}
+	bound, err := postgresLookupTelegramClaimIdempotency(tx, machineID, key)
+	if err != nil {
+		return errors.New("telegram claim idempotency key is unavailable")
+	}
+	if bound.conversationID != conversationID || bound.hash != requestHash {
+		return relay.ErrConflict
 	}
 	return nil
 }

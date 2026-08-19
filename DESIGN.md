@@ -1014,6 +1014,9 @@ A machine's Telegram claim idempotency key maps to one conversation. Every
 successful reserve or ensure records `(machine, key)` in
 `telegram_claim_idempotency` bound to that conversation hash: exact replay
 returns the existing claim, and reuse on another conversation fails closed.
+PostgreSQL inserts that mapping with `ON CONFLICT DO NOTHING` and then
+reads the winning row so a racing unique key does not abort the
+transaction.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
