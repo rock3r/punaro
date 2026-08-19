@@ -1023,6 +1023,63 @@ func TestRunRecoversWhenCurrentExitsBeforeReady(t *testing.T) {
 	}
 }
 
+func TestRunGrandfathersLegacyRollbackTarget(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, previousSlot), "v0.1.0", 1, payloadDigest("previous-adapter"), 0)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, strings.Repeat("c", 64))
+	origin := newSignedOrigin(t, originSpec{payload: "current-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var starts int
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			Origin:        origin.URL,
+			Keys:          origin.Keys,
+			HealthTimeout: 40 * time.Millisecond,
+			Now:           time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				starts++
+				if starts == 1 {
+					return blockingProcess(context.Background()), nil
+				}
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy rollback target did not start")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if recoveryOnly(t, dir) {
+		t.Fatal("legacy rollback target entered recovery-only")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("legacy rollback target entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" || status.Previous != "v0.2.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunRollsBackUnhealthyCurrentWhenCatalogAllowsPrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")

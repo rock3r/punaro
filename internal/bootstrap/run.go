@@ -692,7 +692,7 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 		}
 		return ErrRecoveryOnly
 	}
-	if err := waitHealth(ctx, request, child, rolled, true); err != nil {
+	if err := waitHealth(ctx, request, child, rolled, rolled.Generation >= 1); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, rolled)
 		}
