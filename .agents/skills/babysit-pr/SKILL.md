@@ -90,12 +90,13 @@ the PR is awaiting approval.
 
 ## Post-merge cleanup (when `stop_pr_closed` and PR is merged)
 
-1. **If currently on the PR branch, switch away first** (for example to `main`).
-2. **Delete the local branch** (squash merges leave it unmerged by default):
+1. **If currently on the PR branch or inside its worktree, switch away first** — check
+   out `main`, or `cd` to the main checkout.
+2. **Remove the git worktree** if the branch was checked out in one — find it with
+   `git worktree list` (worktrees live under `.worktrees/`). Do this before touching the
+   branch: `git branch -D` refuses while a worktree still has the branch checked out.
+3. **Delete the local branch** (squash merges leave it unmerged by default):
    `git branch -D <head_branch>`.
-3. **Remove the git worktree** if the branch was checked out in one — find it with
-   `git worktree list` (worktrees live under `.worktrees/`), and if the current working
-   directory IS the worktree, `cd` to the main checkout before removing it.
 
 **Only delete the local branch and worktree** — never touch remote branches. Skip
 silently if the branch or worktree doesn't exist locally.

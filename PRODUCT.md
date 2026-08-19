@@ -76,9 +76,11 @@ touches an agent-mailbox database. The contract:
   `user-telegram`; the enrolled gateway is the only Telegram sender that exists.
 - **Single allowed user.** One numeric Telegram user ID, checked by the gateway on every
   update regardless of BotFather settings.
-- **Delivery semantics.** Inbound is exactly-once into the relay (Telegram `update_id` as
-  idempotency key, marked processed only after the append succeeds). Outbound to Telegram
-  is deliberately at-least-once (no Bot API send idempotency key; ack only after send).
+- **Delivery semantics.** Inbound submission is at-least-once with durable deduplication
+  (the Telegram `update_id` is the relay idempotency key, marked processed only after the
+  append succeeds), so retries and crashes neither duplicate nor lose mail. Outbound to
+  Telegram is deliberately at-least-once (no Bot API send idempotency key; ack only after
+  send).
 - **Agent content stays inert:** rendered as escaped HTML, entity detection off, 32 KiB
   bound with splitting. Agents never call the Bot API and never see tokens, chat IDs, or
   thread IDs. Operator replies-to arrive as inert envelope metadata. Credentials are
