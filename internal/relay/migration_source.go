@@ -140,19 +140,28 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"conversation_display_name_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
 }
 
-var v3MigrationTableSpecs = migrationTableSpecs[:14]
-var v4MigrationTableSpecs = migrationTableSpecs[:16]
-var v5MigrationTableSpecs = migrationTableSpecs[:17]
-var v6MigrationTableSpecs = func() []migrationTableSpec {
-	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:20]...)
-	specs[6] = migrationTableSpec{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"}
-	return specs
-}()
+var v3MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:14])
+var v4MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:16])
+var v5MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:17])
+var v6MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:20])
 
-var roleMigrationTableSpecs = func() []migrationTableSpec {
+var roleMigrationTableSpecs = withParentConversationAndMessageColumns(func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
 	return append(specs, migrationTableSpecs[13])
-}()
+}())
+
+func withParentConversationAndMessageColumns(specs []migrationTableSpec) []migrationTableSpec {
+	out := append([]migrationTableSpec(nil), specs...)
+	for index := range out {
+		switch out[index].name {
+		case "conversations":
+			out[index].columns = "id,next_sequence,created_at"
+		case "messages":
+			out[index].columns = "id,conversation_id,sequence,from_endpoint,body,created_at"
+		}
+	}
+	return out
+}
 
 var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"endpoints", "endpoint,machine_id,lease_until,ownership_generation,consumer_id,consumer_generation,consumer_lease_until", "endpoint"},
@@ -568,6 +577,13 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	return manifest, nil
 }
 
+func conversationDisplayNameTypeCheck(version int) string {
+	if version < 7 {
+		return ""
+	}
+	return " OR (display_name IS NOT NULL AND typeof(display_name)<>'text')"
+}
+
 func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct bool) error {
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
@@ -590,7 +606,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		names = append(names, name)
 	}
 	names = filterOperationalQuotaTables(names)
-	want := []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -634,7 +650,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	case !controls:
 		want = []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	}
-	if version == 6 {
+	if version < 7 {
 		filtered := make([]string, 0, len(want))
 		for _, name := range want {
 			if name == "telegram_claims" || name == "telegram_participants" || name == "telegram_claim_events" || name == "conversation_display_name_idempotency" {
@@ -690,18 +706,13 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		delete(expectedColumns, "message_from_roles")
 		delete(expectedColumns, "direct_message_idempotency")
 	}
-	if version == 6 {
+	if version < 7 {
 		delete(expectedColumns, "telegram_claims")
 		delete(expectedColumns, "telegram_participants")
 		delete(expectedColumns, "telegram_claim_events")
 		delete(expectedColumns, "conversation_display_name_idempotency")
-		var extras int
-		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='from_participant'`).Scan(&extras); err != nil {
-			return errors.New("relay migration source columns are unavailable")
-		}
-		if extras == 0 {
-			expectedColumns["messages"] = []string{"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"}
-		}
+		expectedColumns["conversations"] = []string{"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-"}
+		expectedColumns["messages"] = []string{"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"}
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -763,7 +774,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		delete(expectedForeignKeys, "message_from_roles")
 		delete(expectedForeignKeys, "direct_message_idempotency")
 	}
-	if version == 6 {
+	if version < 7 {
 		delete(expectedForeignKeys, "telegram_claims")
 		delete(expectedForeignKeys, "telegram_participants")
 		delete(expectedForeignKeys, "telegram_claim_events")
@@ -832,7 +843,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 			"direct_message_idempotency:1:pk:0:machine_id,key",
 		)
 	}
-	if version == 6 {
+	if version < 7 {
 		filtered := expectedIndexes[:0]
 		for _, index := range expectedIndexes {
 			if strings.HasPrefix(index, "telegram_") || strings.HasPrefix(index, "conversation_display_name_idempotency:") {
@@ -936,7 +947,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 	case !controls:
 		wantTriggers = 48
 	}
-	if version == 6 {
+	if version < 7 {
 		wantTriggers -= 12
 	}
 	var quotaTables int
@@ -1000,7 +1011,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		OR EXISTS (SELECT 1 FROM conversation_controls AS control LEFT JOIN conversation_control_idempotency AS retry ON retry.control_id=control.id GROUP BY control.id HAVING count(retry.control_id)<>1)
 		OR EXISTS (SELECT 1 FROM uuid_values WHERE typeof(value)<>'text' OR length(value)<>36 OR substr(value,9,1)<>'-' OR substr(value,14,1)<>'-' OR substr(value,19,1)<>'-' OR substr(value,24,1)<>'-' OR lower(replace(value,'-','')) GLOB '*[^0-9a-f]*')
 		OR EXISTS (SELECT 1 FROM endpoints WHERE typeof(endpoint)<>'text' OR typeof(machine_id)<>'text' OR typeof(lease_until)<>'integer' OR typeof(ownership_generation)<>'integer' OR (consumer_id IS NOT NULL AND typeof(consumer_id)<>'text') OR typeof(consumer_generation)<>'integer' OR (consumer_lease_until IS NOT NULL AND typeof(consumer_lease_until)<>'integer'))
-		OR EXISTS (SELECT 1 FROM conversations WHERE typeof(next_sequence)<>'integer' OR typeof(created_at)<>'integer' OR (display_name IS NOT NULL AND typeof(display_name)<>'text'))
+		OR EXISTS (SELECT 1 FROM conversations WHERE typeof(next_sequence)<>'integer' OR typeof(created_at)<>'integer'` + conversationDisplayNameTypeCheck(version) + `)
 		OR EXISTS (SELECT 1 FROM memberships WHERE typeof(endpoint)<>'text' OR typeof(capabilities)<>'integer')
 		OR EXISTS (SELECT 1 FROM roles WHERE typeof(role)<>'text' OR typeof(machine_id)<>'text')
 		OR EXISTS (SELECT 1 FROM role_memberships WHERE typeof(role)<>'text' OR typeof(capabilities)<>'integer')

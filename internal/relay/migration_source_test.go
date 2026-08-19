@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -522,6 +523,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, ctx, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -623,6 +625,7 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, ctx, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -922,6 +925,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testin
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, ctx, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -969,10 +973,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExecContext(ctx, `DROP TABLE telegram_claim_events; DROP TABLE telegram_participants; DROP TABLE telegram_claims; DROP TABLE conversation_display_name_idempotency`); err != nil {
-		_ = db.Close()
-		t.Fatal(err)
-	}
+	stripV7OnlyMigrationSchema(t, ctx, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -997,6 +998,23 @@ func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *t
 	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
 	if err != nil || len(batch.Rows) != 0 || !batch.Done {
 		t.Fatalf("parent v6 telegram batch=%#v err=%v", batch, err)
+	}
+	conversations, err := ReadMigrationSourceBatch(ctx, path, "mail_conversations", "", 10)
+	if err != nil || !conversations.Done {
+		t.Fatalf("parent v6 conversation batch=%#v err=%v", conversations, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_conversations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range conversations.Rows {
+		if err := hasher.Add(row); err != nil {
+			t.Fatalf("parent v6 conversation row=%v err=%v", row, err)
+		}
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.Conversations || digest != prepared.TableSHA256.Conversations {
+		t.Fatalf("parent v6 conversation evidence count=%d digest=%s manifest=%#v", count, digest, prepared)
 	}
 }
 
@@ -1024,6 +1042,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutDirectMessages(t *tes
 		_ = db.Close()
 		t.Fatal(err)
 	}
+	stripV7OnlyMigrationSchema(t, ctx, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1268,6 +1287,21 @@ func TestInspectMigrationSourceExportsDisplayNameIdempotency(t *testing.T) {
 	}
 	if payload["key"] != "rename-cutover-a" || payload["conversation_id"] != conversation.ID {
 		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func stripV7OnlyMigrationSchema(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS telegram_claim_events; DROP TABLE IF EXISTS telegram_participants; DROP TABLE IF EXISTS telegram_claims; DROP TABLE IF EXISTS conversation_display_name_idempotency`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE conversations DROP COLUMN display_name`); err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{"from_participant", "in_reply_to_message_id", "in_reply_to_endpoint", "telegram_thread_id"} {
+		if _, err := db.ExecContext(ctx, "ALTER TABLE messages DROP COLUMN "+column); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

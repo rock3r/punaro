@@ -75,14 +75,19 @@ func (h *MigrationTableHasher) Add(row MigrationSourceRow) error {
 	if err := decoder.Decode(&payload); err != nil {
 		return errors.New("relay migration row payload is invalid")
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || len(payload) != len(h.columns) {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errors.New("relay migration row payload is invalid")
 	}
+	hashed := 0
 	for _, column := range h.columns {
 		value, ok := payload[column]
 		if !ok {
+			if optionalParentMigrationColumn(h.table, column) {
+				continue
+			}
 			return errors.New("relay migration row payload is incomplete")
 		}
+		hashed++
 		if number, ok := value.(json.Number); ok {
 			integer, err := strconv.ParseInt(string(number), 10, 64)
 			if err != nil {
@@ -98,8 +103,35 @@ func (h *MigrationTableHasher) Add(row MigrationSourceRow) error {
 			return err
 		}
 	}
+	if hashed != len(payload) {
+		return errors.New("relay migration row payload is invalid")
+	}
 	h.count++
 	return nil
+}
+
+func optionalParentMigrationColumn(table, column string) bool {
+	switch table {
+	case "mail_conversations":
+		return column == "display_name"
+	case "mail_messages":
+		return column == "from_participant" || column == "in_reply_to_message_id" || column == "in_reply_to_endpoint" || column == "telegram_thread_id"
+	default:
+		return false
+	}
+}
+
+func migrationTableSpecForVersion(spec migrationTableSpec, version int) migrationTableSpec {
+	if version >= 7 {
+		return spec
+	}
+	switch spec.name {
+	case "conversations":
+		spec.columns = "id,next_sequence,created_at"
+	case "messages":
+		spec.columns = "id,conversation_id,sequence,from_endpoint,body,created_at"
+	}
+	return spec
 }
 
 // Evidence returns the current exact row count and manifest-compatible digest.
@@ -211,8 +243,9 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 			where = " WHERE (" + strings.Join(spec.keyColumns, ",") + ")>(" + strings.Join(placeholders, ",") + ")"
 		}
 	}
-	// #nosec G201 -- fragments come only from migrationBatchSpecs.
-	query := fmt.Sprintf("SELECT %s FROM %s%s ORDER BY %s LIMIT ?", spec.source.columns, spec.source.name, where, spec.source.order)
+	source := migrationTableSpecForVersion(spec.source, manifest.Version)
+	// #nosec G201 -- fragments come only from migrationBatchSpecs and frozen parent column lists.
+	query := fmt.Sprintf("SELECT %s FROM %s%s ORDER BY %s LIMIT ?", source.columns, source.name, where, source.order)
 	arguments := make([]any, 0, len(keyValues)+1)
 	arguments = append(arguments, keyValues...)
 	arguments = append(arguments, limit+1)
@@ -221,7 +254,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 		return MigrationSourceBatch{}, errors.New("relay migration batch rows are unavailable")
 	}
 	defer func() { _ = rows.Close() }()
-	columns := strings.Split(spec.source.columns, ",")
+	columns := strings.Split(source.columns, ",")
 	keyIndexes := make([]int, len(spec.keyColumns))
 	for keyIndex, keyColumn := range spec.keyColumns {
 		keyIndexes[keyIndex] = -1
