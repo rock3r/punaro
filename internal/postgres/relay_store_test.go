@@ -1,10 +1,26 @@
 package postgres
 
 import (
+	"os"
 	"slices"
 	"strings"
 	"testing"
 )
+
+func TestRelayInspectSQLComparesMessageMetadataCheckKeysByEquality(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	if strings.Contains(src, "column_keys=ANY(ARRAY[ARRAY[") {
+		t.Fatal("relay inspect SQL compares smallint[] to smallint via ANY")
+	}
+	want := "expected.column_keys=ARRAY[7]::smallint[] OR expected.column_keys=ARRAY[8]::smallint[] OR expected.column_keys=ARRAY[9]::smallint[] OR expected.column_keys=ARRAY[10]::smallint[]"
+	if !strings.Contains(src, want) {
+		t.Fatal("relay inspect SQL missing equality filters for message metadata check keys")
+	}
+}
 
 func TestPostgresLeaseMessageColumnsIncludeMetadataWhenPresent(t *testing.T) {
 	if got := postgresLeaseMessageColumns(false); strings.Contains(got, "from_participant") || strings.Contains(got, "telegram_thread_id") {

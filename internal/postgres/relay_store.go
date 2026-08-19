@@ -3351,7 +3351,7 @@ WITH objects AS (
     ) AS expected(table_oid,column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_keys=ARRAY[4]::smallint[]))
-      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND expected.column_keys=ANY(ARRAY[ARRAY[7]::smallint[],ARRAY[8]::smallint[],ARRAY[9]::smallint[],ARRAY[10]::smallint[]]))))
+      AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND (expected.column_keys=ARRAY[7]::smallint[] OR expected.column_keys=ARRAY[8]::smallint[] OR expected.column_keys=ARRAY[9]::smallint[] OR expected.column_keys=ARRAY[10]::smallint[]))))
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
