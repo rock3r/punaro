@@ -355,6 +355,13 @@ func TestParseSlotRejectsEmptyRecord(t *testing.T) {
 	}
 }
 
+func TestParseSlotRejectsNegativeGeneration(t *testing.T) {
+	body := []byte(`{"schema":1,"release":"v0.1.0","sequence":1,"manifest_sha256":"` + repeatC() + `","generation":-1}`)
+	if _, err := parseSlot(body); err == nil {
+		t.Fatal("negative generation accepted")
+	}
+}
+
 func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "journal.json.tmp"), []byte("stale"), 0o600); err != nil {

@@ -910,7 +910,7 @@ func parseSlot(body []byte) (slotState, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
-	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || !validManifestDigest(slot.ManifestSHA256) {
+	if slot.Schema != 1 || slot.Release == "" || slot.Sequence < 1 || slot.Generation < 0 || !validManifestDigest(slot.ManifestSHA256) {
 		return slotState{}, errors.New("bootstrap slot is invalid")
 	}
 	return slot, nil
