@@ -1948,6 +1948,43 @@ func TestStoreTelegramInboundConsumesRateLimitsAndQuota(t *testing.T) {
 	}
 }
 
+func TestStoreTelegramInboundRefreshesPendingMetrics(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	metrics := &Metrics{}
+	now := time.Date(2026, time.August, 16, 16, 7, 0, 0, time.UTC)
+	conversation := createClaimedTelegramConversation(t, store, now)
+	store.SetMetrics(metrics)
+	if snap := metrics.Snapshot(); snap.RelayPendingDeliveries != 0 || snap.RelayPendingBytes != 0 {
+		t.Fatalf("baseline pending=%#v", snap)
+	}
+	first, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "from-user", IdempotencyKey: "telegram-update:1", Now: now,
+	})
+	if err != nil || duplicate || first.Sequence != 1 {
+		t.Fatalf("first inbound=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	snap := metrics.Snapshot()
+	if snap.RelayPendingDeliveries != 1 || snap.RelayPendingBytes != uint64(len("from-user")) {
+		t.Fatalf("after inbound pending=%#v", snap)
+	}
+	retry, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "from-user", IdempotencyKey: "telegram-update:1", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || retry.ID != first.ID {
+		t.Fatalf("replay=%#v duplicate=%t err=%v", retry, duplicate, err)
+	}
+	if snap := metrics.Snapshot(); snap.RelayPendingDeliveries != 1 || snap.RelayPendingBytes != uint64(len("from-user")) {
+		t.Fatalf("replay pending=%#v", snap)
+	}
+}
+
 func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

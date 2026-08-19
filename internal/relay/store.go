@@ -1626,6 +1626,7 @@ func (s *Store) AppendTelegramInbound(input TelegramInboundInput) (Message, bool
 	if err := tx.Commit(); err != nil {
 		return Message{}, false, err
 	}
+	s.refreshPendingMetrics(input.Now)
 	return message, false, nil
 }
 
