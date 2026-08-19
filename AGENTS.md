@@ -68,7 +68,21 @@ without explaining why and obtaining explicit approval.
 State: behavior covered, tests added first, exact quality commands and results,
 and any residual risk. Do not include sensitive values in the handoff.
 
-## Plans and worktrees
+## Worktree policy
 
-Plans belong in `.plans/` at the repo root; scratch git worktrees go in `.worktrees/`.
-Both stay gitignored — never commit their contents.
+Before writing tracked files from a clean `main` checkout, check whether isolation
+already exists. If you are already inside a worktree or already on a non-main branch,
+keep working there. Otherwise, prefer asking whether to create a worktree before
+starting feature work. Prefer a worktree for implementation-heavy tasks, not for tiny
+doc-only edits.
+
+Create worktrees under `.worktrees/` at the repo root, one per descriptive branch name:
+
+```sh
+git worktree add .worktrees/<branch-name> -b <branch-name> origin/main
+```
+
+Plans belong in `.plans/` at the repo root, kept in the root checkout rather than
+inside a worktree. Both directories stay gitignored; never commit their contents, and
+verify they are ignored before creating them elsewhere. Remove a worktree
+(`git worktree remove`) once its branch is merged or abandoned.
