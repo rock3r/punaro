@@ -1292,14 +1292,18 @@ func TestInspectMigrationSourceExportsDisplayNameIdempotency(t *testing.T) {
 
 func stripV7OnlyMigrationSchema(t *testing.T, ctx context.Context, db *sql.DB) {
 	t.Helper()
-	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS telegram_claim_events; DROP TABLE IF EXISTS telegram_participants; DROP TABLE IF EXISTS telegram_claims; DROP TABLE IF EXISTS conversation_display_name_idempotency`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.ExecContext(ctx, `ALTER TABLE conversations DROP COLUMN display_name`); err != nil {
-		t.Fatal(err)
-	}
-	for _, column := range []string{"from_participant", "in_reply_to_message_id", "in_reply_to_endpoint", "telegram_thread_id"} {
-		if _, err := db.ExecContext(ctx, "ALTER TABLE messages DROP COLUMN "+column); err != nil {
+	for _, statement := range []string{
+		`DROP TABLE IF EXISTS telegram_claim_events`,
+		`DROP TABLE IF EXISTS telegram_participants`,
+		`DROP TABLE IF EXISTS telegram_claims`,
+		`DROP TABLE IF EXISTS conversation_display_name_idempotency`,
+		`ALTER TABLE conversations DROP COLUMN display_name`,
+		`ALTER TABLE messages DROP COLUMN from_participant`,
+		`ALTER TABLE messages DROP COLUMN in_reply_to_message_id`,
+		`ALTER TABLE messages DROP COLUMN in_reply_to_endpoint`,
+		`ALTER TABLE messages DROP COLUMN telegram_thread_id`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)
 		}
 	}
