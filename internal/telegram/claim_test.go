@@ -327,20 +327,26 @@ func TestExecuteClaimTreatsExistingPendingOrCompleteAsSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 9, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
-	topics := &recordingTopicCreator{threadID: 9}
+	topics := &recordingTopicCreator{threadID: 99}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "Already"}}
 	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
 	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after complete+route: %#v", topics.names)
+	}
 	if len(claims.reserves) != 1 || claims.reserves[0].key != GatewayClaimKey("conversation-1") {
 		t.Fatalf("reserves=%#v", claims.reserves)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseComplete {
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 9 {
 		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
@@ -423,6 +429,31 @@ func TestExecuteClaimReusesExistingTopicRouteWithoutCreateForumTopic(t *testing.
 	conversation, found, err := state.Route(55, 795446)
 	if err != nil || !found || conversation != "conversation-1" {
 		t.Fatalf("route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+}
+
+func TestExecuteClaimFailsClosedWhenRelayClaimCompleteWithoutLocalRoute(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 99}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "Already"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err == nil {
+		t.Fatal("complete relay claim without local route created a topic")
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after complete without route: %#v", topics.names)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseReserved || execution.ThreadID != 0 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
 

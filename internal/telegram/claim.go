@@ -62,10 +62,15 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 			return err
 		}
 		if execution.ThreadID <= 0 {
-			if _, threadID, found, err := e.State.RouteForConversation(conversationID); err != nil {
+			if chatID, threadID, found, err := e.State.RouteForConversation(conversationID); err != nil {
 				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_route_persist_failed")
 				return err
 			} else if found && threadID > 0 {
+				if e.AllowedUserID != 0 && chatID != e.AllowedUserID {
+					err := fmt.Errorf("telegram_route_persist_failed")
+					e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+					return err
+				}
 				if err := e.State.PersistClaimThread(conversationID, threadID); err != nil {
 					e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_persist_thread_failed")
 					return err
@@ -161,7 +166,15 @@ func (e ClaimExecutor) ensurePending(ctx context.Context, execution *ClaimExecut
 	if err != nil {
 		return fmt.Errorf("telegram_reserve_failed")
 	}
-	if claim.Status != "pending" && claim.Status != "complete" {
+	switch claim.Status {
+	case "pending":
+	case "complete":
+		if recoverable, err := e.localClaimRouteRecoverable(execution); err != nil {
+			return err
+		} else if !recoverable {
+			return fmt.Errorf("telegram_claim_already_complete")
+		}
+	default:
 		return fmt.Errorf("telegram_reserve_failed")
 	}
 	if claim.DisplayName != "" {
@@ -172,6 +185,23 @@ func (e ClaimExecutor) ensurePending(ctx context.Context, execution *ClaimExecut
 	}
 	e.logEvent("telegram_claim_reserved", "actor=gateway", "conversation_id="+execution.ConversationID)
 	return nil
+}
+
+func (e ClaimExecutor) localClaimRouteRecoverable(execution *ClaimExecution) (bool, error) {
+	if execution.ThreadID > 0 {
+		return true, nil
+	}
+	chatID, threadID, found, err := e.State.RouteForConversation(execution.ConversationID)
+	if err != nil {
+		return false, err
+	}
+	if !found || threadID <= 0 {
+		return false, nil
+	}
+	if e.AllowedUserID != 0 && chatID != e.AllowedUserID {
+		return false, nil
+	}
+	return true, nil
 }
 
 // ResumeAll continues every local execution that is not complete.

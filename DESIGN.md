@@ -980,7 +980,12 @@ keeps the fence instead of retrying create. A completed 4xx Bot API
 rejection, including HTTP 429, returns the row to reserved so resume can
 retry createForumTopic; the topic was not created. Agent-side pending reservations
 are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
-reserve. `punaro-telegram adopt` completes an existing `topic_routes` row
+reserve. A locally reserved execution whose relay claim is already complete
+continues only when this gateway already has a recoverable topic route for
+the configured chat; otherwise it fails closed and requires
+`punaro-telegram adopt` instead of creating a second topic. Reusing a stored
+route requires its `chat_id` to match the configured allowed user.
+`punaro-telegram adopt` completes an existing `topic_routes` row
 without creating a topic. `route` refuses a claimed conversation or a
 `(chat,thread)` already bound to a claimed conversation. Main-chat ordinary
 text stays unbound. There is no main-chat fallback.
