@@ -14,7 +14,9 @@ Prefer a worktree for implementation-heavy tasks, not for tiny doc-only edits.
 
 Check whether isolation already exists:
 
-1. Are you already inside a worktree? (`git worktree list`, `git rev-parse --git-dir`)
+1. Are you inside a *linked* worktree? `git rev-parse --git-dir` prints a path under
+   `.git/worktrees/` for a linked worktree; in the primary checkout it prints just
+   `.git`, which does **not** count as isolation.
 2. Are you already on a non-main branch?
 
 If either is true, report that isolation already exists and keep working there.

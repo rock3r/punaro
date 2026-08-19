@@ -78,7 +78,7 @@ python3 .agents/skills/babysit-pr/scripts/gh_pr_watch.py --pr 42 --once
 | `stop_session_timeout` | `--max-session-minutes` elapsed (default 90 min) — stop and report |
 | `diagnose_hung_check` | A pending check exceeded its hung threshold — stop and report |
 | `diagnose_merge_conflict` | PR is merge-conflicted (`CONFLICTING` / `DIRTY`) — resolve before waiting on checks |
-| `diagnose_branch_behind` | PR branch is behind its base — rebase onto `origin/main` (batch with any pending fixes) |
+| `diagnose_branch_behind` | PR branch is behind its base — rebase onto the PR's base ref (batch with any pending fixes) |
 | `diagnose_skipping_checks` | One or more checks completed with `neutral`/`skipping` — investigate why |
 | `wait_bugbot` | Bugbot still running — do not push or merge |
 | `wait_codex` | Codex is still reviewing (👀 reaction present) — do not push or merge |
@@ -121,7 +121,8 @@ into the same commit before pushing.
 
 1. **Do not push immediately.** Wait until no review bot is in progress.
 2. Snapshot latest status/comments.
-3. Rebase the branch onto `origin/main`.
+3. Rebase the branch onto the PR's actual base ref — resolve it with
+   `gh pr view <n> --json baseRefName` (typically `origin/main`); never assume `main`.
 4. Resolve conflicts and **in the same fix cycle** apply all actionable bot comments.
 5. Run the full Punaro gate.
 6. Push once.
