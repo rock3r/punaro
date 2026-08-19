@@ -80,9 +80,13 @@ type recordingTopicCreator struct {
 	names    []string
 	threadID int64
 	err      error
+	onCreate func()
 }
 
 func (c *recordingTopicCreator) CreateForumTopic(_ context.Context, chatID int64, name string) (int64, error) {
+	if c.onCreate != nil {
+		c.onCreate()
+	}
 	c.chatIDs = append(c.chatIDs, chatID)
 	c.names = append(c.names, name)
 	if c.err != nil {
@@ -130,6 +134,75 @@ func TestExecuteClaimCreatesTopicPersistsThreadThenCompletes(t *testing.T) {
 	}
 	if !hasLogClass(logs, "telegram_claim_completed") {
 		t.Fatalf("logs=%#v", logs)
+	}
+}
+
+func TestExecuteClaimPersistsCreatingFenceBeforeCreateForumTopic(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 795446, onCreate: func() {
+		execution, found, err := state.ClaimExecution("conversation-1")
+		if err != nil || !found || execution.Phase != ClaimPhaseCreating || execution.ThreadID != 0 {
+			t.Fatalf("createForumTopic without creating fence execution=%#v found=%v err=%v", execution, found, err)
+		}
+	}}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 1 {
+		t.Fatalf("createForumTopic names=%#v", topics.names)
+	}
+}
+
+func TestExecuteClaimDoesNotRecreateTopicAfterCreatingFenceCrash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telegram.db")
+	state, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		_ = state.Close()
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimDisplayName("conversation-1", "How is it going"); err != nil {
+		_ = state.Close()
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimCreating("conversation-1"); err != nil {
+		_ = state.Close()
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	topics := &recordingTopicCreator{threadID: 1}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: restarted, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after creating-fence crash: %#v", topics.names)
+	}
+	execution, found, err := restarted.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseCreating || execution.ThreadID != 0 {
+		t.Fatalf("fenced execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
 

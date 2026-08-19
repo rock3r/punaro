@@ -85,14 +85,20 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
 				return err
 			}
+			if err := e.State.PersistClaimCreating(conversationID); err != nil {
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_create_forum_topic_failed")
+				return err
+			}
+			execution.Phase = ClaimPhaseCreating
 			threadID, err := e.Topics.CreateForumTopic(ctx, e.AllowedUserID, name)
 			if err != nil || threadID <= 0 {
+				_ = e.State.ClearClaimCreating(conversationID)
 				err := fmt.Errorf("telegram_create_forum_topic_failed")
-				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+err.Error())
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
 				return err
 			}
 			if err := e.State.PersistClaimThread(conversationID, threadID); err != nil {
-				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_persist_thread_failed")
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err=telegram_persist_thread_failed")
 				return err
 			}
 			execution.ThreadID = threadID
@@ -100,6 +106,14 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 		} else {
 			execution.Phase = ClaimPhaseTopicCreated
 		}
+	}
+	if execution.Phase == ClaimPhaseCreating {
+		if execution.ThreadID <= 0 {
+			err := fmt.Errorf("telegram_create_forum_topic_failed")
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
+			return err
+		}
+		execution.Phase = ClaimPhaseTopicCreated
 	}
 	if execution.Phase == ClaimPhaseTopicCreated {
 		if e.AllowedUserID == 0 || execution.ThreadID <= 0 {

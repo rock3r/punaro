@@ -27,6 +27,7 @@ const (
 // Claim execution phases persisted in claim_executions.
 const (
 	ClaimPhaseReserved       = "reserved"
+	ClaimPhaseCreating       = "creating"
 	ClaimPhaseTopicCreated   = "topic_created"
 	ClaimPhaseRoutePersisted = "route_persisted"
 	ClaimPhaseComplete       = "complete"
@@ -333,6 +334,37 @@ func (s *State) IncompleteClaimExecutions() ([]ClaimExecution, error) {
 // PersistClaimDisplayName stores the snapshotted label used for createForumTopic.
 func (s *State) PersistClaimDisplayName(conversationID, displayName string) error {
 	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET display_name = ? WHERE conversation_id = ?`, displayName, conversationID)
+	return err
+}
+
+// PersistClaimCreating fences createForumTopic so a crash after Bot API success
+// cannot start a second topic. Resume with this phase and no thread id fails
+// closed instead of calling createForumTopic again.
+func (s *State) PersistClaimCreating(conversationID string) error {
+	if strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("conversation ID is required")
+	}
+	result, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ? AND phase = ? AND (thread_id IS NULL OR thread_id <= 0)`, ClaimPhaseCreating, conversationID, ClaimPhaseReserved)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return fmt.Errorf("telegram claim creating fence is unavailable")
+	}
+	return nil
+}
+
+// ClearClaimCreating returns a still-unthreaded row to reserved after Bot API
+// failure so a later attempt may retry createForumTopic.
+func (s *State) ClearClaimCreating(conversationID string) error {
+	if strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("conversation ID is required")
+	}
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ? AND phase = ? AND (thread_id IS NULL OR thread_id <= 0)`, ClaimPhaseReserved, conversationID, ClaimPhaseCreating)
 	return err
 }
 

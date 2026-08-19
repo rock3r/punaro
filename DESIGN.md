@@ -971,8 +971,10 @@ Operator `/list` is a private-chat topic picker: the gateway polls
 of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
 tap persists `claim_executions` reserved, then consumes the token in the same
 SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
-gateway calls `createForumTopic` once, persists `message_thread_id`
-immediately, and never calls `getForumTopic`. Agent-side pending reservations
+gateway persists a `creating` fence, then calls `createForumTopic` once,
+persists `message_thread_id` immediately, and never calls `getForumTopic`. A
+crash after Bot API success and before the thread id is stored keeps the
+fence, so resume does not create a second user-visible topic. Agent-side pending reservations
 are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
 reserve. `punaro-telegram adopt` completes an existing `topic_routes` row
 without creating a topic. `route` refuses a claimed conversation or a
