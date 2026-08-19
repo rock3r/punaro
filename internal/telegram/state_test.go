@@ -123,6 +123,38 @@ func TestStateReservesClaimExecutionBeforeConsumingToken(t *testing.T) {
 	}
 }
 
+func TestOpenAddsClaimExecutionChatIDOnExistingDatabase(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "telegram.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES ('conversation-1', NULL, 'reserved', 0)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || execution.ChatID != 55 {
+		t.Fatalf("upgraded execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
 func TestStatePersistsClaimThreadAndOutboundMap(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

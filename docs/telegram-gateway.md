@@ -104,9 +104,11 @@ the tap, advances the poll offset, and runs claim execution (resumed on every
 Claim execution reserves on the relay as `telegram/primary` with
 `gateway-claim-<conversation-id>` unless the row was pulled from
 `POST /v1/telegram/claims/pending` (already pending). It then calls
-`createForumTopic` once, persists the returned `message_thread_id` immediately,
-writes `topic_routes`, and completes the claim. It never calls `getForumTopic`.
-If the thread id is already stored, it is reused. Completing a claim inserts
+`createForumTopic` once, persists the returned `message_thread_id` and creation
+`chat_id` immediately, writes `topic_routes`, and completes the claim. It never
+calls `getForumTopic`. Resume of `topic_created` binds that stored pair; a
+changed allowed user fails closed. If the thread id is already stored, it is
+reused only for the same chat. Completing a claim inserts
 `telegram/primary` with send|receive and materializes `user-telegram`.
 
 ## Create and claim a topic

@@ -286,8 +286,8 @@ func TestExecuteClaimTopicCreatedDoesNotRebindThreadToNewChat(t *testing.T) {
 	topics := &recordingTopicCreator{threadID: 1}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
 	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 99, Log: func(string, ...any) {}}
-	if err := executor.Execute(context.Background(), "conversation-1"); err == nil {
-		t.Fatal("topic_created thread was bound to a new allowed chat")
+	if err := executor.Execute(context.Background(), "conversation-1"); err == nil || err.Error() != "telegram_route_persist_failed" {
+		t.Fatalf("topic_created thread was bound to a new allowed chat: err=%v", err)
 	}
 	if _, found, err := state.Route(99, 795446); err != nil || found {
 		t.Fatalf("new chat route found=%v err=%v", found, err)
