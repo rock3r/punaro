@@ -10,3 +10,8 @@ coverage.out
 *.key
 *.db
 .local/
+
+# agent scratch (see AGENTS.md)
+.plans/
+.worktrees/
+.claude/worktrees/

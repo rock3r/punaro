@@ -67,3 +67,8 @@ without explaining why and obtaining explicit approval.
 
 State: behavior covered, tests added first, exact quality commands and results,
 and any residual risk. Do not include sensitive values in the handoff.
+
+## Plans and worktrees
+
+Plans belong in `.plans/` at the repo root; scratch git worktrees go in `.worktrees/`.
+Both stay gitignored — never commit their contents.
