@@ -1987,6 +1987,20 @@ func TestStoreOpenPreservesCompletedDuplicateTelegramClaimKeys(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.AdvertiseEndpoints("machine-c", []string{"agent/c"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	thirdRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-c", IdempotencyKey: "legacy-complete-dup-third", CreatorEndpoint: "agent/c",
+		DisplayName: "Complete third", Members: []Member{{Endpoint: "agent/c", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(context.Background(), `INSERT INTO telegram_claims(conversation_id, status, requested_by_machine, requested_by_endpoint, idempotency_key, request_hash, created_at)
+		VALUES (?, 'pending', 'machine-telegram', ?, ?, ?, ?)`, thirdRoom.ID, TelegramGatewayEndpoint, "legacy-dup-"+secondRoom.ID, telegramClaimRequestHash(thirdRoom.ID), now.Add(4*time.Second).UTC().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -2005,8 +2019,15 @@ func TestStoreOpenPreservesCompletedDuplicateTelegramClaimKeys(t *testing.T) {
 	if err := reopened.db.QueryRowContext(context.Background(), `SELECT status, idempotency_key FROM telegram_claims WHERE conversation_id=?`, secondRoom.ID).Scan(&secondStatus, &secondKey); err != nil {
 		t.Fatal(err)
 	}
-	if secondStatus != "complete" || secondKey != "legacy-dup-"+secondRoom.ID {
+	if secondStatus != "complete" || secondKey != "legacy-dup-"+secondRoom.ID+"-1" {
 		t.Fatalf("rekeyed status=%q key=%q", secondStatus, secondKey)
+	}
+	var thirdKey string
+	if err := reopened.db.QueryRowContext(context.Background(), `SELECT idempotency_key FROM telegram_claims WHERE conversation_id=?`, thirdRoom.ID).Scan(&thirdKey); err != nil {
+		t.Fatal(err)
+	}
+	if thirdKey != "legacy-dup-"+secondRoom.ID {
+		t.Fatalf("colliding key rewritten third=%q", thirdKey)
 	}
 	var participants int
 	if err := reopened.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM telegram_participants").Scan(&participants); err != nil || participants != 2 {

@@ -839,43 +839,91 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+type telegramClaimKeyRow struct {
+	conversationID, machine, key, status string
+	createdAt                            int64
+}
+
+func preferTelegramClaimKeyKeeper(a, b telegramClaimKeyRow) bool {
+	aComplete, bComplete := a.status == "complete", b.status == "complete"
+	if aComplete != bComplete {
+		return aComplete
+	}
+	if a.createdAt != b.createdAt {
+		return a.createdAt < b.createdAt
+	}
+	return a.conversationID < b.conversationID
+}
+
+func uniqueLegacyTelegramClaimKey(used map[string]struct{}, machine, conversationID string) string {
+	base := "legacy-dup-" + conversationID
+	for n := 0; ; n++ {
+		key := base
+		if n > 0 {
+			key = fmt.Sprintf("%s-%d", base, n)
+		}
+		if !ValidRequestToken(key) {
+			continue
+		}
+		if _, exists := used[machine+"\x00"+key]; !exists {
+			return key
+		}
+	}
+}
+
 // reconcileLegacyDuplicateTelegramClaimKeys makes (machine, key) unique before
 // creating the index. Pre-v8 SQLite allowed the same key on different
 // conversations. Completed claims are never deleted: extra completes are
-// rekeyed. Extra pending rows are dropped (complete wins, else earliest).
+// rekeyed to a collision-free token. Extra pending rows are dropped.
 func reconcileLegacyDuplicateTelegramClaimKeys(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `UPDATE telegram_claims
-		SET idempotency_key = 'legacy-dup-' || conversation_id
-		WHERE status = 'complete'
-		  AND EXISTS (
-			SELECT 1 FROM telegram_claims AS keeper
-			WHERE keeper.requested_by_machine = telegram_claims.requested_by_machine
-			  AND keeper.idempotency_key = telegram_claims.idempotency_key
-			  AND keeper.status = 'complete'
-			  AND keeper.conversation_id != telegram_claims.conversation_id
-			  AND (
-				keeper.created_at < telegram_claims.created_at
-				OR (keeper.created_at = telegram_claims.created_at AND keeper.conversation_id < telegram_claims.conversation_id)
-			  )
-		  )`); err != nil {
-		return fmt.Errorf("rekey legacy complete telegram claim keys: %w", err)
+	rows, err := tx.QueryContext(ctx, `SELECT conversation_id, requested_by_machine, idempotency_key, status, created_at FROM telegram_claims`)
+	if err != nil {
+		return fmt.Errorf("list telegram claims for key reconcile: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM telegram_claims
-		WHERE status != 'complete'
-		  AND EXISTS (
-			SELECT 1 FROM telegram_claims AS keeper
-			WHERE keeper.requested_by_machine = telegram_claims.requested_by_machine
-			  AND keeper.idempotency_key = telegram_claims.idempotency_key
-			  AND keeper.conversation_id != telegram_claims.conversation_id
-			  AND (
-				keeper.status = 'complete'
-				OR (keeper.status != 'complete' AND (
-					keeper.created_at < telegram_claims.created_at
-					OR (keeper.created_at = telegram_claims.created_at AND keeper.conversation_id < telegram_claims.conversation_id)
-				))
-			  )
-		  )`); err != nil {
-		return fmt.Errorf("reconcile legacy telegram claim keys: %w", err)
+	var claims []telegramClaimKeyRow
+	used := make(map[string]struct{})
+	for rows.Next() {
+		var row telegramClaimKeyRow
+		if err := rows.Scan(&row.conversationID, &row.machine, &row.key, &row.status, &row.createdAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan telegram claim for key reconcile: %w", err)
+		}
+		claims = append(claims, row)
+		used[row.machine+"\x00"+row.key] = struct{}{}
+	}
+	if err := rows.Close(); err != nil || rows.Err() != nil {
+		return fmt.Errorf("list telegram claims for key reconcile: %w", err)
+	}
+	groups := make(map[string][]telegramClaimKeyRow)
+	for _, row := range claims {
+		groups[row.machine+"\x00"+row.key] = append(groups[row.machine+"\x00"+row.key], row)
+	}
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		keeper := group[0]
+		for _, row := range group[1:] {
+			if preferTelegramClaimKeyKeeper(row, keeper) {
+				keeper = row
+			}
+		}
+		for _, row := range group {
+			if row.conversationID == keeper.conversationID {
+				continue
+			}
+			if row.status == "complete" {
+				next := uniqueLegacyTelegramClaimKey(used, row.machine, row.conversationID)
+				used[row.machine+"\x00"+next] = struct{}{}
+				if _, err := tx.ExecContext(ctx, `UPDATE telegram_claims SET idempotency_key = ? WHERE conversation_id = ?`, next, row.conversationID); err != nil {
+					return fmt.Errorf("rekey legacy complete telegram claim keys: %w", err)
+				}
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM telegram_claims WHERE conversation_id = ?`, row.conversationID); err != nil {
+				return fmt.Errorf("reconcile legacy telegram claim keys: %w", err)
+			}
+		}
 	}
 	return nil
 }

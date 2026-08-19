@@ -1020,8 +1020,9 @@ inserts use untargeted `ON CONFLICT DO NOTHING` and then read the winning
 row, so a racing unique `(requested_by_machine, idempotency_key)` cannot
 abort the transaction. Opening a pre-v8 SQLite database that already stored
 the same machine key on two conversations never deletes a complete claim:
-extra completes are rekeyed, extra pending rows are dropped, then the unique
-index is created so inspect/migrate can start.
+extra completes are rekeyed to a collision-free `legacy-dup-` token, extra
+pending rows are dropped, then the unique index is created so inspect/migrate
+can start.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
