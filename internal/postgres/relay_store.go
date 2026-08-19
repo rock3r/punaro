@@ -1390,13 +1390,19 @@ func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, n
 }
 
 func postgresRejectExclusiveClaimOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
-	// Named rooms are already exclusive. Rename can skip the occupant walk;
-	// reserve cannot — every non-gateway occupant must be fenced.
+	// Conversation row first so BindRoleToSession waits on the same room
+	// before inserting a binding this occupant walk cannot yet see.
+	// Named rooms are already exclusive. Rename can skip the occupant walk
+	// after an exclusive check; reserve cannot — every non-gateway occupant
+	// must be fenced.
+	if err := postgresLockOccupancy(tx, []string{conversationID}, nil); err != nil {
+		return err
+	}
 	occupants, err := postgresConversationOccupants(tx, conversationID, now)
 	if err != nil {
 		return err
 	}
-	if err := postgresLockOccupancy(tx, []string{conversationID}, occupants); err != nil {
+	if err := postgresLockOccupancy(tx, nil, occupants); err != nil {
 		return err
 	}
 	return postgresRejectOccupantsInOtherExclusiveConversations(tx, conversationID, occupants, now)
@@ -3394,20 +3400,22 @@ WITH objects AS (
         (conversation_idempotency_oid,ARRAY[2]::smallint[]),(conversation_idempotency_oid,ARRAY[3]::smallint[]),(nonces_oid,ARRAY[2]::smallint[]),
         (telegram_claims_oid,ARRAY[2]::smallint[]),(telegram_claims_oid,ARRAY[3]::smallint[]),(telegram_claims_oid,ARRAY[4]::smallint[]),(telegram_claims_oid,ARRAY[5]::smallint[]),(telegram_claims_oid,ARRAY[6]::smallint[]),(telegram_claims_oid,ARRAY[2,8]::smallint[]),
         (telegram_participants_oid,ARRAY[2]::smallint[]),
-        (telegram_claim_events_oid,ARRAY[3]::smallint[]),(telegram_claim_events_oid,ARRAY[4]::smallint[]),(telegram_claim_events_oid,ARRAY[5]::smallint[])
+        (telegram_claim_events_oid,ARRAY[3]::smallint[]),(telegram_claim_events_oid,ARRAY[4]::smallint[]),(telegram_claim_events_oid,ARRAY[5]::smallint[]),
+        (display_name_idempotency_oid,ARRAY[2]::smallint[]),(display_name_idempotency_oid,ARRAY[3]::smallint[])
     ) AS expected(table_oid,column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_keys=ARRAY[4]::smallint[]))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND (expected.column_keys=ARRAY[7]::smallint[] OR expected.column_keys=ARRAY[8]::smallint[] OR expected.column_keys=ARRAY[9]::smallint[] OR expected.column_keys=ARRAY[10]::smallint[]))))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), actual_check_keys AS (
     SELECT con.conrelid,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND con.contype='c' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), check_expressions AS (
     SELECT NOT EXISTS (SELECT * FROM expected_check_keys EXCEPT ALL SELECT * FROM actual_check_keys)
        AND NOT EXISTS (SELECT * FROM actual_check_keys EXCEPT ALL SELECT * FROM expected_check_keys)
-       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
+       AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid]) AND contype='c' AND (NOT convalidated OR condeferrable OR condeferred))
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[1]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(endpoint) >= 1) AND (char_length(endpoint) <= 512) AND (octet_length(endpoint) <= 2048) AND (endpoint !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(machine_id) >= 1) AND (char_length(machine_id) <= 128) AND (octet_length(machine_id) <= 512) AND (machine_id !~ ''[[:cntrl:]]''::text))')
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=endpoints_oid AND contype='c' AND conkey=ARRAY[4]::smallint[] AND pg_get_expr(conbin,conrelid)='(ownership_generation > 0)')
@@ -3639,6 +3647,10 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
    AND NOT has_table_privilege('punaro_app',cursors_oid,'DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',message_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
    AND NOT has_table_privilege('punaro_app',conversation_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   AND ($1 < 53 OR (
+       has_table_privilege('punaro_app',display_name_idempotency_oid,'SELECT') AND has_table_privilege('punaro_app',display_name_idempotency_oid,'INSERT')
+       AND NOT has_table_privilege('punaro_app',display_name_idempotency_oid,'UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+   ))
    AND ($1 < 51 OR (
        has_table_privilege('punaro_app',telegram_claims_oid,'SELECT') AND has_table_privilege('punaro_app',telegram_claims_oid,'INSERT')
        AND NOT has_table_privilege('punaro_app',telegram_claims_oid,'UPDATE')

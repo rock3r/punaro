@@ -552,10 +552,11 @@ such a room. Joining a second named or claimed room is a conflict. Several
 sessions may share one topic. Unnamed, unclaimed rooms stay many-to-many.
 Exactly `telegram/primary` is exempt so the gateway can occupy every claimed
 topic. The fence is enforced on create, control upsert, role membership,
-bind-role, and the first rename that assigns a name. PostgreSQL serializes
-that first rename with `BindRoleToSession` using conversation then endpoint
-row locks, including still-unnamed rooms the role already occupies, so an
-uncommitted bind cannot hide a second named occupancy. Memberships stay
+bind-role, the first rename that assigns a name, and Telegram claim reserve.
+PostgreSQL serializes that first rename and claim reserve with
+`BindRoleToSession` using conversation then endpoint row locks, including
+still-unnamed rooms the role already occupies, so an uncommitted bind cannot
+hide a second exclusive occupancy. Memberships stay
 keyed by `(conversation, endpoint)` and are not unique on endpoint.
 
 `ack` is idempotent. It is conditional on the current recipient, lease token,

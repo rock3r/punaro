@@ -103,6 +103,29 @@ func TestPostgresBindRoleLocksAllRoleConversationsNotOnlyExclusive(t *testing.T)
 	}
 }
 
+func TestPostgresClaimOccupancyLocksConversationBeforeOccupants(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func postgresRejectExclusiveClaimOccupancy")
+	if start < 0 {
+		t.Fatal("claim occupancy helper missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("claim occupancy helper unbounded")
+	}
+	fn := rest[:end+1]
+	lockIdx := strings.Index(fn, "postgresLockOccupancy(tx, []string{conversationID}, nil)")
+	occupantsIdx := strings.Index(fn, "postgresConversationOccupants")
+	if lockIdx < 0 || occupantsIdx < 0 || lockIdx > occupantsIdx {
+		t.Fatal("claim occupancy must lock the conversation before reading occupants")
+	}
+}
+
 func TestPostgresOccupancySQLUsesNullableUUIDExclude(t *testing.T) {
 	if postgresNullableUUID("") != nil {
 		t.Fatal("empty exclude must bind NULL, not text")
