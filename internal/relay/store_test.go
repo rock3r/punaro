@@ -2202,7 +2202,6 @@ func createSharedTelegramRolePair(t *testing.T, store *Store, now time.Time) (Co
 	}
 	members := []Member{
 		{Endpoint: "agent/creator", Capabilities: CapSend | CapReceive | CapAdmin},
-		{Endpoint: TelegramPrimaryEndpoint, Capabilities: CapSend | CapReceive},
 		{Role: TelegramCodexRole, RoleMachineID: "studio-validation", Capabilities: CapSend | CapReceive | CapAdmin},
 	}
 	keeper, err := store.CreateConversation("agent/creator", members, now)
@@ -2212,6 +2211,11 @@ func createSharedTelegramRolePair(t *testing.T, store *Store, now time.Time) (Co
 	nonKeeper, err := store.CreateConversation("agent/creator", members, now)
 	if err != nil || nonKeeper.DisplayName != "" || nonKeeper.ID == keeper.ID {
 		t.Fatalf("non-keeper unnamed=%#v keeper=%#v err=%v", nonKeeper, keeper, err)
+	}
+	for _, id := range []string{keeper.ID, nonKeeper.ID} {
+		if _, err := store.db.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", id, TelegramPrimaryEndpoint, CapSend|CapReceive); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for i, id := range []string{keeper.ID, nonKeeper.ID} {
 		if _, _, err := store.ApplyControl(ControlInput{

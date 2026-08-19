@@ -1099,8 +1099,8 @@ func (s *Store) PrepareTelegramAdopt(input AdoptPrepareInput) error {
 		return fmt.Errorf("drop durable role member: %w", err)
 	}
 	recipient := roleRecipient(TelegramCodexRole)
-	if _, err := tx.ExecContext(context.Background(), "UPDATE deliveries SET acked_at=? WHERE recipient_endpoint=? AND acked_at IS NULL AND message_id IN (SELECT id FROM messages WHERE conversation_id=?)", now.UTC().UnixMilli(), recipient, nonKeeper.ID); err != nil {
-		return fmt.Errorf("retire revoked deliveries: %w", err)
+	if _, err := retireRecipientDeliveries(tx, recipient, nonKeeper.ID, now); err != nil {
+		return err
 	}
 	if err := advanceRecipientCursor(tx, recipient, nonKeeper.ID); err != nil {
 		return err

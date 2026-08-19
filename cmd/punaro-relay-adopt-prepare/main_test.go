@@ -58,7 +58,7 @@ func TestRunPreparesSharedRoleUnnamedPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, time.August, 16, 18, 0, 0, 0, time.UTC)
-	keeper, nonKeeper := createSharedTelegramRolePair(t, store, now)
+	keeper, nonKeeper := createSharedTelegramRolePair(t, store, database, now)
 	if _, _, err := store.AppendMessage(relay.AppendInput{
 		ConversationID:  nonKeeper.ID,
 		SenderMachineID: "machine-telegram",
@@ -171,7 +171,7 @@ func TestRunRefusesMissingRelayDBAndPrintsOpenError(t *testing.T) {
 	}
 }
 
-func createSharedTelegramRolePair(t *testing.T, store *relay.Store, now time.Time) (relay.Conversation, relay.Conversation) {
+func createSharedTelegramRolePair(t *testing.T, store *relay.Store, database string, now time.Time) (relay.Conversation, relay.Conversation) {
 	t.Helper()
 	for machine, endpoint := range map[string]string{
 		"machine-creator":   "agent/creator",
@@ -184,7 +184,6 @@ func createSharedTelegramRolePair(t *testing.T, store *relay.Store, now time.Tim
 	}
 	members := []relay.Member{
 		{Endpoint: "agent/creator", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
-		{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapSend | relay.CapReceive},
 		{Role: relay.TelegramCodexRole, RoleMachineID: "studio-validation", Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
 	}
 	keeper, err := store.CreateConversation("agent/creator", members, now)
@@ -194,6 +193,16 @@ func createSharedTelegramRolePair(t *testing.T, store *relay.Store, now time.Tim
 	nonKeeper, err := store.CreateConversation("agent/creator", members, now)
 	if err != nil || nonKeeper.DisplayName != "" || nonKeeper.ID == keeper.ID {
 		t.Fatalf("non-keeper unnamed=%#v keeper=%#v err=%v", nonKeeper, keeper, err)
+	}
+	db, err := sql.Open("sqlite", database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	for _, id := range []string{keeper.ID, nonKeeper.ID} {
+		if _, err := db.ExecContext(context.Background(), "INSERT INTO memberships(conversation_id, endpoint, capabilities) VALUES (?, ?, ?)", id, relay.TelegramPrimaryEndpoint, relay.CapSend|relay.CapReceive); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, id := range []string{keeper.ID, nonKeeper.ID} {
 		if _, _, err := store.ApplyControl(relay.ControlInput{
