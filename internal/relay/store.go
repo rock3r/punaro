@@ -1513,6 +1513,16 @@ func (s *Store) AppendTelegramInbound(input TelegramInboundInput) (Message, bool
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Message{}, false, fmt.Errorf("read idempotency key: %w", err)
 	}
+	if err := s.consumeRateLimits(tx, input.SenderMachineID, input.ConversationID, input.Now); err != nil {
+		return Message{}, false, err
+	}
+	deliveryRecipients, err := appendDeliveryRecipients(tx, input.ConversationID, input.FromEndpoint, "")
+	if err != nil {
+		return Message{}, false, err
+	}
+	if err := s.consumeQuota(tx, deliveryRecipients, int64(len(input.Body))); err != nil {
+		return Message{}, false, err
+	}
 	message := Message{
 		ID:                       uuid.NewString(),
 		ConversationID:           input.ConversationID,

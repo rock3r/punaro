@@ -1862,6 +1862,38 @@ func TestStoreAppendUserTelegramRequiresCompleteClaim(t *testing.T) {
 	}
 }
 
+func TestStoreTelegramInboundConsumesRateLimitsAndQuota(t *testing.T) {
+	t.Parallel()
+	cfg := tightRateLimits()
+	cfg.SenderBurst = 1
+	cfg.ConversationBurst = 1
+	store := openRateLimitedStore(t, cfg)
+	if err := store.SetQuotaLimits(tightQuota(1, 1024, 8, 4096)); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.August, 16, 16, 6, 0, 0, time.UTC)
+	conversation := createClaimedTelegramConversation(t, store, now)
+	first, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "from-user", IdempotencyKey: "telegram-update:1", Now: now,
+	})
+	if err != nil || duplicate || first.Sequence != 1 {
+		t.Fatalf("first inbound=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	if counters := quotaRecipientCounters(t, store, "agent/a"); counters.Count != 1 {
+		t.Fatalf("inbound quota=%#v", counters)
+	}
+	_, _, err = store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "again", IdempotencyKey: "telegram-update:2", Now: now,
+	})
+	assertRateLimited(t, err, 1)
+	var messages int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM messages WHERE conversation_id=?", conversation.ID).Scan(&messages); err != nil || messages != 1 {
+		t.Fatalf("denied inbound mutated messages=%d err=%v", messages, err)
+	}
+}
+
 func TestStoreTelegramInboundExcludesMetadataFromHash(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
