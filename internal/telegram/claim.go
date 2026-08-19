@@ -92,7 +92,6 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 			execution.Phase = ClaimPhaseCreating
 			threadID, err := e.Topics.CreateForumTopic(ctx, e.AllowedUserID, name)
 			if err != nil || threadID <= 0 {
-				_ = e.State.ClearClaimCreating(conversationID)
 				err := fmt.Errorf("telegram_create_forum_topic_failed")
 				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
 				return err
