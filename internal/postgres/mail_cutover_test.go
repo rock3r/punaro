@@ -70,7 +70,7 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	}
 	current := valid
 	currentManifest := manifest
-	currentManifest.Version = 6
+	currentManifest.Version = 7
 	currentManifest.TableSHA256.RoleProfiles = strings.Repeat("c", 64)
 	currentManifest.TableSHA256.RoleProfileIdempotency = strings.Repeat("c", 64)
 	currentManifest.TableSHA256.RateBuckets = strings.Repeat("c", 64)
@@ -85,10 +85,10 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	currentDigest := sha256.Sum256(current.Manifest)
 	current.ManifestSHA256 = hex.EncodeToString(currentDigest[:])
 	if err := current.Validate(); err != nil {
-		t.Fatalf("current v6 request rejected: %v", err)
+		t.Fatalf("current v7 request rejected: %v", err)
 	}
 	if len(current.Manifest) > 8192 {
-		t.Fatalf("current v6 manifest is %d bytes, want <= 8192", len(current.Manifest))
+		t.Fatalf("current v7 manifest is %d bytes, want <= 8192", len(current.Manifest))
 	}
 	legacy := valid
 	legacyManifest := manifest
@@ -181,7 +181,7 @@ func TestMailCutoverRequestAcceptsPreparedCurrentSQLiteSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	inspected, err := relay.InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 6 {
+	if err != nil || inspected.Version != 7 {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	epochID := "019f7f07-4b88-7c12-a394-b663274a6555"

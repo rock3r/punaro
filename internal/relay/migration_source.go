@@ -143,6 +143,11 @@ var migrationTableSpecs = []migrationTableSpec{
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
 var v4MigrationTableSpecs = migrationTableSpecs[:16]
 var v5MigrationTableSpecs = migrationTableSpecs[:17]
+var v6MigrationTableSpecs = func() []migrationTableSpec {
+	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:20]...)
+	specs[6] = migrationTableSpec{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"}
+	return specs
+}()
 
 var roleMigrationTableSpecs = func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
@@ -161,7 +166,8 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
+const migrationSourceSchema = "punaro-relay-sqlite-v7:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
+const v6MigrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
 const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
@@ -434,6 +440,10 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 	if directTables == 3 && rateBucketTables != 1 {
 		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
 	}
+	var telegramTables int
+	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('telegram_claims','telegram_participants','telegram_claim_events')`).Scan(&telegramTables); err != nil || telegramTables != 0 && telegramTables != 3 {
+		return MigrationSourceManifest{}, errors.New("relay migration source schema is unavailable")
+	}
 	manifest := MigrationSourceManifest{Version: 3}
 	roleOnly := false
 	tableSpecs, schema := v3MigrationTableSpecs, v3MigrationSourceSchema
@@ -447,9 +457,12 @@ func inspectMigrationSource(ctx context.Context, q migrationQueryer) (MigrationS
 		roleOnly = true
 		manifest.Version = 2
 		tableSpecs, schema = roleMigrationTableSpecs, roleMigrationSourceSchema
+	case directTables == 3 && telegramTables == 3:
+		manifest.Version = 7
+		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
 	case directTables == 3:
 		manifest.Version = 6
-		tableSpecs, schema = migrationTableSpecs, migrationSourceSchema
+		tableSpecs, schema = v6MigrationTableSpecs, v6MigrationSourceSchema
 	case profileTables == 2 && rateBucketTables == 1:
 		manifest.Version = 5
 		tableSpecs, schema = v5MigrationTableSpecs, v5MigrationSourceSchema
@@ -559,7 +572,7 @@ func verifyMigrationSourceSchemaVersion(ctx context.Context, q migrationQueryer,
 	if version == 1 {
 		return verifyLegacyMigrationSourceSchema(ctx, q)
 	}
-	return verifyMigrationSourceSchema(ctx, q, controls, profiles, rateBuckets, direct)
+	return verifyMigrationSourceSchema(ctx, q, version, controls, profiles, rateBuckets, direct)
 }
 
 func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) error {
@@ -595,7 +608,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 	return foreignKeys.Close()
 }
 
-func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, controls, profiles, rateBuckets, direct bool) error {
+func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, version int, controls, profiles, rateBuckets, direct bool) error {
 	rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
 		return errors.New("relay migration source schema is unavailable")
@@ -620,6 +633,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case !controls:
 		want = []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+	}
+	if version == 6 {
+		filtered := make([]string, 0, len(want))
+		for _, name := range want {
+			if name == "telegram_claims" || name == "telegram_participants" || name == "telegram_claim_events" || name == "conversation_display_name_idempotency" {
+				continue
+			}
+			filtered = append(filtered, name)
+		}
+		want = filtered
 	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
@@ -666,6 +689,19 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		delete(expectedColumns, "direct_conversations")
 		delete(expectedColumns, "message_from_roles")
 		delete(expectedColumns, "direct_message_idempotency")
+	}
+	if version == 6 {
+		delete(expectedColumns, "telegram_claims")
+		delete(expectedColumns, "telegram_participants")
+		delete(expectedColumns, "telegram_claim_events")
+		delete(expectedColumns, "conversation_display_name_idempotency")
+		var extras int
+		if err := q.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('messages') WHERE name='from_participant'`).Scan(&extras); err != nil {
+			return errors.New("relay migration source columns are unavailable")
+		}
+		if extras == 0 {
+			expectedColumns["messages"] = []string{"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"}
+		}
 	}
 	for table, expected := range expectedColumns {
 		columns, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -726,6 +762,12 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		delete(expectedForeignKeys, "direct_conversations")
 		delete(expectedForeignKeys, "message_from_roles")
 		delete(expectedForeignKeys, "direct_message_idempotency")
+	}
+	if version == 6 {
+		delete(expectedForeignKeys, "telegram_claims")
+		delete(expectedForeignKeys, "telegram_participants")
+		delete(expectedForeignKeys, "telegram_claim_events")
+		delete(expectedForeignKeys, "conversation_display_name_idempotency")
 	}
 	for table := range expectedColumns {
 		foreignKeys, err := q.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", table)) // #nosec G202 -- table comes only from the fixed expectedColumns allowlist.
@@ -789,6 +831,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			"message_from_roles:1:pk:0:message_id",
 			"direct_message_idempotency:1:pk:0:machine_id,key",
 		)
+	}
+	if version == 6 {
+		filtered := expectedIndexes[:0]
+		for _, index := range expectedIndexes {
+			if strings.HasPrefix(index, "telegram_") || strings.HasPrefix(index, "conversation_display_name_idempotency:") {
+				continue
+			}
+			filtered = append(filtered, index)
+		}
+		expectedIndexes = filtered
 	}
 	var actualIndexes []string
 	for table := range expectedColumns {
@@ -883,6 +935,9 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		wantTriggers = 60
 	case !controls:
 		wantTriggers = 48
+	}
+	if version == 6 {
+		wantTriggers -= 12
 	}
 	var quotaTables int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install','delivery_terminals')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 && quotaTables != 3 {

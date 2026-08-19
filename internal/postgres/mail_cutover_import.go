@@ -333,7 +333,7 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency" || table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency")) {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency")) {
 		return 0, emptyMailCutoverDigest
 	}
 	switch table {

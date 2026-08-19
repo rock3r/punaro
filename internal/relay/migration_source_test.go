@@ -63,7 +63,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 6 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 7 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
 	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 || first.Counts.RateBuckets != 2 {
@@ -949,6 +949,57 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testin
 	}
 }
 
+func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 16, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE telegram_claim_events; DROP TABLE telegram_participants; DROP TABLE telegram_claims; DROP TABLE conversation_display_name_idempotency`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 6 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("parent v6 inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("c", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Phase != MigrationSourcePrepared || prepared.Version != 6 {
+		t.Fatalf("parent v6 prepare=%#v err=%v", prepared, err)
+	}
+	if reopened, err := Open(path); !errors.Is(err, ErrMigrationSourcePrepared) {
+		if reopened != nil {
+			_ = reopened.Close()
+		}
+		t.Fatalf("opening prepared parent v6 source err=%v", err)
+	}
+	afterOpen, err := InspectMigrationSource(ctx, path)
+	if err != nil || afterOpen.Fingerprint != prepared.Fingerprint || afterOpen.Phase != MigrationSourcePrepared || afterOpen.Version != 6 {
+		t.Fatalf("prepared parent v6 changed after Open: %#v err=%v", afterOpen, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_telegram_claims", "", 10)
+	if err != nil || len(batch.Rows) != 0 || !batch.Done {
+		t.Fatalf("parent v6 telegram batch=%#v err=%v", batch, err)
+	}
+}
+
 func TestInspectMigrationSourceAcceptsPreparedParentWithoutDirectMessages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -1018,7 +1069,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 6 || inspected.Counts.RateBuckets != 2 {
+	if err != nil || inspected.Version != 7 || inspected.Counts.RateBuckets != 2 {
 		t.Fatalf("current inspect=%#v err=%v", inspected, err)
 	}
 	hasher, err := NewMigrationTableHasher("mail_rate_buckets")
@@ -1026,7 +1077,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
-	if err != nil || prepared.Version != 6 {
+	if err != nil || prepared.Version != 7 {
 		t.Fatalf("current prepare=%#v err=%v", prepared, err)
 	}
 	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
@@ -1064,11 +1115,11 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 6 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 {
+	if err != nil || inspected.Version != 7 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
-	if err != nil || prepared.Version != 6 || prepared.Counts.TelegramClaims != 1 {
+	if err != nil || prepared.Version != 7 || prepared.Counts.TelegramClaims != 1 {
 		t.Fatalf("prepare=%#v err=%v", prepared, err)
 	}
 	for _, table := range []string{"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events"} {
