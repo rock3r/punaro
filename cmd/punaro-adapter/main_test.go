@@ -85,14 +85,14 @@ func TestParseSendArgsAcceptsToUserTelegramWithoutConversation(t *testing.T) {
 }
 
 func TestParseClaimArgsRequiresConversationFromAndIdempotencyKey(t *testing.T) {
-	if _, err := parseClaimArgs([]string{"--from", "agent/a", "--idempotency-key", "claim-conversation-1"}); err == nil {
+	if _, err := parseClaimArgs([]string{"--from", "agent/a", "--idempotency-key", "claim-room-1"}); err == nil {
 		t.Fatal("claim without conversation was accepted")
 	}
 	if _, err := parseClaimArgs([]string{"--conversation", "conversation-1", "--from", "agent/a"}); err == nil {
 		t.Fatal("claim without idempotency key was accepted")
 	}
-	request, err := parseClaimArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
-	if err != nil || request.conversationID != "conversation-1" || request.fromEndpoint != "agent/a" || request.idempotencyKey != "claim-conversation-1" {
+	request, err := parseClaimArgs([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"})
+	if err != nil || request.conversationID != "conversation-1" || request.fromEndpoint != "agent/a" || request.idempotencyKey != "claim-room-1" {
 		t.Fatalf("claim request=%#v err=%v", request, err)
 	}
 }
@@ -546,12 +546,12 @@ func TestRunClaimTreatsCompleteReserveAsSuccess(t *testing.T) {
 	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
 
 	output, err := captureStdout(t, func() error {
-		return runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+		return runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"})
 	})
 	if err != nil {
 		t.Fatalf("complete claim retry failed: %v", err)
 	}
-	if gotKey != "claim-conversation-1" || !strings.Contains(gotBody, `"endpoint":"agent/a"`) {
+	if gotKey != "claim-room-1" || !strings.Contains(gotBody, `"endpoint":"agent/a"`) {
 		t.Fatalf("claim request key=%q body=%s", gotKey, gotBody)
 	}
 	if !strings.Contains(output, `"status":"complete"`) || !strings.Contains(output, `"conversation_id":"conversation-1"`) {
@@ -576,7 +576,7 @@ func TestRunClaimAcceptsPendingReserveAndRejectsUnknownStatus(t *testing.T) {
 	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
 
 	output, err := captureStdout(t, func() error {
-		return runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+		return runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"})
 	})
 	if err != nil {
 		t.Fatalf("pending claim failed: %v", err)
@@ -587,7 +587,7 @@ func TestRunClaimAcceptsPendingReserveAndRejectsUnknownStatus(t *testing.T) {
 
 	status = "reserved"
 	code = http.StatusOK
-	if err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"}); err == nil || err.Error() != "telegram claim was not accepted" {
+	if err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"}); err == nil || err.Error() != "telegram claim was not accepted" {
 		t.Fatalf("unknown claim status err=%v", err)
 	}
 }
@@ -605,12 +605,12 @@ func TestRunClaimMapsForbiddenAndConflictWithoutExistenceLeak(t *testing.T) {
 	profile := writeInstallerProfile(t, server.URL)
 	t.Setenv("HOME", filepath.Dir(filepath.Dir(filepath.Dir(profile))))
 
-	err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+	err := runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"})
 	if !errors.Is(err, errTelegramClaimForbidden) {
 		t.Fatalf("forbidden claim err=%v", err)
 	}
 	code = http.StatusConflict
-	err = runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-conversation-1"})
+	err = runClaim([]string{"--conversation", "conversation-1", "--from", "agent/a", "--idempotency-key", "claim-room-1"})
 	if !errors.Is(err, errTelegramClaimConflict) {
 		t.Fatalf("conflict claim err=%v", err)
 	}
