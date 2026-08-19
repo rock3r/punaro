@@ -270,6 +270,43 @@ func TestExecuteClaimDoesNotRecreateTopicAfterCreatingFenceCrash(t *testing.T) {
 	}
 }
 
+func TestExecuteClaimTopicCreatedDoesNotRebindThreadToNewChat(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 1}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 99, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err == nil {
+		t.Fatal("topic_created thread was bound to a new allowed chat")
+	}
+	if _, found, err := state.Route(99, 795446); err != nil || found {
+		t.Fatalf("new chat route found=%v err=%v", found, err)
+	}
+	if _, found, err := state.Route(55, 795446); err != nil || found {
+		t.Fatalf("mismatched resume inserted original chat route found=%v err=%v", found, err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || execution.ChatID != 55 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if len(claims.completes) != 0 {
+		t.Fatalf("completed after chat mismatch: %#v", claims.completes)
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after topic_created: %#v", topics.names)
+	}
+}
+
 func TestExecuteClaimReusesStoredThreadAndNeverCreatesTwice(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
@@ -280,7 +317,7 @@ func TestExecuteClaimReusesStoredThreadAndNeverCreatesTwice(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-1", 795446); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
 		t.Fatal(err)
 	}
 	topics := &recordingTopicCreator{threadID: 1}

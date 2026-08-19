@@ -133,11 +133,11 @@ func TestStatePersistsClaimThreadAndOutboundMap(t *testing.T) {
 	if _, err := state.InsertPendingExecution("conversation-1", "How is it going"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-1", 795446); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 795446); err != nil {
 		t.Fatal(err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
-	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || !execution.SkipReserve || execution.DisplayName != "How is it going" {
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 795446 || execution.ChatID != 55 || !execution.SkipReserve || execution.DisplayName != "How is it going" {
 		t.Fatalf("after thread persist %#v found=%v err=%v", execution, found, err)
 	}
 	if err := state.PersistClaimRoute(55, 795446, "conversation-1"); err != nil {
@@ -158,6 +158,38 @@ func TestStatePersistsClaimThreadAndOutboundMap(t *testing.T) {
 	}
 	if _, found, err := state.LookupOutbound(55, 10); err != nil || found {
 		t.Fatal("missing outbound was found")
+	}
+}
+
+func TestStateOpenAddsClaimExecutionChatID(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "telegram.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `CREATE TABLE claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, phase, skip_reserve) VALUES ('conversation-1', 'reserved', 0)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.PersistClaimThread("conversation-1", 55, 7); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 7 || execution.ChatID != 55 {
+		t.Fatalf("upgraded execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
 
@@ -232,7 +264,7 @@ func TestStateSetRouteRefusesAfterConcurrentClaimProtectsThread(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-claimed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-claimed", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-claimed", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(55, 7, "conversation-claimed"); err != nil {
@@ -266,7 +298,7 @@ func TestStateRouteBlockedTreatsCreatingAndTopicCreatedAsClaimed(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-topic"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-topic", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-topic", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.RouteBlocked(55, 8, "conversation-topic"); err == nil {
@@ -287,7 +319,7 @@ func TestStateRouteBlockedTreatsRoutePersistedAsClaimed(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-claimed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-claimed", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-claimed", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(55, 7, "conversation-claimed"); err != nil {
@@ -323,7 +355,7 @@ func TestStatePersistClaimRouteDoesNotStealAnotherConversationThread(t *testing.
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-thief"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-thief", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-thief", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(55, 7, "conversation-thief"); err == nil {
@@ -348,7 +380,7 @@ func TestStatePersistClaimRouteRejectsDifferentChat(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-1", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(99, 1, "conversation-1"); err == nil {
@@ -380,7 +412,7 @@ func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-1", 1); err != nil {
+	if err := state.PersistClaimThread("conversation-1", 55, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(55, 1, "conversation-1"); err != nil {

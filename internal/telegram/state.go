@@ -39,6 +39,7 @@ var telegramOutboundLimit = 10000
 type ClaimExecution struct {
 	ConversationID string
 	ThreadID       int64
+	ChatID         int64
 	Phase          string
 	DisplayName    string
 	SkipReserve    bool
@@ -72,7 +73,7 @@ func Open(database string) (*State, error) {
 		"CREATE TABLE IF NOT EXISTS topic_routes (chat_id INTEGER NOT NULL, thread_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, PRIMARY KEY(chat_id, thread_id))",
 		"CREATE UNIQUE INDEX IF NOT EXISTS topic_routes_conversation ON topic_routes(conversation_id)",
 		"CREATE TABLE IF NOT EXISTS callback_tokens (token_hash TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER)",
-		"CREATE TABLE IF NOT EXISTS claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0)",
+		"CREATE TABLE IF NOT EXISTS claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0, chat_id INTEGER)",
 		"CREATE TABLE IF NOT EXISTS telegram_outbound (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, punaro_message_id TEXT NOT NULL, from_endpoint TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))",
 		"CREATE TABLE IF NOT EXISTS gateway_cursors (name TEXT PRIMARY KEY, value TEXT NOT NULL)",
 	} {
@@ -81,7 +82,23 @@ func Open(database string) (*State, error) {
 			return nil, fmt.Errorf("initialize telegram state: %w", err)
 		}
 	}
+	if err := ensureClaimExecutionChatID(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("initialize telegram state: %w", err)
+	}
 	return &State{db: db}, nil
+}
+
+func ensureClaimExecutionChatID(db *sql.DB) error {
+	var count int
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('claim_executions') WHERE name = 'chat_id'`).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := db.ExecContext(context.Background(), `ALTER TABLE claim_executions ADD COLUMN chat_id INTEGER`)
+	return err
 }
 
 // Close closes the durable Telegram state database.
@@ -285,51 +302,59 @@ func (s *State) InsertPendingExecution(conversationID, displayName string) (bool
 	return affected == 1, nil
 }
 
-// ClaimExecution returns the local execution row for a conversation.
-func (s *State) ClaimExecution(conversationID string) (ClaimExecution, bool, error) {
+const claimExecutionSelect = "conversation_id, thread_id, chat_id, phase, display_name, skip_reserve"
+
+func scanClaimExecution(scanner interface{ Scan(dest ...any) error }) (ClaimExecution, error) {
 	var execution ClaimExecution
-	var threadID sql.NullInt64
+	var threadID, chatID sql.NullInt64
 	var displayName sql.NullString
 	var skip int
-	err := s.db.QueryRowContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip)
+	if err := scanner.Scan(&execution.ConversationID, &threadID, &chatID, &execution.Phase, &displayName, &skip); err != nil {
+		return ClaimExecution{}, err
+	}
+	if threadID.Valid {
+		execution.ThreadID = threadID.Int64
+	}
+	if chatID.Valid {
+		execution.ChatID = chatID.Int64
+	}
+	execution.DisplayName = displayName.String
+	execution.SkipReserve = skip == 1
+	return execution, nil
+}
+
+func scanClaimExecutions(rows *sql.Rows) ([]ClaimExecution, error) {
+	var executions []ClaimExecution
+	for rows.Next() {
+		execution, err := scanClaimExecution(rows)
+		if err != nil {
+			return nil, err
+		}
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
+// ClaimExecution returns the local execution row for a conversation.
+func (s *State) ClaimExecution(conversationID string) (ClaimExecution, bool, error) {
+	execution, err := scanClaimExecution(s.db.QueryRowContext(context.Background(), `SELECT `+claimExecutionSelect+` FROM claim_executions WHERE conversation_id = ?`, conversationID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClaimExecution{}, false, nil
 	}
 	if err != nil {
 		return ClaimExecution{}, false, err
 	}
-	if threadID.Valid {
-		execution.ThreadID = threadID.Int64
-	}
-	execution.DisplayName = displayName.String
-	execution.SkipReserve = skip == 1
 	return execution, true, nil
 }
 
 // IncompleteClaimExecutions lists every local row that is not complete.
 func (s *State) IncompleteClaimExecutions() ([]ClaimExecution, error) {
-	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE phase != ? ORDER BY conversation_id`, ClaimPhaseComplete)
+	rows, err := s.db.QueryContext(context.Background(), `SELECT `+claimExecutionSelect+` FROM claim_executions WHERE phase != ? ORDER BY conversation_id`, ClaimPhaseComplete)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var executions []ClaimExecution
-	for rows.Next() {
-		var execution ClaimExecution
-		var threadID sql.NullInt64
-		var displayName sql.NullString
-		var skip int
-		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
-			return nil, err
-		}
-		if threadID.Valid {
-			execution.ThreadID = threadID.Int64
-		}
-		execution.DisplayName = displayName.String
-		execution.SkipReserve = skip == 1
-		executions = append(executions, execution)
-	}
-	return executions, rows.Err()
+	return scanClaimExecutions(rows)
 }
 
 // IncompleteClaimExecutionsAfter lists incomplete rows after a conversation cursor.
@@ -337,55 +362,23 @@ func (s *State) IncompleteClaimExecutionsAfter(after string, limit int) ([]Claim
 	if limit < 1 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions
+	rows, err := s.db.QueryContext(context.Background(), `SELECT `+claimExecutionSelect+` FROM claim_executions
 		WHERE phase != ? AND (? = '' OR conversation_id > ?) ORDER BY conversation_id LIMIT ?`, ClaimPhaseComplete, after, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var executions []ClaimExecution
-	for rows.Next() {
-		var execution ClaimExecution
-		var threadID sql.NullInt64
-		var displayName sql.NullString
-		var skip int
-		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
-			return nil, err
-		}
-		if threadID.Valid {
-			execution.ThreadID = threadID.Int64
-		}
-		execution.DisplayName = displayName.String
-		execution.SkipReserve = skip == 1
-		executions = append(executions, execution)
-	}
-	return executions, rows.Err()
+	return scanClaimExecutions(rows)
 }
 
 // CompletedClaimExecutions lists finished local executions for route revalidation.
 func (s *State) CompletedClaimExecutions() ([]ClaimExecution, error) {
-	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE phase = ? ORDER BY conversation_id`, ClaimPhaseComplete)
+	rows, err := s.db.QueryContext(context.Background(), `SELECT `+claimExecutionSelect+` FROM claim_executions WHERE phase = ? ORDER BY conversation_id`, ClaimPhaseComplete)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var executions []ClaimExecution
-	for rows.Next() {
-		var execution ClaimExecution
-		var threadID sql.NullInt64
-		var displayName sql.NullString
-		var skip int
-		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
-			return nil, err
-		}
-		if threadID.Valid {
-			execution.ThreadID = threadID.Int64
-		}
-		execution.DisplayName = displayName.String
-		execution.SkipReserve = skip == 1
-		executions = append(executions, execution)
-	}
-	return executions, rows.Err()
+	return scanClaimExecutions(rows)
 }
 
 // CompletedClaimExecutionsAfter lists completed rows after a conversation cursor.
@@ -393,29 +386,13 @@ func (s *State) CompletedClaimExecutionsAfter(after string, limit int) ([]ClaimE
 	if limit < 1 {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions
+	rows, err := s.db.QueryContext(context.Background(), `SELECT `+claimExecutionSelect+` FROM claim_executions
 		WHERE phase = ? AND (? = '' OR conversation_id > ?) ORDER BY conversation_id LIMIT ?`, ClaimPhaseComplete, after, after, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var executions []ClaimExecution
-	for rows.Next() {
-		var execution ClaimExecution
-		var threadID sql.NullInt64
-		var displayName sql.NullString
-		var skip int
-		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
-			return nil, err
-		}
-		if threadID.Valid {
-			execution.ThreadID = threadID.Int64
-		}
-		execution.DisplayName = displayName.String
-		execution.SkipReserve = skip == 1
-		executions = append(executions, execution)
-	}
-	return executions, rows.Err()
+	return scanClaimExecutions(rows)
 }
 
 // PersistClaimDisplayName stores the snapshotted label used for createForumTopic.
@@ -455,12 +432,13 @@ func (s *State) ClearClaimCreating(conversationID string) error {
 	return err
 }
 
-// PersistClaimThread writes the Bot API thread id immediately after createForumTopic.
-func (s *State) PersistClaimThread(conversationID string, threadID int64) error {
-	if strings.TrimSpace(conversationID) == "" || threadID <= 0 {
+// PersistClaimThread writes the Bot API thread id and creation chat immediately
+// after createForumTopic so resume cannot bind that thread to a later chat.
+func (s *State) PersistClaimThread(conversationID string, chatID, threadID int64) error {
+	if strings.TrimSpace(conversationID) == "" || chatID == 0 || threadID <= 0 {
 		return fmt.Errorf("claim thread is required")
 	}
-	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, phase = ? WHERE conversation_id = ?`, threadID, ClaimPhaseTopicCreated, conversationID)
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, chat_id = ?, phase = ? WHERE conversation_id = ?`, threadID, chatID, ClaimPhaseTopicCreated, conversationID)
 	return err
 }
 

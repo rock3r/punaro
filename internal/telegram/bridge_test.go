@@ -74,7 +74,7 @@ func TestBridgeResumesIncompleteClaimBeforePollingInbound(t *testing.T) {
 	if _, err := state.InsertPendingExecution("conversation-stuck", "Stuck room"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-stuck", 7); err != nil {
+	if err := state.PersistClaimThread("conversation-stuck", 55, 7); err != nil {
 		t.Fatal(err)
 	}
 	if err := state.PersistClaimRoute(55, 7, "conversation-stuck"); err != nil {
@@ -125,7 +125,7 @@ func TestBridgeResumesIncompleteClaimAndStartsPendingWithoutLocalRow(t *testing.
 	if _, err := state.InsertPendingExecution("conversation-resume", "Resume room"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.PersistClaimThread("conversation-resume", 11); err != nil {
+	if err := state.PersistClaimThread("conversation-resume", 55, 11); err != nil {
 		t.Fatal(err)
 	}
 	relayClient := &fakeBridgeRelay{recordingClaimRelay: recordingClaimRelay{

@@ -976,9 +976,12 @@ of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
 tap persists `claim_executions` reserved, then consumes the token in the same
 SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
 gateway persists a `creating` fence, then calls `createForumTopic` once,
-persists `message_thread_id` immediately, and never calls `getForumTopic`. A
-crash after Bot API success and before the thread id is stored keeps the
-fence, so resume does not create a second user-visible topic. An ambiguous
+persists `message_thread_id` and the creation `chat_id` immediately, and
+never calls `getForumTopic`. Resume of `topic_created` binds that stored
+pair; a changed allowed user fails closed instead of attaching the old
+thread to a new chat. A crash after Bot API success and before the thread
+id is stored keeps the fence, so resume does not create a second
+user-visible topic. An ambiguous
 createForumTopic error (timeout, lost response, or decode failure) also
 keeps the fence instead of retrying create. A completed 4xx Bot API
 rejection, including HTTP 429, returns the row to reserved so resume can
