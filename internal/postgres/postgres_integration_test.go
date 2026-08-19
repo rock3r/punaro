@@ -1590,6 +1590,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.RunDirectMessages(t, app, "postgres-direct")
 	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
 	testPostgresTelegramClaimReserveOccupancy(t, app)
+	testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
 	testEndpointAdvertisementUsesCanonicalLockOrder(t, app)
@@ -1657,6 +1658,60 @@ func testPostgresTelegramClaimReserveOccupancy(t *testing.T, app *Database) {
 	})
 	if err != nil || !duplicate || replay.ConversationID != namedA.ID {
 		t.Fatalf("postgres same-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
+func testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 16, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-quota-self-a"
+		machineTelegram = "postgres-quota-self-telegram"
+		endpointA       = "agent/postgres-quota-self/a"
+	)
+	if err := app.SetQuotaLimits(relay.QuotaConfig{RecipientCount: 1, RecipientBytes: 1024, InstallationCount: 8, InstallationBytes: 4096, RetryAfterSeconds: 9}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = app.SetQuotaLimits(relay.DefaultQuotaConfig()) })
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-quota-self-named", CreatorEndpoint: endpointA,
+		DisplayName: "Quota self", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "claim-" + conversation.ID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.CompleteTelegramClaim(relay.TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: machineTelegram, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	message, duplicate, err := app.AppendMessage(relay.AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: machineTelegram, FromEndpoint: relay.TelegramGatewayEndpoint,
+		TargetRole: relay.TelegramUserParticipant, Body: "self", IdempotencyKey: "gateway-to-user", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("postgres gateway user-telegram send=%#v duplicate=%t err=%v", message, duplicate, err)
+	}
+	var pendingCount int
+	if err := app.relayPool().QueryRowContext(context.Background(), `SELECT COALESCE((SELECT pending_count FROM relay.mail_pending_recipients WHERE recipient_endpoint=$1),0)`, relay.TelegramGatewayEndpoint).Scan(&pendingCount); err != nil || pendingCount != 0 {
+		t.Fatalf("postgres gateway self-send charged quota count=%d err=%v", pendingCount, err)
+	}
+	var deliveries int
+	if err := app.relayPool().QueryRowContext(context.Background(), `SELECT COUNT(*) FROM relay.mail_deliveries WHERE message_id=$1::uuid`, message.ID).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("postgres gateway self-send deliveries=%d err=%v", deliveries, err)
+	}
+	if err := app.VerifyPendingQuota(context.Background()); err != nil {
+		t.Fatalf("postgres quota after gateway self-send: %v", err)
 	}
 }
 

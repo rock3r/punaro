@@ -1024,8 +1024,11 @@ protection set.
 
 Product pings and replies to the human use `punaro-adapter send --to
 user-telegram`. The adapter resolves the session's sole claimed topic and
-sets `target_role=user-telegram`. Agents never pass a Telegram thread or chat
-id. `telegram-major-updates` / `send_major_update.py` is not a production
+sets `target_role=user-telegram`. Pending quota for that send charges
+`telegram/primary` only when the sender is not the gateway; a gateway
+self-send creates no delivery and must not leave an un-ackable quota charge.
+Agents never pass a Telegram thread or chat id.
+`telegram-major-updates` / `send_major_update.py` is not a production
 sender.
 
 Adopt of the two live routes is fence-legal only in this order: rename the

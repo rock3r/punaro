@@ -33,6 +33,9 @@ func bootstrapPendingQuota(ctx context.Context, db sqliteExecQueryer) error {
 func appendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, targetRole string) ([]string, error) {
 	var recipients []string
 	if targetRole == TelegramUserParticipant {
+		if fromEndpoint == TelegramGatewayEndpoint {
+			return nil, nil
+		}
 		recipients = append(recipients, TelegramGatewayEndpoint)
 		sort.Strings(recipients)
 		return recipients, nil

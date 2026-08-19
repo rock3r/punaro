@@ -113,6 +113,9 @@ func postgresReleaseQuota(tx *sql.Tx, recipient string, bodyBytes int64) error {
 func postgresAppendDeliveryRecipients(tx *sql.Tx, conversationID, fromEndpoint, targetRole string, rolesAvailable bool) ([]string, error) {
 	var recipients []string
 	if targetRole == relay.TelegramUserParticipant {
+		if fromEndpoint == relay.TelegramGatewayEndpoint {
+			return nil, nil
+		}
 		recipients = append(recipients, relay.TelegramGatewayEndpoint)
 		sort.Strings(recipients)
 		return recipients, nil

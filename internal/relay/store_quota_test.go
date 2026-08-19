@@ -497,6 +497,41 @@ func TestStoreConcurrentAckCannotUnderflow(t *testing.T) {
 	}
 }
 
+func TestStoreGatewayUserTelegramSendDoesNotChargeSelfQuota(t *testing.T) {
+	store := openQuotaStore(t, tightQuota(1, 1024, 8, 4096))
+	now := quotaNow()
+	conversation := createClaimedTelegramConversation(t, store, now)
+	first, duplicate, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		TargetRole: TelegramUserParticipant, Body: "self", IdempotencyKey: "gateway-to-user-1", Now: now,
+	})
+	if err != nil || duplicate {
+		t.Fatalf("gateway user-telegram send=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	var deliveries int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM deliveries WHERE message_id=?", first.ID).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("gateway self-send deliveries=%d err=%v", deliveries, err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters != (QuotaCounters{}) {
+		t.Fatalf("gateway self-send charged recipient quota=%#v", counters)
+	}
+	if counters := quotaInstallCounters(t, store); counters != (QuotaCounters{}) {
+		t.Fatalf("gateway self-send charged install quota=%#v", counters)
+	}
+	if err := store.VerifyPendingQuota(); err != nil {
+		t.Fatalf("quota after gateway self-send: %v", err)
+	}
+	if _, _, err := store.AppendMessage(AppendInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-a", FromEndpoint: "agent/a",
+		TargetRole: TelegramUserParticipant, Body: "ping", IdempotencyKey: "agent-to-user-1", Now: now,
+	}); err != nil {
+		t.Fatalf("agent user-telegram send after gateway self-send: %v", err)
+	}
+	if counters := quotaRecipientCounters(t, store, TelegramGatewayEndpoint); counters.Count != 1 || counters.Bytes != int64(len("ping")) {
+		t.Fatalf("agent send quota=%#v", counters)
+	}
+}
+
 func TestStoreUserTelegramSendChargesAndReleasesGatewayQuota(t *testing.T) {
 	store := openQuotaStore(t, tightQuota(1, 1024, 8, 4096))
 	now := quotaNow()
