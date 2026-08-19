@@ -242,10 +242,14 @@ func SanitizeConversationDisplayName(value string) (string, error) {
 var errInvalidConversationDisplayName = errors.New("invalid conversation display name")
 
 // CreateConversationRequestHash binds a conversation idempotency key to the
-// normalized creator, membership set, and display name. The display name is
-// always folded in after the membership digest, including when it is empty.
+// normalized creator, membership set, and display name. An empty display name
+// keeps the pre-upgrade membership digest so unnamed create retries still hit
+// existing conversation_idempotency rows.
 func CreateConversationRequestHash(creatorEndpoint string, members []Member, displayName string, projectID ...string) string {
-	digest := stableHash(createConversationHash(creatorEndpoint, members), displayName)
+	digest := createConversationHash(creatorEndpoint, members)
+	if displayName != "" {
+		digest = stableHash(digest, displayName)
+	}
 	if len(projectID) == 0 || projectID[0] == "" {
 		return digest
 	}

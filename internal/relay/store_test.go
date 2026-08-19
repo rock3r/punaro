@@ -938,7 +938,7 @@ func TestStoreRenewsRoleBindingOnlyForTheSameLiveSession(t *testing.T) {
 	}
 }
 
-func TestCreateConversationRequestHashAlwaysBindsDisplayName(t *testing.T) {
+func TestCreateConversationRequestHashPreservesLegacyUnnamedDigest(t *testing.T) {
 	members := []Member{
 		{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin},
 		{Endpoint: "agent/b", Capabilities: CapReceive},
@@ -946,8 +946,8 @@ func TestCreateConversationRequestHashAlwaysBindsDisplayName(t *testing.T) {
 	membersDigest := createConversationHash("agent/a", members)
 	unnamed := CreateConversationRequestHash("agent/a", members, "")
 	named := CreateConversationRequestHash("agent/a", members, "Review room")
-	if unnamed == membersDigest {
-		t.Fatal("create hash omitted empty display_name after the membership digest")
+	if unnamed != membersDigest {
+		t.Fatal("unnamed create hash must match the pre-upgrade membership digest")
 	}
 	if unnamed == named {
 		t.Fatal("display name was not bound into the create hash")
@@ -955,9 +955,14 @@ func TestCreateConversationRequestHashAlwaysBindsDisplayName(t *testing.T) {
 	if got := CreateConversationRequestHash("agent/a", members, ""); got != unnamed {
 		t.Fatal("empty display name hash was not stable")
 	}
-	withProject := CreateConversationRequestHash("agent/a", members, "Review room", "project-1")
-	if withProject == named || withProject == unnamed {
-		t.Fatal("project digest did not wrap the display-name hash")
+	legacyProject := stableHash(membersDigest, "project-1")
+	withProject := CreateConversationRequestHash("agent/a", members, "", "project-1")
+	if withProject != legacyProject {
+		t.Fatal("unnamed create with project must wrap the pre-upgrade membership digest")
+	}
+	namedProject := CreateConversationRequestHash("agent/a", members, "Review room", "project-1")
+	if namedProject == named || namedProject == unnamed || namedProject == withProject {
+		t.Fatal("named project digest did not wrap the display-name hash")
 	}
 }
 
