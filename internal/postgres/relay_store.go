@@ -2795,21 +2795,7 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 	if inserted == 0 {
 		claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
 		if errors.Is(err, sql.ErrNoRows) {
-			if err := postgresBindTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey, input.ConversationID, requestHash, input.Now); err != nil {
-				return relay.TelegramClaim{}, false, err
-			}
-			bound, err := postgresLookupTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey)
-			if err != nil {
-				return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
-			}
-			claim, err = postgresTelegramClaimByConversation(tx, bound.conversationID)
-			if err != nil {
-				return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
-			}
-			if err := tx.Commit(); err != nil {
-				return relay.TelegramClaim{}, false, errors.New("telegram claim retry cannot commit")
-			}
-			return claim, true, nil
+			return relay.TelegramClaim{}, false, relay.ErrConflict
 		}
 		if err != nil {
 			return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")

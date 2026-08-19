@@ -175,6 +175,35 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 	}
 }
 
+func TestPostgresReserveTelegramClaimSerializesByMachineKey(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func (d *Database) ReserveTelegramClaim(")
+	if start < 0 {
+		t.Fatal("ReserveTelegramClaim missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("ReserveTelegramClaim unbounded")
+	}
+	fn := rest[:end+1]
+	lock := strings.Index(fn, "telegram-claim-retry")
+	lookup := strings.Index(fn, "postgresLookupTelegramClaimIdempotency")
+	if lock < 0 || lookup < 0 || lock > lookup {
+		t.Fatal("ReserveTelegramClaim must take the (machine, key) advisory lock before the mapping lookup")
+	}
+	if !strings.Contains(fn, "ON CONFLICT DO NOTHING") {
+		t.Fatal("claim insert must ignore unique conflicts so a reused machine/key cannot abort the transaction")
+	}
+	if strings.Contains(fn, "ON CONFLICT (conversation_id) DO NOTHING") {
+		t.Fatal("conversation_id-only ON CONFLICT still aborts on unique (requested_by_machine, idempotency_key)")
+	}
+}
+
 func TestPostgresBindTelegramClaimIdempotencyUsesOnConflictDoNothing(t *testing.T) {
 	body, err := os.ReadFile("relay_store.go")
 	if err != nil {
