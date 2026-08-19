@@ -110,13 +110,25 @@ func (s *State) MarkProcessed(updateID int64) error {
 
 // SetRoute binds one exact Telegram topic to one relay conversation. There is
 // no main-chat fallback because an absent topic is a routing error, not a hint.
+// The claim fence and write share one transaction so a concurrent PersistClaimRoute
+// cannot land between RouteBlocked and the INSERT.
 func (s *State) SetRoute(chatID, threadID int64, conversationID string) error {
 	if strings.TrimSpace(conversationID) == "" {
 		return fmt.Errorf("conversation ID is required")
 	}
-	_, err := s.db.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
-		ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID)
-	return err
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := routeBlockedOn(tx, chatID, threadID, conversationID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
+		ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Route returns the exact conversation bound to a chat and thread.
@@ -411,9 +423,17 @@ func (s *State) ClaimComplete(conversationID string) (bool, error) {
 	return execution.Phase == ClaimPhaseComplete, nil
 }
 
+type rowQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (s *State) claimProtectsRoute(conversationID string) (bool, error) {
+	return claimProtectsRouteOn(s.db, conversationID)
+}
+
+func claimProtectsRouteOn(q rowQueryer, conversationID string) (bool, error) {
 	var phase string
-	err := s.db.QueryRowContext(context.Background(), `SELECT phase FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&phase)
+	err := q.QueryRowContext(context.Background(), `SELECT phase FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&phase)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -426,21 +446,29 @@ func (s *State) claimProtectsRoute(conversationID string) (bool, error) {
 // RouteBlocked refuses remapping a claimed conversation or stealing its thread.
 // A route is claimed once claim_executions has persisted it (route_persisted or complete).
 func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) error {
-	protected, err := s.claimProtectsRoute(conversationID)
+	return routeBlockedOn(s.db, chatID, threadID, conversationID)
+}
+
+func routeBlockedOn(q rowQueryer, chatID, threadID int64, conversationID string) error {
+	protected, err := claimProtectsRouteOn(q, conversationID)
 	if err != nil {
 		return err
 	}
 	if protected {
 		return fmt.Errorf("telegram conversation is already claimed")
 	}
-	existing, found, err := s.Route(chatID, threadID)
+	var existing string
+	err = q.QueryRowContext(context.Background(), "SELECT conversation_id FROM topic_routes WHERE chat_id = ? AND thread_id = ?", chatID, threadID).Scan(&existing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if !found || existing == conversationID {
+	if existing == conversationID {
 		return nil
 	}
-	protected, err = s.claimProtectsRoute(existing)
+	protected, err = claimProtectsRouteOn(q, existing)
 	if err != nil {
 		return err
 	}

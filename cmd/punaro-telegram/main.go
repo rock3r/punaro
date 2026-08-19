@@ -116,9 +116,6 @@ func runRoute(args []string) error {
 		return err
 	}
 	defer func() { _ = state.Close() }()
-	if err := state.RouteBlocked(request.chatID, request.threadID, request.conversation); err != nil {
-		return err
-	}
 	return state.SetRoute(request.chatID, request.threadID, request.conversation)
 }
 

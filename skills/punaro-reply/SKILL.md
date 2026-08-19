@@ -25,9 +25,16 @@ invoke that launcher's absolute path. It safely finds the installer-owned
 client. Use the receiving agent's attached mailbox endpoint as `--from`.
 
 When the envelope's `from_participant` or `from_endpoint` is `user-telegram`,
-or whenever this session has a claimed topic, send to that built-in
-participant. Omit `--conversation` unless you also need to pin the resolved
-topic. Write the reply to a private temporary file, then run the
+send to that built-in participant. The adapter resolves this session's claimed
+topic. Omit `--conversation` unless you also need to pin that topic. Do not
+send to `user-telegram` merely because the session has a claimed topic: an
+envelope from another conversation must use that envelope's exact
+`conversation_id` without `--to user-telegram`.
+
+Proactive Telegram pings that are not replies to a `user-telegram` envelope
+may use `--to user-telegram` without an envelope conversation ID.
+
+Write the reply to a private temporary file, then run the
 platform-appropriate launcher:
 
 ```sh
