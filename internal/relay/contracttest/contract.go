@@ -985,6 +985,8 @@ func sameRoleProfile(got, want relay.RoleProfile) bool {
 	return got.Role == want.Role && got.DisplayName == want.DisplayName && got.DirectAddressable == want.DirectAddressable && got.UpdatedAt.Equal(want.UpdatedAt)
 }
 
+// RunNamedOccupancy proves unnamed rooms stay many-to-many while a session
+// occupies at most one named conversation. telegram/primary is exempt.
 func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
 	t.Helper()
 	now := time.Date(2026, time.August, 16, 15, 0, 0, 0, time.UTC)

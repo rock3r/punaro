@@ -1416,7 +1416,7 @@ func postgresExclusiveConversationIDsForRole(tx *sql.Tx, role string, namesAvail
 	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text
 		FROM relay.mail_role_memberships AS membership
 		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
-		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable), role)
+		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable), role) // #nosec G202 -- exclusive predicate is a schema-presence allowlist; alias is a fixed identifier.
 	if err != nil {
 		return nil, errors.New("role occupancy conversations are unavailable")
 	}
@@ -2649,6 +2649,8 @@ func postgresTelegramClaimByConversationLocked(tx *sql.Tx, conversationID string
 	return claim, nil
 }
 
+// ReserveTelegramClaim is a singleton ensure: the first successful reserve
+// wins, and any later key returns that row without rewriting it.
 func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.TelegramClaim, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.MachineID) || !relay.ValidEndpoint(input.Endpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
 		return relay.TelegramClaim{}, false, relay.ErrForbidden
@@ -2730,6 +2732,8 @@ func postgresTelegramClaimHash(conversationID string) string {
 	return hex.EncodeToString(digest[:])
 }
 
+// CompleteTelegramClaim materializes telegram/primary and user-telegram after
+// a pending reservation. A completed row is an idempotent no-op.
 func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput) (relay.TelegramClaim, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.MachineID) {
 		return relay.TelegramClaim{}, false, relay.ErrForbidden
@@ -2802,6 +2806,7 @@ func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput)
 	return claim, false, nil
 }
 
+// PendingTelegramClaims is a gateway poll of pending reservations, not a lease.
 func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit int) ([]relay.TelegramClaim, error) {
 	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 {
 		return nil, relay.ErrForbidden
@@ -2848,6 +2853,8 @@ func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit 
 	return claims, nil
 }
 
+// UnclaimedNamedConversations returns the newest named rooms without a
+// completed claim. Last-message time is computed from messages.created_at.
 func (d *Database) UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]relay.UnclaimedTopic, error) {
 	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 {
 		return nil, relay.ErrForbidden
@@ -2895,6 +2902,7 @@ func (d *Database) UnclaimedNamedConversations(machineID string, now time.Time, 
 	return topics, nil
 }
 
+// SessionTopic returns the endpoint's sole named or claimed occupancy.
 func (d *Database) SessionTopic(machineID, endpoint string, now time.Time) (relay.SessionTopic, error) {
 	if !relay.ValidMachineID(machineID) || !relay.ValidEndpoint(endpoint) {
 		return relay.SessionTopic{}, relay.ErrForbidden
@@ -2932,7 +2940,7 @@ func (d *Database) SessionTopic(machineID, endpoint string, now time.Time) (rela
 				  AND live.ownership_generation = binding.ownership_generation
 				  AND live.lease_until > $2
 			)
-		  )`, endpoint, now.UTC())
+		  )`, endpoint, now.UTC()) // #nosec G202 -- exclusive predicate is a schema-presence allowlist; alias is a fixed identifier.
 	if err != nil {
 		return relay.SessionTopic{}, errors.New("session topic is unavailable")
 	}
@@ -2983,6 +2991,8 @@ func postgresEnsureTelegramGatewayMembership(tx *sql.Tx, conversationID string) 
 	return nil
 }
 
+// AppendTelegramInbound accepts gateway inbound mail. Metadata is stored but
+// excluded from the append hash so a later reply-map fill cannot conflict.
 func (d *Database) AppendTelegramInbound(input relay.TelegramInboundInput) (relay.Message, bool, error) {
 	if err := relay.ValidateTelegramInbound(input); err != nil {
 		return relay.Message{}, false, err

@@ -1424,7 +1424,7 @@ func (s *Store) SessionTopic(machineID, endpoint string, now time.Time) (Session
 				  AND live.ownership_generation = binding.ownership_generation
 				  AND live.lease_until > ?
 			)
-		  )`, endpoint, endpoint, now.UnixMilli(), now.UnixMilli())
+		  )`, endpoint, endpoint, now.UnixMilli(), now.UnixMilli()) // #nosec G202 -- exclusive predicate uses a fixed alias and table names.
 	if err != nil {
 		return SessionTopic{}, fmt.Errorf("read session topic: %w", err)
 	}
