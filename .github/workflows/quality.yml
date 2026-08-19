@@ -27,6 +27,9 @@ jobs:
       - uses: golangci/golangci-lint-action@db9de0fc1a667e1a49d2291a1a042dff081d78f6 # v9
         with:
           version: v2.11.1
+          # Do not fetch golangci-lint.run JSON schema; a timeout there fails the job
+          # after tests already passed. `golangci-lint run` remains the lint gate.
+          verify: false
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
       - run: CGO_ENABLED=0 go run github.com/securego/gosec/v2/cmd/gosec@v2.22.10 -exclude-generated ./...
       - run: go run github.com/zricethezav/gitleaks/v8@v8.27.2 detect --source . --no-git
