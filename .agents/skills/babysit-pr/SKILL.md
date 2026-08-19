@@ -122,9 +122,11 @@ into the same commit before pushing.
 1. **Do not push immediately.** Wait until no review bot is in progress.
 2. Snapshot latest status/comments.
 3. Rebase the branch onto the PR's actual base ref — resolve it with
-   `gh pr view <n> --json baseRefName`, then `git fetch origin <base>` and rebase onto
-   the updated `origin/<base>` remote-tracking ref (typically `origin/main`); never
-   assume `main`, and never rebase onto a stale local ref.
+   `gh pr view <n> --json baseRefName`, fetch that base from the repository the PR
+   *targets* before rebasing onto its updated remote-tracking ref (for a same-repo PR
+   that remote is `origin`; for a cross-repository PR resolve the base repo's remote
+   first — a fork's `origin/<base>` is the wrong history). Never assume `main`, and
+   never rebase onto a stale or wrong-remote local ref.
 4. Resolve conflicts and **in the same fix cycle** apply all actionable bot comments.
 5. Run the full Punaro gate.
 6. Push once.
@@ -165,8 +167,12 @@ comments like any other bot comments.
 
 See `references/heuristics.md` for the full classification checklist:
 
-- **Branch-related failure**: edit the code, collect all other pending issues (bot and
-  human reviews), fix everything, run the full Punaro gate, then push once.
+- **Branch-related failure**: first make sure you are editing the right checkout —
+  `HEAD` must match the watcher's reported `head_branch`/`head_sha`; when invoked with
+  an explicit PR number from `main` or an unrelated branch, check the PR branch out in
+  an isolated worktree before touching anything. Then edit the code, collect all other
+  pending issues (bot and human reviews), fix everything, run the full Punaro gate, and
+  push once.
 - **Likely flaky/unrelated**: rerun via `--retry-failed-now`; retry budget defaults to 3
   per SHA. Only retry-eligible workflows are auto-rerun; ordinary CI failures are
   diagnose/fix-first.
