@@ -528,6 +528,19 @@ func (s *Store) migrate(ctx context.Context) error {
 		"PRAGMA foreign_keys = ON",
 		"PRAGMA journal_mode = WAL",
 		"PRAGMA busy_timeout = 5000",
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("migrate relay database: %w", err)
+		}
+	}
+	// One WAL commit for schema install. Each CREATE/TRIGGER is otherwise its
+	// own fsync; parallel tests then serialize on disk and miss the race timeout.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("migrate relay database: %w", err)
+	}
+	defer rollback(tx)
+	for _, statement := range []string{
 		`CREATE TABLE IF NOT EXISTS endpoints (
 			endpoint TEXT PRIMARY KEY,
 			machine_id TEXT NOT NULL,
@@ -748,12 +761,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS role_bindings_session ON role_bindings(machine_id, session_endpoint, ownership_generation, lease_until)",
 		"CREATE INDEX IF NOT EXISTS request_nonces_expiry ON request_nonces(expires_at)",
 	} {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate relay database: %w", err)
 		}
 	}
 	if !migrationControlExisted {
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO relay_migration_control(singleton,source_id,changed_at) VALUES(1,?,?)`, uuid.NewString(), time.Now().UTC().UnixMilli()); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO relay_migration_control(singleton,source_id,changed_at) VALUES(1,?,?)`, uuid.NewString(), time.Now().UTC().UnixMilli()); err != nil {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
@@ -763,7 +776,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
 				WHEN COALESCE((SELECT phase FROM relay_migration_control WHERE singleton=1), 'missing') <> 'active'
 				BEGIN SELECT RAISE(ABORT, 'relay migration source is not writable'); END`, name, operation, table) // #nosec G201 -- identifiers come only from fixed internal allowlists.
-			if _, err := s.db.ExecContext(ctx, statement); err != nil { // #nosec G202 -- identifiers come only from fixed internal allowlists above.
+			if _, err := tx.ExecContext(ctx, statement); err != nil { // #nosec G202 -- identifiers come only from fixed internal allowlists above.
 				return fmt.Errorf("install relay migration guard: %w", err)
 			}
 		}
@@ -789,11 +802,17 @@ func (s *Store) migrate(ctx context.Context) error {
 		{"messages", "in_reply_to_endpoint", "TEXT"},
 		{"messages", "telegram_thread_id", "INTEGER"},
 	} {
-		if err := ensureSQLiteColumn(ctx, s.db, column.table, column.name, column.definition); err != nil {
+		if err := ensureSQLiteColumn(ctx, tx, column.table, column.name, column.definition); err != nil {
 			return err
 		}
 	}
-	return s.bootstrapPendingQuota(ctx)
+	if err := bootstrapPendingQuota(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("migrate relay database: %w", err)
+	}
+	return nil
 }
 
 // ApplyControl performs one explicit membership mutation after rechecking that
@@ -1605,7 +1624,12 @@ func controlEventByID(tx *sql.Tx, id string) (ControlEvent, error) {
 	return event, nil
 }
 
-func ensureSQLiteColumn(ctx context.Context, db *sql.DB, table, name, definition string) error {
+type sqliteExecQueryer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func ensureSQLiteColumn(ctx context.Context, db sqliteExecQueryer, table, name, definition string) error {
 	if table != "endpoints" && table != "deliveries" && table != "invocations" && table != "relay_migration_control" && table != "conversations" && table != "messages" {
 		return errors.New("invalid relay migration table")
 	}

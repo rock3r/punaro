@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -36,6 +37,45 @@ func TestAppendRequestHashPreservesBroadcastUpgradeCompatibility(t *testing.T) {
 	input.TargetRole = "role/reviewer"
 	if got := AppendRequestHash(input); got == legacy {
 		t.Fatal("targeted request did not bind its target role into idempotency")
+	}
+}
+
+func TestStoreParallelFreshOpensCompletePromptly(t *testing.T) {
+	t.Parallel()
+	const workers = 16
+	dir := t.TempDir()
+	started := make(chan struct{})
+	var startOnce sync.Once
+	errorsSeen := make(chan error, workers)
+	var done sync.WaitGroup
+	done.Add(workers)
+	for index := 0; index < workers; index++ {
+		go func(index int) {
+			defer done.Done()
+			<-started
+			store, err := Open(filepath.Join(dir, fmt.Sprintf("relay-%d.db", index)))
+			if err == nil {
+				err = store.Close()
+			}
+			errorsSeen <- err
+		}(index)
+	}
+	startOnce.Do(func() { close(started) })
+	finished := make(chan struct{})
+	go func() {
+		done.Wait()
+		close(errorsSeen)
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(15 * time.Second):
+		t.Fatal("parallel fresh Open still blocked after 15s")
+	}
+	for err := range errorsSeen {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
