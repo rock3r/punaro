@@ -682,22 +682,29 @@ func failOrRollback(ctx context.Context, request RunRequest, start func(context.
 	if err := removeReadyFile(request.Directory); err != nil {
 		return err
 	}
+	provenRolled := currentGenerationIsHealthy(request.Directory, rolled)
 	child, err := startAdapter(ctx, request, start, adapter)
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // SIGINT/SIGTERM before the rolled child starts is a clean supervisor stop
+		}
+		if provenRolled {
+			return errChildExited
 		}
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
 			return recErr
 		}
 		return ErrRecoveryOnly
 	}
-	if err := waitHealth(ctx, request, child, rolled, rolled.Generation >= 1); err != nil {
+	if err := waitHealth(ctx, request, child, rolled, rolled.Generation >= 1 && !provenRolled); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, rolled)
 		}
 		_ = stopChild(child)
 		if errors.Is(err, errSlotChanged) {
+			return err
+		}
+		if provenRolled {
 			return err
 		}
 		if recErr := enterRecoveryOnly(request.Directory, recoveryPreviousFailed, rolled); recErr != nil {
