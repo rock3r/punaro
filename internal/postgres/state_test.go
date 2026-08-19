@@ -69,8 +69,8 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 55 || len(manifest.Migrations) != 55 {
-		t.Fatalf("manifest=%#v, want exact v55 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 57 || len(manifest.Migrations) != 57 {
+		t.Fatalf("manifest=%#v, want exact v57 compatibility window", manifest)
 	}
 	embedding := manifest.Migrations[23]
 	if embedding.Version != 24 || embedding.Name != "024_memory_embedding_worker_control" ||
@@ -88,7 +88,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55:
+		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
@@ -246,7 +246,13 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 54}, manifest) {
 		t.Fatal("compatible v54 schema must still apply the pending v55 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 55}, manifest) {
-		t.Fatal("current v55 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 55}, manifest) {
+		t.Fatal("compatible v55 schema must still apply the pending v56 migration")
+	}
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 56}, manifest) {
+		t.Fatal("compatible v56 schema must still apply the pending v57 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 57}, manifest) {
+		t.Fatal("current v57 schema reported a pending migration")
 	}
 }

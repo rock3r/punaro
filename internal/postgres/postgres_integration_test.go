@@ -1590,6 +1590,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	contracttest.RunDirectMessages(t, app, "postgres-direct")
 	contracttest.RunNamedOccupancy(t, app, "postgres-occupancy")
 	testPostgresTelegramClaimReserveOccupancy(t, app)
+	testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t, app)
 	testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
@@ -1658,6 +1659,67 @@ func testPostgresTelegramClaimReserveOccupancy(t *testing.T, app *Database) {
 	})
 	if err != nil || !duplicate || replay.ConversationID != namedA.ID {
 		t.Fatalf("postgres same-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+}
+
+func testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 17, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-ensure-a"
+		machineB        = "postgres-claim-ensure-b"
+		machineTelegram = "postgres-claim-ensure-telegram"
+		endpointA       = "agent/postgres-claim-ensure/a"
+		endpointB       = "agent/postgres-claim-ensure/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-ensure-first", CreatorEndpoint: endpointA,
+		DisplayName: "Ensure first", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-ensure-second", CreatorEndpoint: endpointB,
+		DisplayName: "Ensure second", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineA, Endpoint: endpointA,
+		IdempotencyKey: "postgres-agent-claim", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("postgres first reserve duplicate=%t err=%v", duplicate, err)
+	}
+	ensure, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(time.Second),
+	})
+	if err != nil || !duplicate || ensure.ConversationID != firstRoom.ID {
+		t.Fatalf("postgres ensure existing=%#v duplicate=%t err=%v", ensure, duplicate, err)
+	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: secondRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(2 * time.Second),
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres ensure key reused on another conversation err=%v", err)
+	}
+	replay, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "postgres-ensure-key", Now: now.Add(3 * time.Second),
+	})
+	if err != nil || !duplicate || replay.ConversationID != firstRoom.ID {
+		t.Fatalf("postgres ensure-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
 	}
 }
 

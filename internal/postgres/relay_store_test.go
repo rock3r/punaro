@@ -160,9 +160,9 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 	src := string(body)
 	for _, want := range []string{
 		"to_regclass('relay.mail_conversation_display_name_idempotency') AS display_name_idempotency_oid",
-		"CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END",
-		"CASE WHEN $1 >= 53 THEN 4 WHEN $1 >= 51 THEN 3 ELSE 2 END",
-		"count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 53 THEN 39 WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END",
+		"CASE WHEN $1 >= 56 THEN 17 WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END",
+		"CASE WHEN $1 >= 56 THEN 5 WHEN $1 >= 53 THEN 4 WHEN $1 >= 51 THEN 3 ELSE 2 END",
+		"count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 56 THEN 41 WHEN $1 >= 53 THEN 39 WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END",
 		"(display_name_idempotency_oid, 'mail_conversation_display_name_idempotency_mutation_guard')",
 		"$1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid",
 		"$1 < 53 OR display_name_idempotency_oid IS NOT NULL",
@@ -171,6 +171,25 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("relay inspect SQL missing display-name idempotency check: %s", want)
+		}
+	}
+}
+
+func TestRelayInspectSQLIncludesTelegramClaimIdempotencyAfter56(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	for _, want := range []string{
+		"to_regclass('relay.mail_telegram_claim_idempotency') AS claim_idempotency_oid",
+		"(claim_idempotency_oid, 'mail_telegram_claim_idempotency_mutation_guard')",
+		"$1 >= 56 OR expected.table_oid IS DISTINCT FROM claim_idempotency_oid",
+		"$1 < 56 OR claim_idempotency_oid IS NOT NULL",
+		"$1 < 56 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=claim_idempotency_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))')",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("relay inspect SQL missing telegram claim idempotency check: %s", want)
 		}
 	}
 }

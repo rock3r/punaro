@@ -16,7 +16,7 @@ import (
 
 var mailCutoverTables = []string{
 	"mail_endpoints", "mail_conversations",
-	"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events",
+	"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events", "mail_telegram_claim_idempotency",
 	"mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency",
 	"mail_conversation_display_name_idempotency", "mail_request_nonces",
@@ -333,7 +333,7 @@ func canonicalizeStagedPayload(payload []byte) ([]byte, error) {
 }
 
 func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table string) (int64, string) {
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency")) {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || (manifest.Version <= 2 && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) || (manifest.Version < 7 && (table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events" || table == "mail_conversation_display_name_idempotency")) || (manifest.Version < 8 && table == "mail_telegram_claim_idempotency") {
 		return 0, emptyMailCutoverDigest
 	}
 	switch table {
@@ -433,6 +433,12 @@ func mailCutoverTableEvidence(manifest relay.MigrationSourceManifest, table stri
 			digest = emptyMailCutoverDigest
 		}
 		return manifest.Counts.DisplayNameIdempotency, digest
+	case "mail_telegram_claim_idempotency":
+		digest := manifest.TableSHA256.TelegramClaimIdempotency
+		if digest == "" && manifest.Counts.TelegramClaimIdempotency == 0 {
+			digest = emptyMailCutoverDigest
+		}
+		return manifest.Counts.TelegramClaimIdempotency, digest
 	default:
 		return -1, ""
 	}
@@ -490,6 +496,9 @@ var mailCutoverMaterializationStatements = []string{
 	`INSERT INTO relay.mail_conversation_display_name_idempotency(machine_id,key,request_hash,conversation_id,created_at)
 	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'conversation_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_display_name_idempotency' ORDER BY row_key COLLATE "C"`,
+	`INSERT INTO relay.mail_telegram_claim_idempotency(machine_id,key,request_hash,conversation_id,created_at)
+	 SELECT payload->>'machine_id',payload->>'key',payload->>'request_hash',(payload->>'conversation_id')::uuid,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
+	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_telegram_claim_idempotency' ORDER BY row_key COLLATE "C"`,
 	`INSERT INTO relay.mail_conversation_controls(id,conversation_id,actor_endpoint,operation,member_endpoint,member_capabilities,created_at)
 	 SELECT (payload->>'id')::uuid,(payload->>'conversation_id')::uuid,payload->>'actor_endpoint',payload->>'operation',payload->>'member_endpoint',(payload->>'member_capabilities')::smallint,TIMESTAMPTZ 'epoch'+(payload->>'created_at')::bigint*INTERVAL '1 millisecond'
 	 FROM relay.mail_cutover_staging WHERE epoch_id=$1 AND table_name='mail_conversation_controls' ORDER BY row_key COLLATE "C"`,

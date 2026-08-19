@@ -64,7 +64,7 @@ func TestMigrationSourceManifestAndBarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || first.Version != 7 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
+	if first != second || first.Version != 8 || first.SourceID == "" || first.Phase != MigrationSourceActive || first.Fingerprint == "" {
 		t.Fatalf("unstable manifest first=%#v second=%#v", first, second)
 	}
 	if first.Counts.Endpoints != 2 || first.Counts.Conversations != 1 || first.Counts.Roles != 1 || first.Counts.RoleMemberships != 1 || first.Counts.RoleBindings != 1 || first.Counts.Messages != 1 || first.Counts.Deliveries != 1 || first.Counts.MessageIdempotency != 1 || first.Counts.ConversationIdempotency != 1 || first.Counts.RateBuckets != 2 {
@@ -1088,7 +1088,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 7 || inspected.Counts.RateBuckets != 2 {
+	if err != nil || inspected.Version != 8 || inspected.Counts.RateBuckets != 2 {
 		t.Fatalf("current inspect=%#v err=%v", inspected, err)
 	}
 	hasher, err := NewMigrationTableHasher("mail_rate_buckets")
@@ -1096,7 +1096,7 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 		t.Fatal(err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("d", 64), inspected.Fingerprint, now.Add(time.Minute))
-	if err != nil || prepared.Version != 7 {
+	if err != nil || prepared.Version != 8 {
 		t.Fatalf("current prepare=%#v err=%v", prepared, err)
 	}
 	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_rate_buckets", "", 10)
@@ -1134,14 +1134,14 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
 	}
 	inspected, err := InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 7 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 {
+	if err != nil || inspected.Version != 8 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 || inspected.Counts.TelegramClaimIdempotency != 1 {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
-	if err != nil || prepared.Version != 7 || prepared.Counts.TelegramClaims != 1 {
+	if err != nil || prepared.Version != 8 || prepared.Counts.TelegramClaims != 1 || prepared.Counts.TelegramClaimIdempotency != 1 {
 		t.Fatalf("prepare=%#v err=%v", prepared, err)
 	}
-	for _, table := range []string{"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events"} {
+	for _, table := range []string{"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events", "mail_telegram_claim_idempotency"} {
 		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
 		if err != nil || len(batch.Rows) != 1 || !batch.Done {
 			t.Fatalf("table=%s batch=%#v err=%v", table, batch, err)
@@ -1163,6 +1163,8 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 			expectedCount, expectedDigest = prepared.Counts.TelegramParticipants, prepared.TableSHA256.TelegramParticipants
 		case "mail_telegram_claim_events":
 			expectedCount, expectedDigest = prepared.Counts.TelegramClaimEvents, prepared.TableSHA256.TelegramClaimEvents
+		case "mail_telegram_claim_idempotency":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaimIdempotency, prepared.TableSHA256.TelegramClaimIdempotency
 		}
 		if count != expectedCount || digest != expectedDigest {
 			t.Fatalf("table=%s evidence count=%d digest=%s want count=%d digest=%s", table, count, digest, expectedCount, expectedDigest)
@@ -1294,6 +1296,7 @@ func stripV7OnlyMigrationSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
 	for _, statement := range []string{
+		`DROP TABLE IF EXISTS telegram_claim_idempotency`,
 		`DROP TABLE IF EXISTS telegram_claim_events`,
 		`DROP TABLE IF EXISTS telegram_participants`,
 		`DROP TABLE IF EXISTS telegram_claims`,

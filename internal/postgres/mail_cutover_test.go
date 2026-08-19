@@ -181,7 +181,7 @@ func TestMailCutoverRequestAcceptsPreparedCurrentSQLiteSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	inspected, err := relay.InspectMigrationSource(ctx, path)
-	if err != nil || inspected.Version != 7 {
+	if err != nil || inspected.Version != 8 {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	epochID := "019f7f07-4b88-7c12-a394-b663274a6555"

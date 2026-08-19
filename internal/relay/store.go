@@ -746,6 +746,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			actor_endpoint TEXT NOT NULL,
 			created_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS telegram_claim_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS relay_migration_control (
 			singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
 			source_id TEXT NOT NULL,
@@ -769,6 +777,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS role_bindings_session ON role_bindings(machine_id, session_endpoint, ownership_generation, lease_until)",
 		"CREATE INDEX IF NOT EXISTS request_nonces_expiry ON request_nonces(expires_at)",
 		"CREATE UNIQUE INDEX IF NOT EXISTS telegram_claims_machine_key ON telegram_claims(requested_by_machine, idempotency_key)",
+		`INSERT OR IGNORE INTO telegram_claim_idempotency(machine_id, key, request_hash, conversation_id, created_at)
+			SELECT requested_by_machine, idempotency_key, request_hash, conversation_id, created_at FROM telegram_claims`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate relay database: %w", err)
@@ -779,7 +789,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "conversation_display_name_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "delivery_terminals", "direct_conversations", "message_from_roles", "direct_message_idempotency", "telegram_claims", "telegram_participants", "telegram_claim_events"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "conversation_display_name_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "delivery_terminals", "direct_conversations", "message_from_roles", "direct_message_idempotency", "telegram_claims", "telegram_participants", "telegram_claim_events", "telegram_claim_idempotency"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -1255,13 +1265,12 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 		}
 	}
 	requestHash := telegramClaimRequestHash(input.ConversationID)
-	var boundConversation, boundHash string
-	err = tx.QueryRowContext(context.Background(), "SELECT conversation_id, request_hash FROM telegram_claims WHERE requested_by_machine = ? AND idempotency_key = ?", input.MachineID, input.IdempotencyKey).Scan(&boundConversation, &boundHash)
+	bound, err := lookupTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey)
 	if err == nil {
-		if boundHash != requestHash {
+		if bound.hash != requestHash {
 			return TelegramClaim{}, false, ErrConflict
 		}
-		claim, err := telegramClaimByConversation(tx, boundConversation)
+		claim, err := telegramClaimByConversation(tx, bound.conversationID)
 		if err != nil {
 			return TelegramClaim{}, false, err
 		}
@@ -1271,13 +1280,16 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 		return claim, true, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return TelegramClaim{}, false, fmt.Errorf("read telegram claim idempotency key: %w", err)
+		return TelegramClaim{}, false, err
 	}
 	var existing string
 	err = tx.QueryRowContext(context.Background(), "SELECT conversation_id FROM telegram_claims WHERE conversation_id = ?", input.ConversationID).Scan(&existing)
 	if err == nil {
 		claim, err := telegramClaimByConversation(tx, input.ConversationID)
 		if err != nil {
+			return TelegramClaim{}, false, err
+		}
+		if err := bindTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey, input.ConversationID, requestHash, input.Now); err != nil {
 			return TelegramClaim{}, false, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -1296,10 +1308,47 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 		VALUES (?, 'pending', ?, ?, ?, ?, ?)`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, requestHash, createdAt.UnixMilli()); err != nil {
 		return TelegramClaim{}, false, fmt.Errorf("reserve telegram claim: %w", err)
 	}
+	if err := bindTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey, input.ConversationID, requestHash, input.Now); err != nil {
+		return TelegramClaim{}, false, err
+	}
 	if err := tx.Commit(); err != nil {
 		return TelegramClaim{}, false, err
 	}
 	return TelegramClaim{ConversationID: input.ConversationID, Status: "pending", DisplayName: conversation.DisplayName, CreatedAt: createdAt}, false, nil
+}
+
+type telegramClaimIdempotencyRow struct {
+	conversationID string
+	hash           string
+}
+
+func lookupTelegramClaimIdempotency(tx *sql.Tx, machineID, key string) (telegramClaimIdempotencyRow, error) {
+	var row telegramClaimIdempotencyRow
+	err := tx.QueryRowContext(context.Background(), `SELECT conversation_id, request_hash FROM telegram_claim_idempotency WHERE machine_id = ? AND key = ?`, machineID, key).Scan(&row.conversationID, &row.hash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return telegramClaimIdempotencyRow{}, err
+		}
+		return telegramClaimIdempotencyRow{}, fmt.Errorf("read telegram claim idempotency key: %w", err)
+	}
+	return row, nil
+}
+
+func bindTelegramClaimIdempotency(tx *sql.Tx, machineID, key, conversationID, requestHash string, now time.Time) error {
+	bound, err := lookupTelegramClaimIdempotency(tx, machineID, key)
+	if err == nil {
+		if bound.conversationID != conversationID || bound.hash != requestHash {
+			return ErrConflict
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO telegram_claim_idempotency(machine_id, key, request_hash, conversation_id, created_at) VALUES (?, ?, ?, ?, ?)`, machineID, key, requestHash, conversationID, now.UTC().UnixMilli()); err != nil {
+		return fmt.Errorf("bind telegram claim idempotency key: %w", err)
+	}
+	return nil
 }
 
 // CompleteTelegramClaim materializes telegram/primary and user-telegram after

@@ -1003,9 +1003,10 @@ the same 64-rune button label. One `SyncOnce` starts at most ten new pending
 claims, retries at most ten incomplete local executions, and revalidates at
 most ten completed routes so Bot API retries cannot starve inbound and
 outbound mail; durable cursors continue later rows on the next cycle.
-A machine's Telegram claim idempotency key maps to one conversation. A claim `Idempotency-Key` is unique per requesting machine
-and bound to the original conversation hash: exact replay returns that claim,
-and reuse on another conversation fails closed.
+A machine's Telegram claim idempotency key maps to one conversation. Every
+successful reserve or ensure records `(machine, key)` in
+`telegram_claim_idempotency` bound to that conversation hash: exact replay
+returns the existing claim, and reuse on another conversation fails closed.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
