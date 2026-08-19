@@ -538,6 +538,27 @@ or `punaro-adapter member remove --conversation ... --actor ... --member
 endpoint --idempotency-key ...`. These paths call the typed control endpoint;
 they never interpret local or delivered text as a command.
 
+Optional conversation display names are sanitized UTF-8 labels, not routing
+authority. Create may leave a room unnamed. `POST
+/v1/conversations/{id}/display-name` requires a live admin session and an
+`Idempotency-Key`; repeating the same sanitized label is a no-op. Once a room
+has a name it cannot be unnamed again. The adapter surfaces this as
+`punaro-adapter create --name ...` and `punaro-adapter rename --conversation
+... --actor ... --name ... --idempotency-key ...`.
+
+An agent session may occupy at most one conversation that is named or claimed.
+Occupancy is a direct membership or a live role binding to a role member of
+such a room. Joining a second named or claimed room is a conflict. Several
+sessions may share one topic. Unnamed, unclaimed rooms stay many-to-many.
+Exactly `telegram/primary` is exempt so the gateway can occupy every claimed
+topic. The fence is enforced on create, control upsert, role membership,
+bind-role, the first rename that assigns a name, and Telegram claim reserve.
+PostgreSQL serializes that first rename and claim reserve with
+`BindRoleToSession` using conversation then endpoint row locks, including
+still-unnamed rooms the role already occupies, so an uncommitted bind cannot
+hide a second exclusive occupancy. Memberships stay
+keyed by `(conversation, endpoint)` and are not unique on endpoint.
+
 `ack` is idempotent. It is conditional on the current recipient, lease token,
 and lease generation. Acks from the wrong machine, stale lease holders, expired
 credentials, or a machine no longer owning the endpoint are rejected. The relay
@@ -904,13 +925,14 @@ API client and reaches the relay using its own enrolled machine credential.
 | Method | Route | Purpose |
 | --- | --- | --- |
 | `PUT` | `/v1/machines/me/endpoints` | Atomically advertise active local attachments. |
-| `POST` | `/v1/conversations` | Create a conversation with explicit members; idempotent per signed machine and key. |
+| `POST` | `/v1/conversations` | Create a conversation with explicit members and an optional display name; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/register` | Register or update one machine-owned canonical role profile; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/list` | Bounded listing of opted-in addressable roles; no session inventory. |
 | `POST` | `/v1/roles/resolve` | Deterministic name resolution; short names are unambiguous or typed-ambiguous. |
 | `POST` | `/v1/direct-messages` | Create or reuse the unique direct-role conversation and send; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
-| `GET` | `/v1/conversations` | List conversations the caller may discover. |
+| `GET` | `/v1/conversations` | List conversations the caller may discover, including optional display names. |
+| `POST` | `/v1/conversations/{id}/display-name` | Set a conversation display name from a live admin session; idempotent per signed machine and key bound to the original conversation, actor, and label. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity ceilings; committed idempotent retries do not consume tokens or reserve capacity again. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
@@ -926,23 +948,119 @@ cover client retry windows.
 
 ## Telegram integration
 
+A Punaro conversation is the topic. `user-telegram` is a conversation-scoped
+built-in participant, not a durable `roles` row: creating or member-setting
+that label is rejected. `POST /v1/conversations/{id}/telegram-claim` is a
+singleton reservation (`request_hash` is SHA-256 of the conversation id).
+Only a live `telegram/primary` advertisement may complete a claim, list
+unclaimed named rooms, poll pending reservations, or submit
+`telegram-inbound`. Complete inserts `telegram/primary` with send|receive
+and materializes `user-telegram`. Targeted send `target_role=user-telegram`
+requires a completed claim and creates one delivery to `telegram/primary`.
+SQLite-to-PostgreSQL mail cutover exports `telegram_claims`,
+`telegram_participants`, `telegram_claim_events`, and inbound `messages`
+metadata (`from_participant`, `in_reply_to_*`, `telegram_thread_id`) so a
+claimed installation keeps reservation authority and reply context.
+
 The Telegram gateway converts one explicitly configured topic into one Punaro
 conversation. It verifies the configured allowed Telegram user ID on every
-update. It persists `update_id` only after the relay append succeeds; retrying
-an unrecorded update uses the same relay idempotency key, so crashes or
-transient relay failures do not silently lose user input.
+update, including `callback_query`. It persists `update_id` only after the
+relay append succeeds (or after an inert command/callback is finalized);
+retrying an unrecorded update uses the same relay idempotency key, so crashes
+or transient relay failures do not silently lose user input.
+
+Operator `/list` is a private-chat topic picker: the gateway polls
+`callback_query` and sends display-name buttons whose `callback_data` is a raw
+256-bit token. Only SHA-256(token) is stored, with a 15-minute TTL and a cap
+of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
+tap persists `claim_executions` reserved, then consumes the token in the same
+SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
+gateway persists a `creating` fence under the same SQLite `BEGIN IMMEDIATE`
+write lock as `route`, rechecking `topic_routes` and adopting a concurrent
+emergency route instead of creating a second topic, then calls
+`createForumTopic` only when no route exists,
+persists `message_thread_id` and the creation `chat_id` immediately, and
+never calls `getForumTopic`. Resume of `topic_created` binds that stored
+pair; a changed allowed user fails closed instead of attaching the old
+thread to a new chat. A crash after Bot API success and before the thread
+id is stored keeps the fence, so resume does not create a second
+user-visible topic. An emergency `route` of a known thread is the supported
+recovery: unthreaded `creating` may be remapped, and resume binds that route
+without calling `createForumTopic`. A thread already bound to `creating`
+still cannot be stolen. An ambiguous
+createForumTopic error (timeout, lost response, or decode failure) also
+keeps the fence instead of retrying create. A completed 4xx Bot API
+rejection, including HTTP 429, returns the row to reserved so resume can
+retry createForumTopic; the topic was not created. Agent-side pending reservations
+are polled with `POST /v1/telegram/claims/pending`; those rows skip a second
+reserve. A locally reserved execution whose relay claim is already complete
+continues only when this gateway already has a recoverable topic route for
+the configured chat; otherwise it fails closed and requires
+`punaro-telegram adopt` instead of creating a second topic. Reusing a stored
+route requires its `chat_id` to match the configured allowed user.
+`punaro-telegram adopt` writes the local `claim_executions` fence from
+`topic_routes` under one SQLite `BEGIN IMMEDIATE` as `adopting` before the
+remote reserve, so an emergency `route` remap cannot leave a pending relay
+claim without a protected local route. A crash after that fence and before
+`ClaimConversation` resumes through the adopt reservation instead of
+`CompleteTelegramClaim`. `route` refuses a conversation that is adopting, topic-created, routed, or
+complete, or a `(chat,thread)` already bound to a `creating` or later claim.
+Unthreaded `creating` may be bound to a known thread. Main-chat
+ordinary text stays unbound. There is no main-chat fallback. Gateway startup
+and `SendDelivery` fail closed when a completed route's `chat_id` is not the
+configured allowed user. `/list` fails closed when two unclaimed rooms share
+the same 64-rune button label: it sends a generic operator error, consumes
+the update, and does not stall later Telegram polling or outbound leasing. One `SyncOnce` starts at most ten new pending
+claims, retries at most ten incomplete local executions, and revalidates at
+most ten completed routes so Bot API retries cannot starve inbound and
+outbound mail; durable cursors continue later rows on the next cycle.
+A machine's Telegram claim idempotency key maps to one conversation. Every
+successful reserve or ensure records `(machine, key)` in
+`telegram_claim_idempotency` bound to that conversation hash: exact replay
+returns the existing claim, and reuse on another conversation fails closed.
+PostgreSQL serializes reserve/ensure by `(machine, key)` with
+`pg_advisory_xact_lock` before the mapping lookup. Claim and mapping
+inserts use untargeted `ON CONFLICT DO NOTHING` and then read the winning
+row, so a racing unique `(requested_by_machine, idempotency_key)` cannot
+abort the transaction. Opening a pre-v8 SQLite database that already stored
+the same machine key on two conversations never deletes a complete claim:
+extra completes are rekeyed to a collision-free `legacy-dup-` token, extra
+pending rows are dropped, then the unique index is created so inspect/migrate
+can start.
+
+Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
+with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
+from each successful `sendRichMessage` `message_id`, resolves `reply_to_message`
+into inert `in_reply_to_*` metadata. A map miss delivers the text without that
+metadata.
 
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
-conversation from fanning out to multiple topics. There is no topic picker,
-callback data, or main-chat fallback. The Bot API does not expose a send
-idempotency key, so a crash after an accepted Telegram send and before relay
-acknowledgement is deliberately at-least-once. Agent text is rendered as
-escaped rich HTML with entity detection disabled and content protection set.
+conversation from fanning out to multiple topics. `SendDelivery` stays
+route-based (`topic_routes` only) and refuses a `chat_id` other than the
+configured allowed user. A missing or foreign route fails closed and leaves
+the delivery unacked. Requiring a
+completed claim on that path is a post-adopt soak follow-up. The Bot API does
+not expose a send idempotency key, so a crash after an accepted Telegram send
+and before relay acknowledgement is deliberately at-least-once. Agent text is
+rendered as escaped rich HTML with entity detection disabled and content
+protection set.
 
-An optional major-update adapter action resolves the registered
-conversation/topic and submits a concise milestone or blocker message. It must
-fail closed if there is no explicit thread route.
+Product pings and replies to the human use `punaro-adapter send --to
+user-telegram`. The adapter resolves the session's sole claimed topic and
+sets `target_role=user-telegram`. Pending quota for that send charges
+`telegram/primary` only when the sender is not the gateway; a gateway
+self-send creates no delivery and must not leave an un-ackable quota charge.
+Agents never pass a Telegram thread or chat id.
+`telegram-major-updates` / `send_major_update.py` is not a production
+sender.
+
+Adopt of the two live routes is fence-legal only in this order: rename the
+keeper while the non-keeper is still unnamed; run `punaro-relay-adopt-prepare
+--drop-role role/telegram-codex --yes` on the non-keeper; then
+`punaro-telegram adopt` on `dae86ecc-05ff-4431-967a-584e2cd82916` (thread
+795446) and `e5c269b6-7e4c-450d-82bb-c25209096c10` (thread 795625). Adopt
+never calls `createForumTopic`.
 
 ## Local adapter boundary
 
@@ -952,8 +1070,12 @@ CLI/MCP integration and no remote actor may invoke the CLI directly. It:
 1. Watches or periodically reads the locally configured attachment group.
 2. Advertises only currently attached sessions to Punaro with a renewable lease.
 3. Converts inbound Punaro messages to local mailbox messages, preserving
-   `punaro_message_id`, conversation ID, and Telegram thread metadata.
-4. Watches local replies and major-update events, then submits them to Punaro.
+   `punaro_message_id`, conversation ID, `from_participant`, `in_reply_to_*`,
+   and `telegram_thread_id`. When `from_participant` is `user-telegram`, the
+   envelope `from_endpoint` is rewritten to `user-telegram`. Agents cannot set
+   those metadata fields on `POST /v1/conversations/{id}/messages`.
+4. Watches local replies and submits them to Punaro. Pings use
+   `punaro-adapter send --to user-telegram`, not a Bot API side channel.
 5. Keeps a local encrypted-or-permission-restricted SQLite journal of received
    message UUIDs and pending acknowledgements.
 

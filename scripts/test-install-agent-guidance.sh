@@ -34,10 +34,19 @@ sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$project"
 for file in "$project/AGENTS.md" "$project/CLAUDE.md"; do
 	grep -Fqx '<!-- punaro-agent-guidance:start -->' "$file"
 	[ "$(grep -Fc '<!-- punaro-agent-guidance:start -->' "$file")" -eq 1 ] || { printf '%s\n' 'guidance was duplicated' >&2; exit 1; }
+	grep -Fq -- '--to user-telegram' "$file" || { printf '%s\n' 'installed guidance omitted --to user-telegram' >&2; exit 1; }
+	grep -Fq 'typed envelope conversation ID' "$file" && { printf '%s\n' 'installed guidance still teaches envelope conversation send' >&2; exit 1; }
+	grep -Fq 'or the session has a claimed topic' "$file" && { printf '%s\n' 'installed guidance still routes claimed-topic sessions to user-telegram' >&2; exit 1; }
+	grep -Fq 'envelope is from `user-telegram`' "$file" || { printf '%s\n' 'installed guidance omitted telegram-origin restriction' >&2; exit 1; }
+	grep -Fq 'Proactive Telegram pings' "$file" || { printf '%s\n' 'installed guidance omitted proactive Telegram pings' >&2; exit 1; }
 done
 [ -f "$project/.agents/skills/punaro-mailbox/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-reply/SKILL.md" ]
 [ -f "$project/.agents/skills/punaro-attachment/SKILL.md" ]
+grep -Fq -- '--to user-telegram' "$project/.agents/skills/punaro-reply/SKILL.md" || { printf '%s\n' 'copied punaro-reply omitted --to user-telegram' >&2; exit 1; }
+grep -Fq -- '--thread-id' "$project/.agents/skills/punaro-reply/SKILL.md" && { printf '%s\n' 'copied punaro-reply still teaches --thread-id' >&2; exit 1; }
+grep -Eq 'telegram-major-updates|send_major_update' "$project/.agents/skills/punaro-reply/SKILL.md" || { printf '%s\n' 'copied punaro-reply omitted side-channel retirement' >&2; exit 1; }
+grep -Fq -- '--to user-telegram' "$project/.agents/skills/punaro-mailbox/SKILL.md" || { printf '%s\n' 'copied punaro-mailbox omitted --to user-telegram' >&2; exit 1; }
 
 for skill in punaro-mailbox punaro-reply punaro-attachment; do
 	diff -qr "$repo_dir/skills/$skill" "$project/.agents/skills/$skill" >/dev/null || {
@@ -64,6 +73,9 @@ for installer in "$repo_dir/scripts/install-agent-guidance.sh" "$repo_dir/script
 	require_phrase "$installer" 'successful send proves relay acceptance only'
 	require_phrase "$installer" 'does not itself create a model turn'
 	require_phrase "$installer" 'Tool permission and consent belong to the receiving agent host'
+	require_phrase "$installer" 'envelope is from `user-telegram`'
+	require_phrase "$installer" 'Proactive Telegram pings'
+	require_phrase "$installer" 'predates telegram-origin-only send'
 done
 
 linked_project="$fixture_dir/linked-project"
@@ -78,6 +90,55 @@ set -e
 [ "$status" -eq 2 ] || { printf '%s\n' 'symlinked guidance target was accepted' >&2; exit 1; }
 [ ! -s "$outside" ] || { printf '%s\n' 'guidance escaped the selected project' >&2; exit 1; }
 grep -Fq 'guidance target is not a regular file:' "$fixture_dir/linked.out"
+
+stale_send_project="$fixture_dir/stale-send-project"
+mkdir -p "$stale_send_project"
+cat >"$stale_send_project/AGENTS.md" <<'EOF'
+<!-- punaro-agent-guidance:start -->
+## Punaro coordination
+
+Reply only with `punaro-adapter send` using the typed envelope conversation ID and a stable idempotency key.
+For attachments, use the `punaro-attachment` skill and installed `punaro-trusted-attachment` client only for one explicit task-owner-authorized operation.
+<!-- punaro-agent-guidance:end -->
+EOF
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$stale_send_project" >"$fixture_dir/stale-send.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'stale conversation-id send guidance was silently retained' >&2; exit 1; }
+grep -Fq 'existing Punaro guidance predates user-telegram send:' "$fixture_dir/stale-send.out"
+grep -Fq 'typed envelope conversation ID' "$stale_send_project/AGENTS.md"
+grep -Fq -- '--to user-telegram' "$stale_send_project/AGENTS.md" && { printf '%s\n' 'stale guidance was rewritten in place' >&2; exit 1; }
+
+stale_claimed_project="$fixture_dir/stale-claimed-project"
+mkdir -p "$stale_claimed_project"
+cat >"$stale_claimed_project/AGENTS.md" <<'EOF'
+<!-- punaro-agent-guidance:start -->
+## Punaro coordination
+
+Reply only with `punaro-adapter send --to user-telegram` when the envelope is from `user-telegram` or the session has a claimed topic, using a stable idempotency key. A successful send proves relay acceptance only (`accepted/queued`).
+For attachments, use the `punaro-attachment` skill and installed `punaro-trusted-attachment` client only for one explicit task-owner-authorized operation.
+<!-- punaro-agent-guidance:end -->
+EOF
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$stale_claimed_project" >"$fixture_dir/stale-claimed.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'claimed-topic send guidance was silently retained' >&2; exit 1; }
+grep -Fq 'existing Punaro guidance predates telegram-origin-only send:' "$fixture_dir/stale-claimed.out"
+grep -Fq 'or the session has a claimed topic' "$stale_claimed_project/AGENTS.md"
+grep -Fq 'envelope is from `user-telegram`,' "$stale_claimed_project/AGENTS.md" && { printf '%s\n' 'claimed-topic guidance was rewritten in place' >&2; exit 1; }
+
+stale_reply_project="$fixture_dir/stale-reply-project"
+mkdir -p "$stale_reply_project/.agents/skills/punaro-reply"
+printf '%s\n' '# Reply with punaro-adapter send --conversation CONVERSATION_ID' >"$stale_reply_project/.agents/skills/punaro-reply/SKILL.md"
+set +e
+sh "$repo_dir/scripts/install-agent-guidance.sh" --directory "$stale_reply_project" >"$fixture_dir/stale-reply.out" 2>&1
+status=$?
+set -e
+[ "$status" -eq 2 ] || { printf '%s\n' 'stale punaro-reply skill was overwritten or ignored' >&2; exit 1; }
+grep -Fq 'existing punaro-reply skill predates user-telegram send at' "$fixture_dir/stale-reply.out"
+grep -Fq -- '--conversation CONVERSATION_ID' "$stale_reply_project/.agents/skills/punaro-reply/SKILL.md"
 
 legacy_project="$fixture_dir/legacy-project"
 mkdir -p "$legacy_project/.agents/skills/punaro-attachment"

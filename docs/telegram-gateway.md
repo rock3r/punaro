@@ -2,8 +2,10 @@
 
 `punaro-telegram` is a separately enrolled bridge between one Telegram bot and
 the central Punaro relay. It deliberately does not access an agent-mailbox
-database. It uses a single explicitly configured gateway endpoint, so each
-Telegram topic maps to exactly one Punaro conversation.
+database. A Punaro conversation **is** the topic: claiming it creates one
+private-chat forum topic, persists one `topic_routes` row, and materializes the
+built-in participant `user-telegram`. Agents send to that label. They never
+choose a Telegram thread.
 
 This is alpha text-relay functionality. Run it only behind the same protected
 loopback relay and origin controls described in [the operator guide](operator-guide.md).
@@ -70,26 +72,182 @@ webhook is configured. Punaro never removes or changes a webhook automatically:
 an operator must intentionally migrate the bot or use a bot dedicated to this
 gateway.
 
-Run `punaro-telegram` with no arguments. The process long-polls only `message`
-updates, checks the numeric user ID itself, renews the gateway endpoint lease,
-and fetches durable relay replies. It does not log tokens, Access headers,
-message text, or Bot API response bodies.
+`PUNARO_TELEGRAM_GATEWAY_ENDPOINT` must be exactly `telegram/primary`. The
+binary rejects any other enrolled name so the env value cannot drift from the
+relay constant.
 
-## Bind a topic to a conversation
+Run `punaro-telegram` with no arguments. After start it calls `setMyCommands`
+once, then long-polls `message` and `callback_query` updates, checks the
+numeric user ID itself, renews the gateway endpoint lease, resumes incomplete
+local claim executions, polls pending reservations, and fetches durable
+relay replies. It does not log tokens, Access headers, message text, raw
+`callback_data`, or Bot API response bodies.
 
-Create the conversation with an attached agent endpoint and the attached
-Telegram endpoint. The agent needs `send,receive,admin`; the Telegram endpoint
-needs `send,receive`:
+## Operator commands
+
+Operator commands are recognized only from Telegram `bot_command` entities:
+
+- `/start` replies with a short help sentence that mentions `/list`.
+- `/list` asks the relay for the last 10 unclaimed named topics and replies in
+  the private chat with one inline-keyboard row per topic. Button labels are
+  display names (truncated to 64 characters). `callback_data` is a one-time raw
+  256-bit hex token; the gateway stores SHA-256(token) with a 15-minute TTL and
+  evicts to 100 outstanding. Conversation ids never appear in Telegram.
+
+Ordinary main-chat text stays inert. A `/list` tap persists a local
+`claim_executions` row at `reserved`, then consumes the token in the same
+transaction. Invalid, expired, or replayed tokens stay inert and receive a
+generic failure toast. After the reserved row is durable, the gateway answers
+the tap, advances the poll offset, and runs claim execution (resumed on every
+`SyncOnce` if that cycle fails).
+
+Claim execution reserves on the relay as `telegram/primary` with
+`gateway-claim-<conversation-id>` unless the row was pulled from
+`POST /v1/telegram/claims/pending` (already pending). It then calls
+`createForumTopic` once, persists the returned `message_thread_id` and creation
+`chat_id` immediately, writes `topic_routes`, and completes the claim. It never
+calls `getForumTopic`. Resume of `topic_created` binds that stored pair; a
+changed allowed user fails closed. If the thread id is already stored, it is
+reused only for the same chat. Completing a claim inserts
+`telegram/primary` with send|receive and materializes `user-telegram`.
+
+## Create and claim a topic
+
+Create a named conversation. Do **not** pass `--member telegram/primary` on
+this path; claim adds that membership:
 
 ```sh
 punaro-adapter create \
+  --name "How is it going" \
   --creator agent/workstation/session \
   --member agent/workstation/session:send,receive,admin \
-  --member telegram/primary:send,receive \
-  --idempotency-key create-with-telegram-1
+  --idempotency-key create-named-1
 ```
 
-Persist the exact topic-to-conversation mapping:
+The operator then claims it from Telegram with `/list` and a button tap.
+An attached member session may instead reserve:
+
+```sh
+punaro-adapter claim \
+  --conversation CONVERSATION_ID \
+  --from agent/workstation/session \
+  --idempotency-key claim-<conversation-id>
+```
+
+The gateway completes that reservation on the next `SyncOnce` poll of pending
+claims. A retry that returns `status=complete` is success. Until complete,
+`--to user-telegram` fails closed.
+
+A session may occupy at most one named or claimed topic (direct membership or a
+live role binding). Several sessions may share one topic. Exactly
+`telegram/primary` is exempt so the gateway can occupy every claimed room.
+Unnamed, unclaimed rooms stay many-to-many.
+
+## Agent send path
+
+Pings and replies to the human are ordinary Punaro sends:
+
+```sh
+punaro-adapter send \
+  --to user-telegram \
+  --from agent/workstation/session \
+  --body-file REPLY_FILE \
+  --idempotency-key REPLY_KEY
+```
+
+`--to user-telegram` omits `--conversation`. The adapter resolves the session's
+sole claimed topic. If `--conversation` is also supplied it must match that
+topic. Existing `send --conversation --from` remains for same-topic broadcast
+and `--target-role`. Broadcast after claim also reaches `telegram/primary`
+because that endpoint has receive; `--to user-telegram` is the documented
+product path.
+
+Agents never choose Telegram topics, pass a thread or chat id, or call the Bot
+API. `telegram_thread_id` on a mailbox envelope is inbound diagnostic metadata
+only.
+
+## Retire the Bot API side channel
+
+`telegram-major-updates` lives outside this repository. It is not a production
+sender. Do not run `scripts/send_major_update.py` against a Punaro-claimed bot,
+do not pass a Telegram thread id, and do not give agent machines a bot token.
+Replies to those side-channel pings land in the main chat or an unbound topic
+and never become mailbox mail. Use `punaro-reply` /
+`punaro-adapter send --to user-telegram` instead.
+
+## Refresh installed agent guidance
+
+`scripts/install-agent-guidance.sh` appends a marked `AGENTS.md` block that
+teaches `--to user-telegram` and copies `punaro-mailbox`, `punaro-reply`, and
+`punaro-attachment` only when the destination is absent. If
+`.agents/skills/punaro-reply` already exists and differs, the installer refuses
+to overwrite it. Operators must refresh existing project copies by hand:
+archive or remove the old skill directory and, if the marked guidance block
+predates `--to user-telegram`, remove only that marked block, then rerun
+`./scripts/install-agent-guidance.sh --directory PROJECT`.
+
+## Adopt the two live routes
+
+The live private-chat topics already have `topic_routes` rows. Adopt them; do
+not recreate Telegram threads. Both rooms currently share
+`role/telegram-codex`. Naming or claiming the second room while that role
+remains a member of both is a conflict.
+
+Fence-legal order (operator chooses which topic **keeps**
+`role/telegram-codex`):
+
+1. **Rename the keeper first**, while the non-keeper is still unnamed:
+
+   ```sh
+   punaro-adapter rename \
+     --conversation KEEPER_CONVERSATION_ID \
+     --actor agent/punaro-studio/validation \
+     --name "Keeper label" \
+     --idempotency-key rename-keeper-1
+   ```
+
+2. **Prepare the still-unnamed non-keeper** on the relay host as the relay
+   service account. This one-shot opens the local SQLite mail store. It does
+   not talk to Telegram or the relay HTTP API, and it does not grant
+   `telegram/primary` admin:
+
+   ```sh
+   punaro-relay-adopt-prepare \
+     --relay-db /var/lib/punaro/relay.db \
+     --keeper KEEPER_CONVERSATION_ID \
+     --non-keeper NON_KEEPER_CONVERSATION_ID \
+     --non-keeper-name "Non-keeper label" \
+     --drop-role role/telegram-codex \
+     --yes
+   ```
+
+3. **Adopt both live conversations** without creating topics:
+
+   ```sh
+   punaro-telegram adopt --conversation dae86ecc-05ff-4431-967a-584e2cd82916
+   punaro-telegram adopt --conversation e5c269b6-7e4c-450d-82bb-c25209096c10
+   ```
+
+   These are thread `795446` and thread `795625`. Adopt requires a display
+   name and an existing `topic_routes` row. It reserves as `telegram/primary`
+   with `adopt-<conversation-id>`, records the local execution at
+   `route_persisted`, and completes. A reserve that already returns
+   `status=complete` is success. It never calls `createForumTopic`.
+
+4. Confirm `sendRichMessage` still hits threads `795446` and `795625`. Renew
+   `role/telegram-codex` onto `agent/punaro-studio/validation` and send
+   `--to user-telegram` from that session into the **keeper** topic only.
+
+If adopt is skipped, those two threads keep working as today (route +
+broadcast to a conversation that already includes `telegram/primary`). They
+will not have `user-telegram` until complete runs; `--to user-telegram` fails
+closed. `/list` hides them once they are named and claimed, so keeper-rename,
+prepare, and adopt must be one window.
+
+## Emergency remapper
+
+`punaro-telegram route` remains as an emergency remapper after adopt. It is
+not the product bind path:
 
 ```sh
 punaro-telegram route \
@@ -98,20 +256,37 @@ punaro-telegram route \
   --conversation CONVERSATION_ID
 ```
 
-The route command rejects missing thread IDs, and durable state rejects mapping
-one conversation to multiple topics. There is no main-chat fallback. Incoming
-questions use the Telegram update ID as the durable relay idempotency key. A
-failed submission is retried; a crash after submission is safely deduplicated
-by the relay. Unauthorized, non-text, or unbound-topic updates are durably
-skipped so they cannot stall the polling offset after a restart. They are never
-routed by inference.
+The route command rejects missing thread IDs, mapping a conversation that
+already has a completed, routed, topic-created, or adopting claim, or stealing
+a `(chat_id, thread_id)` already bound to a claimed conversation, including
+`creating`. Unthreaded `creating` (createForumTopic succeeded or was ambiguous,
+but no thread id was stored) can be bound to a known thread so resume completes
+without a second create. Durable state also rejects mapping one conversation
+to multiple topics. There is no main-chat fallback.
+
+## Inbound and outbound routing
+
+Incoming questions use the Telegram update ID as the durable relay idempotency
+key and are submitted on `telegram-inbound` as `user-telegram`. A failed
+submission is retried; a crash after submission is safely deduplicated by the
+relay. Unauthorized, non-text, or unbound-topic updates are durably skipped so
+they cannot stall the polling offset after a restart. They are never routed by
+inference. Replies resolve `reply_to_message` through a local 10,000-row
+`telegram_outbound` map of Telegram `message_id` to Punaro identities; a miss
+delivers the text without `in_reply_to_*`.
 
 Outgoing agent replies are sent using Telegram's `sendRichMessage` to that
-exact `message_thread_id`. The bridge renders opaque agent content as escaped
-HTML, disables automatic entity detection, and asks Telegram to protect
-content. Telegram has no send-idempotency key, therefore this external boundary
-is explicitly at-least-once: a crash after Telegram accepts a reply but before
-relay acknowledgement can repeat that reply on recovery.
+exact `message_thread_id` from `topic_routes`. `SendDelivery` stays
+route-based through adopt soak. A missing route fails closed with
+`telegram conversation route is missing` and leaves the delivery unacked. A
+deleted Telegram thread fails closed at `sendRichMessage`; do not recreate it
+and do not require a completed claim on this path until after soak. The
+returned `message_id` is stored in the outbound map. The bridge renders opaque
+agent content as escaped HTML, disables automatic entity detection, and asks
+Telegram to protect content. Telegram has no send-idempotency key, therefore
+this external boundary is explicitly at-least-once: a crash after Telegram
+accepts a reply but before relay acknowledgement can repeat that reply on
+recovery.
 
 Telegram Bot API rich messages support structured HTML and Markdown variants,
 and `sendRichMessage` accepts a `message_thread_id` for a forum topic. Punaro

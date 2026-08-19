@@ -985,6 +985,208 @@ func sameRoleProfile(got, want relay.RoleProfile) bool {
 	return got.Role == want.Role && got.DisplayName == want.DisplayName && got.DirectAddressable == want.DirectAddressable && got.UpdatedAt.Equal(want.UpdatedAt)
 }
 
+// RunNamedOccupancy proves unnamed rooms stay many-to-many while a session
+// occupies at most one named conversation. telegram/primary is exempt.
+func RunNamedOccupancy(t *testing.T, backend relay.Backend, namespace string) {
+	t.Helper()
+	now := time.Date(2026, time.August, 16, 15, 0, 0, 0, time.UTC)
+	machineA, machineB, machineGateway := namespace+"-occ-a", namespace+"-occ-b", namespace+"-occ-telegram"
+	endpointA, endpointB := "agent/"+namespace+"/occ-a", "agent/"+namespace+"/occ-b"
+	if err := backend.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.AdvertiseEndpoints(machineGateway, []string{relay.TelegramPrimaryEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	unnamedMembers := []relay.Member{
+		{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		{Endpoint: endpointB, Capabilities: relay.CapReceive},
+	}
+	firstUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-1", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || firstUnnamed.DisplayName != "" {
+		t.Fatalf("first unnamed=%#v err=%v", firstUnnamed, err)
+	}
+	secondUnnamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-unnamed-2", CreatorEndpoint: endpointA, Members: unnamedMembers, Now: now,
+	})
+	if err != nil || secondUnnamed.ID == firstUnnamed.ID {
+		t.Fatalf("second unnamed=%#v first=%#v err=%v", secondUnnamed, firstUnnamed, err)
+	}
+	named, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-1", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy A", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: namespace + "-named-2", CreatorEndpoint: endpointA,
+		DisplayName: "Occupancy B", Members: []relay.Member{
+			{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("second named join err=%v", err)
+	}
+	telegramRoom, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: namespace + "-named-telegram", CreatorEndpoint: endpointB,
+		DisplayName: "Occupancy Telegram", Members: []relay.Member{
+			{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("second named room err=%v", err)
+	}
+	mustClaimConversation(t, backend, telegramRoom.ID, machineB, endpointB, machineGateway, now)
+	mustClaimConversation(t, backend, named.ID, machineA, endpointA, machineGateway, now.Add(time.Second))
+	if names, ok := backend.(relay.DisplayNameBackend); ok {
+		if _, _, err := names.SetConversationDisplayName(relay.SetDisplayNameInput{
+			ConversationID: firstUnnamed.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+			DisplayName: "Should conflict", IdempotencyKey: namespace + "-rename-occupied", Now: now,
+		}); !errors.Is(err, relay.ErrConflict) {
+			t.Fatalf("rename while occupying named room err=%v", err)
+		}
+	}
+	control, ok := backend.(relay.ControlBackend)
+	if !ok {
+		t.Fatal("backend does not implement membership controls")
+	}
+	machineC, machineExtra, machineCreator, machineRole, machineFree := namespace+"-occ-c", namespace+"-occ-extra", namespace+"-occ-creator", namespace+"-occ-role", namespace+"-occ-free"
+	endpointC, endpointExtra, endpointCreator, endpointRole, endpointRole2, endpointFree := "agent/"+namespace+"/occ-c", "agent/"+namespace+"/occ-extra", "agent/"+namespace+"/occ-creator", "agent/"+namespace+"/occ-role", "agent/"+namespace+"/occ-role-2", "agent/"+namespace+"/occ-free"
+	for machine, endpoints := range map[string][]string{
+		machineC:       {endpointC},
+		machineExtra:   {endpointExtra},
+		machineCreator: {endpointCreator},
+		machineRole:    {endpointRole, endpointRole2},
+		machineFree:    {endpointFree},
+	} {
+		if err := backend.AdvertiseEndpoints(machine, endpoints, now, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: telegramRoom.ID, ActorMachineID: machineB, ActorEndpoint: endpointB,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: endpointA, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-occupied", Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("control upsert into second named room err=%v", err)
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: named.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: endpointC, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-free", Now: now,
+	}); err != nil {
+		t.Fatalf("control upsert unoccupied session err=%v", err)
+	}
+	if _, _, err := control.ApplyControl(relay.ControlInput{
+		ConversationID: named.ID, ActorMachineID: machineA, ActorEndpoint: endpointA,
+		Operation: relay.ControlUpsertMember, Member: relay.Member{Endpoint: relay.TelegramPrimaryEndpoint, Capabilities: relay.CapReceive},
+		IdempotencyKey: namespace + "-upsert-telegram-existing", Now: now,
+	}); !errors.Is(err, relay.ErrForbidden) {
+		t.Fatalf("control upsert telegram/primary err=%v", err)
+	}
+	extraNamed, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineExtra, IdempotencyKey: namespace + "-named-extra", CreatorEndpoint: endpointExtra,
+		DisplayName: "Extra room", Members: []relay.Member{
+			{Endpoint: endpointExtra, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustClaimConversation(t, backend, extraNamed.ID, machineExtra, endpointExtra, machineGateway, now.Add(2*time.Second))
+	roleBackend, ok := backend.(relay.RoleBindingBackend)
+	if !ok {
+		t.Fatal("backend does not implement durable role bindings")
+	}
+	reviewerRole, otherRole, unnamedRole := "role/"+namespace+"/reviewer", "role/"+namespace+"/other", "role/"+namespace+"/unnamed"
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineCreator, IdempotencyKey: namespace + "-named-role-a", CreatorEndpoint: endpointCreator,
+		DisplayName: "Role room A", Members: []relay.Member{
+			{Endpoint: endpointCreator, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: reviewerRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineRole, IdempotencyKey: namespace + "-named-role-2", CreatorEndpoint: endpointRole2,
+		DisplayName: "Role session 2", Members: []relay.Member{
+			{Endpoint: endpointRole2, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole, now.Add(time.Second), time.Hour); err != nil {
+		t.Fatalf("renew bind onto the same named room err=%v", err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, reviewerRole, endpointRole2, now.Add(2*time.Second), time.Hour); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("bind named role onto session occupying another named room err=%v", err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineFree, IdempotencyKey: namespace + "-named-role-conflict", CreatorEndpoint: endpointFree,
+		DisplayName: "Role room B", Members: []relay.Member{
+			{Endpoint: endpointFree, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: reviewerRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("named role membership for occupied session err=%v", err)
+	}
+	if _, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineFree, IdempotencyKey: namespace + "-named-other-role", CreatorEndpoint: endpointFree,
+		DisplayName: "Other role room", Members: []relay.Member{
+			{Endpoint: endpointFree, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: otherRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, otherRole, endpointRole, now.Add(3*time.Second), time.Hour); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("bind role into second named room err=%v", err)
+	}
+	unnamedRoleRoom, err := backend.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineCreator, IdempotencyKey: namespace + "-unnamed-role", CreatorEndpoint: endpointCreator,
+		Members: []relay.Member{
+			{Endpoint: endpointCreator, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin},
+			{Role: unnamedRole, RoleMachineID: machineRole, Capabilities: relay.CapReceive},
+		}, Now: now,
+	})
+	if err != nil || unnamedRoleRoom.DisplayName != "" {
+		t.Fatalf("unnamed role room=%#v err=%v", unnamedRoleRoom, err)
+	}
+	if err := roleBackend.BindRoleToSession(machineRole, unnamedRole, endpointRole, now.Add(4*time.Second), time.Hour); err != nil {
+		t.Fatalf("bind unnamed role while occupying one named room err=%v", err)
+	}
+}
+
+func mustClaimConversation(t *testing.T, backend relay.Backend, conversationID, actorMachine, actorEndpoint, gatewayMachine string, now time.Time) {
+	t.Helper()
+	claims, ok := backend.(relay.TelegramClaimBackend)
+	if !ok {
+		t.Fatal("backend does not implement telegram claims")
+	}
+	if _, _, err := claims.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: conversationID, MachineID: actorMachine, Endpoint: actorEndpoint,
+		IdempotencyKey: "claim-" + conversationID, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := claims.CompleteTelegramClaim(relay.TelegramClaimCompleteInput{
+		ConversationID: conversationID, MachineID: gatewayMachine, Now: now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runLeasePageContract(t *testing.T, backend relay.Backend, namespace string, now time.Time) {
 	t.Helper()
 	senderMachine, recipientMachine := namespace+"-page-sender", namespace+"-page-recipient"

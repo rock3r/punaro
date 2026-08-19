@@ -90,6 +90,15 @@ func (e *relayHTTPStatusError) PermanentOfferNoticeFailure() bool {
 	return e != nil && (e.status == http.StatusForbidden || e.status == http.StatusNotFound)
 }
 
+// RelayHTTPStatus reports the HTTP status carried by a signed relay error.
+func RelayHTTPStatus(err error) int {
+	var status *relayHTTPStatusError
+	if errors.As(err, &status) {
+		return status.status
+	}
+	return 0
+}
+
 // NewHTTPRelayClient validates and creates a signed client for one machine.
 func NewHTTPRelayClient(rawURL, machineID string, privateKey ed25519.PrivateKey, client *http.Client, accessToken AccessServiceToken) (*HTTPRelayClient, error) {
 	return NewHTTPRelayClientWithPolicy(rawURL, machineID, privateKey, client, accessToken, clienttransport.Policy{})
@@ -232,7 +241,7 @@ func (c *HTTPRelayClient) ReportInvocation(ctx context.Context, invocation relay
 
 // CreateConversation bootstraps an explicit, membership-scoped room from an
 // attached local endpoint. The relay still verifies endpoint ownership.
-func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, idempotencyKey string) (relay.Conversation, error) {
+func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string, members []relay.Member, displayName, idempotencyKey string) (relay.Conversation, error) {
 	if strings.TrimSpace(creator) == "" || len(members) == 0 || strings.TrimSpace(idempotencyKey) == "" {
 		return relay.Conversation{}, fmt.Errorf("creator, members, and idempotency key are required")
 	}
@@ -247,8 +256,99 @@ func (c *HTTPRelayClient) CreateConversation(ctx context.Context, creator string
 		}
 		encoded = append(encoded, encodedMember)
 	}
+	request := map[string]any{"creator_endpoint": creator, "members": encoded}
+	if displayName != "" {
+		request["display_name"] = displayName
+	}
 	var conversation relay.Conversation
-	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", map[string]any{"creator_endpoint": creator, "members": encoded}, idempotencyKey, &conversation)
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations", request, idempotencyKey, &conversation)
+	return conversation, err
+}
+
+// ClaimConversation reserves a Telegram claim for a named conversation.
+func (c *HTTPRelayClient) ClaimConversation(ctx context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(endpoint) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.TelegramClaim{}, fmt.Errorf("conversation, endpoint, and idempotency key are required")
+	}
+	var claim relay.TelegramClaim
+	status, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-claim", map[string]any{"endpoint": endpoint}, idempotencyKey, &claim)
+	if err != nil {
+		return relay.TelegramClaim{}, &relayHTTPStatusError{status: status, err: err}
+	}
+	return claim, nil
+}
+
+// CompleteTelegramClaim finishes a reserved claim as the live telegram/primary owner.
+func (c *HTTPRelayClient) CompleteTelegramClaim(ctx context.Context, conversationID string) (relay.TelegramClaim, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return relay.TelegramClaim{}, fmt.Errorf("conversation is required")
+	}
+	var claim relay.TelegramClaim
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-claim/complete", map[string]any{}, &claim)
+	return claim, err
+}
+
+// PendingTelegramClaims polls pending claim reservations. It is not a lease.
+func (c *HTTPRelayClient) PendingTelegramClaims(ctx context.Context, limit int, after string) ([]relay.TelegramClaim, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	var response struct {
+		Claims []relay.TelegramClaim `json:"claims"`
+	}
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/telegram/claims/pending", map[string]any{"limit": limit, "after": after}, &response)
+	return response.Claims, err
+}
+
+// ListUnclaimed returns the last named rooms without a completed claim.
+func (c *HTTPRelayClient) ListUnclaimed(ctx context.Context) ([]relay.UnclaimedTopic, error) {
+	var response struct {
+		Topics []relay.UnclaimedTopic `json:"topics"`
+	}
+	_, err := c.doJSON(ctx, http.MethodGet, "/v1/telegram/unclaimed", map[string]any{}, &response)
+	return response.Topics, err
+}
+
+// GetSessionTopic returns the live endpoint's sole named or claimed occupancy.
+func (c *HTTPRelayClient) GetSessionTopic(ctx context.Context, endpoint string) (relay.SessionTopic, error) {
+	if strings.TrimSpace(endpoint) == "" {
+		return relay.SessionTopic{}, fmt.Errorf("endpoint is required")
+	}
+	var topic relay.SessionTopic
+	status, err := c.doJSON(ctx, http.MethodPost, "/v1/sessions/topic", map[string]any{"endpoint": endpoint}, &topic)
+	if err != nil {
+		return relay.SessionTopic{}, &relayHTTPStatusError{status: status, err: err}
+	}
+	return topic, nil
+}
+
+// SendTelegramInbound submits gateway inbound mail plus inert reply metadata.
+func (c *HTTPRelayClient) SendTelegramInbound(ctx context.Context, conversationID, fromEndpoint, fromParticipant, body, inReplyToMessageID, inReplyToEndpoint string, telegramThreadID int64, idempotencyKey string) (relay.Message, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(fromEndpoint) == "" || strings.TrimSpace(fromParticipant) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.Message{}, fmt.Errorf("conversation, sender, participant, and idempotency key are required")
+	}
+	request := map[string]any{"from_endpoint": fromEndpoint, "from_participant": fromParticipant, "body": body}
+	if inReplyToMessageID != "" {
+		request["in_reply_to_punaro_message_id"] = inReplyToMessageID
+	}
+	if inReplyToEndpoint != "" {
+		request["in_reply_to_endpoint"] = inReplyToEndpoint
+	}
+	if telegramThreadID != 0 {
+		request["telegram_thread_id"] = telegramThreadID
+	}
+	var message relay.Message
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/telegram-inbound", request, idempotencyKey, &message)
+	return message, err
+}
+
+// SetConversationDisplayName renames a room through a live admin session.
+func (c *HTTPRelayClient) SetConversationDisplayName(ctx context.Context, conversationID, actor, displayName, idempotencyKey string) (relay.Conversation, error) {
+	if strings.TrimSpace(conversationID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(displayName) == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return relay.Conversation{}, fmt.Errorf("conversation, actor, display name, and idempotency key are required")
+	}
+	var conversation relay.Conversation
+	_, err := c.doJSONWithIdempotency(ctx, http.MethodPost, "/v1/conversations/"+url.PathEscape(conversationID)+"/display-name", map[string]any{"actor_endpoint": actor, "display_name": displayName}, idempotencyKey, &conversation)
 	return conversation, err
 }
 

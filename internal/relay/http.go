@@ -155,6 +155,40 @@ func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.controlAudit(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/display-name"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/display-name")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.setConversationDisplayName(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-claim/complete"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-claim/complete")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.completeTelegramClaim(w, body, machineID, conversationID, now)
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-claim"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-claim")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.reserveTelegramClaim(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/conversations/") && strings.HasSuffix(r.URL.Path, "/telegram-inbound"):
+		conversationID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/conversations/"), "/telegram-inbound")
+		if conversationID == "" || strings.Contains(conversationID, "/") {
+			writeError(w, http.StatusNotFound, "route not found")
+			return
+		}
+		h.appendTelegramInbound(w, body, machineID, conversationID, now, r.Header.Get("Idempotency-Key"))
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/telegram/claims/pending":
+		h.pendingTelegramClaims(w, body, machineID, now)
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/telegram/unclaimed":
+		h.unclaimedTelegramTopics(w, machineID, now)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions/topic":
+		h.sessionTopic(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/deliveries/lease":
 		h.leaseDeliveries(w, body, machineID, now)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/invocations/lease":
@@ -426,6 +460,233 @@ func (h *handler) validateSender(w http.ResponseWriter, body []byte, machineID, 
 	writeJSON(w, http.StatusOK, map[string]any{"authorized": true})
 }
 
+func (h *handler) setConversationDisplayName(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.store.(DisplayNameBackend)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "display name plane is unavailable")
+		return
+	}
+	var request struct {
+		ActorEndpoint string `json:"actor_endpoint"`
+		DisplayName   string `json:"display_name"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid display name request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.ActorEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	conversation, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{ConversationID: conversationID, ActorMachineID: machineID, ActorEndpoint: request.ActorEndpoint, DisplayName: request.DisplayName, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, conversation)
+}
+
+func (h *handler) telegramClaimStore() (TelegramClaimBackend, bool) {
+	store, ok := h.store.(TelegramClaimBackend)
+	return store, ok
+}
+
+func (h *handler) reserveTelegramClaim(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram claim request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.Endpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claim, duplicate, err := store.ReserveTelegramClaim(TelegramClaimInput{ConversationID: conversationID, MachineID: machineID, Endpoint: request.Endpoint, IdempotencyKey: idempotencyKey, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, claim)
+}
+
+func (h *handler) completeTelegramClaim(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct{}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram claim complete request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claim, duplicate, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversationID, MachineID: machineID, Now: now})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, claim)
+}
+
+func (h *handler) pendingTelegramClaims(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Limit int    `json:"limit"`
+		After string `json:"after"`
+	}
+	if err := decodeJSON(body, &request); err != nil || request.Limit < 1 || request.Limit > 100 {
+		writeError(w, http.StatusBadRequest, "invalid pending claim request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	claims, err := store.PendingTelegramClaims(machineID, now, request.Limit, request.After)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claims": claims})
+}
+
+func (h *handler) unclaimedTelegramTopics(w http.ResponseWriter, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	topics, err := store.UnclaimedNamedConversations(machineID, now, 10)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
+}
+
+func (h *handler) sessionTopic(w http.ResponseWriter, body []byte, machineID string, now time.Time) {
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session topic request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, request.Endpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	topic, err := store.SessionTopic(machineID, request.Endpoint, now)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, topic)
+}
+
+func (h *handler) appendTelegramInbound(w http.ResponseWriter, body []byte, machineID, conversationID string, now time.Time, idempotencyKey string) {
+	if !ValidRequestToken(idempotencyKey) {
+		writeError(w, http.StatusBadRequest, "Idempotency-Key is required")
+		return
+	}
+	store, ok := h.telegramClaimStore()
+	if !ok {
+		writeStoreError(w, ErrMaintenance)
+		return
+	}
+	var request struct {
+		FromEndpoint           string `json:"from_endpoint"`
+		FromParticipant        string `json:"from_participant"`
+		Body                   string `json:"body"`
+		InReplyToPunaroMessage string `json:"in_reply_to_punaro_message_id"`
+		InReplyToEndpoint      string `json:"in_reply_to_endpoint"`
+		TelegramThreadID       int64  `json:"telegram_thread_id"`
+	}
+	if err := decodeJSON(body, &request); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid telegram inbound request")
+		return
+	}
+	if !h.auth.AllowsEndpoint(machineID, TelegramGatewayEndpoint) {
+		writeError(w, http.StatusForbidden, "authorization denied")
+		return
+	}
+	message, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID:     conversationID,
+		SenderMachineID:    machineID,
+		FromEndpoint:       request.FromEndpoint,
+		FromParticipant:    request.FromParticipant,
+		Body:               request.Body,
+		InReplyToMessageID: request.InReplyToPunaroMessage,
+		InReplyToEndpoint:  request.InReplyToEndpoint,
+		TelegramThreadID:   request.TelegramThreadID,
+		IdempotencyKey:     idempotencyKey,
+		Now:                now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !duplicate {
+		machines, err := h.store.RecipientMachines(message.ID, now)
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, recipientMachine := range machines {
+			h.notifier.Publish(recipientMachine, message.ConversationID, message.Sequence)
+		}
+	}
+	status := http.StatusCreated
+	if duplicate {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, message)
+}
+
 func (h *handler) listConversations(w http.ResponseWriter, machineID string, now time.Time) {
 	conversations, err := h.store.ConversationsForMachine(machineID, now)
 	if err != nil {
@@ -554,6 +815,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 	}
 	var request struct {
 		CreatorEndpoint string `json:"creator_endpoint"`
+		DisplayName     string `json:"display_name"`
 		ProjectID       string `json:"project_id"`
 		Members         []struct {
 			Endpoint      string   `json:"endpoint"`
@@ -593,7 +855,7 @@ func (h *handler) createConversation(w http.ResponseWriter, body []byte, machine
 		}
 		members = append(members, Member{Endpoint: member.Endpoint, Role: member.Role, RoleMachineID: member.RoleMachineID, Capabilities: capabilities})
 	}
-	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, Members: members, Now: now})
+	conversation, err := h.store.CreateConversationIdempotent(CreateConversationInput{MachineID: machineID, PrincipalID: authority.PrincipalID, CredentialLookupID: authority.CredentialLookupID, CredentialGeneration: authority.CredentialGeneration, ProjectID: request.ProjectID, IdempotencyKey: idempotencyKey, CreatorEndpoint: request.CreatorEndpoint, DisplayName: request.DisplayName, Members: members, Now: now})
 	if err != nil {
 		writeStoreError(w, err)
 		return

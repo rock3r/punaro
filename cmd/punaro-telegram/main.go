@@ -21,6 +21,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	"github.com/rock3r/punaro/internal/clienttransport"
+	"github.com/rock3r/punaro/internal/relay"
 	"github.com/rock3r/punaro/internal/telegram"
 )
 
@@ -53,13 +54,27 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "adopt" {
+		if err := runAdopt(os.Args[2:]); err != nil {
+			log.Printf("punaro-telegram stopped: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 {
-		log.Print("punaro-telegram stopped: unknown command (supported: route)")
+		log.Print("punaro-telegram stopped: unknown command (supported: route, adopt)")
 		os.Exit(1)
 	}
 	if err := run(); err != nil {
 		log.Printf("punaro-telegram stopped: %v", err)
 		os.Exit(1)
+	}
+}
+
+func registerOperatorCommands(ctx context.Context, register func(context.Context, []telegram.BotCommand) error) {
+	if err := register(ctx, telegram.DefaultBotCommands()); err != nil {
+		// Menu registration is operator UX, not a prerequisite for poll/lease.
+		log.Printf("telegram event class=telegram_command cmd=setMyCommands err=register_failed")
 	}
 }
 
@@ -74,6 +89,17 @@ func parseRoute(args []string) (routeRequest, error) {
 		return routeRequest{}, fmt.Errorf("--chat-id, --thread-id, and --conversation are required")
 	}
 	return request, nil
+}
+
+func parseAdopt(args []string) (string, error) {
+	flags := flag.NewFlagSet("punaro-telegram adopt", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var conversation string
+	flags.StringVar(&conversation, "conversation", "", "Punaro conversation ID")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || strings.TrimSpace(conversation) == "" {
+		return "", fmt.Errorf("--conversation is required")
+	}
+	return conversation, nil
 }
 
 func runRoute(args []string) error {
@@ -91,6 +117,27 @@ func runRoute(args []string) error {
 	}
 	defer func() { _ = state.Close() }()
 	return state.SetRoute(request.chatID, request.threadID, request.conversation)
+}
+
+func runAdopt(args []string) error {
+	conversation, err := parseAdopt(args)
+	if err != nil {
+		return err
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("configuration: %w", err)
+	}
+	state, err := telegram.Open(filepath.Join(cfg.stateDir, "telegram.db"))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = state.Close() }()
+	relayClient, err := adapter.NewHTTPRelayClientWithPolicy(cfg.relayURL, cfg.machineID, cfg.privateKey, nil, cfg.accessToken, cfg.transportPolicy)
+	if err != nil {
+		return err
+	}
+	return telegram.Adopt(context.Background(), state, relayClient, conversation, cfg.allowedUserID, nil)
 }
 
 func run() error {
@@ -111,16 +158,31 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	registerOperatorCommands(ctx, botClient.SetMyCommands)
+	claims := &telegram.ClaimExecutor{
+		State:         state,
+		Relay:         relayClient,
+		Topics:        botClient,
+		AllowedUserID: cfg.allowedUserID,
+	}
 	bridge := telegram.Bridge{
 		Relay:    relayClient,
 		Endpoint: cfg.endpoint,
 		State:    state,
 		Poller:   botClient,
-		Gateway:  telegram.Gateway{AllowedUserID: cfg.allowedUserID, State: state, Submit: telegram.SubmitToRelay(relayClient, cfg.endpoint)},
-		Sender:   botClient,
+		Gateway: telegram.Gateway{
+			AllowedUserID: cfg.allowedUserID,
+			State:         state,
+			Submit:        telegram.SubmitToRelay(relayClient, cfg.endpoint, state, nil),
+			ListUnclaimed: relayClient.ListUnclaimed,
+			Notify:        botClient,
+			Claims:        claims,
+		},
+		Sender: botClient,
+		Claims: claims,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	var offset int64
 	for ctx.Err() == nil {
 		next, err := bridge.SyncOnce(ctx, offset)
@@ -176,6 +238,9 @@ func loadConfig() (config, error) {
 	}
 	if cfg.relayURL == "" || cfg.machineID == "" || cfg.botToken == "" || cfg.endpoint == "" || cfg.stateDir == "" {
 		return config{}, fmt.Errorf("PUNARO_ADAPTER_RELAY_URL, PUNARO_MACHINE_ID, Telegram bot token source, PUNARO_TELEGRAM_GATEWAY_ENDPOINT, and PUNARO_TELEGRAM_STATE_DIR are required")
+	}
+	if cfg.endpoint != relay.TelegramGatewayEndpoint {
+		return config{}, fmt.Errorf("PUNARO_TELEGRAM_GATEWAY_ENDPOINT must be %s", relay.TelegramGatewayEndpoint)
 	}
 	accessTokenFile := strings.TrimSpace(os.Getenv("PUNARO_TELEGRAM_ACCESS_TOKEN_FILE"))
 	if accessTokenFile != "" {

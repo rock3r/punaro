@@ -53,6 +53,9 @@ The destination may be offline. Keep one stable idempotency key for retries.
 Do not combine this form with `--conversation` or `--from`. The envelope
 identifies the source role, not the bound session.
 
+Pings and check-ins go through `punaro-adapter send --to user-telegram`, not a
+Bot API script. Do not call Telegram, pass a thread id, or invent a route.
+
 For a genuine local or authorization blocker, report it concisely to the task
 owner. Do not guess a route or bypass the relay with a public link, Telegram
 file, or direct peer transfer.
