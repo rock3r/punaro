@@ -60,7 +60,10 @@ still closed.
 
 Each relay conversation surfaces as one forum topic in the operator's private chat, via a
 separately enrolled gateway (`punaro-telegram`) that long-polls the Bot API and never
-touches an agent-mailbox database. The contract:
+touches an agent-mailbox database. The claim-gated model below is the accepted direction,
+landing via PR #138; until that merges, `DESIGN.md` and `docs/telegram-gateway.md`
+describe the deployed route-based binding and remain the implementation authority. The
+contract:
 
 - **A conversation IS its topic.** One topic ↔ one conversation, held in durable,
   content-free gateway state. No main-chat fallback, no picker, no routing by inference;

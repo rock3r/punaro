@@ -122,7 +122,9 @@ into the same commit before pushing.
 1. **Do not push immediately.** Wait until no review bot is in progress.
 2. Snapshot latest status/comments.
 3. Rebase the branch onto the PR's actual base ref — resolve it with
-   `gh pr view <n> --json baseRefName` (typically `origin/main`); never assume `main`.
+   `gh pr view <n> --json baseRefName`, then `git fetch origin <base>` and rebase onto
+   the updated `origin/<base>` remote-tracking ref (typically `origin/main`); never
+   assume `main`, and never rebase onto a stale local ref.
 4. Resolve conflicts and **in the same fix cycle** apply all actionable bot comments.
 5. Run the full Punaro gate.
 6. Push once.
