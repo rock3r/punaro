@@ -64,6 +64,57 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 	}
 }
 
+func TestBridgeResumesIncompleteClaimBeforePollingInbound(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, err := state.InsertPendingExecution("conversation-stuck", "Stuck room"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-stuck", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimRoute(55, 7, "conversation-stuck"); err != nil {
+		t.Fatal(err)
+	}
+	relayClient := &fakeBridgeRelay{}
+	submitted := 0
+	executor := &ClaimExecutor{State: state, Relay: relayClient, AllowedUserID: 55, Log: func(string, ...any) {}}
+	bridge := Bridge{
+		Relay:    relayClient,
+		Endpoint: relay.TelegramGatewayEndpoint,
+		State:    state,
+		Poller:   fakePoller{updates: []Update{{ID: 30, UserID: 55, ChatID: 55, ThreadID: 7, Text: "hello"}}},
+		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error {
+			complete, err := state.ClaimComplete("conversation-stuck")
+			if err != nil {
+				return err
+			}
+			if !complete {
+				return fmt.Errorf("telegram inbound requires complete claim")
+			}
+			submitted++
+			return nil
+		}, Log: func(string, ...any) {}},
+		Sender: &recordedRichSender{},
+		Claims: executor,
+	}
+	next, err := bridge.SyncOnce(context.Background(), 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume, found, err := state.ClaimExecution("conversation-stuck")
+	if err != nil || !found || resume.Phase != ClaimPhaseComplete {
+		t.Fatalf("resume=%#v found=%v err=%v", resume, found, err)
+	}
+	if next != 31 || submitted != 1 || len(relayClient.completes) != 1 {
+		t.Fatalf("next=%d submitted=%d completes=%#v", next, submitted, relayClient.completes)
+	}
+}
+
 func TestBridgeResumesIncompleteClaimAndStartsPendingWithoutLocalRow(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

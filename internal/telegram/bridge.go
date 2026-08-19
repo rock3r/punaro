@@ -33,9 +33,11 @@ type Bridge struct {
 	Log      func(string, ...any)
 }
 
-// SyncOnce renews gateway attachment, processes one inbound Telegram page,
-// then sends and acknowledges its durable outbound deliveries. A send failure
-// intentionally leaves the delivery unacknowledged for at-least-once retry.
+// SyncOnce renews gateway attachment, resumes incomplete claims, processes one
+// inbound Telegram page, then sends and acknowledges its durable outbound
+// deliveries. Claim recovery runs before polling so a routed-but-incomplete
+// claim cannot reject inbound and skip ResumeAll. A send failure intentionally
+// leaves the delivery unacknowledged for at-least-once retry.
 func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	if b.Relay == nil || b.State == nil || b.Poller == nil || b.Sender == nil || strings.TrimSpace(b.Endpoint) == "" {
 		return offset, fmt.Errorf("telegram bridge is not configured")
@@ -43,17 +45,17 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 	if err := b.Relay.Advertise(ctx, []string{b.Endpoint}); err != nil {
 		return offset, fmt.Errorf("advertise telegram gateway endpoint: %w", err)
 	}
+	if b.Claims != nil {
+		if err := b.Claims.ResumeAll(ctx); err != nil {
+			return offset, err
+		}
+		if err := b.Claims.StartPending(ctx); err != nil {
+			return offset, err
+		}
+	}
 	next, err := (Runner{Poller: b.Poller, Gateway: b.Gateway}).RunOnce(ctx, offset)
 	if err != nil {
 		return offset, err
-	}
-	if b.Claims != nil {
-		if err := b.Claims.ResumeAll(ctx); err != nil {
-			return next, err
-		}
-		if err := b.Claims.StartPending(ctx); err != nil {
-			return next, err
-		}
 	}
 	deliveries, err := b.Relay.Lease(ctx, b.Endpoint)
 	if err != nil {
