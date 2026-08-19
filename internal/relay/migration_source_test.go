@@ -1044,6 +1044,80 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 	}
 }
 
+func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	conversation := createClaimedTelegramConversation(t, store, now)
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "ship it", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:7", Now: now,
+	})
+	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant || inbound.TelegramThreadID != 795446 {
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 6 || inspected.Counts.TelegramClaims != 1 || inspected.Counts.TelegramParticipants != 1 || inspected.Counts.TelegramClaimEvents != 1 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("e", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 6 || prepared.Counts.TelegramClaims != 1 {
+		t.Fatalf("prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) != 1 || !batch.Done {
+			t.Fatalf("table=%s batch=%#v err=%v", table, batch, err)
+		}
+		hasher, err := NewMigrationTableHasher(table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hasher.Add(batch.Rows[0]); err != nil {
+			t.Fatal(err)
+		}
+		count, digest := hasher.Evidence()
+		var expectedCount int64
+		var expectedDigest string
+		switch table {
+		case "mail_telegram_claims":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaims, prepared.TableSHA256.TelegramClaims
+		case "mail_telegram_participants":
+			expectedCount, expectedDigest = prepared.Counts.TelegramParticipants, prepared.TableSHA256.TelegramParticipants
+		case "mail_telegram_claim_events":
+			expectedCount, expectedDigest = prepared.Counts.TelegramClaimEvents, prepared.TableSHA256.TelegramClaimEvents
+		}
+		if count != expectedCount || digest != expectedDigest {
+			t.Fatalf("table=%s evidence count=%d digest=%s want count=%d digest=%s", table, count, digest, expectedCount, expectedDigest)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(batch.Rows[0].Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["conversation_id"] != conversation.ID {
+			t.Fatalf("table=%s conversation_id=%v", table, payload["conversation_id"])
+		}
+	}
+	messages, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 10)
+	if err != nil || len(messages.Rows) != 1 {
+		t.Fatalf("messages batch=%#v err=%v", messages, err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(messages.Rows[0].Payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["from_participant"] != TelegramUserParticipant || message["in_reply_to_message_id"] != "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" || message["in_reply_to_endpoint"] != "agent/a" || message["telegram_thread_id"] != float64(795446) {
+		t.Fatalf("message metadata=%#v", message)
+	}
+}
+
 func migrationSourcePhase(t *testing.T, store *Store) MigrationSourcePhase {
 	t.Helper()
 	var phase MigrationSourcePhase

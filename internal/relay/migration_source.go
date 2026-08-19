@@ -54,6 +54,9 @@ type MigrationSourceCounts struct {
 	DirectConversations      int64 `json:"direct_conversations,omitempty"`
 	MessageFromRoles         int64 `json:"message_from_roles,omitempty"`
 	DirectMessageIdempotency int64 `json:"direct_message_idempotency,omitempty"`
+	TelegramClaims           int64 `json:"telegram_claims,omitempty"`
+	TelegramParticipants     int64 `json:"telegram_participants,omitempty"`
+	TelegramClaimEvents      int64 `json:"telegram_claim_events,omitempty"`
 	RequestNonces            int64 `json:"request_nonces"`
 }
 
@@ -78,6 +81,9 @@ type MigrationSourceHashes struct {
 	DirectConversations      string `json:"direct_conversations,omitempty"`
 	MessageFromRoles         string `json:"message_from_roles,omitempty"`
 	DirectMessageIdempotency string `json:"direct_message_idempotency,omitempty"`
+	TelegramClaims           string `json:"telegram_claims,omitempty"`
+	TelegramParticipants     string `json:"telegram_participants,omitempty"`
+	TelegramClaimEvents      string `json:"telegram_claim_events,omitempty"`
 	RequestNonces            string `json:"request_nonces"`
 }
 
@@ -112,7 +118,7 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"roles", "role,machine_id", "role"},
 	{"role_memberships", "conversation_id,role,capabilities", "conversation_id,role"},
 	{"role_bindings", "role,session_endpoint,machine_id,ownership_generation,lease_until", "role"},
-	{"messages", "id,conversation_id,sequence,from_endpoint,body,created_at", "id"},
+	{"messages", "id,conversation_id,sequence,from_endpoint,from_participant,in_reply_to_message_id,in_reply_to_endpoint,telegram_thread_id,body,created_at", "id"},
 	{"deliveries", "id,message_id,recipient_endpoint,lease_machine_id,lease_token,lease_generation,ownership_generation,consumer_generation,lease_until,acked_at", "id"},
 	{"recipient_cursors", "recipient_endpoint,conversation_id,sequence", "recipient_endpoint,conversation_id"},
 	{"idempotency", "machine_id,key,request_hash,message_id,created_at", "machine_id,key"},
@@ -126,6 +132,9 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"direct_conversations", "role_low,role_high,conversation_id,created_at", "role_low,role_high"},
 	{"message_from_roles", "message_id,from_role", "message_id"},
 	{"direct_message_idempotency", "machine_id,key,request_hash,from_role,to_role,conversation_id,message_id,sequence,created_at", "machine_id,key"},
+	{"telegram_claims", "conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at,completed_at", "conversation_id"},
+	{"telegram_participants", "conversation_id,label,created_at", "conversation_id"},
+	{"telegram_claim_events", "id,conversation_id,event,actor_machine,actor_endpoint,created_at", "id"},
 }
 
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
@@ -149,7 +158,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency"
+const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
 const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
@@ -1025,12 +1034,16 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidEndpoint(text)
 	case "roles.role", "role_memberships.role", "role_bindings.role", "role_profiles.role", "role_profile_idempotency.role", "direct_conversations.role_low", "direct_conversations.role_high", "message_from_roles.from_role", "direct_message_idempotency.from_role", "direct_message_idempotency.to_role":
 		valid = ValidRole(text)
-	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id":
+	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id", "telegram_claims.requested_by_machine", "telegram_claim_events.actor_machine":
 		valid = ValidMachineID(text)
 	case "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
 		_, roleRecipient := parseRoleRecipient(text)
 		valid = roleRecipient || ValidEndpoint(text)
-	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce":
+	case "telegram_claims.requested_by_endpoint", "telegram_claim_events.actor_endpoint", "messages.in_reply_to_endpoint":
+		valid = ValidEndpoint(text)
+	case "messages.from_participant", "telegram_participants.label":
+		valid = text == TelegramUserParticipant
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce", "telegram_claims.idempotency_key":
 		valid = ValidRequestToken(text)
 	case "role_profiles.display_name", "role_profile_idempotency.display_name":
 		_, valid = NormalizeRoleDisplayName(text)
@@ -1040,7 +1053,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "messages.in_reply_to_message_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil
@@ -1119,6 +1132,12 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.MessageFromRoles, manifest.TableSHA256.MessageFromRoles = count, digest
 	case "direct_message_idempotency":
 		manifest.Counts.DirectMessageIdempotency, manifest.TableSHA256.DirectMessageIdempotency = count, digest
+	case "telegram_claims":
+		manifest.Counts.TelegramClaims, manifest.TableSHA256.TelegramClaims = count, digest
+	case "telegram_participants":
+		manifest.Counts.TelegramParticipants, manifest.TableSHA256.TelegramParticipants = count, digest
+	case "telegram_claim_events":
+		manifest.Counts.TelegramClaimEvents, manifest.TableSHA256.TelegramClaimEvents = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}

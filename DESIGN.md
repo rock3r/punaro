@@ -953,6 +953,10 @@ unclaimed named rooms, poll pending reservations, or submit
 `telegram-inbound`. Complete inserts `telegram/primary` with send|receive
 and materializes `user-telegram`. Targeted send `target_role=user-telegram`
 requires a completed claim and creates one delivery to `telegram/primary`.
+SQLite-to-PostgreSQL mail cutover exports `telegram_claims`,
+`telegram_participants`, `telegram_claim_events`, and inbound `messages`
+metadata (`from_participant`, `in_reply_to_*`, `telegram_thread_id`) so a
+claimed installation keeps reservation authority and reply context.
 
 The Telegram gateway converts one explicitly configured topic into one Punaro
 conversation. It verifies the configured allowed Telegram user ID on every

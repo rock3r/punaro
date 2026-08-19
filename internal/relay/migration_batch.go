@@ -119,6 +119,9 @@ type migrationBatchSpec struct {
 var migrationBatchSpecs = []migrationBatchSpec{
 	{target: "mail_endpoints", source: migrationTableSpecs[0], keyColumns: []string{"endpoint"}},
 	{target: "mail_conversations", source: migrationTableSpecs[1], keyColumns: []string{"id"}},
+	{target: "mail_telegram_claims", source: migrationTableSpecs[20], keyColumns: []string{"conversation_id"}},
+	{target: "mail_telegram_participants", source: migrationTableSpecs[21], keyColumns: []string{"conversation_id"}},
+	{target: "mail_telegram_claim_events", source: migrationTableSpecs[22], keyColumns: []string{"id"}},
 	{target: "mail_memberships", source: migrationTableSpecs[2], keyColumns: []string{"conversation_id", "endpoint"}},
 	{target: "mail_roles", source: migrationTableSpecs[3], keyColumns: []string{"role"}},
 	{target: "mail_role_memberships", source: migrationTableSpecs[4], keyColumns: []string{"conversation_id", "role"}},
@@ -174,7 +177,7 @@ func ReadMigrationSourceBatch(ctx context.Context, path, table, afterKey string,
 		return MigrationSourceBatch{}, errors.New("relay migration source is not prepared")
 	}
 	parentRoleOnlyV3 := manifest.Version == 3 && manifest.Counts.ControlEvents == 0 && manifest.Counts.ControlIdempotency == 0 && manifest.TableSHA256.ControlEvents == "" && manifest.TableSHA256.ControlIdempotency == ""
-	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency")) {
+	if (manifest.Version == 1 && (table == "mail_roles" || table == "mail_role_memberships" || table == "mail_role_bindings")) || ((manifest.Version <= 2 || parentRoleOnlyV3) && (table == "mail_conversation_controls" || table == "mail_conversation_control_idempotency")) || (manifest.Version < 4 && (table == "mail_role_profiles" || table == "mail_role_profile_idempotency")) || (manifest.Version < 5 && table == "mail_rate_buckets") || (manifest.Version < 6 && (table == "mail_direct_conversations" || table == "mail_message_from_roles" || table == "mail_direct_message_idempotency" || table == "mail_telegram_claims" || table == "mail_telegram_participants" || table == "mail_telegram_claim_events")) {
 		return MigrationSourceBatch{Done: true}, nil
 	}
 	var keyValues []any
