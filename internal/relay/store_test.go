@@ -1130,6 +1130,60 @@ func TestStoreSetConversationDisplayNameRequiresLiveAdminAndIsIdempotent(t *test
 	}
 }
 
+func TestStoreSetConversationDisplayNameBindsIdempotencyKeyToOriginalRequest(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 19, 13, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "create-rename-bind", CreatorEndpoint: "agent/a",
+		Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}, {Endpoint: "agent/b", Capabilities: CapReceive}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Alpha", IdempotencyKey: "rename-a", Now: now,
+	})
+	if err != nil || duplicate || first.DisplayName != "Alpha" {
+		t.Fatalf("rename A=%#v duplicate=%v err=%v", first, duplicate, err)
+	}
+	if _, _, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Changed", IdempotencyKey: "rename-a", Now: now.Add(time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed-label retry err=%v", err)
+	}
+	current, err := conversationByIDViaStore(store, conversation.ID)
+	if err != nil || current.DisplayName != "Alpha" {
+		t.Fatalf("after changed-label retry=%#v err=%v", current, err)
+	}
+	second, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Beta", IdempotencyKey: "rename-b", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || duplicate || second.DisplayName != "Beta" {
+		t.Fatalf("rename B=%#v duplicate=%v err=%v", second, duplicate, err)
+	}
+	replay, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Alpha", IdempotencyKey: "rename-a", Now: now.Add(3 * time.Second),
+	})
+	if err != nil || !duplicate || replay.DisplayName != "Beta" {
+		t.Fatalf("intervening replay=%#v duplicate=%v err=%v", replay, duplicate, err)
+	}
+}
+
 func TestStoreUnnamedConversationsRemainManyToMany(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

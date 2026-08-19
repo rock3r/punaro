@@ -656,6 +656,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (machine_id, key)
 		)`,
+		`CREATE TABLE IF NOT EXISTS conversation_display_name_idempotency (
+			machine_id TEXT NOT NULL,
+			key TEXT NOT NULL,
+			request_hash TEXT NOT NULL,
+			conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (machine_id, key)
+		)`,
 		`CREATE TABLE IF NOT EXISTS request_nonces (
 			machine_id TEXT NOT NULL,
 			nonce TEXT NOT NULL,
@@ -770,7 +778,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("initialize relay migration control: %w", err)
 		}
 	}
-	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "delivery_terminals", "direct_conversations", "message_from_roles", "direct_message_idempotency", "telegram_claims", "telegram_participants", "telegram_claim_events"} {
+	for _, table := range []string{"endpoints", "conversations", "memberships", "roles", "role_memberships", "role_bindings", "role_profiles", "role_profile_idempotency", "messages", "deliveries", "recipient_cursors", "idempotency", "conversation_idempotency", "conversation_controls", "conversation_control_idempotency", "conversation_display_name_idempotency", "request_nonces", "rate_buckets", "pending_quota_recipients", "pending_quota_install", "delivery_terminals", "direct_conversations", "message_from_roles", "direct_message_idempotency", "telegram_claims", "telegram_participants", "telegram_claim_events"} {
 		for _, operation := range []string{"INSERT", "UPDATE", "DELETE"} {
 			name := "relay_migration_guard_" + table + "_" + strings.ToLower(operation)
 			statement := fmt.Sprintf(`CREATE TRIGGER IF NOT EXISTS %s BEFORE %s ON %s
@@ -1017,7 +1025,9 @@ func (s *Store) ControlAudit(conversationID, machineID, actorEndpoint string, no
 }
 
 // SetConversationDisplayName updates a room label after rechecking a live
-// admin session. Repeating the same label is a no-op retry.
+// admin session. A stored (machine, key) replay returns the original completed
+// operation without mutating a later label; a different label on the same key
+// conflicts.
 func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversation, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !ValidMachineID(input.ActorMachineID) || !ValidEndpoint(input.ActorEndpoint) || !ValidRequestToken(input.IdempotencyKey) {
 		return Conversation{}, false, ErrForbidden
@@ -1026,6 +1036,7 @@ func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversat
 	if err != nil || displayName == "" {
 		return Conversation{}, false, fmt.Errorf("invalid conversation display name")
 	}
+	requestHash := DisplayNameRequestHash(input.ConversationID, input.ActorEndpoint, displayName)
 	tx, err := s.db.BeginTx(context.Background(), nil)
 	if err != nil {
 		return Conversation{}, false, err
@@ -1041,29 +1052,47 @@ func (s *Store) SetConversationDisplayName(input SetDisplayNameInput) (Conversat
 	if actorCapabilities&CapAdmin == 0 {
 		return Conversation{}, false, ErrForbidden
 	}
-	conversation, err := conversationByID(tx, input.ConversationID)
-	if err != nil {
-		return Conversation{}, false, ErrForbidden
-	}
-	if conversation.DisplayName == displayName {
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), "SELECT conversation_id,request_hash FROM conversation_display_name_idempotency WHERE machine_id=? AND key=?", input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return Conversation{}, false, ErrConflict
+		}
+		conversation, err := conversationByID(tx, existingID)
+		if err != nil {
+			return Conversation{}, false, err
+		}
 		if err := tx.Commit(); err != nil {
 			return Conversation{}, false, err
 		}
 		return conversation, true, nil
 	}
-	if conversation.DisplayName == "" {
-		if err := rejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
-			return Conversation{}, false, err
+	if !errors.Is(err, sql.ErrNoRows) {
+		return Conversation{}, false, fmt.Errorf("read display name idempotency key: %w", err)
+	}
+	conversation, err := conversationByID(tx, input.ConversationID)
+	if err != nil {
+		return Conversation{}, false, ErrForbidden
+	}
+	duplicate := conversation.DisplayName == displayName
+	if !duplicate {
+		if conversation.DisplayName == "" {
+			if err := rejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+				return Conversation{}, false, err
+			}
 		}
+		if _, err := tx.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", displayName, input.ConversationID); err != nil {
+			return Conversation{}, false, fmt.Errorf("update conversation display name: %w", err)
+		}
+		conversation.DisplayName = displayName
 	}
-	if _, err := tx.ExecContext(context.Background(), "UPDATE conversations SET display_name=? WHERE id=?", displayName, input.ConversationID); err != nil {
-		return Conversation{}, false, fmt.Errorf("update conversation display name: %w", err)
+	if _, err := tx.ExecContext(context.Background(), "INSERT INTO conversation_display_name_idempotency(machine_id,key,request_hash,conversation_id,created_at) VALUES(?,?,?,?,?)", input.ActorMachineID, input.IdempotencyKey, requestHash, input.ConversationID, input.Now.UnixMilli()); err != nil {
+		return Conversation{}, false, fmt.Errorf("record display name idempotency key: %w", err)
 	}
-	conversation.DisplayName = displayName
 	if err := tx.Commit(); err != nil {
 		return Conversation{}, false, err
 	}
-	return conversation, false, nil
+	return conversation, duplicate, nil
 }
 
 // PrepareTelegramAdopt drops TelegramCodexRole from the still-unnamed

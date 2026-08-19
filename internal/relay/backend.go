@@ -256,6 +256,12 @@ func CreateConversationRequestHash(creatorEndpoint string, members []Member, dis
 	return stableHash(digest, projectID[0])
 }
 
+// DisplayNameRequestHash binds a rename idempotency key to the conversation,
+// live admin endpoint, and sanitized label.
+func DisplayNameRequestHash(conversationID, actorEndpoint, displayName string) string {
+	return stableHash(conversationID, actorEndpoint, displayName)
+}
+
 // Backend is the complete durable mail boundary shared by the SQLite parity
 // store and the selectable PostgreSQL implementation. HTTP authentication and
 // authorization remain outside this interface; every method still rechecks

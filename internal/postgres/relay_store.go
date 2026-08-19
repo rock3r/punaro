@@ -967,7 +967,9 @@ func (d *Database) ControlAudit(conversationID, machineID, actorEndpoint string,
 }
 
 // SetConversationDisplayName updates a room label after rechecking a live
-// admin session. A stable retry key returns the original name.
+// admin session. A stored (machine, key) replay returns the original completed
+// operation without mutating a later label; a different label on the same key
+// conflicts.
 func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (relay.Conversation, bool, error) {
 	if strings.TrimSpace(input.ConversationID) == "" || !relay.ValidMachineID(input.ActorMachineID) || !relay.ValidEndpoint(input.ActorEndpoint) || !relay.ValidRequestToken(input.IdempotencyKey) {
 		return relay.Conversation{}, false, relay.ErrForbidden
@@ -979,6 +981,7 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	if err != nil || displayName == "" {
 		return relay.Conversation{}, false, errors.New("invalid conversation display name")
 	}
+	requestHash := relay.DisplayNameRequestHash(input.ConversationID, input.ActorEndpoint, displayName)
 	tx, cancel, err := d.beginRelayTransaction(nil)
 	if err != nil {
 		return relay.Conversation{}, false, errors.New("display name transaction cannot start")
@@ -991,6 +994,13 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	}
 	if !namesAvailable {
 		return relay.Conversation{}, false, errors.New("conversation display names are unavailable")
+	}
+	retriesAvailable, err := postgresConversationDisplayNameIdempotencyAvailable(tx)
+	if err != nil {
+		return relay.Conversation{}, false, errors.New("conversation display name retry schema is unavailable")
+	}
+	if !retriesAvailable {
+		return relay.Conversation{}, false, errors.New("conversation display name retries are unavailable")
 	}
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230612))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, false, errors.New("display name retry lock is unavailable")
@@ -1012,29 +1022,55 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	if actorCapabilities&relay.CapAdmin == 0 {
 		return relay.Conversation{}, false, relay.ErrForbidden
 	}
-	conversation, err := postgresConversationByID(tx, input.ConversationID)
-	if err != nil {
-		return relay.Conversation{}, false, relay.ErrForbidden
-	}
-	if conversation.DisplayName == displayName {
+	var existingID, existingHash string
+	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id::text,request_hash FROM relay.mail_conversation_display_name_idempotency WHERE machine_id=$1 AND key=$2`, input.ActorMachineID, input.IdempotencyKey).Scan(&existingID, &existingHash)
+	if err == nil {
+		if existingHash != requestHash {
+			return relay.Conversation{}, false, relay.ErrConflict
+		}
+		conversation, err := postgresConversationByID(tx, existingID)
+		if err != nil {
+			return relay.Conversation{}, false, err
+		}
 		if err := tx.Commit(); err != nil {
 			return relay.Conversation{}, false, errors.New("display name retry cannot commit")
 		}
 		return conversation, true, nil
 	}
-	if conversation.DisplayName == "" {
-		if err := postgresRejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
-			return relay.Conversation{}, false, err
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.Conversation{}, false, errors.New("display name retry state is unavailable")
+	}
+	conversation, err := postgresConversationByID(tx, input.ConversationID)
+	if err != nil {
+		return relay.Conversation{}, false, relay.ErrForbidden
+	}
+	duplicate := conversation.DisplayName == displayName
+	if !duplicate {
+		if conversation.DisplayName == "" {
+			if err := postgresRejectExclusiveRenameOccupancy(tx, input.ConversationID, input.Now); err != nil {
+				return relay.Conversation{}, false, err
+			}
 		}
+		if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_conversations SET display_name=$2 WHERE id=$1::uuid`, input.ConversationID, displayName); err != nil {
+			return relay.Conversation{}, false, relayDatabaseError(err, "update conversation display name")
+		}
+		conversation.DisplayName = displayName
 	}
-	if _, err := tx.ExecContext(context.Background(), `UPDATE relay.mail_conversations SET display_name=$2 WHERE id=$1::uuid`, input.ConversationID, displayName); err != nil {
-		return relay.Conversation{}, false, relayDatabaseError(err, "update conversation display name")
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_conversation_display_name_idempotency(machine_id,key,request_hash,conversation_id,created_at) VALUES($1,$2,$3,$4::uuid,$5)`, input.ActorMachineID, input.IdempotencyKey, requestHash, input.ConversationID, input.Now); err != nil {
+		return relay.Conversation{}, false, relayDatabaseError(err, "record display name retry")
 	}
-	conversation.DisplayName = displayName
 	if err := tx.Commit(); err != nil {
 		return relay.Conversation{}, false, relayDatabaseError(err, "commit display name")
 	}
-	return conversation, false, nil
+	return conversation, duplicate, nil
+}
+
+func postgresConversationDisplayNameIdempotencyAvailable(q queryer) (bool, error) {
+	var available bool
+	if err := q.QueryRowContext(context.Background(), `SELECT to_regclass('relay.mail_conversation_display_name_idempotency') IS NOT NULL`).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
 }
 
 func postgresConversationDisplayNameAvailable(q queryer) (bool, error) {

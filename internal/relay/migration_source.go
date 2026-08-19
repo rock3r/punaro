@@ -574,7 +574,7 @@ func verifyLegacyMigrationSourceSchema(ctx context.Context, q migrationQueryer) 
 		names = append(names, name)
 	}
 	names = filterOperationalQuotaTables(names)
-	want := []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+	want := []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	if err := rows.Err(); err != nil || strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
@@ -607,45 +607,46 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		names = append(names, name)
 	}
 	names = filterOperationalQuotaTables(names)
-	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+	want := []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	switch {
 	case direct:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "direct_conversations", "direct_message_idempotency", "endpoints", "idempotency", "memberships", "message_from_roles", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case rateBuckets:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "rate_buckets", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case profiles:
-		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		want = []string{"conversation_control_idempotency", "conversation_controls", "conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "role_profile_idempotency", "role_profiles", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	case !controls:
-		want = []string{"conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
+		want = []string{"conversation_display_name_idempotency", "conversation_idempotency", "conversations", "deliveries", "endpoints", "idempotency", "memberships", "messages", "recipient_cursors", "relay_migration_control", "request_nonces", "role_bindings", "role_memberships", "roles", "telegram_claim_events", "telegram_claims", "telegram_participants"}
 	}
 	if strings.Join(names, "\x00") != strings.Join(want, "\x00") {
 		return errors.New("relay migration source has an unexpected schema")
 	}
 	expectedColumns := map[string][]string{
-		"endpoints":                        {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
-		"conversations":                    {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-", "display_name:TEXT:0:0:-"},
-		"memberships":                      {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"roles":                            {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
-		"role_memberships":                 {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
-		"role_bindings":                    {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
-		"messages":                         {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "from_participant:TEXT:0:0:-", "in_reply_to_message_id:TEXT:0:0:-", "in_reply_to_endpoint:TEXT:0:0:-", "telegram_thread_id:INTEGER:0:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"rate_buckets":                     {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
-		"telegram_claims":                  {"conversation_id:TEXT:0:1:-", "status:TEXT:1:0:-", "requested_by_machine:TEXT:1:0:-", "requested_by_endpoint:TEXT:1:0:-", "idempotency_key:TEXT:1:0:-", "request_hash:TEXT:1:0:-", "created_at:INTEGER:1:0:-", "completed_at:INTEGER:0:0:-"},
-		"telegram_participants":            {"conversation_id:TEXT:0:1:-", "label:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"telegram_claim_events":            {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "event:TEXT:1:0:-", "actor_machine:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"deliveries":                       {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
-		"recipient_cursors":                {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
-		"idempotency":                      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_controls":            {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "operation:TEXT:1:0:-", "member_endpoint:TEXT:1:0:-", "member_capabilities:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
-		"conversation_control_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"request_nonces":                   {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
-		"relay_migration_control":          {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
-		"role_profiles":                    {"role:TEXT:0:1:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:0", "updated_at:INTEGER:1:0:-"},
-		"role_profile_idempotency":         {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "role:TEXT:1:0:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
-		"direct_conversations":             {"role_low:TEXT:1:1:-", "role_high:TEXT:1:2:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
-		"message_from_roles":               {"message_id:TEXT:0:1:-", "from_role:TEXT:1:0:-"},
-		"direct_message_idempotency":       {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "from_role:TEXT:1:0:-", "to_role:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "message_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"endpoints":                             {"endpoint:TEXT:0:1:-", "machine_id:TEXT:1:0:-", "lease_until:INTEGER:1:0:-", "ownership_generation:INTEGER:1:0:1", "consumer_id:TEXT:0:0:-", "consumer_generation:INTEGER:1:0:0", "consumer_lease_until:INTEGER:0:0:-"},
+		"conversations":                         {"id:TEXT:0:1:-", "next_sequence:INTEGER:1:0:0", "created_at:INTEGER:1:0:-", "display_name:TEXT:0:0:-"},
+		"memberships":                           {"conversation_id:TEXT:1:1:-", "endpoint:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"roles":                                 {"role:TEXT:0:1:-", "machine_id:TEXT:1:0:-"},
+		"role_memberships":                      {"conversation_id:TEXT:1:1:-", "role:TEXT:1:2:-", "capabilities:INTEGER:1:0:-"},
+		"role_bindings":                         {"role:TEXT:0:1:-", "session_endpoint:TEXT:1:0:-", "machine_id:TEXT:1:0:-", "ownership_generation:INTEGER:1:0:-", "lease_until:INTEGER:1:0:-"},
+		"messages":                              {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "from_endpoint:TEXT:1:0:-", "from_participant:TEXT:0:0:-", "in_reply_to_message_id:TEXT:0:0:-", "in_reply_to_endpoint:TEXT:0:0:-", "telegram_thread_id:INTEGER:0:0:-", "body:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"rate_buckets":                          {"kind:TEXT:1:1:-", "bucket_key:TEXT:1:2:-", "tokens:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-"},
+		"telegram_claims":                       {"conversation_id:TEXT:0:1:-", "status:TEXT:1:0:-", "requested_by_machine:TEXT:1:0:-", "requested_by_endpoint:TEXT:1:0:-", "idempotency_key:TEXT:1:0:-", "request_hash:TEXT:1:0:-", "created_at:INTEGER:1:0:-", "completed_at:INTEGER:0:0:-"},
+		"telegram_participants":                 {"conversation_id:TEXT:0:1:-", "label:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"telegram_claim_events":                 {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "event:TEXT:1:0:-", "actor_machine:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"deliveries":                            {"id:TEXT:0:1:-", "message_id:TEXT:1:0:-", "recipient_endpoint:TEXT:1:0:-", "lease_machine_id:TEXT:0:0:-", "lease_token:TEXT:0:0:-", "lease_generation:INTEGER:1:0:0", "ownership_generation:INTEGER:0:0:-", "consumer_generation:INTEGER:0:0:-", "lease_until:INTEGER:0:0:-", "acked_at:INTEGER:0:0:-"},
+		"recipient_cursors":                     {"recipient_endpoint:TEXT:1:1:-", "conversation_id:TEXT:1:2:-", "sequence:INTEGER:1:0:0"},
+		"idempotency":                           {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "message_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_idempotency":              {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_controls":                 {"id:TEXT:0:1:-", "conversation_id:TEXT:1:0:-", "actor_endpoint:TEXT:1:0:-", "operation:TEXT:1:0:-", "member_endpoint:TEXT:1:0:-", "member_capabilities:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_control_idempotency":      {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "control_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"conversation_display_name_idempotency": {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"request_nonces":                        {"machine_id:TEXT:1:1:-", "nonce:TEXT:1:2:-", "expires_at:INTEGER:1:0:-"},
+		"relay_migration_control":               {"singleton:INTEGER:0:1:-", "source_id:TEXT:1:0:-", "phase:TEXT:1:0:'active'", "epoch_id:TEXT:0:0:-", "target_identity:TEXT:0:0:-", "fingerprint:TEXT:0:0:-", "last_epoch_id:TEXT:0:0:-", "last_target_identity:TEXT:0:0:-", "last_expected_fingerprint:TEXT:0:0:-", "last_result_fingerprint:TEXT:0:0:-", "last_cutoff:INTEGER:0:0:-", "last_transition:TEXT:0:0:-", "changed_at:INTEGER:1:0:-"},
+		"role_profiles":                         {"role:TEXT:0:1:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:0", "updated_at:INTEGER:1:0:-"},
+		"role_profile_idempotency":              {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "role:TEXT:1:0:-", "display_name:TEXT:0:0:-", "direct_addressable:INTEGER:1:0:-", "updated_at:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
+		"direct_conversations":                  {"role_low:TEXT:1:1:-", "role_high:TEXT:1:2:-", "conversation_id:TEXT:1:0:-", "created_at:INTEGER:1:0:-"},
+		"message_from_roles":                    {"message_id:TEXT:0:1:-", "from_role:TEXT:1:0:-"},
+		"direct_message_idempotency":            {"machine_id:TEXT:1:1:-", "key:TEXT:1:2:-", "request_hash:TEXT:1:0:-", "from_role:TEXT:1:0:-", "to_role:TEXT:1:0:-", "conversation_id:TEXT:1:0:-", "message_id:TEXT:1:0:-", "sequence:INTEGER:1:0:-", "created_at:INTEGER:1:0:-"},
 	}
 	if !controls {
 		delete(expectedColumns, "conversation_controls")
@@ -690,24 +691,25 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		}
 	}
 	expectedForeignKeys := map[string][]string{
-		"memberships":                      {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"role_memberships":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
-		"role_bindings":                    {"roles:role:role:NO ACTION:CASCADE:NONE"},
-		"messages":                         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"deliveries":                       {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"recipient_cursors":                {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"idempotency":                      {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_idempotency":         {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_controls":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"conversation_control_idempotency": {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
-		"role_profiles":                    {"roles:role:role:NO ACTION:CASCADE:NONE"},
-		"role_profile_idempotency":         {"role_profiles:role:role:NO ACTION:CASCADE:NONE"},
-		"direct_conversations":             {"roles:role_low:role:NO ACTION:RESTRICT:NONE", "roles:role_high:role:NO ACTION:RESTRICT:NONE", "conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"message_from_roles":               {"messages:message_id:id:NO ACTION:CASCADE:NONE", "roles:from_role:role:NO ACTION:RESTRICT:NONE"},
-		"direct_message_idempotency":       {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "messages:message_id:id:NO ACTION:CASCADE:NONE"},
-		"telegram_claims":                  {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"telegram_participants":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
-		"telegram_claim_events":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"memberships":                           {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"role_memberships":                      {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "roles:role:role:NO ACTION:RESTRICT:NONE"},
+		"role_bindings":                         {"roles:role:role:NO ACTION:CASCADE:NONE"},
+		"messages":                              {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"deliveries":                            {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"recipient_cursors":                     {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"idempotency":                           {"messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_idempotency":              {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_controls":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_control_idempotency":      {"conversation_controls:control_id:id:NO ACTION:CASCADE:NONE"},
+		"conversation_display_name_idempotency": {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"role_profiles":                         {"roles:role:role:NO ACTION:CASCADE:NONE"},
+		"role_profile_idempotency":              {"role_profiles:role:role:NO ACTION:CASCADE:NONE"},
+		"direct_conversations":                  {"roles:role_low:role:NO ACTION:RESTRICT:NONE", "roles:role_high:role:NO ACTION:RESTRICT:NONE", "conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"message_from_roles":                    {"messages:message_id:id:NO ACTION:CASCADE:NONE", "roles:from_role:role:NO ACTION:RESTRICT:NONE"},
+		"direct_message_idempotency":            {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE", "messages:message_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claims":                       {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_participants":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
+		"telegram_claim_events":                 {"conversations:conversation_id:id:NO ACTION:CASCADE:NONE"},
 	}
 	if !controls {
 		delete(expectedForeignKeys, "conversation_controls")
@@ -758,6 +760,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 		"conversation_idempotency:1:pk:0:machine_id,key",
 		"conversation_controls:1:pk:0:id",
 		"conversation_control_idempotency:1:pk:0:machine_id,key",
+		"conversation_display_name_idempotency:1:pk:0:machine_id,key",
 		"request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 		"role_profiles:1:pk:0:role",
 		"role_profile_idempotency:1:pk:0:machine_id,key",
@@ -770,7 +773,7 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 	}
 	if !controls {
 		expectedIndexes = []string{
-			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
+			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "conversation_display_name_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
 			"telegram_claims:1:pk:0:conversation_id", "telegram_participants:1:pk:0:conversation_id", "telegram_claim_events:1:pk:0:id",
 		}
 	}
@@ -867,16 +870,16 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, contro
 			return errors.New("relay migration source has an unexpected trigger")
 		}
 	}
-	wantTriggers := 51
+	wantTriggers := 54
 	switch {
 	case direct:
-		wantTriggers = 69
+		wantTriggers = 72
 	case rateBuckets:
-		wantTriggers = 60
+		wantTriggers = 63
 	case profiles:
-		wantTriggers = 57
+		wantTriggers = 60
 	case !controls:
-		wantTriggers = 45
+		wantTriggers = 48
 	}
 	var quotaTables int
 	if err := q.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('pending_quota_recipients','pending_quota_install','delivery_terminals')`).Scan(&quotaTables); err != nil || quotaTables != 0 && quotaTables != 2 && quotaTables != 3 {
@@ -1034,7 +1037,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidEndpoint(text)
 	case "roles.role", "role_memberships.role", "role_bindings.role", "role_profiles.role", "role_profile_idempotency.role", "direct_conversations.role_low", "direct_conversations.role_high", "message_from_roles.from_role", "direct_message_idempotency.from_role", "direct_message_idempotency.to_role":
 		valid = ValidRole(text)
-	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id", "telegram_claims.requested_by_machine", "telegram_claim_events.actor_machine":
+	case "endpoints.machine_id", "roles.machine_id", "role_bindings.machine_id", "deliveries.lease_machine_id", "idempotency.machine_id", "conversation_idempotency.machine_id", "conversation_control_idempotency.machine_id", "conversation_display_name_idempotency.machine_id", "role_profile_idempotency.machine_id", "direct_message_idempotency.machine_id", "request_nonces.machine_id", "telegram_claims.requested_by_machine", "telegram_claim_events.actor_machine":
 		valid = ValidMachineID(text)
 	case "deliveries.recipient_endpoint", "recipient_cursors.recipient_endpoint":
 		_, roleRecipient := parseRoleRecipient(text)
@@ -1043,7 +1046,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidEndpoint(text)
 	case "messages.from_participant", "telegram_participants.label":
 		valid = text == TelegramUserParticipant
-	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce", "telegram_claims.idempotency_key":
+	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "conversation_display_name_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce", "telegram_claims.idempotency_key":
 		valid = ValidRequestToken(text)
 	case "role_profiles.display_name", "role_profile_idempotency.display_name":
 		_, valid = NormalizeRoleDisplayName(text)
@@ -1053,7 +1056,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "messages.in_reply_to_message_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "messages.in_reply_to_message_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "conversation_display_name_idempotency.conversation_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil

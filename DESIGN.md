@@ -928,7 +928,7 @@ API client and reaches the relay using its own enrolled machine credential.
 | `POST` | `/v1/direct-messages` | Create or reuse the unique direct-role conversation and send; idempotent per signed machine and key. |
 | `POST` | `/v1/roles/bindings` | Renew one durable role onto a currently attached session of its owning machine. |
 | `GET` | `/v1/conversations` | List conversations the caller may discover, including optional display names. |
-| `POST` | `/v1/conversations/{id}/display-name` | Set a conversation display name from a live admin session; idempotent for the same label. |
+| `POST` | `/v1/conversations/{id}/display-name` | Set a conversation display name from a live admin session; idempotent per signed machine and key bound to the original conversation, actor, and label. |
 | `POST` | `/v1/conversations/{id}/messages` | Append an authorized broadcast, or set `target_role` for one durable receiving role. Distinct new messages are admitted only within the configured sender and conversation rate limits and pending-delivery capacity ceilings; committed idempotent retries do not consume tokens or reserve capacity again. |
 | `POST` | `/v1/conversations/{id}/invocations` | Request a server-authorized, body-free offline-role handoff. |
 | `POST` | `/v1/deliveries/lease` | Lease bounded durable deliveries for one endpoint. |
