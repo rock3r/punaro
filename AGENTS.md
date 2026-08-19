@@ -86,3 +86,12 @@ Plans belong in `.plans/` at the repo root, kept in the root checkout rather tha
 inside a worktree. Both directories stay gitignored; never commit their contents, and
 verify they are ignored before creating them elsewhere. Remove a worktree
 (`git worktree remove`) once its branch is merged or abandoned.
+
+Use the local `using-git-worktree` skill when setting up an isolated workspace.
+
+## Local skills
+
+Before reinventing a workflow, check `.agents/skills/`. Current Punaro-local skills:
+
+- `using-git-worktree` — isolated workspaces under `.worktrees/`
+- `babysit-pr` — watch a PR's CI, review bots, and mergeability until it lands
