@@ -131,7 +131,9 @@ func (s *State) MarkProcessed(updateID int64) error {
 // SetRoute binds one exact Telegram topic to one relay conversation. There is
 // no main-chat fallback because an absent topic is a routing error, not a hint.
 // The claim fence and write share one transaction so a concurrent PersistClaimRoute
-// cannot land between RouteBlocked and the INSERT.
+// cannot land between RouteBlocked and the INSERT. Unthreaded creating is bound
+// to the routed thread in the same transaction so resume cannot create again
+// and another conversation cannot steal the recovery route.
 func (s *State) SetRoute(chatID, threadID int64, conversationID string) error {
 	if strings.TrimSpace(conversationID) == "" {
 		return fmt.Errorf("conversation ID is required")
@@ -140,8 +142,11 @@ func (s *State) SetRoute(chatID, threadID int64, conversationID string) error {
 		if err := routeBlockedOn(conn, chatID, threadID, conversationID); err != nil {
 			return err
 		}
-		_, err := conn.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
-			ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID)
+		if _, err := conn.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
+			ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID); err != nil {
+			return err
+		}
+		_, err := conn.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, chat_id = ?, phase = ? WHERE conversation_id = ? AND phase = ? AND (thread_id IS NULL OR thread_id <= 0)`, threadID, chatID, ClaimPhaseTopicCreated, conversationID, ClaimPhaseCreating)
 		return err
 	})
 }
@@ -398,8 +403,8 @@ func (s *State) PersistClaimDisplayName(conversationID, displayName string) erro
 }
 
 // PersistClaimCreating fences createForumTopic so a crash after Bot API success
-// cannot start a second topic. Resume with this phase and no thread id fails
-// closed instead of calling createForumTopic again.
+// cannot start a second topic. Resume with this phase and no thread id does
+// not call createForumTopic again; an emergency route may bind a known thread.
 func (s *State) PersistClaimCreating(conversationID string) error {
 	_, _, creating, err := s.BeginClaimCreating(conversationID, 0)
 	if err != nil {
@@ -413,7 +418,8 @@ func (s *State) PersistClaimCreating(conversationID string) error {
 
 // BeginClaimCreating rechecks topic_routes and transitions reserved to
 // creating under BEGIN IMMEDIATE so SetRoute cannot insert a route in the
-// window before createForumTopic. An existing route for the allowed chat is
+// window before createForumTopic. After the fence, unthreaded creating may
+// still be bound by emergency route. An existing route for the allowed chat is
 // persisted as topic_created in the same transaction. A foreign-chat race
 // leaves the execution reserved so the operator can correct the route.
 func (s *State) BeginClaimCreating(conversationID string, allowedUserID int64) (int64, int64, bool, error) {
@@ -726,18 +732,35 @@ func claimProtectsRouteOn(q rowQueryer, conversationID string) (bool, error) {
 	return phase == ClaimPhaseCreating || phase == ClaimPhaseTopicCreated || phase == ClaimPhaseAdopting || phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
 }
 
+func claimBlocksRemapOn(q rowQueryer, conversationID string) (bool, error) {
+	var phase string
+	var threadID sql.NullInt64
+	err := q.QueryRowContext(context.Background(), `SELECT phase, thread_id FROM claim_executions WHERE conversation_id = ?`, conversationID).Scan(&phase, &threadID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if phase == ClaimPhaseCreating && (!threadID.Valid || threadID.Int64 <= 0) {
+		return false, nil
+	}
+	return phase == ClaimPhaseCreating || phase == ClaimPhaseTopicCreated || phase == ClaimPhaseAdopting || phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
+}
+
 // RouteBlocked refuses remapping a claimed conversation or stealing its thread.
-// A route is claimed once createForumTopic is in flight or a topic/route exists.
+// Unthreaded creating may be bound by emergency route; a thread already bound
+// to creating still cannot be stolen.
 func (s *State) RouteBlocked(chatID, threadID int64, conversationID string) error {
 	return routeBlockedOn(s.db, chatID, threadID, conversationID)
 }
 
 func routeBlockedOn(q rowQueryer, chatID, threadID int64, conversationID string) error {
-	protected, err := claimProtectsRouteOn(q, conversationID)
+	blocked, err := claimBlocksRemapOn(q, conversationID)
 	if err != nil {
 		return err
 	}
-	if protected {
+	if blocked {
 		return fmt.Errorf("telegram conversation is already claimed")
 	}
 	var existing string
@@ -751,7 +774,7 @@ func routeBlockedOn(q rowQueryer, chatID, threadID int64, conversationID string)
 	if existing == conversationID {
 		return nil
 	}
-	protected, err = claimProtectsRouteOn(q, existing)
+	protected, err := claimProtectsRouteOn(q, existing)
 	if err != nil {
 		return err
 	}

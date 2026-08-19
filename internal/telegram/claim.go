@@ -155,11 +155,30 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 	}
 	if execution.Phase == ClaimPhaseCreating {
 		if execution.ThreadID <= 0 {
-			err := fmt.Errorf("telegram_create_forum_topic_failed")
-			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
-			return err
+			if chatID, threadID, found, err := e.State.RouteForConversation(conversationID); err != nil {
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err=telegram_route_persist_failed")
+				return err
+			} else if found && threadID > 0 {
+				if e.AllowedUserID != 0 && chatID != e.AllowedUserID {
+					err := fmt.Errorf("telegram_route_persist_failed")
+					e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
+					return err
+				}
+				if err := e.State.PersistClaimThread(conversationID, chatID, threadID); err != nil {
+					e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err=telegram_persist_thread_failed")
+					return err
+				}
+				execution.ThreadID = threadID
+				execution.ChatID = chatID
+				execution.Phase = ClaimPhaseTopicCreated
+			} else {
+				err := fmt.Errorf("telegram_create_forum_topic_failed")
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
+				return err
+			}
+		} else {
+			execution.Phase = ClaimPhaseTopicCreated
 		}
-		execution.Phase = ClaimPhaseTopicCreated
 	}
 	if execution.Phase == ClaimPhaseTopicCreated {
 		if e.AllowedUserID == 0 || execution.ThreadID <= 0 || execution.ChatID == 0 || execution.ChatID != e.AllowedUserID {

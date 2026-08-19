@@ -391,13 +391,13 @@ func TestBeginClaimCreatingDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
 			_ = state.Close()
 			t.Fatal(err)
 		}
-		if execution.Phase == ClaimPhaseCreating && found {
-			_ = state.Close()
-			t.Fatalf("iter %d creating after concurrent route owner=%q execution=%#v", i, owner, execution)
-		}
 		if found && owner != "conversation-a" {
 			_ = state.Close()
 			t.Fatalf("iter %d unexpected owner=%q execution=%#v", i, owner, execution)
+		}
+		if execution.Phase == ClaimPhaseCreating && found {
+			_ = state.Close()
+			t.Fatalf("iter %d creating after concurrent route owner=%q execution=%#v", i, owner, execution)
 		}
 		_ = state.Close()
 	}
@@ -416,8 +416,18 @@ func TestStateRouteBlockedTreatsCreatingAndTopicCreatedAsClaimed(t *testing.T) {
 	if err := state.PersistClaimCreating("conversation-creating"); err != nil {
 		t.Fatal(err)
 	}
-	if err := state.RouteBlocked(55, 8, "conversation-creating"); err == nil {
-		t.Fatal("creating conversation remapped")
+	if err := state.RouteBlocked(55, 8, "conversation-creating"); err != nil {
+		t.Fatalf("unthreaded creating blocked emergency route: %v", err)
+	}
+	if err := state.SetRoute(55, 8, "conversation-creating"); err != nil {
+		t.Fatalf("emergency route during unthreaded creating: %v", err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-creating")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 8 || execution.ChatID != 55 {
+		t.Fatalf("bound creating execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-other"); err == nil {
+		t.Fatal("unthreaded creating thread stolen")
 	}
 	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-topic"); err != nil {
 		t.Fatal(err)

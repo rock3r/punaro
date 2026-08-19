@@ -257,9 +257,12 @@ punaro-telegram route \
 ```
 
 The route command rejects missing thread IDs, mapping a conversation that
-already has a completed claim, or stealing a `(chat_id, thread_id)` already
-bound to a claimed conversation. Durable state also rejects mapping one
-conversation to multiple topics. There is no main-chat fallback.
+already has a completed, routed, topic-created, or adopting claim, or stealing
+a `(chat_id, thread_id)` already bound to a claimed conversation, including
+`creating`. Unthreaded `creating` (createForumTopic succeeded or was ambiguous,
+but no thread id was stored) can be bound to a known thread so resume completes
+without a second create. Durable state also rejects mapping one conversation
+to multiple topics. There is no main-chat fallback.
 
 ## Inbound and outbound routing
 

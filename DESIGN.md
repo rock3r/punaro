@@ -984,7 +984,10 @@ never calls `getForumTopic`. Resume of `topic_created` binds that stored
 pair; a changed allowed user fails closed instead of attaching the old
 thread to a new chat. A crash after Bot API success and before the thread
 id is stored keeps the fence, so resume does not create a second
-user-visible topic. An ambiguous
+user-visible topic. An emergency `route` of a known thread is the supported
+recovery: unthreaded `creating` may be remapped, and resume binds that route
+without calling `createForumTopic`. A thread already bound to `creating`
+still cannot be stolen. An ambiguous
 createForumTopic error (timeout, lost response, or decode failure) also
 keeps the fence instead of retrying create. A completed 4xx Bot API
 rejection, including HTTP 429, returns the row to reserved so resume can
@@ -1000,8 +1003,9 @@ route requires its `chat_id` to match the configured allowed user.
 remote reserve, so an emergency `route` remap cannot leave a pending relay
 claim without a protected local route. A crash after that fence and before
 `ClaimConversation` resumes through the adopt reservation instead of
-`CompleteTelegramClaim`. `route` refuses a conversation that is adopting, creating, topic-created, routed, or
-complete, or a `(chat,thread)` already bound to such a conversation. Main-chat
+`CompleteTelegramClaim`. `route` refuses a conversation that is adopting, topic-created, routed, or
+complete, or a `(chat,thread)` already bound to a `creating` or later claim.
+Unthreaded `creating` may be bound to a known thread. Main-chat
 ordinary text stays unbound. There is no main-chat fallback. Gateway startup
 and `SendDelivery` fail closed when a completed route's `chat_id` is not the
 configured allowed user. `/list` fails closed when two unclaimed rooms share
