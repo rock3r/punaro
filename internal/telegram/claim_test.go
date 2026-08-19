@@ -84,7 +84,7 @@ type adoptFenceRelay struct {
 	completes    []string
 }
 
-func (r *adoptFenceRelay) ClaimConversation(_ context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error) {
+func (r *adoptFenceRelay) ClaimConversation(_ context.Context, conversationID, _, _ string) (relay.TelegramClaim, error) {
 	_, found, err := r.state.ClaimExecution(conversationID)
 	if err != nil {
 		return relay.TelegramClaim{}, err
