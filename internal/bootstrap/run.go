@@ -131,6 +131,9 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 			}
 			return ErrRecoveryOnly
 		}
+		if currentGenerationIsHealthy(request.Directory, identity) || identity.Release == localCheckoutRelease {
+			return err
+		}
 		return failCurrent(ctx, request, startOrDefault(request), identity, hadPrevious, errChildExited)
 	}
 	if err != nil {

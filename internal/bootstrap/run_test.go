@@ -1115,6 +1115,37 @@ func TestRunDoesNotRollbackSeededCheckoutOnStartFailure(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRollbackSeededCheckoutOnMissingAdapter(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "checkout-adapter")
+	writeAccepted(t, dir, "v0.2.0", 2, 2, payloadDigest("signed-adapter"))
+	if err := os.Remove(filepath.Join(dir, currentSlot, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH))); err != nil {
+		t.Fatal(err)
+	}
+	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	})
+	if !errors.Is(err, errNoAdapter) {
+		t.Fatalf("seeded missing adapter err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("seeded missing adapter entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != localCheckoutRelease || status.Previous != "v0.1.0" {
+		t.Fatalf("seeded checkout was rolled back: %#v", status)
+	}
+}
+
 func TestRunDoesNotRecoverWhenRolledGenerationIsProven(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
