@@ -137,7 +137,7 @@ func runAdopt(args []string) error {
 	if err != nil {
 		return err
 	}
-	return telegram.Adopt(context.Background(), state, relayClient, conversation, nil)
+	return telegram.Adopt(context.Background(), state, relayClient, conversation, cfg.allowedUserID, nil)
 }
 
 func run() error {

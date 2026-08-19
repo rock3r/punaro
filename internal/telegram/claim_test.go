@@ -362,7 +362,7 @@ func TestAdoptUsesExistingRouteWithoutCreateForumTopic(t *testing.T) {
 		t.Fatal(err)
 	}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
-	if err := Adopt(context.Background(), state, claims, "conversation-1", func(string, ...any) {}); err != nil {
+	if err := Adopt(context.Background(), state, claims, "conversation-1", 55, func(string, ...any) {}); err != nil {
 		t.Fatal(err)
 	}
 	if len(claims.reserves) != 1 || claims.reserves[0].key != AdoptClaimKey("conversation-1") || claims.reserves[0].endpoint != relay.TelegramGatewayEndpoint {
@@ -388,7 +388,7 @@ func TestAdoptAlreadyCompleteIsNoopSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-2", Status: "complete", DisplayName: "Other"}}
-	if err := Adopt(context.Background(), state, claims, "conversation-2", func(string, ...any) {}); err != nil {
+	if err := Adopt(context.Background(), state, claims, "conversation-2", 55, func(string, ...any) {}); err != nil {
 		t.Fatal(err)
 	}
 	if len(claims.completes) != 0 {
@@ -509,7 +509,7 @@ func TestAdoptDoesNotDowngradeCompleteExecution(t *testing.T) {
 		t.Fatalf("AdoptExecution downgraded complete: %#v found=%v err=%v", execution, found, err)
 	}
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "How is it going"}}
-	if err := Adopt(context.Background(), state, claims, "conversation-1", func(string, ...any) {}); err != nil {
+	if err := Adopt(context.Background(), state, claims, "conversation-1", 55, func(string, ...any) {}); err != nil {
 		t.Fatal(err)
 	}
 	if len(claims.completes) != 0 {
@@ -596,11 +596,30 @@ func TestAdoptRequiresExistingRoute(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = state.Close() })
 	claims := &recordingClaimRelay{claim: relay.TelegramClaim{Status: "pending", DisplayName: "Ops"}}
-	if err := Adopt(context.Background(), state, claims, "conversation-missing", func(string, ...any) {}); err == nil {
+	if err := Adopt(context.Background(), state, claims, "conversation-missing", 55, func(string, ...any) {}); err == nil {
 		t.Fatal("adopt without route succeeded")
 	}
 	if len(claims.reserves) != 0 {
 		t.Fatalf("missing-route adopt reserved: %#v", claims.reserves)
+	}
+}
+
+func TestAdoptRejectsRouteForDifferentTelegramChat(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(99, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	if err := Adopt(context.Background(), state, claims, "conversation-1", 55, func(string, ...any) {}); err == nil {
+		t.Fatal("adopt completed a route for a different telegram chat")
+	}
+	if len(claims.reserves) != 0 || len(claims.completes) != 0 {
+		t.Fatalf("foreign-chat adopt touched relay: reserves=%#v completes=%#v", claims.reserves, claims.completes)
 	}
 }
 

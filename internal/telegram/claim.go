@@ -258,16 +258,19 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 }
 
 // Adopt binds an existing topic_routes row to a completed claim. It never creates a topic.
-func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversationID string, logfn func(string, ...any)) error {
+func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversationID string, allowedUserID int64, logfn func(string, ...any)) error {
 	if state == nil || relayClient == nil || strings.TrimSpace(conversationID) == "" {
 		return fmt.Errorf("telegram adopt is not configured")
 	}
-	_, threadID, found, err := state.RouteForConversation(conversationID)
+	chatID, threadID, found, err := state.RouteForConversation(conversationID)
 	if err != nil {
 		return err
 	}
 	if !found || threadID <= 0 {
 		return fmt.Errorf("telegram adopt requires an existing topic route")
+	}
+	if allowedUserID == 0 || chatID != allowedUserID {
+		return fmt.Errorf("telegram adopt requires the configured telegram chat")
 	}
 	claim, err := relayClient.ClaimConversation(ctx, conversationID, relay.TelegramGatewayEndpoint, AdoptClaimKey(conversationID))
 	if err != nil {
