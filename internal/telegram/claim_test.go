@@ -191,6 +191,40 @@ func TestExecuteClaimKeepsCreatingFenceAfterAmbiguousTopicCreateError(t *testing
 	}
 }
 
+func TestExecuteClaimRetriesAfterDefinitiveTopicCreateRejection(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{err: BotAPIStatusError{Method: "createForumTopic", Status: 429}}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err == nil {
+		t.Fatal("HTTP 429 createForumTopic error was treated as success")
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseReserved || execution.ThreadID != 0 {
+		t.Fatalf("retryable after HTTP 429 execution=%#v found=%v err=%v", execution, found, err)
+	}
+	topics.err = nil
+	topics.threadID = 795446
+	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 2 {
+		t.Fatalf("createForumTopic after HTTP 429 names=%#v", topics.names)
+	}
+	execution, found, err = state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("completed after HTTP 429 retry execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
 func TestExecuteClaimDoesNotRecreateTopicAfterCreatingFenceCrash(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

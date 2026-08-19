@@ -17,6 +17,17 @@ import (
 const maxBotResponseBytes = 1 << 20
 const maxRichMessageBytes = 32 << 10
 
+// BotAPIStatusError is a completed Telegram HTTP response. 4xx means the
+// requested object was not created and may be retried.
+type BotAPIStatusError struct {
+	Method string
+	Status int
+}
+
+func (e BotAPIStatusError) Error() string {
+	return fmt.Sprintf("telegram %s returned HTTP %d", e.Method, e.Status)
+}
+
 // Client is a narrow Telegram Bot API long-poll client. Its token is retained
 // only in memory and is never included in returned errors.
 type Client struct {
@@ -360,7 +371,7 @@ func (c *Client) postJSON(ctx context.Context, methodName string, body []byte, d
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("telegram %s returned HTTP %d", methodName, response.StatusCode)
+		return BotAPIStatusError{Method: methodName, Status: response.StatusCode}
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, maxBotResponseBytes+1)).Decode(decoded); err != nil {
 		return fmt.Errorf("invalid telegram %s response", methodName)

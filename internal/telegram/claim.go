@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -92,9 +93,16 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 			execution.Phase = ClaimPhaseCreating
 			threadID, err := e.Topics.CreateForumTopic(ctx, e.AllowedUserID, name)
 			if err != nil || threadID <= 0 {
-				err := fmt.Errorf("telegram_create_forum_topic_failed")
-				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+err.Error())
-				return err
+				failed := fmt.Errorf("telegram_create_forum_topic_failed")
+				if definitivePreCreationRejection(err) {
+					if clearErr := e.State.ClearClaimCreating(conversationID); clearErr != nil {
+						e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err="+failed.Error())
+						return failed
+					}
+					execution.Phase = ClaimPhaseReserved
+				}
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+execution.Phase, "err="+failed.Error())
+				return failed
 			}
 			if err := e.State.PersistClaimThread(conversationID, threadID); err != nil {
 				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseCreating, "err=telegram_persist_thread_failed")
@@ -138,6 +146,11 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 		e.logEvent("telegram_claim_completed", "conversation_id="+conversationID)
 	}
 	return nil
+}
+
+func definitivePreCreationRejection(err error) bool {
+	var status BotAPIStatusError
+	return errors.As(err, &status) && status.Status >= 400 && status.Status < 500
 }
 
 func (e ClaimExecutor) ensurePending(ctx context.Context, execution *ClaimExecution) error {
