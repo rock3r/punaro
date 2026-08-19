@@ -1118,6 +1118,50 @@ func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testin
 	}
 }
 
+func TestInspectMigrationSourceAcceptsTokenReplyIDs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 14, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	conversation := createClaimedTelegramConversation(t, store, now)
+	const replyID = "legacy-reply-token-1"
+	if !ValidRequestToken(replyID) {
+		t.Fatalf("fixture reply id %q is not a valid request token", replyID)
+	}
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "reply", InReplyToMessageID: replyID,
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 11, IdempotencyKey: "telegram-update:token-reply", Now: now,
+	})
+	if err != nil || duplicate || inbound.InReplyToPunaroMessageID != replyID {
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Counts.Messages != 1 {
+		t.Fatalf("inspect token reply id=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("a", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Counts.Messages != 1 {
+		t.Fatalf("prepare token reply id=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_messages", "", 10)
+	if err != nil || len(batch.Rows) != 1 {
+		t.Fatalf("messages batch=%#v err=%v", batch, err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(batch.Rows[0].Payload, &message); err != nil {
+		t.Fatal(err)
+	}
+	if message["in_reply_to_message_id"] != replyID {
+		t.Fatalf("exported reply id=%v", message["in_reply_to_message_id"])
+	}
+}
+
 func migrationSourcePhase(t *testing.T, store *Store) MigrationSourcePhase {
 	t.Helper()
 	var phase MigrationSourcePhase

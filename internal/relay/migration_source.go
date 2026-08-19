@@ -1048,6 +1048,8 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = text == TelegramUserParticipant
 	case "endpoints.consumer_id", "idempotency.key", "conversation_idempotency.key", "conversation_control_idempotency.key", "conversation_display_name_idempotency.key", "role_profile_idempotency.key", "direct_message_idempotency.key", "request_nonces.nonce", "telegram_claims.idempotency_key":
 		valid = ValidRequestToken(text)
+	case "messages.in_reply_to_message_id":
+		valid = ValidRequestToken(text) || uuid.Validate(text) == nil
 	case "role_profiles.display_name", "role_profile_idempotency.display_name":
 		_, valid = NormalizeRoleDisplayName(text)
 	case "rate_buckets.kind":
@@ -1056,7 +1058,7 @@ func validateMigrationSourceValue(table, column string, value any) error {
 		valid = ValidMachineID(text) || uuid.Validate(text) == nil
 	case "messages.body":
 		valid = ValidMessageBody(text)
-	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "messages.in_reply_to_message_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "conversation_display_name_idempotency.conversation_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id":
+	case "conversations.id", "memberships.conversation_id", "messages.id", "messages.conversation_id", "deliveries.id", "deliveries.message_id", "recipient_cursors.conversation_id", "idempotency.message_id", "conversation_idempotency.conversation_id", "conversation_controls.id", "conversation_controls.conversation_id", "conversation_control_idempotency.control_id", "conversation_display_name_idempotency.conversation_id", "direct_conversations.conversation_id", "message_from_roles.message_id", "direct_message_idempotency.conversation_id", "direct_message_idempotency.message_id", "telegram_claims.conversation_id", "telegram_participants.conversation_id", "telegram_claim_events.id", "telegram_claim_events.conversation_id":
 		valid = uuid.Validate(text) == nil
 	default:
 		return nil
