@@ -140,6 +140,8 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 		"(display_name_idempotency_oid, 'mail_conversation_display_name_idempotency_mutation_guard')",
 		"$1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid",
 		"$1 < 53 OR display_name_idempotency_oid IS NOT NULL",
+		"$1 < 53 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=display_name_idempotency_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(key) >= 1) AND (char_length(key) <= 128) AND (octet_length(key) <= 512) AND (key !~ ''[[:cntrl:]]''::text))')",
+		"$1 < 53 OR EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=display_name_idempotency_oid AND contype='c' AND conkey=ARRAY[3]::smallint[] AND pg_get_expr(conbin,conrelid)='(request_hash ~ ''^[0-9a-f]{64}$''::text)')",
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("relay inspect SQL missing display-name idempotency check: %s", want)
