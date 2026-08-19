@@ -511,6 +511,33 @@ func TestNextSlotGenerationRejectsExhaustedHighWater(t *testing.T) {
 	}
 }
 
+func TestLoadAutoRollbackQuarantinesNegativeGeneration(t *testing.T) {
+	dir := privateDir(t)
+	body := []byte(`{"schema":1,"release":"v0.2.0","sequence":2,"manifest_sha256":"` + repeatC() + `","generation":-1}`)
+	if err := os.WriteFile(filepath.Join(dir, autoRollbackFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := loadAutoRollback(dir)
+	if err != nil || record.Release != "" {
+		t.Fatalf("quarantined auto-rollback=%+v err=%v", record, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, autoRollbackFile)); !os.IsNotExist(err) {
+		t.Fatal("negative-generation auto-rollback survived load")
+	}
+}
+
+func TestLoadAutoRollbackKeepsLegacyZeroGeneration(t *testing.T) {
+	dir := privateDir(t)
+	body := []byte(`{"schema":1,"release":"v0.2.0","sequence":2,"manifest_sha256":"` + repeatC() + `","generation":0}`)
+	if err := os.WriteFile(filepath.Join(dir, autoRollbackFile), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record, err := loadAutoRollback(dir)
+	if err != nil || record.Release != "v0.2.0" || record.Generation != 0 {
+		t.Fatalf("legacy auto-rollback=%+v err=%v", record, err)
+	}
+}
+
 func TestLoadAutoRollbackQuarantinesDirectoryNode(t *testing.T) {
 	dir := privateDir(t)
 	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))

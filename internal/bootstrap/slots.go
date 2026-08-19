@@ -470,7 +470,7 @@ func loadAutoRollback(directory string) (autoRollbackState, error) {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return quarantineInvalidAutoRollback(directory)
 	}
-	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || !validManifestDigest(record.ManifestSHA256) {
+	if record.Schema != 1 || record.Release == "" || record.Sequence < 1 || record.Generation < 0 || !validManifestDigest(record.ManifestSHA256) {
 		return quarantineInvalidAutoRollback(directory)
 	}
 	return record, nil
@@ -487,7 +487,7 @@ func quarantineInvalidAutoRollback(directory string) (autoRollbackState, error) 
 }
 
 func saveAutoRollback(directory string, away slotState) error {
-	if away.Release == "" || away.Sequence < 1 || !validManifestDigest(away.ManifestSHA256) {
+	if away.Release == "" || away.Sequence < 1 || away.Generation < 0 || !validManifestDigest(away.ManifestSHA256) {
 		return errors.New("bootstrap auto-rollback state is invalid")
 	}
 	body, err := json.Marshal(autoRollbackState{
