@@ -780,6 +780,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT OR IGNORE INTO telegram_claim_idempotency(machine_id, key, request_hash, conversation_id, created_at)
 			SELECT requested_by_machine, idempotency_key, request_hash, conversation_id, created_at FROM telegram_claims`,
 	} {
+		if strings.Contains(statement, "telegram_claims_machine_key") {
+			if err := reconcileLegacyDuplicateTelegramClaimKeys(ctx, tx); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate relay database: %w", err)
 		}
@@ -830,6 +835,30 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("migrate relay database: %w", err)
+	}
+	return nil
+}
+
+// reconcileLegacyDuplicateTelegramClaimKeys keeps one claim per (machine, key)
+// before creating the unique index. Pre-v8 SQLite allowed the same key on
+// different conversations. Keep complete over pending, then earliest created_at,
+// then lexicographically smallest conversation_id.
+func reconcileLegacyDuplicateTelegramClaimKeys(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM telegram_claims
+		WHERE EXISTS (
+			SELECT 1 FROM telegram_claims AS keeper
+			WHERE keeper.requested_by_machine = telegram_claims.requested_by_machine
+			  AND keeper.idempotency_key = telegram_claims.idempotency_key
+			  AND keeper.conversation_id != telegram_claims.conversation_id
+			  AND (
+				(keeper.status = 'complete' AND telegram_claims.status != 'complete')
+				OR (keeper.status = telegram_claims.status AND (
+					keeper.created_at < telegram_claims.created_at
+					OR (keeper.created_at = telegram_claims.created_at AND keeper.conversation_id < telegram_claims.conversation_id)
+				))
+			  )
+		)`); err != nil {
+		return fmt.Errorf("reconcile legacy telegram claim keys: %w", err)
 	}
 	return nil
 }

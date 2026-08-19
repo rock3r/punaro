@@ -1018,7 +1018,10 @@ PostgreSQL serializes reserve/ensure by `(machine, key)` with
 `pg_advisory_xact_lock` before the mapping lookup. Claim and mapping
 inserts use untargeted `ON CONFLICT DO NOTHING` and then read the winning
 row, so a racing unique `(requested_by_machine, idempotency_key)` cannot
-abort the transaction.
+abort the transaction. Opening a pre-v8 SQLite database that already stored
+the same machine key on two conversations keeps the complete row, else the
+earliest `created_at`, then creates the unique index so inspect/migrate can
+start.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
