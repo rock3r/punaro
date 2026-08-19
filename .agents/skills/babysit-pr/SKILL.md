@@ -71,7 +71,7 @@ python3 .agents/skills/babysit-pr/scripts/gh_pr_watch.py --pr 42 --once
 | `actions` value | Meaning |
 |---|---|
 | `stop_pr_closed` | PR was merged or closed — done |
-| `stop_ready_to_merge` | CI green, no blocking reviews, no conflicts — the only positive readiness verdict |
+| `stop_ready_to_merge` | CI green, no blocking reviews, no conflicts — the only positive readiness verdict. Before acting on it, run the full Punaro gate locally on the PR head (a PR can go green without any babysitter push, and the gate must still pass before merge) |
 | `stop_exhausted_retries` | Flaky reruns hit the retry limit — user must investigate |
 | `stop_non_retryable_failure` | Terminal failure is not in retry-eligible workflows — diagnose/fix before continuing |
 | `stop_bugbot_not_green` | Cursor Bugbot is not clean — do not merge |
@@ -129,7 +129,9 @@ into the same commit before pushing.
    never rebase onto a stale or wrong-remote local ref.
 4. Resolve conflicts and **in the same fix cycle** apply all actionable bot comments.
 5. Run the full Punaro gate.
-6. Push once.
+6. Push once, with `--force-with-lease`: the rebase rewrote the commit IDs, so an
+   ordinary push is rejected as non-fast-forward, and an unqualified force push could
+   overwrite concurrent remote updates.
 
 This avoids paying for multiple bot reruns and prevents a ping-pong where a conflict-fix
 push is immediately followed by a second bot-fix push.

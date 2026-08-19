@@ -134,8 +134,11 @@ Mail carries the conversation; Big Brain carries the knowledge.
   until adversarial acceptance tests pass (replayed updates and hostile bodies stay inert).
 - **Content-free operational state:** gateway state, wake hints, audit logs, and
   maintenance reports carry IDs and sequences, never bodies or credentials.
-- **Durable correctness over liveness tricks:** idempotency keys on every mutation,
-  at-least-once only where explicitly chosen and documented (the Telegram send edge).
+- **Durable correctness over liveness tricks:** the general delivery model is
+  at-least-once with durable deduplication — idempotency keys on every mutation,
+  append/lease/ack on every queue. The Telegram outbound send is the one documented
+  edge where deduplication is impossible (no Bot API idempotency key), so duplicates
+  are explicitly accepted there instead.
 
 ## 5. Where it stands and where it goes
 
