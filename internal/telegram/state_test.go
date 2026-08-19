@@ -304,6 +304,38 @@ func TestStatePersistClaimRouteDoesNotStealAnotherConversationThread(t *testing.
 	}
 }
 
+func TestStatePersistClaimRouteRejectsDifferentChat(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimThread("conversation-1", 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.PersistClaimRoute(99, 1, "conversation-1"); err == nil {
+		t.Fatal("PersistClaimRoute reused a route from a different chat")
+	}
+	conversation, found, err := state.Route(55, 7)
+	if err != nil || !found || conversation != "conversation-1" {
+		t.Fatalf("original route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+	if _, found, err := state.Route(99, 1); err != nil || found {
+		t.Fatal("wrong-chat route was inserted")
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 7 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
 func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

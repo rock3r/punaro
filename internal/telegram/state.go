@@ -389,12 +389,15 @@ func (s *State) PersistClaimRoute(chatID, threadID int64, conversationID string)
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var existingThread sql.NullInt64
-	err = tx.QueryRowContext(context.Background(), `SELECT thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&existingThread)
+	var existingChat, existingThread sql.NullInt64
+	err = tx.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&existingChat, &existingThread)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if err == nil && existingThread.Valid && existingThread.Int64 > 0 {
+		if !existingChat.Valid || existingChat.Int64 != chatID {
+			return fmt.Errorf("telegram topic is bound to another chat")
+		}
 		if _, err := tx.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, phase = ? WHERE conversation_id = ?`, existingThread.Int64, ClaimPhaseRoutePersisted, conversationID); err != nil {
 			return err
 		}
