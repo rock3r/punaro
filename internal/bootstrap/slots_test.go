@@ -381,6 +381,26 @@ func TestRecoverJournalRemovesAbandonedTempFiles(t *testing.T) {
 	}
 }
 
+func TestRecoverJournalLeavesLiveRunMarkerTemps(t *testing.T) {
+	dir := privateDir(t)
+	live := filepath.Join(dir, ".run.pid-live.tmp")
+	if err := os.WriteFile(live, []byte("in-flight"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "journal.json.tmp"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverJournal(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(live); err != nil {
+		t.Fatal("live run marker temp was removed")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "journal.json.tmp")); !os.IsNotExist(err) {
+		t.Fatal("fixed temporary journal retained")
+	}
+}
+
 func TestReplaceCurrentQuarantinesCorruptPrevious(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")

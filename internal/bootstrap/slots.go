@@ -1011,16 +1011,32 @@ func existsRealDir(path string) (bool, error) {
 	return true, nil
 }
 
+func isRunPIDTemp(name string) bool {
+	return strings.HasPrefix(name, "."+runPIDFile+"-") && strings.HasSuffix(name, ".tmp")
+}
+
 func removeAbandonedTemps(directory string) error {
+	return removeDirectoryTemps(directory, false)
+}
+
+func removeAbandonedRunPIDTemps(directory string) error {
+	return removeDirectoryTemps(directory, true)
+}
+
+func removeDirectoryTemps(directory string, runPIDOnly bool) error {
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".tmp") {
+		name := entry.Name()
+		if entry.IsDir() || strings.ContainsAny(name, `/\`) || !strings.HasSuffix(name, ".tmp") {
 			continue
 		}
-		if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil && !os.IsNotExist(err) {
+		if isRunPIDTemp(name) != runPIDOnly {
+			continue
+		}
+		if err := os.Remove(filepath.Join(directory, name)); err != nil && !os.IsNotExist(err) { // #nosec G703 -- temps are directory entries of the bootstrap root.
 			return err
 		}
 	}

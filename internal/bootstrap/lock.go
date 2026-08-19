@@ -19,6 +19,10 @@ func acquireRunLease(directory string) (func(), error) {
 		unlock()
 		return nil, err
 	}
+	if err := removeAbandonedRunPIDTemps(directory); err != nil {
+		unlock()
+		return nil, err
+	}
 	return unlock, nil
 }
 

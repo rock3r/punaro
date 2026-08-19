@@ -82,6 +82,22 @@ func TestAcquireRunLeaseTerminatesStaleChild(t *testing.T) {
 	}
 }
 
+func TestAcquireRunLeaseRemovesAbandonedRunMarkerTemps(t *testing.T) {
+	dir := privateDir(t)
+	stale := filepath.Join(dir, ".run.pid-stale.tmp")
+	if err := os.WriteFile(stale, []byte("abandoned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireRunLease(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatal("abandoned run marker temp survived lease acquire")
+	}
+}
+
 func TestAcquireRunLeaseLeavesMismatchedProcess(t *testing.T) {
 	dir := privateDir(t)
 	cmd, _ := startSleepProcess(t)
