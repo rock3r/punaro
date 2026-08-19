@@ -324,13 +324,38 @@ func TestBeginClaimCreatingReusesRouteInsertedBeforeCreatingFence(t *testing.T) 
 	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
-	chatID, threadID, creating, err := state.BeginClaimCreating("conversation-1")
+	chatID, threadID, creating, err := state.BeginClaimCreating("conversation-1", 55)
 	if err != nil || creating || chatID != 55 || threadID != 7 {
 		t.Fatalf("creating=%t chat=%d thread=%d err=%v", creating, chatID, threadID, err)
 	}
 	execution, found, err := state.ClaimExecution("conversation-1")
 	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 7 || execution.ChatID != 55 {
 		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
+func TestBeginClaimCreatingLeavesReservedWhenRacedRouteIsForeign(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(99, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := state.BeginClaimCreating("conversation-1", 55); err == nil || err.Error() != "telegram_route_persist_failed" {
+		t.Fatalf("foreign route err=%v", err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseReserved || execution.ThreadID != 0 {
+		t.Fatalf("wedged execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if err := state.RouteBlocked(55, 8, "conversation-1"); err != nil {
+		t.Fatalf("reserved execution blocked route correction: %v", err)
 	}
 }
 
@@ -349,7 +374,7 @@ func TestBeginClaimCreatingDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			_, _, _, _ = state.BeginClaimCreating("conversation-a")
+			_, _, _, _ = state.BeginClaimCreating("conversation-a", 55)
 		}()
 		go func() {
 			defer wg.Done()

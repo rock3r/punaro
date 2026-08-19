@@ -108,10 +108,14 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 			if e.beforeCreatingFence != nil {
 				e.beforeCreatingFence()
 			}
-			chatID, existingThread, creating, err := e.State.BeginClaimCreating(conversationID)
+			chatID, existingThread, creating, err := e.State.BeginClaimCreating(conversationID, e.AllowedUserID)
 			if err != nil {
-				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err=telegram_create_forum_topic_failed")
-				return err
+				failed := err
+				if err.Error() != "telegram_route_persist_failed" {
+					failed = fmt.Errorf("telegram_create_forum_topic_failed")
+				}
+				e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseReserved, "err="+failed.Error())
+				return failed
 			}
 			if !creating {
 				if e.AllowedUserID != 0 && chatID != e.AllowedUserID {

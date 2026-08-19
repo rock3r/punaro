@@ -401,7 +401,7 @@ func (s *State) PersistClaimDisplayName(conversationID, displayName string) erro
 // cannot start a second topic. Resume with this phase and no thread id fails
 // closed instead of calling createForumTopic again.
 func (s *State) PersistClaimCreating(conversationID string) error {
-	_, _, creating, err := s.BeginClaimCreating(conversationID)
+	_, _, creating, err := s.BeginClaimCreating(conversationID, 0)
 	if err != nil {
 		return err
 	}
@@ -413,9 +413,10 @@ func (s *State) PersistClaimCreating(conversationID string) error {
 
 // BeginClaimCreating rechecks topic_routes and transitions reserved to
 // creating under BEGIN IMMEDIATE so SetRoute cannot insert a route in the
-// window before createForumTopic. An existing route is persisted as
-// topic_created in the same transaction instead of fencing.
-func (s *State) BeginClaimCreating(conversationID string) (int64, int64, bool, error) {
+// window before createForumTopic. An existing route for the allowed chat is
+// persisted as topic_created in the same transaction. A foreign-chat race
+// leaves the execution reserved so the operator can correct the route.
+func (s *State) BeginClaimCreating(conversationID string, allowedUserID int64) (int64, int64, bool, error) {
 	if strings.TrimSpace(conversationID) == "" {
 		return 0, 0, false, fmt.Errorf("conversation ID is required")
 	}
@@ -424,6 +425,9 @@ func (s *State) BeginClaimCreating(conversationID string) (int64, int64, bool, e
 	err := s.withImmediate(func(conn *sql.Conn) error {
 		err := conn.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&chatID, &threadID)
 		if err == nil && threadID > 0 {
+			if allowedUserID != 0 && chatID != allowedUserID {
+				return fmt.Errorf("telegram_route_persist_failed")
+			}
 			if _, err := conn.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, chat_id = ?, phase = ? WHERE conversation_id = ?`, threadID, chatID, ClaimPhaseTopicCreated, conversationID); err != nil {
 				return err
 			}
