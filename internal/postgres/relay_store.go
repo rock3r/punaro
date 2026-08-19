@@ -2745,6 +2745,9 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 		}
 	}
 	requestHash := postgresTelegramClaimHash(input.ConversationID)
+	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('telegram-claim-retry',$1::text,$2::text)::text, 579001230616))`, input.MachineID, input.IdempotencyKey); err != nil {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim retry lock is unavailable")
+	}
 	bound, err := postgresLookupTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey)
 	if err == nil {
 		if bound.hash != requestHash {
@@ -2781,7 +2784,7 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 	createdAt := input.Now.UTC().Truncate(time.Microsecond)
 	result, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at)
 		VALUES($1::uuid,'pending',$2,$3,$4,$5,$6)
-		ON CONFLICT (conversation_id) DO NOTHING`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, requestHash, createdAt)
+		ON CONFLICT DO NOTHING`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, requestHash, createdAt)
 	if err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "reserve telegram claim")
 	}
@@ -2791,6 +2794,23 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 	}
 	if inserted == 0 {
 		claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
+		if errors.Is(err, sql.ErrNoRows) {
+			if err := postgresBindTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey, input.ConversationID, requestHash, input.Now); err != nil {
+				return relay.TelegramClaim{}, false, err
+			}
+			bound, err := postgresLookupTelegramClaimIdempotency(tx, input.MachineID, input.IdempotencyKey)
+			if err != nil {
+				return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
+			}
+			claim, err = postgresTelegramClaimByConversation(tx, bound.conversationID)
+			if err != nil {
+				return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
+			}
+			if err := tx.Commit(); err != nil {
+				return relay.TelegramClaim{}, false, errors.New("telegram claim retry cannot commit")
+			}
+			return claim, true, nil
+		}
 		if err != nil {
 			return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
 		}

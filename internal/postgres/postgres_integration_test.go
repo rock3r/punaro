@@ -1593,6 +1593,7 @@ func testRelayIntegration(t *testing.T, app *Database) {
 	testPostgresTelegramClaimReserveOccupancy(t, app)
 	testPostgresTelegramClaimBindsEnsureKeyToExistingClaim(t, app)
 	testPostgresTelegramClaimConcurrentEnsureBind(t, app)
+	testPostgresTelegramClaimConcurrentSameKeyDifferentConversations(t, app)
 	testPostgresUserTelegramSendFromGatewayDoesNotChargeQuota(t, app)
 	testPostgresMembershipControls(t, app)
 	testRecipientCursorDoesNotCrossUncommittedAppend(t, app)
@@ -1776,6 +1777,82 @@ func testPostgresTelegramClaimConcurrentEnsureBind(t *testing.T, app *Database) 
 		if got.err != nil || !got.duplicate || got.claim.ConversationID != room.ID {
 			t.Fatalf("concurrent ensure %d claim=%#v duplicate=%t err=%v", i, got.claim, got.duplicate, got.err)
 		}
+	}
+}
+
+func testPostgresTelegramClaimConcurrentSameKeyDifferentConversations(t *testing.T, app *Database) {
+	t.Helper()
+	now := time.Date(2026, time.August, 19, 19, 0, 0, 0, time.UTC)
+	const (
+		machineA        = "postgres-claim-keyrace-a"
+		machineB        = "postgres-claim-keyrace-b"
+		machineTelegram = "postgres-claim-keyrace-telegram"
+		endpointA       = "agent/postgres-claim-keyrace/a"
+		endpointB       = "agent/postgres-claim-keyrace/b"
+	)
+	if err := app.AdvertiseEndpoints(machineA, []string{endpointA}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineB, []string{endpointB}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.AdvertiseEndpoints(machineTelegram, []string{relay.TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineA, IdempotencyKey: "postgres-claim-keyrace-first", CreatorEndpoint: endpointA,
+		DisplayName: "Key race first", Members: []relay.Member{{Endpoint: endpointA, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := app.CreateConversationIdempotent(relay.CreateConversationInput{
+		MachineID: machineB, IdempotencyKey: "postgres-claim-keyrace-second", CreatorEndpoint: endpointB,
+		DisplayName: "Key race second", Members: []relay.Member{{Endpoint: endpointB, Capabilities: relay.CapSend | relay.CapReceive | relay.CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms := []string{firstRoom.ID, secondRoom.ID}
+	type result struct {
+		claim     relay.TelegramClaim
+		duplicate bool
+		err       error
+	}
+	results := make([]result, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func(i int) {
+			defer wg.Done()
+			claim, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+				ConversationID: rooms[i], MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+				IdempotencyKey: "postgres-shared-key", Now: now.Add(time.Duration(i+1) * time.Second),
+			})
+			results[i] = result{claim: claim, duplicate: duplicate, err: err}
+		}(i)
+	}
+	wg.Wait()
+	var winner string
+	conflicts := 0
+	for i, got := range results {
+		if errors.Is(got.err, relay.ErrConflict) {
+			conflicts++
+			continue
+		}
+		if got.err != nil {
+			t.Fatalf("concurrent same-key different conversation %d err=%v", i, got.err)
+		}
+		if got.claim.ConversationID != rooms[i] {
+			t.Fatalf("concurrent same-key different conversation %d claimed=%s want=%s", i, got.claim.ConversationID, rooms[i])
+		}
+		if winner != "" && winner != got.claim.ConversationID {
+			t.Fatalf("both conversations reserved with the same key: %s and %s", winner, got.claim.ConversationID)
+		}
+		winner = got.claim.ConversationID
+	}
+	if winner == "" || conflicts != 1 {
+		t.Fatalf("same-key different conversation winner=%q conflicts=%d results=%#v", winner, conflicts, results)
 	}
 }
 
