@@ -275,7 +275,7 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	started := 0
+	scanned := 0
 	for {
 		claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit, after)
 		if err != nil {
@@ -286,22 +286,20 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 		}
 		for _, claim := range claims {
 			after = claim.ConversationID
+			scanned++
 			if _, found, err := e.State.ClaimExecution(claim.ConversationID); err != nil {
 				return err
-			} else if found {
-				continue
+			} else if !found {
+				inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
+				if err != nil {
+					return err
+				}
+				if inserted {
+					e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
+					_ = e.Execute(ctx, claim.ConversationID)
+				}
 			}
-			inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
-			if err != nil {
-				return err
-			}
-			if !inserted {
-				continue
-			}
-			e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
-			_ = e.Execute(ctx, claim.ConversationID)
-			started++
-			if started >= pendingClaimPollLimit {
+			if scanned >= pendingClaimPollLimit {
 				return e.State.setPendingClaimCursor(after)
 			}
 		}

@@ -581,8 +581,17 @@ func TestStartPendingPagesPastLocallyKnownClaims(t *testing.T) {
 	if err := executor.StartPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(claims.pendingAfter) < 2 || claims.pendingAfter[0] != "" || claims.pendingAfter[1] != "conversation-10" {
-		t.Fatalf("pending after cursors=%#v", claims.pendingAfter)
+	if len(claims.pendingAfter) != 1 || claims.pendingAfter[0] != "" {
+		t.Fatalf("first cycle pending after cursors=%#v", claims.pendingAfter)
+	}
+	if _, found, err := state.ClaimExecution("conversation-11"); err != nil || found {
+		t.Fatal("eleventh pending started before scan budget rolled over")
+	}
+	if err := executor.StartPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.pendingAfter) < 2 || claims.pendingAfter[1] != "conversation-10" {
+		t.Fatalf("second cycle pending after cursors=%#v", claims.pendingAfter)
 	}
 	later, found, err := state.ClaimExecution("conversation-11")
 	if err != nil || !found || later.Phase != ClaimPhaseComplete || later.ThreadID != 99 {
