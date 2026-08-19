@@ -184,7 +184,7 @@ func TestRelayInspectSQLIncludesTelegramClaimMachineKeyAfter55(t *testing.T) {
 	for _, want := range []string{
 		`(telegram_claims_oid,'u'::"char",ARRAY[3,5]::smallint[])`,
 		`count(*) FILTER (WHERE con.contype='u')=CASE WHEN $1 >= 55 THEN 5 ELSE 4 END`,
-		`$1 >= 55 OR NOT (expected.table_oid=telegram_claims_oid AND expected.constraint_type='u')`,
+		`$1 >= 55 OR expected.table_oid IS DISTINCT FROM telegram_claims_oid OR expected.constraint_type IS DISTINCT FROM 'u'::"char"`,
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("relay inspect SQL missing telegram claim machine-key unique: %s", want)

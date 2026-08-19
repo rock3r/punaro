@@ -3396,7 +3396,7 @@ WITH objects AS (
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
       AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
-      AND ($1 >= 55 OR NOT (expected.table_oid=telegram_claims_oid AND expected.constraint_type='u'))
+      AND ($1 >= 55 OR expected.table_oid IS DISTINCT FROM telegram_claims_oid OR expected.constraint_type IS DISTINCT FROM 'u'::"char")
 ), actual_keys AS (
     SELECT con.conrelid,con.contype,con.conkey
     FROM objects JOIN pg_constraint AS con
