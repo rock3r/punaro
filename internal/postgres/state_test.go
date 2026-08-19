@@ -69,8 +69,8 @@ func TestManifestValidationRejectsMutableOrNonContiguousHistory(t *testing.T) {
 
 func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 	manifest := CurrentManifest()
-	if manifest.MinSupported != 10 || manifest.MaxSupported != 53 || len(manifest.Migrations) != 53 {
-		t.Fatalf("manifest=%#v, want exact v53 compatibility window", manifest)
+	if manifest.MinSupported != 10 || manifest.MaxSupported != 54 || len(manifest.Migrations) != 54 {
+		t.Fatalf("manifest=%#v, want exact v54 compatibility window", manifest)
 	}
 	embedding := manifest.Migrations[23]
 	if embedding.Version != 24 || embedding.Name != "024_memory_embedding_worker_control" ||
@@ -88,7 +88,7 @@ func TestCurrentManifestRequiresControlPlaneSchema(t *testing.T) {
 			want = 10
 		case 12, 13:
 			want = 10
-		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53:
+		case 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54:
 			want = 10
 		}
 		if migration.CompatibilityFloor != want {
@@ -240,7 +240,10 @@ func TestCompatibleSchemaCanStillHavePendingMigrations(t *testing.T) {
 	if !migrationPending(SchemaState{Classification: Compatible, Version: 52}, manifest) {
 		t.Fatal("compatible v52 schema must still apply the pending v53 migration")
 	}
-	if migrationPending(SchemaState{Classification: Compatible, Version: 53}, manifest) {
-		t.Fatal("current v53 schema reported a pending migration")
+	if !migrationPending(SchemaState{Classification: Compatible, Version: 53}, manifest) {
+		t.Fatal("compatible v53 schema must still apply the pending v54 migration")
+	}
+	if migrationPending(SchemaState{Classification: Compatible, Version: 54}, manifest) {
+		t.Fatal("current v54 schema reported a pending migration")
 	}
 }

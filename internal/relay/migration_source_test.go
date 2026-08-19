@@ -1162,6 +1162,64 @@ func TestInspectMigrationSourceAcceptsTokenReplyIDs(t *testing.T) {
 	}
 }
 
+func TestInspectMigrationSourceExportsDisplayNameIdempotency(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 15, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "create-cutover-rename", CreatorEndpoint: "agent/a",
+		Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate, err := store.SetConversationDisplayName(SetDisplayNameInput{
+		ConversationID: conversation.ID, ActorMachineID: "machine-a", ActorEndpoint: "agent/a",
+		DisplayName: "Alpha", IdempotencyKey: "rename-cutover-a", Now: now,
+	}); err != nil || duplicate {
+		t.Fatalf("rename err=%v duplicate=%v", err, duplicate)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Counts.DisplayNameIdempotency != 1 {
+		t.Fatalf("inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("b", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Counts.DisplayNameIdempotency != 1 {
+		t.Fatalf("prepare=%#v err=%v", prepared, err)
+	}
+	batch, err := ReadMigrationSourceBatch(ctx, path, "mail_conversation_display_name_idempotency", "", 10)
+	if err != nil || len(batch.Rows) != 1 || !batch.Done {
+		t.Fatalf("rename idempotency batch=%#v err=%v", batch, err)
+	}
+	hasher, err := NewMigrationTableHasher("mail_conversation_display_name_idempotency")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hasher.Add(batch.Rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	count, digest := hasher.Evidence()
+	if count != prepared.Counts.DisplayNameIdempotency || digest != prepared.TableSHA256.DisplayNameIdempotency {
+		t.Fatalf("evidence count=%d digest=%s want count=%d digest=%s", count, digest, prepared.Counts.DisplayNameIdempotency, prepared.TableSHA256.DisplayNameIdempotency)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(batch.Rows[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["key"] != "rename-cutover-a" || payload["conversation_id"] != conversation.ID {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
 func migrationSourcePhase(t *testing.T, store *Store) MigrationSourcePhase {
 	t.Helper()
 	var phase MigrationSourcePhase

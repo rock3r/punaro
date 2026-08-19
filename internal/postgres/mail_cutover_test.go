@@ -80,6 +80,7 @@ func TestMailCutoverRequestValidation(t *testing.T) {
 	currentManifest.TableSHA256.TelegramClaims = strings.Repeat("c", 64)
 	currentManifest.TableSHA256.TelegramParticipants = strings.Repeat("c", 64)
 	currentManifest.TableSHA256.TelegramClaimEvents = strings.Repeat("c", 64)
+	currentManifest.TableSHA256.DisplayNameIdempotency = strings.Repeat("c", 64)
 	current.Manifest, _ = json.Marshal(currentManifest)
 	currentDigest := sha256.Sum256(current.Manifest)
 	current.ManifestSHA256 = hex.EncodeToString(currentDigest[:])

@@ -57,6 +57,7 @@ type MigrationSourceCounts struct {
 	TelegramClaims           int64 `json:"telegram_claims,omitempty"`
 	TelegramParticipants     int64 `json:"telegram_participants,omitempty"`
 	TelegramClaimEvents      int64 `json:"telegram_claim_events,omitempty"`
+	DisplayNameIdempotency   int64 `json:"display_name_idempotency,omitempty"`
 	RequestNonces            int64 `json:"request_nonces"`
 }
 
@@ -84,6 +85,7 @@ type MigrationSourceHashes struct {
 	TelegramClaims           string `json:"telegram_claims,omitempty"`
 	TelegramParticipants     string `json:"telegram_participants,omitempty"`
 	TelegramClaimEvents      string `json:"telegram_claim_events,omitempty"`
+	DisplayNameIdempotency   string `json:"display_name_idempotency,omitempty"`
 	RequestNonces            string `json:"request_nonces"`
 }
 
@@ -135,6 +137,7 @@ var migrationTableSpecs = []migrationTableSpec{
 	{"telegram_claims", "conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at,completed_at", "conversation_id"},
 	{"telegram_participants", "conversation_id,label,created_at", "conversation_id"},
 	{"telegram_claim_events", "id,conversation_id,event,actor_machine,actor_endpoint,created_at", "id"},
+	{"conversation_display_name_idempotency", "machine_id,key,request_hash,conversation_id,created_at", "machine_id,key"},
 }
 
 var v3MigrationTableSpecs = migrationTableSpecs[:14]
@@ -158,7 +161,7 @@ var legacyMigrationTableSpecs = []migrationTableSpec{
 	{"request_nonces", "machine_id,nonce,expires_at", "machine_id,nonce"},
 }
 
-const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events"
+const migrationSourceSchema = "punaro-relay-sqlite-v6:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets;direct_conversations;message_from_roles;direct_message_idempotency;telegram_claims;telegram_participants;telegram_claim_events;conversation_display_name_idempotency"
 const v5MigrationSourceSchema = "punaro-relay-sqlite-v5:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency;rate_buckets"
 const v4MigrationSourceSchema = "punaro-relay-sqlite-v4:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces;role_profiles;role_profile_idempotency"
 const v3MigrationSourceSchema = "punaro-relay-sqlite-v3:endpoints;conversations;memberships;roles;role_memberships;role_bindings;messages;deliveries;recipient_cursors;idempotency;conversation_idempotency;conversation_controls;conversation_control_idempotency;request_nonces"
@@ -1143,6 +1146,8 @@ func setMigrationTableEvidence(manifest *MigrationSourceManifest, table string, 
 		manifest.Counts.TelegramParticipants, manifest.TableSHA256.TelegramParticipants = count, digest
 	case "telegram_claim_events":
 		manifest.Counts.TelegramClaimEvents, manifest.TableSHA256.TelegramClaimEvents = count, digest
+	case "conversation_display_name_idempotency":
+		manifest.Counts.DisplayNameIdempotency, manifest.TableSHA256.DisplayNameIdempotency = count, digest
 	case "request_nonces":
 		manifest.Counts.RequestNonces, manifest.TableSHA256.RequestNonces = count, digest
 	}

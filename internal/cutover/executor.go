@@ -22,6 +22,7 @@ var tables = []string{
 	"mail_telegram_claims", "mail_telegram_participants", "mail_telegram_claim_events",
 	"mail_memberships", "mail_roles", "mail_role_memberships", "mail_role_bindings", "mail_messages", "mail_deliveries",
 	"mail_recipient_cursors", "mail_message_idempotency", "mail_conversation_idempotency",
+	"mail_conversation_display_name_idempotency",
 	"mail_conversation_controls", "mail_conversation_control_idempotency", "mail_request_nonces",
 	"mail_role_profiles", "mail_role_profile_idempotency", "mail_rate_buckets",
 	"mail_direct_conversations", "mail_message_from_roles", "mail_direct_message_idempotency",
@@ -358,6 +359,8 @@ func tableEvidence(manifest relay.MigrationSourceManifest, table string) (int64,
 		return manifest.Counts.TelegramParticipants, manifest.TableSHA256.TelegramParticipants
 	case "mail_telegram_claim_events":
 		return manifest.Counts.TelegramClaimEvents, manifest.TableSHA256.TelegramClaimEvents
+	case "mail_conversation_display_name_idempotency":
+		return manifest.Counts.DisplayNameIdempotency, manifest.TableSHA256.DisplayNameIdempotency
 	default:
 		return -1, ""
 	}
