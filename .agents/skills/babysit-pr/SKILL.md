@@ -8,7 +8,7 @@ description: >
   (e.g. CI infrastructure issues, exhausted flaky retries, or ambiguous/blocking review
   feedback). Use when the user asks to monitor a PR, watch CI, handle review comments, or
   keep an eye on failures and feedback on an open PR.
-allowed-tools: Bash(python3 */skills/babysit-pr/scripts/*), Bash(gh pr *), Bash(gh run *), Bash(gh api *), Bash(git fetch *), Bash(git rebase *), Bash(git merge *), Bash(git checkout *), Bash(git switch *), Bash(git push *), Bash(git add *), Bash(git commit *), Bash(git remote *), Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(git worktree *), Bash(make *), Read, Edit
+allowed-tools: Bash(python3 */skills/babysit-pr/scripts/*), Bash(gh pr *), Bash(gh run *), Bash(gh api *), Bash(git fetch *), Bash(git rebase *), Bash(git merge *), Bash(git checkout *), Bash(git switch *), Bash(git push *), Bash(git add *), Bash(git commit *), Bash(git remote *), Bash(git diff *), Bash(git log *), Bash(git status), Bash(git branch *), Bash(git worktree *), Bash(make *), Read, Edit, Write
 ---
 
 # PR Babysitter
@@ -96,7 +96,9 @@ the PR is awaiting approval.
    `git worktree list` (worktrees live under `.worktrees/`). Do this before touching the
    branch: `git branch -D` refuses while a worktree still has the branch checked out.
 3. **Delete the local branch** (squash merges leave it unmerged by default):
-   `git branch -D <head_branch>`.
+   `git branch -D <head_branch>` — but first confirm the local tip matches the watched
+   PR's final head (or is an ancestor of it). If the branch carries commits that were
+   never pushed, stop and report instead of deleting the only reference to them.
 
 **Only delete the local branch and worktree** — never touch remote branches. Skip
 silently if the branch or worktree doesn't exist locally.
