@@ -1023,6 +1023,60 @@ func TestRunRecoversWhenCurrentExitsBeforeReady(t *testing.T) {
 	}
 }
 
+func TestRunDoesNotRollbackSeededLocalCheckout(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "signed-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("signed-adapter"), 0)
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.2.0", 2, payloadDigest("signed-adapter"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			Origin:        origin.URL,
+			Keys:          origin.Keys,
+			HealthTimeout: 40 * time.Millisecond,
+			Now:           time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("seeded checkout did not start")
+	}
+	time.Sleep(80 * time.Millisecond)
+	if recoveryOnly(t, dir) {
+		t.Fatal("seeded checkout entered recovery-only")
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != localCheckoutRelease {
+		t.Fatalf("seeded checkout was rolled back: %#v", status)
+	}
+}
+
 func TestRunDoesNotRecoverWhenRolledGenerationIsProven(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")

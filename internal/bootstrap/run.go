@@ -161,7 +161,7 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	requireHealth := hadPrevious && !proven && identity.Generation >= 1
+	requireHealth := hadPrevious && !proven && identity.Generation >= 1 && identity.Release != localCheckoutRelease
 	if err := waitHealth(ctx, request, child, identity, requireHealth); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, identity)
