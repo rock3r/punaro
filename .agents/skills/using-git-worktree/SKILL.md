@@ -26,6 +26,11 @@ Create worktrees under `.worktrees/` at the repo root (create it if missing). Be
 creating a project-local worktree directory, verify it is gitignored; if it is not, fix
 that first.
 
+Never place a Punaro worktree under a world-writable ancestor such as `/tmp` or
+`$TMPDIR`: the adapter's invocation tests create fixtures inside the checkout and
+require protected, non-symlink path components, so the quality gate fails from such a
+location even when the code is fine.
+
 ## Creation flow
 
 1. Determine the current branch and the default branch.
