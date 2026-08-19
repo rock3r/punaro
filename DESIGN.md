@@ -989,10 +989,14 @@ continues only when this gateway already has a recoverable topic route for
 the configured chat; otherwise it fails closed and requires
 `punaro-telegram adopt` instead of creating a second topic. Reusing a stored
 route requires its `chat_id` to match the configured allowed user.
-`punaro-telegram adopt` completes an existing `topic_routes` row
-without creating a topic. `route` refuses a claimed conversation or a
+`punaro-telegram adopt` re-reads `topic_routes` and writes
+`claim_executions` in one transaction so an emergency `route` remap cannot
+complete against a stale thread. `route` refuses a claimed conversation or a
 `(chat,thread)` already bound to a claimed conversation. Main-chat ordinary
-text stays unbound. There is no main-chat fallback.
+text stays unbound. There is no main-chat fallback. Gateway startup and
+`SendDelivery` fail closed when a completed route's `chat_id` is not the
+configured allowed user. One `SyncOnce` starts at most ten new pending
+claims so Bot API retries cannot starve inbound and outbound mail.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
@@ -1003,8 +1007,9 @@ metadata.
 For outbound messages, it leases a durable gateway delivery and posts it using
 the exact stored `message_thread_id`. One durable unique route prevents a
 conversation from fanning out to multiple topics. `SendDelivery` stays
-route-based (`topic_routes` only). A missing route fails closed with the
-existing missing-route error and leaves the delivery unacked. Requiring a
+route-based (`topic_routes` only) and refuses a `chat_id` other than the
+configured allowed user. A missing or foreign route fails closed and leaves
+the delivery unacked. Requiring a
 completed claim on that path is a post-adopt soak follow-up. The Bot API does
 not expose a send idempotency key, so a crash after an accepted Telegram send
 and before relay acknowledgement is deliberately at-least-once. Agent text is

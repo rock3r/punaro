@@ -35,7 +35,7 @@ func TestSendDeliveryRoutesToExactTopicAndEscapesAgentText(t *testing.T) {
 	}
 	sender := &recordedRichSender{}
 	delivery := relay.Delivery{Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a<unsafe>", Body: "<script>not markup</script>"}}
-	if err := SendDelivery(context.Background(), state, sender, delivery); err != nil {
+	if err := SendDelivery(context.Background(), state, sender, delivery, 100); err != nil {
 		t.Fatal(err)
 	}
 	if sender.chat != 100 || sender.thread != 7 || len(sender.html) != 1 {
@@ -59,7 +59,7 @@ func TestSendDeliveryRecordsTelegramOutboundMap(t *testing.T) {
 	}
 	sender := &recordedRichSender{}
 	delivery := relay.Delivery{ID: "delivery-1", Message: relay.Message{ID: "message-1", ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}
-	if err := SendDelivery(context.Background(), state, sender, delivery); err != nil {
+	if err := SendDelivery(context.Background(), state, sender, delivery, 100); err != nil {
 		t.Fatal(err)
 	}
 	ref, found, err := state.LookupOutbound(100, 1)
@@ -75,7 +75,24 @@ func TestSendDeliveryRejectsUnroutedConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := SendDelivery(context.Background(), state, &recordedRichSender{}, relay.Delivery{Message: relay.Message{ConversationID: "unrouted", FromEndpoint: "agent/a", Body: "reply"}}); err == nil {
+	if err := SendDelivery(context.Background(), state, &recordedRichSender{}, relay.Delivery{Message: relay.Message{ConversationID: "unrouted", FromEndpoint: "agent/a", Body: "reply"}}, 100); err == nil {
 		t.Fatal("unrouted delivery was sent to Telegram")
+	}
+}
+
+func TestSendDeliveryRejectsRouteForDifferentTelegramChat(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(99, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	sender := &recordedRichSender{}
+	err = SendDelivery(context.Background(), state, sender, relay.Delivery{Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}, 55)
+	if err == nil || sender.chat != 0 {
+		t.Fatalf("foreign-chat delivery was sent: err=%v chat=%d", err, sender.chat)
 	}
 }

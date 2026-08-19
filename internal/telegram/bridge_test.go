@@ -38,7 +38,7 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = state.Close() })
-	if err := state.SetRoute(100, 7, "conversation-1"); err != nil {
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
 		t.Fatal(err)
 	}
 	relayClient := &fakeBridgeRelay{deliveries: []relay.Delivery{{ID: "delivery-1", Message: relay.Message{ConversationID: "conversation-1", FromEndpoint: "agent/a", Body: "reply"}}}}
@@ -48,7 +48,7 @@ func TestBridgeSyncsInboundAndOutboundThroughOneAttachedGatewayEndpoint(t *testi
 		Relay:    relayClient,
 		Endpoint: "telegram/gateway",
 		State:    state,
-		Poller:   fakePoller{updates: []Update{{ID: 10, UserID: 55, ChatID: 100, ThreadID: 7, Text: "question"}}},
+		Poller:   fakePoller{updates: []Update{{ID: 10, UserID: 55, ChatID: 55, ThreadID: 7, Text: "question"}}},
 		Gateway: Gateway{AllowedUserID: 55, State: state, Submit: func(context.Context, Submission) error {
 			submitted++
 			return nil

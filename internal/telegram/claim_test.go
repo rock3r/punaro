@@ -3,7 +3,9 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rock3r/punaro/internal/relay"
@@ -601,6 +603,97 @@ func TestAdoptRequiresExistingRoute(t *testing.T) {
 	}
 	if len(claims.reserves) != 0 {
 		t.Fatalf("missing-route adopt reserved: %#v", claims.reserves)
+	}
+}
+
+func TestExecuteCompleteRejectsRouteForDifferentTelegramChat(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(99, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.AdoptExecution("conversation-1", 795446); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.MarkClaimComplete("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 1}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "complete", DisplayName: "Ops"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.Execute(context.Background(), "conversation-1"); err == nil {
+		t.Fatal("complete execution kept a foreign telegram chat")
+	}
+	if err := executor.ResumeAll(context.Background()); err == nil {
+		t.Fatal("startup resume kept a completed foreign telegram chat")
+	}
+	if len(topics.names) != 0 || len(claims.completes) != 0 {
+		t.Fatalf("foreign complete route touched bot/relay: topics=%#v completes=%#v", topics.names, claims.completes)
+	}
+}
+
+func TestAdoptPersistsExecutionFromCurrentRouteTransaction(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("claim.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func Adopt(")
+	if start < 0 {
+		t.Fatal("Adopt missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("Adopt unbounded")
+	}
+	fn := rest[:end+1]
+	if !strings.Contains(fn, "AdoptExistingRoute") {
+		t.Fatal("Adopt must persist claim_executions from the same transaction that re-reads topic_routes")
+	}
+	if strings.Contains(fn, "AdoptExecution") {
+		t.Fatal("Adopt must not persist a stale thread id from a prior route lookup")
+	}
+}
+
+func TestStartPendingBoundsExecuteWorkPerCycle(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	pending := make([]relay.TelegramClaim, 0, 11)
+	for i := 1; i <= 11; i++ {
+		id := fmt.Sprintf("conversation-%02d", i)
+		pending = append(pending, relay.TelegramClaim{ConversationID: id, Status: "pending", DisplayName: id})
+	}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{Status: "pending"}, pending: pending}
+	topics := &recordingTopicCreator{}
+	topics.onCreate = func() { topics.threadID++ }
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.StartPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	eleventh, found, err := state.ClaimExecution("conversation-11")
+	if err != nil || found {
+		t.Fatalf("eleventh claim consumed the cycle budget: %#v found=%v err=%v", eleventh, found, err)
+	}
+	tenth, found, err := state.ClaimExecution("conversation-10")
+	if err != nil || !found || tenth.Phase != ClaimPhaseComplete {
+		t.Fatalf("tenth pending was not started: %#v found=%v err=%v", tenth, found, err)
+	}
+	if err := executor.StartPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	later, found, err := state.ClaimExecution("conversation-11")
+	if err != nil || !found || later.Phase != ClaimPhaseComplete {
+		t.Fatalf("next cycle did not start the remaining claim: %#v found=%v err=%v", later, found, err)
 	}
 }
 

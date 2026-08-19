@@ -331,6 +331,32 @@ func (s *State) IncompleteClaimExecutions() ([]ClaimExecution, error) {
 	return executions, rows.Err()
 }
 
+// CompletedClaimExecutions lists finished local executions for route revalidation.
+func (s *State) CompletedClaimExecutions() ([]ClaimExecution, error) {
+	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions WHERE phase = ? ORDER BY conversation_id`, ClaimPhaseComplete)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []ClaimExecution
+	for rows.Next() {
+		var execution ClaimExecution
+		var threadID sql.NullInt64
+		var displayName sql.NullString
+		var skip int
+		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
+			return nil, err
+		}
+		if threadID.Valid {
+			execution.ThreadID = threadID.Int64
+		}
+		execution.DisplayName = displayName.String
+		execution.SkipReserve = skip == 1
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
 // PersistClaimDisplayName stores the snapshotted label used for createForumTopic.
 func (s *State) PersistClaimDisplayName(conversationID, displayName string) error {
 	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET display_name = ? WHERE conversation_id = ?`, displayName, conversationID)
@@ -428,12 +454,45 @@ func (s *State) AdoptExecution(conversationID string, threadID int64) error {
 	if strings.TrimSpace(conversationID) == "" || threadID <= 0 {
 		return fmt.Errorf("adopt route is required")
 	}
-	_, err := s.db.ExecContext(context.Background(), `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES (?, ?, ?, 1)
+	_, err := s.db.ExecContext(context.Background(), adoptExecutionSQL, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete)
+	return err
+}
+
+const adoptExecutionSQL = `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES (?, ?, ?, 1)
 		ON CONFLICT(conversation_id) DO UPDATE SET
 			thread_id = CASE WHEN claim_executions.phase = ? THEN claim_executions.thread_id ELSE excluded.thread_id END,
 			phase = CASE WHEN claim_executions.phase = ? THEN claim_executions.phase ELSE excluded.phase END,
-			skip_reserve = 1`, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete)
-	return err
+			skip_reserve = 1`
+
+// AdoptExistingRoute re-reads topic_routes and writes claim_executions in one
+// transaction so an emergency SetRoute cannot remap the row after the lookup.
+func (s *State) AdoptExistingRoute(conversationID string, allowedUserID int64) (int64, error) {
+	if strings.TrimSpace(conversationID) == "" || allowedUserID == 0 {
+		return 0, fmt.Errorf("telegram adopt is not configured")
+	}
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var chatID, threadID int64
+	err = tx.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&chatID, &threadID)
+	if errors.Is(err, sql.ErrNoRows) || threadID <= 0 {
+		return 0, fmt.Errorf("telegram adopt requires an existing topic route")
+	}
+	if err != nil {
+		return 0, err
+	}
+	if chatID != allowedUserID {
+		return 0, fmt.Errorf("telegram adopt requires the configured telegram chat")
+	}
+	if _, err := tx.ExecContext(context.Background(), adoptExecutionSQL, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return threadID, nil
 }
 
 // MarkClaimComplete records a finished local execution.

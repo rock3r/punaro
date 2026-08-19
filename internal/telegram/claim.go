@@ -54,6 +54,10 @@ func (e ClaimExecutor) Execute(ctx context.Context, conversationID string) error
 		return fmt.Errorf("telegram claim execution is missing")
 	}
 	if execution.Phase == ClaimPhaseComplete {
+		if err := e.rejectMismatchedRoute(conversationID); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+conversationID, "phase="+ClaimPhaseComplete, "err="+err.Error())
+			return err
+		}
 		return nil
 	}
 	if execution.Phase == ClaimPhaseReserved {
@@ -204,8 +208,22 @@ func (e ClaimExecutor) localClaimRouteRecoverable(execution *ClaimExecution) (bo
 	return true, nil
 }
 
+func (e ClaimExecutor) rejectMismatchedRoute(conversationID string) error {
+	chatID, threadID, found, err := e.State.RouteForConversation(conversationID)
+	if err != nil {
+		return err
+	}
+	if !found || threadID <= 0 || e.AllowedUserID == 0 || chatID != e.AllowedUserID {
+		return fmt.Errorf("telegram_route_persist_failed")
+	}
+	return nil
+}
+
 // ResumeAll continues every local execution that is not complete.
 func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
+	if err := e.rejectCompletedRouteMismatches(); err != nil {
+		return err
+	}
 	executions, err := e.State.IncompleteClaimExecutions()
 	if err != nil {
 		return err
@@ -219,11 +237,26 @@ func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
 	return nil
 }
 
+func (e ClaimExecutor) rejectCompletedRouteMismatches() error {
+	executions, err := e.State.CompletedClaimExecutions()
+	if err != nil {
+		return err
+	}
+	for _, execution := range executions {
+		if err := e.rejectMismatchedRoute(execution.ConversationID); err != nil {
+			e.logEvent("telegram_claim_failed", "conversation_id="+execution.ConversationID, "phase="+ClaimPhaseComplete, "err="+err.Error())
+			return err
+		}
+	}
+	return nil
+}
+
 const pendingClaimPollLimit = 10
 
 // StartPending inserts reserved rows for relay-pending claims with no local execution.
 func (e ClaimExecutor) StartPending(ctx context.Context) error {
 	after := ""
+	started := 0
 	for {
 		claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit, after)
 		if err != nil {
@@ -247,8 +280,10 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 				continue
 			}
 			e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
-			if err := e.Execute(ctx, claim.ConversationID); err != nil {
-				continue
+			_ = e.Execute(ctx, claim.ConversationID)
+			started++
+			if started >= pendingClaimPollLimit {
+				return nil
 			}
 		}
 		if len(claims) < pendingClaimPollLimit {
@@ -285,7 +320,8 @@ func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversati
 		logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
 		return nil
 	}
-	if err := state.AdoptExecution(conversationID, threadID); err != nil {
+	threadID, err = state.AdoptExistingRoute(conversationID, allowedUserID)
+	if err != nil {
 		return err
 	}
 	if claim.Status == "complete" {

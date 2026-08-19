@@ -62,7 +62,7 @@ func (b Bridge) SyncOnce(ctx context.Context, offset int64) (int64, error) {
 		return next, fmt.Errorf("lease Telegram gateway deliveries: %w", err)
 	}
 	for _, delivery := range deliveries {
-		if err := SendDelivery(ctx, b.State, b.Sender, delivery); err != nil {
+		if err := SendDelivery(ctx, b.State, b.Sender, delivery, b.Gateway.AllowedUserID); err != nil {
 			b.logEvent("telegram_send_err", "delivery_id="+delivery.ID)
 			return next, fmt.Errorf("send Telegram delivery %q: %w", delivery.ID, err)
 		}

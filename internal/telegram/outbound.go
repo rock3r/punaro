@@ -21,7 +21,7 @@ type RichSender interface {
 // no idempotency key for sendRichMessage, so callers must acknowledge the
 // relay delivery only after this function succeeds; a crash can result in an
 // explicit at-least-once duplicate rather than silent loss.
-func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery relay.Delivery) error {
+func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery relay.Delivery, allowedUserID int64) error {
 	from := delivery.Message.FromEndpoint
 	if from == "" {
 		from = delivery.Message.FromRole
@@ -35,6 +35,9 @@ func SendDelivery(ctx context.Context, state *State, sender RichSender, delivery
 	}
 	if !found {
 		return fmt.Errorf("telegram conversation route is missing")
+	}
+	if allowedUserID == 0 || chatID != allowedUserID {
+		return fmt.Errorf("telegram conversation route is not the configured chat")
 	}
 	for _, rendered := range renderDelivery(from, delivery.Message.Body) {
 		messageID, err := sender.SendRichMessage(ctx, chatID, threadID, rendered)
