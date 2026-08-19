@@ -26,6 +26,9 @@ if (-not $allScripts.Contains('existing Punaro guidance predates trusted attachm
 if (-not $allScripts.Contains('existing Punaro guidance predates user-telegram send')) {
     throw 'Windows guidance installer does not fail closed on pre-user-telegram send guidance'
 }
+if (-not $allScripts.Contains('existing Punaro guidance predates telegram-origin-only send')) {
+    throw 'Windows guidance installer does not fail closed on claimed-topic user-telegram send guidance'
+}
 if (-not $allScripts.Contains('--to user-telegram')) {
     throw 'Windows guidance installer does not teach --to user-telegram'
 }
