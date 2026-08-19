@@ -94,7 +94,7 @@ contract:
 
 ## 3. Pillar: Central memory — Big Brain
 
-Shared, revisioned memory with lexical and, next, semantic retrieval
+Shared, revisioned memory with lexical and semantic retrieval
 (`docs/big-brain-plan.md` is the accepted direction).
 
 - **Model.** Canonical memory is project-scoped PostgreSQL authority. Items are immutable
@@ -108,7 +108,11 @@ Shared, revisioned memory with lexical and, next, semantic retrieval
   two-second deadline on an isolated pool; full documents need `memory.read`. A
   deterministic **prompt brief** packs pinned records, the project brief, and top lexical
   results into budget-bound JSON explicitly framed as untrusted data — pins and kinds are
-  retrieval hints, never authority.
+  retrieval hints, never authority. The semantic slices are built but provider-gated: a
+  provider-agnostic embedding executor with a background worker that starts only when a
+  provider is configured, and a device-authenticated hybrid-search route mounted only
+  with the memory API enabled and a query provider constructed, degrading to
+  lexical-only when no embedding generation exists.
 - **Access paths.** Agents-only, via MCP/CLI — Big Brain exists for the agents, not the
   human, so it has no Telegram or operator surface. The native client `punaro-memory`
   binds to a fixed HTTPS origin and protected device credential, with a local stdio MCP
@@ -155,7 +159,8 @@ Runway, roughly in order:
   decide whether the gateway gets the relay's park-and-continue semantic instead of
   head-of-line blocking on a permanently failing delivery; role discovery (#143).
 - **Big Brain:** end-to-end testing, integration into the agent skills, and proving it
-  in real day-to-day use; then semantic retrieval (embedding execution + search) and
-  the remote MCP resource-server/transport slices.
+  in real day-to-day use; configuring a production embedding provider so the built
+  semantic slices light up; then the remaining remote MCP transport slices (the OAuth
+  resource-server validation boundary is already built dark).
 - **Platform:** production Compose as the reference deployment; opening the release
   gates (attachments, public operation) once their adversarial acceptance tests pass.
