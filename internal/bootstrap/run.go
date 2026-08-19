@@ -156,7 +156,7 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		if ctx.Err() != nil {
 			return nil //nolint:nilerr // SIGINT/SIGTERM before the child starts is a clean supervisor stop
 		}
-		if proven {
+		if proven || identity.Release == localCheckoutRelease {
 			return errChildExited
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
@@ -170,7 +170,7 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		if errors.Is(err, errSlotChanged) {
 			return err
 		}
-		if proven {
+		if proven || identity.Release == localCheckoutRelease {
 			return err
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, err)

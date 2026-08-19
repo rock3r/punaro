@@ -1025,17 +1025,25 @@ func TestRunRecoversWhenCurrentExitsBeforeReady(t *testing.T) {
 
 func TestRunDoesNotRollbackSeededLocalCheckout(t *testing.T) {
 	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "signed-adapter")
 	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("signed-adapter"), 0)
+	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	allowPreviousInCatalog(t, origin, "v0.1.0", 1, payloadDigest("previous-adapter"))
 	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
 	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+	if err := SeedLocalCheckout(dir, adapter, origin.Keys); err != nil {
 		t.Fatal(err)
 	}
-	origin := newSignedOrigin(t, originSpec{payload: "signed-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
-	allowPreviousInCatalog(t, origin, "v0.2.0", 2, payloadDigest("signed-adapter"))
+	seeded, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seeded.Current != localCheckoutRelease || seeded.Previous != "v0.1.0" {
+		t.Fatalf("seeded status=%#v", seeded)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan struct{})
@@ -1072,7 +1080,37 @@ func TestRunDoesNotRollbackSeededLocalCheckout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Current != localCheckoutRelease {
+	if status.Current != localCheckoutRelease || status.Previous != "v0.1.0" {
+		t.Fatalf("seeded checkout was rolled back: %#v", status)
+	}
+}
+
+func TestRunDoesNotRollbackSeededCheckoutOnStartFailure(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeAdapterSlot(t, dir, currentSlot, localCheckoutRelease, 1, "checkout-adapter")
+	writeAccepted(t, dir, "v0.1.0", 1, 1, payloadDigest("previous-adapter"))
+	origin := newSignedOrigin(t, originSpec{payload: "previous-adapter", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.1.0", sequence: 1, catalogSequence: 1})
+	err := Run(context.Background(), RunRequest{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+		Start: func(context.Context, ChildSpec) (Process, error) {
+			return nil, errors.New("start failed")
+		},
+	})
+	if !errors.Is(err, errChildExited) {
+		t.Fatalf("seeded start failure err=%v", err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("seeded start failure entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != localCheckoutRelease || status.Previous != "v0.1.0" {
 		t.Fatalf("seeded checkout was rolled back: %#v", status)
 	}
 }
