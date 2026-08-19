@@ -1114,6 +1114,102 @@ func TestInspectMigrationSourceCarriesRateBucketsThroughCurrentCutoverSurface(t 
 	}
 }
 
+func TestInspectMigrationSourceV7HashesIncludeDisplayNameAndInboundMetadata(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	now := time.Date(2026, time.August, 19, 20, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "relay.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	conversation, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-v7-hash", CreatorEndpoint: "agent/a",
+		DisplayName: "V7 room", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: conversation.ID, MachineID: "machine-a", Endpoint: "agent/a",
+		IdempotencyKey: "claim-v7-hash", Now: now,
+	}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: conversation.ID, MachineID: "machine-telegram", Now: now}); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	inbound, duplicate, err := store.AppendTelegramInbound(TelegramInboundInput{
+		ConversationID: conversation.ID, SenderMachineID: "machine-telegram", FromEndpoint: TelegramGatewayEndpoint,
+		FromParticipant: TelegramUserParticipant, Body: "v7 inbound", InReplyToMessageID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+		InReplyToEndpoint: "agent/a", TelegramThreadID: 795446, IdempotencyKey: "telegram-update:v7", Now: now,
+	})
+	if err != nil || duplicate || inbound.FromParticipant != TelegramUserParticipant {
+		_ = store.Close()
+		t.Fatalf("inbound=%#v duplicate=%t err=%v", inbound, duplicate, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openMigrationSourceDatabase(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS telegram_claim_idempotency`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	inspected, err := InspectMigrationSource(ctx, path)
+	if err != nil || inspected.Version != 7 || inspected.Phase != MigrationSourceActive {
+		t.Fatalf("v7 inspect=%#v err=%v", inspected, err)
+	}
+	prepared, err := PrepareMigrationSource(ctx, path, uuid.NewString(), strings.Repeat("f", 64), inspected.Fingerprint, now.Add(time.Minute))
+	if err != nil || prepared.Version != 7 {
+		t.Fatalf("v7 prepare=%#v err=%v", prepared, err)
+	}
+	for _, table := range []string{"mail_conversations", "mail_messages"} {
+		batch, err := ReadMigrationSourceBatch(ctx, path, table, "", 10)
+		if err != nil || len(batch.Rows) == 0 || !batch.Done {
+			t.Fatalf("v7 table=%s batch=%#v err=%v", table, batch, err)
+		}
+		hasher, err := NewMigrationTableHasher(table)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range batch.Rows {
+			if err := hasher.Add(row); err != nil {
+				t.Fatalf("v7 table=%s row=%v err=%v", table, row, err)
+			}
+		}
+		count, digest := hasher.Evidence()
+		var expectedCount int64
+		var expectedDigest string
+		switch table {
+		case "mail_conversations":
+			expectedCount, expectedDigest = prepared.Counts.Conversations, prepared.TableSHA256.Conversations
+		case "mail_messages":
+			expectedCount, expectedDigest = prepared.Counts.Messages, prepared.TableSHA256.Messages
+		}
+		if count != expectedCount || digest != expectedDigest {
+			t.Fatalf("v7 table=%s evidence count=%d digest=%s want count=%d digest=%s", table, count, digest, expectedCount, expectedDigest)
+		}
+	}
+}
+
 func TestInspectMigrationSourceExportsTelegramClaimsAndInboundMetadata(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

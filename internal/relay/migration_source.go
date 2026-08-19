@@ -147,7 +147,7 @@ var v3MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTab
 var v4MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:16])
 var v5MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:17])
 var v6MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:20])
-var v7MigrationTableSpecs = withParentConversationAndMessageColumns(migrationTableSpecs[:24])
+var v7MigrationTableSpecs = append([]migrationTableSpec(nil), migrationTableSpecs[:24]...)
 
 var roleMigrationTableSpecs = withParentConversationAndMessageColumns(func() []migrationTableSpec {
 	specs := append([]migrationTableSpec(nil), migrationTableSpecs[:11]...)
