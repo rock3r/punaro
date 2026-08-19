@@ -149,8 +149,8 @@ Mail carries the conversation; Big Brain carries the knowledge.
 Alpha, unpublished, single live deployment. The mail pillar is furthest along: relay,
 adapter, durable roles, targeted routing, rate/capacity/dead-letter bounds, and the
 enrolled Telegram gateway are live; the claim/`user-telegram` model (PR #138) is landing
-now, and fresh topics are created through the claim flow — no legacy routes are carried
-forward. Big Brain has the full canonical store, proposal machinery, lexical retrieval,
+now, and once it merges fresh topics will be created through the claim flow — no legacy
+routes are carried forward. Big Brain has the full canonical store, proposal machinery, lexical retrieval,
 and native client built, but runs dark pending its enablement slices.
 
 Runway, roughly in order:
