@@ -24,6 +24,7 @@ type recordingClaimRelay struct {
 	complete         relay.TelegramClaim
 	pendingErr       error
 	lastPendingLimit int
+	pendingAfter     []string
 }
 
 func (r *recordingClaimRelay) ClaimConversation(_ context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error) {
@@ -49,15 +50,29 @@ func (r *recordingClaimRelay) CompleteTelegramClaim(_ context.Context, conversat
 	return relay.TelegramClaim{ConversationID: conversationID, Status: "complete", DisplayName: r.claim.DisplayName}, nil
 }
 
-func (r *recordingClaimRelay) PendingTelegramClaims(_ context.Context, limit int) ([]relay.TelegramClaim, error) {
+func (r *recordingClaimRelay) PendingTelegramClaims(_ context.Context, limit int, after string) ([]relay.TelegramClaim, error) {
 	r.lastPendingLimit = limit
+	r.pendingAfter = append(r.pendingAfter, after)
 	if r.pendingErr != nil {
 		return nil, r.pendingErr
 	}
-	if limit < 1 || len(r.pending) <= limit {
-		return r.pending, nil
+	start := 0
+	if after != "" {
+		for i, claim := range r.pending {
+			if claim.ConversationID == after {
+				start = i + 1
+				break
+			}
+		}
 	}
-	return r.pending[:limit], nil
+	if start >= len(r.pending) {
+		return nil, nil
+	}
+	rest := r.pending[start:]
+	if limit < 1 || len(rest) <= limit {
+		return rest, nil
+	}
+	return rest[:limit], nil
 }
 
 type recordingTopicCreator struct {
@@ -372,6 +387,38 @@ func TestStartPendingSkipsLocalRowAndStartsLaterClaim(t *testing.T) {
 	stuck, found, err := state.ClaimExecution("conversation-stuck")
 	if err != nil || !found || stuck.Phase != ClaimPhaseReserved {
 		t.Fatalf("stuck local row was rewritten: %#v found=%v err=%v", stuck, found, err)
+	}
+}
+
+func TestStartPendingPagesPastLocallyKnownClaims(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	pending := make([]relay.TelegramClaim, 0, 11)
+	for i := 1; i <= 11; i++ {
+		id := fmt.Sprintf("conversation-%02d", i)
+		pending = append(pending, relay.TelegramClaim{ConversationID: id, Status: "pending", DisplayName: id})
+		if i <= 10 {
+			if _, err := state.InsertPendingExecution(id, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{Status: "pending", DisplayName: "Later"}, pending: pending}
+	topics := &recordingTopicCreator{threadID: 99}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.StartPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.pendingAfter) < 2 || claims.pendingAfter[0] != "" || claims.pendingAfter[1] != "conversation-10" {
+		t.Fatalf("pending after cursors=%#v", claims.pendingAfter)
+	}
+	later, found, err := state.ClaimExecution("conversation-11")
+	if err != nil || !found || later.Phase != ClaimPhaseComplete || later.ThreadID != 99 {
+		t.Fatalf("eleventh pending was not started: %#v found=%v err=%v", later, found, err)
 	}
 }
 

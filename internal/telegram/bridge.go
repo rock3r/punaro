@@ -16,7 +16,7 @@ type BridgeRelay interface {
 	Ack(ctx context.Context, delivery relay.Delivery) error
 	ClaimConversation(ctx context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error)
 	CompleteTelegramClaim(ctx context.Context, conversationID string) (relay.TelegramClaim, error)
-	PendingTelegramClaims(ctx context.Context, limit int) ([]relay.TelegramClaim, error)
+	PendingTelegramClaims(ctx context.Context, limit int, after string) ([]relay.TelegramClaim, error)
 }
 
 // Bridge joins one enrolled gateway endpoint to the Telegram poller and rich

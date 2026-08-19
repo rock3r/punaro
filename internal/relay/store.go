@@ -1320,8 +1320,8 @@ func (s *Store) CompleteTelegramClaim(input TelegramClaimCompleteInput) (Telegra
 }
 
 // PendingTelegramClaims is a gateway poll of pending reservations, not a lease.
-func (s *Store) PendingTelegramClaims(machineID string, now time.Time, limit int) ([]TelegramClaim, error) {
-	if !ValidMachineID(machineID) || limit < 1 || limit > 100 {
+func (s *Store) PendingTelegramClaims(machineID string, now time.Time, limit int, after string) ([]TelegramClaim, error) {
+	if !ValidMachineID(machineID) || limit < 1 || limit > 100 || (after != "" && strings.TrimSpace(after) != after) {
 		return nil, ErrForbidden
 	}
 	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: true})
@@ -1336,8 +1336,11 @@ func (s *Store) PendingTelegramClaims(machineID string, now time.Time, limit int
 		FROM telegram_claims AS claim
 		JOIN conversations AS conversation ON conversation.id = claim.conversation_id
 		WHERE claim.status = 'pending'
+		  AND (? = '' OR (claim.created_at, claim.conversation_id) > (
+			SELECT cursor.created_at, cursor.conversation_id FROM telegram_claims AS cursor WHERE cursor.conversation_id = ?
+		  ))
 		ORDER BY claim.created_at ASC, claim.conversation_id ASC
-		LIMIT ?`, limit)
+		LIMIT ?`, after, after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list pending telegram claims: %w", err)
 	}

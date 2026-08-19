@@ -566,7 +566,8 @@ func (h *handler) pendingTelegramClaims(w http.ResponseWriter, body []byte, mach
 		return
 	}
 	var request struct {
-		Limit int `json:"limit"`
+		Limit int    `json:"limit"`
+		After string `json:"after"`
 	}
 	if err := decodeJSON(body, &request); err != nil || request.Limit < 1 || request.Limit > 100 {
 		writeError(w, http.StatusBadRequest, "invalid pending claim request")
@@ -576,7 +577,7 @@ func (h *handler) pendingTelegramClaims(w http.ResponseWriter, body []byte, mach
 		writeError(w, http.StatusForbidden, "authorization denied")
 		return
 	}
-	claims, err := store.PendingTelegramClaims(machineID, now, request.Limit)
+	claims, err := store.PendingTelegramClaims(machineID, now, request.Limit, request.After)
 	if err != nil {
 		writeStoreError(w, err)
 		return

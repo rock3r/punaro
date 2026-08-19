@@ -983,7 +983,7 @@ func TestHTTPRelayClientTelegramClaimAndInboundMethods(t *testing.T) {
 	if err != nil || completed.Status != "complete" {
 		t.Fatalf("complete=%#v err=%v", completed, err)
 	}
-	pending, err := client.PendingTelegramClaims(context.Background(), 1)
+	pending, err := client.PendingTelegramClaims(context.Background(), 1, "")
 	if err != nil || len(pending) != 1 || pending[0].ConversationID != "conversation-1" {
 		t.Fatalf("pending=%#v err=%v", pending, err)
 	}

@@ -2807,8 +2807,8 @@ func (d *Database) CompleteTelegramClaim(input relay.TelegramClaimCompleteInput)
 }
 
 // PendingTelegramClaims is a gateway poll of pending reservations, not a lease.
-func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit int) ([]relay.TelegramClaim, error) {
-	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 {
+func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit int, after string) ([]relay.TelegramClaim, error) {
+	if !relay.ValidMachineID(machineID) || limit < 1 || limit > 100 || (after != "" && strings.TrimSpace(after) != after) {
 		return nil, relay.ErrForbidden
 	}
 	tx, cancel, err := d.beginRelayTransaction(&sql.TxOptions{ReadOnly: true})
@@ -2824,8 +2824,11 @@ func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit 
 		FROM relay.mail_telegram_claims AS claim
 		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
 		WHERE claim.status='pending'
+		  AND ($2 = '' OR (claim.created_at, claim.conversation_id) > (
+			SELECT cursor.created_at, cursor.conversation_id FROM relay.mail_telegram_claims AS cursor WHERE cursor.conversation_id = $2
+		  ))
 		ORDER BY claim.created_at ASC, claim.conversation_id ASC
-		LIMIT $1`, limit)
+		LIMIT $1`, limit, after)
 	if err != nil {
 		return nil, errors.New("pending telegram claims are unavailable")
 	}

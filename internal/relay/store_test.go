@@ -2016,11 +2016,11 @@ func TestStoreSessionTopicPendingAndUnclaimed(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := store.PendingTelegramClaims("machine-telegram", now, 1)
+	pending, err := store.PendingTelegramClaims("machine-telegram", now, 1, "")
 	if err != nil || len(pending) != 1 || pending[0].ConversationID != named.ID || pending[0].Status != "pending" {
 		t.Fatalf("pending=%#v err=%v", pending, err)
 	}
-	if _, err := store.PendingTelegramClaims("machine-a", now, 1); !errors.Is(err, ErrForbidden) {
+	if _, err := store.PendingTelegramClaims("machine-a", now, 1, ""); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("non-gateway pending err=%v", err)
 	}
 	if _, _, err := store.CompleteTelegramClaim(TelegramClaimCompleteInput{ConversationID: named.ID, MachineID: "machine-telegram", Now: now}); err != nil {

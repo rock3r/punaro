@@ -304,7 +304,7 @@ type TelegramClaimBackend interface {
 	SetConversationDisplayName(SetDisplayNameInput) (Conversation, bool, error)
 	ReserveTelegramClaim(TelegramClaimInput) (TelegramClaim, bool, error)
 	CompleteTelegramClaim(TelegramClaimCompleteInput) (TelegramClaim, bool, error)
-	PendingTelegramClaims(machineID string, now time.Time, limit int) ([]TelegramClaim, error)
+	PendingTelegramClaims(machineID string, now time.Time, limit int, after string) ([]TelegramClaim, error)
 	UnclaimedNamedConversations(machineID string, now time.Time, limit int) ([]UnclaimedTopic, error)
 	SessionTopic(machineID, endpoint string, now time.Time) (SessionTopic, error)
 	AppendTelegramInbound(TelegramInboundInput) (Message, bool, error)

@@ -289,14 +289,14 @@ func (c *HTTPRelayClient) CompleteTelegramClaim(ctx context.Context, conversatio
 }
 
 // PendingTelegramClaims polls pending claim reservations. It is not a lease.
-func (c *HTTPRelayClient) PendingTelegramClaims(ctx context.Context, limit int) ([]relay.TelegramClaim, error) {
+func (c *HTTPRelayClient) PendingTelegramClaims(ctx context.Context, limit int, after string) ([]relay.TelegramClaim, error) {
 	if limit < 1 {
 		limit = 1
 	}
 	var response struct {
 		Claims []relay.TelegramClaim `json:"claims"`
 	}
-	_, err := c.doJSON(ctx, http.MethodPost, "/v1/telegram/claims/pending", map[string]any{"limit": limit}, &response)
+	_, err := c.doJSON(ctx, http.MethodPost, "/v1/telegram/claims/pending", map[string]any{"limit": limit, "after": after}, &response)
 	return response.Claims, err
 }
 

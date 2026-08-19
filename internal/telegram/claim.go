@@ -13,7 +13,7 @@ import (
 type ClaimRelay interface {
 	ClaimConversation(ctx context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error)
 	CompleteTelegramClaim(ctx context.Context, conversationID string) (relay.TelegramClaim, error)
-	PendingTelegramClaims(ctx context.Context, limit int) ([]relay.TelegramClaim, error)
+	PendingTelegramClaims(ctx context.Context, limit int, after string) ([]relay.TelegramClaim, error)
 }
 
 // TopicCreator is the Bot API surface that may create a forum topic. Adopt never uses it.
@@ -167,29 +167,38 @@ const pendingClaimPollLimit = 10
 
 // StartPending inserts reserved rows for relay-pending claims with no local execution.
 func (e ClaimExecutor) StartPending(ctx context.Context) error {
-	claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit)
-	if err != nil {
-		return fmt.Errorf("poll pending telegram claims: %w", err)
-	}
-	for _, claim := range claims {
-		if _, found, err := e.State.ClaimExecution(claim.ConversationID); err != nil {
-			return err
-		} else if found {
-			continue
-		}
-		inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
+	after := ""
+	for {
+		claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit, after)
 		if err != nil {
-			return err
+			return fmt.Errorf("poll pending telegram claims: %w", err)
 		}
-		if !inserted {
-			continue
+		if len(claims) == 0 {
+			return nil
 		}
-		e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
-		if err := e.Execute(ctx, claim.ConversationID); err != nil {
-			continue
+		for _, claim := range claims {
+			after = claim.ConversationID
+			if _, found, err := e.State.ClaimExecution(claim.ConversationID); err != nil {
+				return err
+			} else if found {
+				continue
+			}
+			inserted, err := e.State.InsertPendingExecution(claim.ConversationID, claim.DisplayName)
+			if err != nil {
+				return err
+			}
+			if !inserted {
+				continue
+			}
+			e.logEvent("telegram_claim_reserved", "actor=session", "conversation_id="+claim.ConversationID)
+			if err := e.Execute(ctx, claim.ConversationID); err != nil {
+				continue
+			}
+		}
+		if len(claims) < pendingClaimPollLimit {
+			return nil
 		}
 	}
-	return nil
 }
 
 // Adopt binds an existing topic_routes row to a completed claim. It never creates a topic.
