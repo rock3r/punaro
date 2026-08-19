@@ -523,7 +523,7 @@ func TestPreparedV1MigrationSourceRemainsRecoverable(t *testing.T) {
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	stripV7OnlyMigrationSchema(t, ctx, db)
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -625,7 +625,7 @@ func TestPreparedParentV3RoleOnlyMigrationSourcePreservesManifestIdentity(t *tes
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	stripV7OnlyMigrationSchema(t, ctx, db)
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -925,7 +925,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutRateBuckets(t *testin
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	stripV7OnlyMigrationSchema(t, ctx, db)
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -973,7 +973,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentV6WithoutTelegramTables(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	stripV7OnlyMigrationSchema(t, ctx, db)
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1042,7 +1042,7 @@ func TestInspectMigrationSourceAcceptsPreparedParentWithoutDirectMessages(t *tes
 		_ = db.Close()
 		t.Fatal(err)
 	}
-	stripV7OnlyMigrationSchema(t, ctx, db)
+	stripV7OnlyMigrationSchema(t, db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1290,8 +1290,9 @@ func TestInspectMigrationSourceExportsDisplayNameIdempotency(t *testing.T) {
 	}
 }
 
-func stripV7OnlyMigrationSchema(t *testing.T, ctx context.Context, db *sql.DB) {
+func stripV7OnlyMigrationSchema(t *testing.T, db *sql.DB) {
 	t.Helper()
+	ctx := context.Background()
 	for _, statement := range []string{
 		`DROP TABLE IF EXISTS telegram_claim_events`,
 		`DROP TABLE IF EXISTS telegram_participants`,
