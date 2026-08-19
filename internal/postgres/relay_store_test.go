@@ -92,6 +92,17 @@ func TestPostgresPendingTelegramClaimsSQLUsesNullableUUIDCursor(t *testing.T) {
 	}
 }
 
+func TestPostgresBindRoleLocksAllRoleConversationsNotOnlyExclusive(t *testing.T) {
+	query := postgresConversationIDsForRoleSQL()
+	compact := strings.ReplaceAll(query, " ", "")
+	if strings.Contains(query, "display_name") || strings.Contains(query, "mail_telegram_claims") || strings.Contains(compact, "ISNOTNULL") {
+		t.Fatalf("bind occupancy locks filtered exclusive rooms: %s", query)
+	}
+	if !strings.Contains(query, "mail_role_memberships") || !strings.Contains(query, "conversation_id") {
+		t.Fatalf("bind occupancy locks missing role memberships: %s", query)
+	}
+}
+
 func TestPostgresOccupancySQLUsesNullableUUIDExclude(t *testing.T) {
 	if postgresNullableUUID("") != nil {
 		t.Fatal("empty exclude must bind NULL, not text")

@@ -188,23 +188,14 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	} else if err != nil {
 		return errors.New("durable role ownership is unavailable")
 	}
-	namesAvailable, err := postgresConversationDisplayNameAvailable(tx)
+	// Lock every room this role already occupies, including still-unnamed ones,
+	// then the session. Rename uses the same conversation/endpoint order so an
+	// initial name cannot race a bind that would occupy two named rooms.
+	conversationIDs, err := postgresConversationIDsForRole(tx, role)
 	if err != nil {
-		return errors.New("conversation display name schema is unavailable")
+		return err
 	}
-	claimsAvailable, err := postgresTelegramClaimsAvailable(tx)
-	if err != nil {
-		return errors.New("telegram claim schema is unavailable")
-	}
-	var exclusiveIDs []string
-	if namesAvailable || claimsAvailable {
-		exclusiveIDs, err = postgresExclusiveConversationIDsForRole(tx, role, namesAvailable, claimsAvailable)
-		if err != nil {
-			return err
-		}
-	}
-	// Conversations first, then the session, so bind and rename share one lock order.
-	if err := postgresLockOccupancy(tx, exclusiveIDs, map[string]struct{}{endpoint: {}}); err != nil {
+	if err := postgresLockOccupancy(tx, conversationIDs, map[string]struct{}{endpoint: {}}); err != nil {
 		return err
 	}
 	generation, err := postgresEndpointOwnershipLocked(tx, endpoint, machineID, now)
@@ -1005,7 +996,7 @@ func (d *Database) SetConversationDisplayName(input relay.SetDisplayNameInput) (
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array($1::text,$2::text)::text, 579001230612))`, input.ActorMachineID, input.IdempotencyKey); err != nil {
 		return relay.Conversation{}, false, errors.New("display name retry lock is unavailable")
 	}
-	// Same occupancy conversation fence as control upsert.
+	// Shared with control upsert. Bind/rename occupancy uses row locks below.
 	if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended($1::text, 579001230611))`, input.ConversationID); err != nil {
 		return relay.Conversation{}, false, errors.New("display name conversation lock is unavailable")
 	}
@@ -1376,11 +1367,16 @@ func postgresRejectExclusiveCreateOccupancy(tx *sql.Tx, endpoints map[string]str
 }
 
 func postgresRejectExclusiveRenameOccupancy(tx *sql.Tx, conversationID string, now time.Time) error {
+	// Conversation row first so BindRoleToSession waits on the same unnamed
+	// room before inserting a binding this occupant walk cannot yet see.
+	if err := postgresLockOccupancy(tx, []string{conversationID}, nil); err != nil {
+		return err
+	}
 	occupants, err := postgresConversationOccupants(tx, conversationID, now)
 	if err != nil {
 		return err
 	}
-	if err := postgresLockOccupancy(tx, []string{conversationID}, occupants); err != nil {
+	if err := postgresLockOccupancy(tx, nil, occupants); err != nil {
 		return err
 	}
 	exclusive, exclusiveErr := postgresConversationIsExclusive(tx, conversationID)
@@ -1457,14 +1453,12 @@ func postgresRejectOccupantsInOtherExclusiveConversations(tx *sql.Tx, conversati
 	return nil
 }
 
-func postgresExclusiveConversationIDsForRole(tx *sql.Tx, role string, namesAvailable, claimsAvailable bool) ([]string, error) {
-	if !namesAvailable && !claimsAvailable {
-		return nil, nil
-	}
-	rows, err := tx.QueryContext(context.Background(), `SELECT conversation.id::text
-		FROM relay.mail_role_memberships AS membership
-		JOIN relay.mail_conversations AS conversation ON conversation.id = membership.conversation_id
-		WHERE membership.role = $1 AND `+postgresExclusiveConversationPredicate("conversation", namesAvailable, claimsAvailable), role) // #nosec G202 -- exclusive predicate is a schema-presence allowlist; alias is a fixed identifier.
+func postgresConversationIDsForRoleSQL() string {
+	return `SELECT conversation_id::text FROM relay.mail_role_memberships WHERE role=$1`
+}
+
+func postgresConversationIDsForRole(tx *sql.Tx, role string) ([]string, error) {
+	rows, err := tx.QueryContext(context.Background(), postgresConversationIDsForRoleSQL(), role)
 	if err != nil {
 		return nil, errors.New("role occupancy conversations are unavailable")
 	}
