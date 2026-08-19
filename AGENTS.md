@@ -67,3 +67,32 @@ without explaining why and obtaining explicit approval.
 
 State: behavior covered, tests added first, exact quality commands and results,
 and any residual risk. Do not include sensitive values in the handoff.
+
+## Worktree policy
+
+Before writing tracked files from a clean `main` checkout, check whether isolation
+already exists. If you are already inside a linked worktree (`git rev-parse --git-dir`
+prints a path under `.git/worktrees/`) or already on a non-main branch, keep working
+there; the primary checkout itself does not count as isolation. Otherwise, prefer asking whether to create a worktree before
+starting feature work. Prefer a worktree for implementation-heavy tasks, not for tiny
+doc-only edits.
+
+Create worktrees under `.worktrees/` at the repo root, one per descriptive branch name:
+
+```sh
+git worktree add .worktrees/<branch-name> -b <branch-name> origin/main
+```
+
+Plans belong in `.plans/` at the repo root, kept in the root checkout rather than
+inside a worktree. Both directories stay gitignored; never commit their contents, and
+verify they are ignored before creating them elsewhere. Remove a worktree
+(`git worktree remove`) once its branch is merged or abandoned.
+
+Use the local `using-git-worktree` skill when setting up an isolated workspace.
+
+## Local skills
+
+Before reinventing a workflow, check `.agents/skills/`. Current Punaro-local skills:
+
+- `using-git-worktree` — isolated workspaces under `.worktrees/`
+- `babysit-pr` — watch a PR's CI, review bots, and mergeability until it lands
