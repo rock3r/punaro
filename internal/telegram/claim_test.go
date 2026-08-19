@@ -700,6 +700,28 @@ func TestStartPendingBoundsExecuteWorkPerCycle(t *testing.T) {
 	}
 }
 
+func TestResumeAllPagesCompletedRouteRevalidation(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile("claim.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func (e ClaimExecutor) rejectCompletedRouteMismatches")
+	if start < 0 {
+		t.Fatal("completed-route revalidation missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("completed-route revalidation unbounded")
+	}
+	fn := rest[:end+1]
+	if !strings.Contains(fn, "CompletedClaimExecutionsAfter") || !strings.Contains(fn, "pendingClaimPollLimit") {
+		t.Fatal("completed-route revalidation must page with the per-cycle work budget")
+	}
+}
+
 func TestResumeAllBoundsExecuteWorkPerCycle(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

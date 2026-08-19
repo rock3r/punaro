@@ -1645,6 +1645,19 @@ func testPostgresTelegramClaimReserveOccupancy(t *testing.T, app *Database) {
 	}); !errors.Is(err, relay.ErrConflict) {
 		t.Fatalf("postgres claim with occupant of another named room err=%v", err)
 	}
+	if _, _, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedB.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now.Add(time.Second),
+	}); !errors.Is(err, relay.ErrConflict) {
+		t.Fatalf("postgres same-key different conversation err=%v", err)
+	}
+	replay, duplicate, err := app.ReserveTelegramClaim(relay.TelegramClaimInput{
+		ConversationID: namedA.ID, MachineID: machineTelegram, Endpoint: relay.TelegramGatewayEndpoint,
+		IdempotencyKey: "gateway-claim-a", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || !duplicate || replay.ConversationID != namedA.ID {
+		t.Fatalf("postgres same-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
 }
 
 func testPostgresMembershipControls(t *testing.T, app *Database) {

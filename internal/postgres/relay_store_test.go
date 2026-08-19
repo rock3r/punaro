@@ -92,6 +92,32 @@ func TestPostgresPendingTelegramClaimsSQLUsesNullableUUIDCursor(t *testing.T) {
 	}
 }
 
+func TestPostgresBindRoleTakesDurableRoleAdvisoryLock(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	start := strings.Index(src, "func (d *Database) BindRoleToSession")
+	if start < 0 {
+		t.Fatal("BindRoleToSession missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest[1:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("BindRoleToSession unbounded")
+	}
+	fn := rest[:end+1]
+	lockIdx := strings.Index(fn, "postgresDurableRoleLockSQL()")
+	occupancyIdx := strings.Index(fn, "postgresLockOccupancy")
+	if lockIdx < 0 || occupancyIdx < 0 || lockIdx > occupancyIdx {
+		t.Fatal("BindRoleToSession must take the durable-role lock before occupancy")
+	}
+	if !strings.Contains(postgresDurableRoleLockSQL(), "durable-role") {
+		t.Fatal("durable-role lock SQL missing role namespace")
+	}
+}
+
 func TestPostgresBindRoleLocksAllRoleConversationsNotOnlyExclusive(t *testing.T) {
 	query := postgresConversationIDsForRoleSQL()
 	compact := strings.ReplaceAll(query, " ", "")
@@ -145,6 +171,23 @@ func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
 	} {
 		if !strings.Contains(src, want) {
 			t.Fatalf("relay inspect SQL missing display-name idempotency check: %s", want)
+		}
+	}
+}
+
+func TestRelayInspectSQLIncludesTelegramClaimMachineKeyAfter55(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	for _, want := range []string{
+		`(telegram_claims_oid,'u'::"char",ARRAY[3,5]::smallint[])`,
+		`count(*) FILTER (WHERE con.contype='u')=CASE WHEN $1 >= 55 THEN 5 ELSE 4 END`,
+		`$1 >= 55 OR NOT (expected.table_oid=telegram_claims_oid AND expected.constraint_type='u')`,
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("relay inspect SQL missing telegram claim machine-key unique: %s", want)
 		}
 	}
 }

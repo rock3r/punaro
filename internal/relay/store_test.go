@@ -1733,6 +1733,70 @@ func TestStoreReserveTelegramClaimIsSingletonEnsure(t *testing.T) {
 	}
 }
 
+func TestStoreReserveTelegramClaimBindsIdempotencyKeyToOneConversation(t *testing.T) {
+	t.Parallel()
+	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 19, 15, 0, 0, 0, time.UTC)
+	if err := store.AdvertiseEndpoints("machine-a", []string{"agent/a"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-b", []string{"agent/b"}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AdvertiseEndpoints("machine-telegram", []string{TelegramGatewayEndpoint}, now, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	firstRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-a", IdempotencyKey: "named-first", CreatorEndpoint: "agent/a",
+		DisplayName: "First room", Members: []Member{{Endpoint: "agent/a", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRoom, err := store.CreateConversationIdempotent(CreateConversationInput{
+		MachineID: "machine-b", IdempotencyKey: "named-second", CreatorEndpoint: "agent/b",
+		DisplayName: "Second room", Members: []Member{{Endpoint: "agent/b", Capabilities: CapSend | CapReceive | CapAdmin}}, Now: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, duplicate, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "shared-claim-key", Now: now,
+	})
+	if err != nil || duplicate || first.ConversationID != firstRoom.ID {
+		t.Fatalf("first reserve=%#v duplicate=%t err=%v", first, duplicate, err)
+	}
+	if _, _, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: secondRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "shared-claim-key", Now: now.Add(time.Second),
+	}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("same-key different conversation err=%v", err)
+	}
+	replay, duplicate, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: firstRoom.ID, MachineID: "machine-telegram", Endpoint: TelegramGatewayEndpoint,
+		IdempotencyKey: "shared-claim-key", Now: now.Add(2 * time.Second),
+	})
+	if err != nil || !duplicate || replay.ConversationID != firstRoom.ID {
+		t.Fatalf("same-key replay=%#v duplicate=%t err=%v", replay, duplicate, err)
+	}
+	other, duplicate, err := store.ReserveTelegramClaim(TelegramClaimInput{
+		ConversationID: secondRoom.ID, MachineID: "machine-b", Endpoint: "agent/b",
+		IdempotencyKey: "shared-claim-key", Now: now.Add(3 * time.Second),
+	})
+	if err != nil || duplicate || other.ConversationID != secondRoom.ID {
+		t.Fatalf("other-machine same key=%#v duplicate=%t err=%v", other, duplicate, err)
+	}
+	var count int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM telegram_claims").Scan(&count); err != nil || count != 2 {
+		t.Fatalf("claims=%d err=%v", count, err)
+	}
+}
+
 func TestStoreReserveTelegramClaimOccupancyFence(t *testing.T) {
 	t.Parallel()
 	store, err := Open(filepath.Join(t.TempDir(), "relay.db"))

@@ -388,6 +388,36 @@ func (s *State) CompletedClaimExecutions() ([]ClaimExecution, error) {
 	return executions, rows.Err()
 }
 
+// CompletedClaimExecutionsAfter lists completed rows after a conversation cursor.
+func (s *State) CompletedClaimExecutionsAfter(after string, limit int) ([]ClaimExecution, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(context.Background(), `SELECT conversation_id, thread_id, phase, display_name, skip_reserve FROM claim_executions
+		WHERE phase = ? AND (? = '' OR conversation_id > ?) ORDER BY conversation_id LIMIT ?`, ClaimPhaseComplete, after, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var executions []ClaimExecution
+	for rows.Next() {
+		var execution ClaimExecution
+		var threadID sql.NullInt64
+		var displayName sql.NullString
+		var skip int
+		if err := rows.Scan(&execution.ConversationID, &threadID, &execution.Phase, &displayName, &skip); err != nil {
+			return nil, err
+		}
+		if threadID.Valid {
+			execution.ThreadID = threadID.Int64
+		}
+		execution.DisplayName = displayName.String
+		execution.SkipReserve = skip == 1
+		executions = append(executions, execution)
+	}
+	return executions, rows.Err()
+}
+
 // PersistClaimDisplayName stores the snapshotted label used for createForumTopic.
 func (s *State) PersistClaimDisplayName(conversationID, displayName string) error {
 	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET display_name = ? WHERE conversation_id = ?`, displayName, conversationID)
@@ -497,6 +527,7 @@ const adoptExecutionSQL = `INSERT INTO claim_executions(conversation_id, thread_
 
 const pendingClaimCursorName = "pending_claims"
 const resumeClaimCursorName = "resume_claims"
+const completedRouteCursorName = "completed_routes"
 
 func (s *State) pendingClaimCursor() (string, error) {
 	var value string
@@ -539,6 +570,28 @@ func (s *State) setResumeClaimCursor(after string) error {
 	}
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO gateway_cursors(name, value) VALUES (?, ?)
 		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, resumeClaimCursorName, after)
+	return err
+}
+
+func (s *State) completedRouteCursor() (string, error) {
+	var value string
+	err := s.db.QueryRowContext(context.Background(), `SELECT value FROM gateway_cursors WHERE name = ?`, completedRouteCursorName).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func (s *State) setCompletedRouteCursor(after string) error {
+	if after == "" {
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM gateway_cursors WHERE name = ?`, completedRouteCursorName)
+		return err
+	}
+	_, err := s.db.ExecContext(context.Background(), `INSERT INTO gateway_cursors(name, value) VALUES (?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, completedRouteCursorName, after)
 	return err
 }
 

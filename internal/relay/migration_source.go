@@ -821,16 +821,17 @@ func verifyMigrationSourceSchema(ctx context.Context, q migrationQueryer, versio
 		"role_profiles:1:pk:0:role",
 		"role_profile_idempotency:1:pk:0:machine_id,key",
 		"telegram_claims:1:pk:0:conversation_id",
+		"telegram_claims:1:c:0:requested_by_machine,idempotency_key",
 		"telegram_participants:1:pk:0:conversation_id",
 		"telegram_claim_events:1:pk:0:id",
 	}
 	if !profiles {
-		expectedIndexes = append(expectedIndexes[:len(expectedIndexes)-5], expectedIndexes[len(expectedIndexes)-3:]...)
+		expectedIndexes = append(expectedIndexes[:len(expectedIndexes)-6], expectedIndexes[len(expectedIndexes)-4:]...)
 	}
 	if !controls {
 		expectedIndexes = []string{
 			"endpoints:1:pk:0:endpoint", "conversations:1:pk:0:id", "memberships:1:pk:0:conversation_id,endpoint", "roles:1:pk:0:role", "role_memberships:1:pk:0:conversation_id,role", "role_bindings:1:pk:0:role", "role_bindings:0:c:0:machine_id,session_endpoint,ownership_generation,lease_until", "messages:1:pk:0:id", "messages:1:u:0:conversation_id,sequence", "deliveries:1:pk:0:id", "deliveries:1:u:0:message_id,recipient_endpoint", "deliveries:0:c:0:recipient_endpoint,acked_at,lease_until", "recipient_cursors:1:pk:0:recipient_endpoint,conversation_id", "idempotency:1:pk:0:machine_id,key", "conversation_idempotency:1:pk:0:machine_id,key", "conversation_display_name_idempotency:1:pk:0:machine_id,key", "request_nonces:1:pk:0:machine_id,nonce", "request_nonces:0:c:0:expires_at",
-			"telegram_claims:1:pk:0:conversation_id", "telegram_participants:1:pk:0:conversation_id", "telegram_claim_events:1:pk:0:id",
+			"telegram_claims:1:pk:0:conversation_id", "telegram_claims:1:c:0:requested_by_machine,idempotency_key", "telegram_participants:1:pk:0:conversation_id", "telegram_claim_events:1:pk:0:id",
 		}
 	}
 	if rateBuckets {

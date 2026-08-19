@@ -768,6 +768,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS deliveries_recipient_pending ON deliveries(recipient_endpoint, acked_at, lease_until)",
 		"CREATE INDEX IF NOT EXISTS role_bindings_session ON role_bindings(machine_id, session_endpoint, ownership_generation, lease_until)",
 		"CREATE INDEX IF NOT EXISTS request_nonces_expiry ON request_nonces(expires_at)",
+		"CREATE UNIQUE INDEX IF NOT EXISTS telegram_claims_machine_key ON telegram_claims(requested_by_machine, idempotency_key)",
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate relay database: %w", err)
@@ -1253,6 +1254,25 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 			return TelegramClaim{}, false, ErrForbidden
 		}
 	}
+	requestHash := telegramClaimRequestHash(input.ConversationID)
+	var boundConversation, boundHash string
+	err = tx.QueryRowContext(context.Background(), "SELECT conversation_id, request_hash FROM telegram_claims WHERE requested_by_machine = ? AND idempotency_key = ?", input.MachineID, input.IdempotencyKey).Scan(&boundConversation, &boundHash)
+	if err == nil {
+		if boundHash != requestHash {
+			return TelegramClaim{}, false, ErrConflict
+		}
+		claim, err := telegramClaimByConversation(tx, boundConversation)
+		if err != nil {
+			return TelegramClaim{}, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return TelegramClaim{}, false, err
+		}
+		return claim, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return TelegramClaim{}, false, fmt.Errorf("read telegram claim idempotency key: %w", err)
+	}
 	var existing string
 	err = tx.QueryRowContext(context.Background(), "SELECT conversation_id FROM telegram_claims WHERE conversation_id = ?", input.ConversationID).Scan(&existing)
 	if err == nil {
@@ -1273,7 +1293,7 @@ func (s *Store) ReserveTelegramClaim(input TelegramClaimInput) (TelegramClaim, b
 	}
 	createdAt := input.Now.UTC().Truncate(time.Millisecond)
 	if _, err := tx.ExecContext(context.Background(), `INSERT INTO telegram_claims(conversation_id, status, requested_by_machine, requested_by_endpoint, idempotency_key, request_hash, created_at)
-		VALUES (?, 'pending', ?, ?, ?, ?, ?)`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, telegramClaimRequestHash(input.ConversationID), createdAt.UnixMilli()); err != nil {
+		VALUES (?, 'pending', ?, ?, ?, ?, ?)`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, requestHash, createdAt.UnixMilli()); err != nil {
 		return TelegramClaim{}, false, fmt.Errorf("reserve telegram claim: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

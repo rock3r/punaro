@@ -188,6 +188,11 @@ func (d *Database) BindRoleToSession(machineID, role, endpoint string, now time.
 	} else if err != nil {
 		return errors.New("durable role ownership is unavailable")
 	}
+	// Same durable-role advisory lock as named create, so an uncommitted
+	// binding cannot hide from create occupancy and vice versa.
+	if _, err := tx.ExecContext(context.Background(), postgresDurableRoleLockSQL(), role); err != nil {
+		return errors.New("durable role bind lock is unavailable")
+	}
 	// Lock every room this role already occupies, including still-unnamed ones,
 	// then the session. Rename uses the same conversation/endpoint order so an
 	// initial name cannot race a bind that would occupy two named rooms.
@@ -1459,6 +1464,10 @@ func postgresRejectOccupantsInOtherExclusiveConversations(tx *sql.Tx, conversati
 	return nil
 }
 
+func postgresDurableRoleLockSQL() string {
+	return `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`
+}
+
 func postgresConversationIDsForRoleSQL() string {
 	return `SELECT conversation_id::text FROM relay.mail_role_memberships WHERE role=$1`
 }
@@ -1667,7 +1676,7 @@ func (d *Database) CreateConversationIdempotent(input relay.CreateConversationIn
 	}
 	for _, role := range orderedRoles {
 		owner := roles[role]
-		if _, err := tx.ExecContext(context.Background(), `SELECT pg_advisory_xact_lock(hashtextextended(jsonb_build_array('durable-role',$1::text)::text, 579001230609))`, role); err != nil {
+		if _, err := tx.ExecContext(context.Background(), postgresDurableRoleLockSQL(), role); err != nil {
 			return relay.Conversation{}, errors.New("durable role creation lock is unavailable")
 		}
 		var existingOwner string
@@ -2735,6 +2744,25 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 			return relay.TelegramClaim{}, false, relay.ErrForbidden
 		}
 	}
+	requestHash := postgresTelegramClaimHash(input.ConversationID)
+	var boundConversation, boundHash string
+	err = tx.QueryRowContext(context.Background(), `SELECT conversation_id::text, request_hash FROM relay.mail_telegram_claims WHERE requested_by_machine=$1 AND idempotency_key=$2`, input.MachineID, input.IdempotencyKey).Scan(&boundConversation, &boundHash)
+	if err == nil {
+		if boundHash != requestHash {
+			return relay.TelegramClaim{}, false, relay.ErrConflict
+		}
+		claim, err := postgresTelegramClaimByConversation(tx, boundConversation)
+		if err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim is unavailable")
+		}
+		if err := tx.Commit(); err != nil {
+			return relay.TelegramClaim{}, false, errors.New("telegram claim retry cannot commit")
+		}
+		return claim, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return relay.TelegramClaim{}, false, errors.New("telegram claim idempotency key is unavailable")
+	}
 	claim, err := postgresTelegramClaimByConversation(tx, input.ConversationID)
 	if err == nil {
 		if err := tx.Commit(); err != nil {
@@ -2751,7 +2779,7 @@ func (d *Database) ReserveTelegramClaim(input relay.TelegramClaimInput) (relay.T
 	createdAt := input.Now.UTC().Truncate(time.Microsecond)
 	result, err := tx.ExecContext(context.Background(), `INSERT INTO relay.mail_telegram_claims(conversation_id,status,requested_by_machine,requested_by_endpoint,idempotency_key,request_hash,created_at)
 		VALUES($1::uuid,'pending',$2,$3,$4,$5,$6)
-		ON CONFLICT (conversation_id) DO NOTHING`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, postgresTelegramClaimHash(input.ConversationID), createdAt)
+		ON CONFLICT (conversation_id) DO NOTHING`, input.ConversationID, input.MachineID, input.Endpoint, input.IdempotencyKey, requestHash, createdAt)
 	if err != nil {
 		return relay.TelegramClaim{}, false, relayDatabaseError(err, "reserve telegram claim")
 	}
@@ -3362,11 +3390,13 @@ WITH objects AS (
         (telegram_claims_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_participants_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_claim_events_oid,'p'::"char",ARRAY[1]::smallint[]),
         (display_name_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (messages_oid,'u'::"char",ARRAY[2,3]::smallint[]),(deliveries_oid,'u'::"char",ARRAY[2,3]::smallint[]),
-        (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[])
+        (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),
+        (telegram_claims_oid,'u'::"char",ARRAY[3,5]::smallint[])
     ) AS expected(table_oid,constraint_type,column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
       AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
+      AND ($1 >= 55 OR NOT (expected.table_oid=telegram_claims_oid AND expected.constraint_type='u'))
 ), actual_keys AS (
     SELECT con.conrelid,con.contype,con.conkey
     FROM objects JOIN pg_constraint AS con
@@ -3466,7 +3496,7 @@ WITH objects AS (
     FROM objects
 ), constraints AS (
     SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
-       AND count(*) FILTER (WHERE con.contype='u')=4
+       AND count(*) FILTER (WHERE con.contype='u')=CASE WHEN $1 >= 55 THEN 5 ELSE 4 END
 	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 10 END
 	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 53 THEN 39 WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)

@@ -245,17 +245,26 @@ func (e ClaimExecutor) ResumeAll(ctx context.Context) error {
 }
 
 func (e ClaimExecutor) rejectCompletedRouteMismatches() error {
-	executions, err := e.State.CompletedClaimExecutions()
+	after, err := e.State.completedRouteCursor()
 	if err != nil {
 		return err
 	}
+	executions, err := e.State.CompletedClaimExecutionsAfter(after, pendingClaimPollLimit)
+	if err != nil {
+		return err
+	}
+	last := after
 	for _, execution := range executions {
 		if err := e.rejectMismatchedRoute(execution.ConversationID); err != nil {
 			e.logEvent("telegram_claim_failed", "conversation_id="+execution.ConversationID, "phase="+ClaimPhaseComplete, "err="+err.Error())
 			return err
 		}
+		last = execution.ConversationID
 	}
-	return nil
+	if len(executions) < pendingClaimPollLimit {
+		return e.State.setCompletedRouteCursor("")
+	}
+	return e.State.setCompletedRouteCursor(last)
 }
 
 const pendingClaimPollLimit = 10
