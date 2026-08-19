@@ -168,6 +168,40 @@ func TestExecuteClaimCreatesTopicPersistsThreadThenCompletes(t *testing.T) {
 	}
 }
 
+func TestExecuteClaimAdoptsRouteInsertedBetweenCheckAndCreatingFence(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	topics := &recordingTopicCreator{threadID: 99}
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: state, Relay: claims, Topics: topics, AllowedUserID: 55, Log: func(string, ...any) {}}
+	executor.beforeCreatingFence = func() {
+		if err := state.SetRoute(55, 42, "conversation-1"); err != nil {
+			t.Fatalf("inject SetRoute: %v", err)
+		}
+	}
+	if err := executor.Execute(context.Background(), "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(topics.names) != 0 {
+		t.Fatalf("createForumTopic after emergency route: %#v", topics.names)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 42 || execution.ChatID != 55 {
+		t.Fatalf("adopted emergency route execution=%#v found=%v err=%v", execution, found, err)
+	}
+	conversation, found, err := state.Route(55, 42)
+	if err != nil || !found || conversation != "conversation-1" {
+		t.Fatalf("route conversation=%q found=%v err=%v", conversation, found, err)
+	}
+}
+
 func TestExecuteClaimPersistsCreatingFenceBeforeCreateForumTopic(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
@@ -855,6 +889,52 @@ func TestResumeAllBoundsExecuteWorkPerCycle(t *testing.T) {
 	later, found, err := state.ClaimExecution("conversation-11")
 	if err != nil || !found || later.Phase != ClaimPhaseComplete {
 		t.Fatalf("next cycle did not resume remaining claim: %#v found=%v err=%v", later, found, err)
+	}
+}
+
+func TestResumeAllReservesAdoptingExecutionInsteadOfCompleting(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telegram.db")
+	state, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		_ = state.Close()
+		t.Fatal(err)
+	}
+	if _, err := state.AdoptExistingRoute("conversation-1", 55); err != nil {
+		_ = state.Close()
+		t.Fatal(err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseAdopting || execution.ThreadID != 795446 {
+		_ = state.Close()
+		t.Fatalf("pre-reserve adopt fence execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	claims := &recordingClaimRelay{claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	executor := ClaimExecutor{State: restarted, Relay: claims, AllowedUserID: 55, Log: func(string, ...any) {}}
+	if err := executor.ResumeAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.reserves) != 1 || claims.reserves[0].key != AdoptClaimKey("conversation-1") || claims.reserves[0].endpoint != relay.TelegramGatewayEndpoint {
+		t.Fatalf("adopting resume reserves=%#v", claims.reserves)
+	}
+	if len(claims.completes) != 1 || claims.completes[0] != "conversation-1" {
+		t.Fatalf("adopting resume completes=%#v", claims.completes)
+	}
+	execution, found, err = restarted.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseComplete || execution.ThreadID != 795446 {
+		t.Fatalf("resumed adopting execution=%#v found=%v err=%v", execution, found, err)
 	}
 }
 

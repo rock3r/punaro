@@ -311,6 +311,73 @@ func TestStateSetRouteRefusesAfterConcurrentClaimProtectsThread(t *testing.T) {
 	}
 }
 
+func TestBeginClaimCreatingReusesRouteInsertedBeforeCreatingFence(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.SetRoute(55, 7, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	chatID, threadID, creating, err := state.BeginClaimCreating("conversation-1")
+	if err != nil || creating || chatID != 55 || threadID != 7 {
+		t.Fatalf("creating=%t chat=%d thread=%d err=%v", creating, chatID, threadID, err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseTopicCreated || execution.ThreadID != 7 || execution.ChatID != 55 {
+		t.Fatalf("execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
+func TestBeginClaimCreatingDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
+	t.Parallel()
+	for i := 0; i < 40; i++ {
+		state, err := Open(filepath.Join(t.TempDir(), fmt.Sprintf("telegram-create-%d.db", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := state.ReserveClaimAndConsumeTokenMust(t, "conversation-a"); err != nil {
+			_ = state.Close()
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _, _, _ = state.BeginClaimCreating("conversation-a")
+		}()
+		go func() {
+			defer wg.Done()
+			_ = state.SetRoute(55, 1, "conversation-a")
+		}()
+		wg.Wait()
+		execution, execFound, err := state.ClaimExecution("conversation-a")
+		if err != nil || !execFound {
+			_ = state.Close()
+			t.Fatalf("iter %d missing execution found=%v err=%v", i, execFound, err)
+		}
+		owner, found, err := state.Route(55, 1)
+		if err != nil {
+			_ = state.Close()
+			t.Fatal(err)
+		}
+		if execution.Phase == ClaimPhaseCreating && found {
+			_ = state.Close()
+			t.Fatalf("iter %d creating after concurrent route owner=%q execution=%#v", i, owner, execution)
+		}
+		if found && owner != "conversation-a" {
+			_ = state.Close()
+			t.Fatalf("iter %d unexpected owner=%q execution=%#v", i, owner, execution)
+		}
+		_ = state.Close()
+	}
+}
+
 func TestStateRouteBlockedTreatsCreatingAndTopicCreatedAsClaimed(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
@@ -463,6 +530,36 @@ func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 	}
 }
 
+func TestAdoptExistingRoutePersistsAdoptingFence(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	threadID, err := state.AdoptExistingRoute("conversation-1", 55)
+	if err != nil || threadID != 795446 {
+		t.Fatalf("adopt fence thread=%d err=%v", threadID, err)
+	}
+	execution, found, err := state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseAdopting || execution.ThreadID != 795446 || execution.ChatID != 55 || !execution.SkipReserve {
+		t.Fatalf("adopting fence execution=%#v found=%v err=%v", execution, found, err)
+	}
+	if err := state.SetRoute(55, 795446, "conversation-other"); err == nil {
+		t.Fatal("adopting fence allowed a remapped route")
+	}
+	if err := state.PersistClaimAdoptReserved("conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	execution, found, err = state.ClaimExecution("conversation-1")
+	if err != nil || !found || execution.Phase != ClaimPhaseRoutePersisted {
+		t.Fatalf("after adopt reserve execution=%#v found=%v err=%v", execution, found, err)
+	}
+}
+
 func TestAdoptExistingRouteDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
 	t.Parallel()
 	for i := 0; i < 40; i++ {
@@ -495,13 +592,13 @@ func TestAdoptExistingRouteDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
 			_ = state.Close()
 			t.Fatal(err)
 		}
-		if execFound && (execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
+		if execFound && (execution.Phase == ClaimPhaseAdopting || execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
 			if owner != "conversation-a" || execution.ThreadID != 1 {
 				_ = state.Close()
 				t.Fatalf("iter %d split mapping owner=%q execution=%#v", i, owner, execution)
 			}
 		}
-		if owner == "conversation-b" && execFound && (execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
+		if owner == "conversation-b" && execFound && (execution.Phase == ClaimPhaseAdopting || execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
 			_ = state.Close()
 			t.Fatalf("iter %d claimed conversation-a while thread belongs to conversation-b: %#v", i, execution)
 		}

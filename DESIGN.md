@@ -975,7 +975,10 @@ Operator `/list` is a private-chat topic picker: the gateway polls
 of 100 outstanding tokens. Conversation ids never appear in Telegram. A `/list`
 tap persists `claim_executions` reserved, then consumes the token in the same
 SQLite transaction, and `SyncOnce` resumes any incomplete execution. The
-gateway persists a `creating` fence, then calls `createForumTopic` once,
+gateway persists a `creating` fence under the same SQLite `BEGIN IMMEDIATE`
+write lock as `route`, rechecking `topic_routes` and adopting a concurrent
+emergency route instead of creating a second topic, then calls
+`createForumTopic` only when no route exists,
 persists `message_thread_id` and the creation `chat_id` immediately, and
 never calls `getForumTopic`. Resume of `topic_created` binds that stored
 pair; a changed allowed user fails closed instead of attaching the old
@@ -993,9 +996,11 @@ the configured chat; otherwise it fails closed and requires
 `punaro-telegram adopt` instead of creating a second topic. Reusing a stored
 route requires its `chat_id` to match the configured allowed user.
 `punaro-telegram adopt` writes the local `claim_executions` fence from
-`topic_routes` under one SQLite `BEGIN IMMEDIATE` before the remote
-reserve, so an emergency `route` remap cannot leave a pending relay claim
-without a protected local route. `route` refuses a conversation that is creating, topic-created, routed, or
+`topic_routes` under one SQLite `BEGIN IMMEDIATE` as `adopting` before the
+remote reserve, so an emergency `route` remap cannot leave a pending relay
+claim without a protected local route. A crash after that fence and before
+`ClaimConversation` resumes through the adopt reservation instead of
+`CompleteTelegramClaim`. `route` refuses a conversation that is adopting, creating, topic-created, routed, or
 complete, or a `(chat,thread)` already bound to such a conversation. Main-chat
 ordinary text stays unbound. There is no main-chat fallback. Gateway startup
 and `SendDelivery` fail closed when a completed route's `chat_id` is not the

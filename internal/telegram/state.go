@@ -29,6 +29,7 @@ const (
 	ClaimPhaseReserved       = "reserved"
 	ClaimPhaseCreating       = "creating"
 	ClaimPhaseTopicCreated   = "topic_created"
+	ClaimPhaseAdopting       = "adopting"
 	ClaimPhaseRoutePersisted = "route_persisted"
 	ClaimPhaseComplete       = "complete"
 )
@@ -135,19 +136,14 @@ func (s *State) SetRoute(chatID, threadID int64, conversationID string) error {
 	if strings.TrimSpace(conversationID) == "" {
 		return fmt.Errorf("conversation ID is required")
 	}
-	tx, err := s.db.BeginTx(context.Background(), nil)
-	if err != nil {
+	return s.withImmediate(func(conn *sql.Conn) error {
+		if err := routeBlockedOn(conn, chatID, threadID, conversationID); err != nil {
+			return err
+		}
+		_, err := conn.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
+			ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID)
 		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := routeBlockedOn(tx, chatID, threadID, conversationID); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(context.Background(), `INSERT INTO topic_routes(chat_id, thread_id, conversation_id) VALUES (?, ?, ?)
-		ON CONFLICT(chat_id, thread_id) DO UPDATE SET conversation_id = excluded.conversation_id`, chatID, threadID, conversationID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	})
 }
 
 // Route returns the exact conversation bound to a chat and thread.
@@ -405,21 +401,57 @@ func (s *State) PersistClaimDisplayName(conversationID, displayName string) erro
 // cannot start a second topic. Resume with this phase and no thread id fails
 // closed instead of calling createForumTopic again.
 func (s *State) PersistClaimCreating(conversationID string) error {
-	if strings.TrimSpace(conversationID) == "" {
-		return fmt.Errorf("conversation ID is required")
-	}
-	result, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ? AND phase = ? AND (thread_id IS NULL OR thread_id <= 0)`, ClaimPhaseCreating, conversationID, ClaimPhaseReserved)
+	_, _, creating, err := s.BeginClaimCreating(conversationID)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected != 1 {
+	if !creating {
 		return fmt.Errorf("telegram claim creating fence is unavailable")
 	}
 	return nil
+}
+
+// BeginClaimCreating rechecks topic_routes and transitions reserved to
+// creating under BEGIN IMMEDIATE so SetRoute cannot insert a route in the
+// window before createForumTopic. An existing route is persisted as
+// topic_created in the same transaction instead of fencing.
+func (s *State) BeginClaimCreating(conversationID string) (int64, int64, bool, error) {
+	if strings.TrimSpace(conversationID) == "" {
+		return 0, 0, false, fmt.Errorf("conversation ID is required")
+	}
+	var chatID, threadID int64
+	var creating bool
+	err := s.withImmediate(func(conn *sql.Conn) error {
+		err := conn.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&chatID, &threadID)
+		if err == nil && threadID > 0 {
+			if _, err := conn.ExecContext(context.Background(), `UPDATE claim_executions SET thread_id = ?, chat_id = ?, phase = ? WHERE conversation_id = ?`, threadID, chatID, ClaimPhaseTopicCreated, conversationID); err != nil {
+				return err
+			}
+			creating = false
+			return nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		chatID, threadID = 0, 0
+		result, err := conn.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ? AND phase = ? AND (thread_id IS NULL OR thread_id <= 0)`, ClaimPhaseCreating, conversationID, ClaimPhaseReserved)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return fmt.Errorf("telegram claim creating fence is unavailable")
+		}
+		creating = true
+		return nil
+	})
+	if err != nil {
+		return 0, 0, false, err
+	}
+	return chatID, threadID, creating, nil
 }
 
 // ClearClaimCreating returns a still-unthreaded row to reserved after Bot API
@@ -500,6 +532,13 @@ func (s *State) AdoptExecution(conversationID string, threadID int64) error {
 const adoptExecutionSQL = `INSERT INTO claim_executions(conversation_id, thread_id, phase, skip_reserve) VALUES (?, ?, ?, 1)
 		ON CONFLICT(conversation_id) DO UPDATE SET
 			thread_id = CASE WHEN claim_executions.phase = ? THEN claim_executions.thread_id ELSE excluded.thread_id END,
+			phase = CASE WHEN claim_executions.phase = ? THEN claim_executions.phase ELSE excluded.phase END,
+			skip_reserve = 1`
+
+const adoptExistingRouteSQL = `INSERT INTO claim_executions(conversation_id, thread_id, chat_id, phase, skip_reserve) VALUES (?, ?, ?, ?, 1)
+		ON CONFLICT(conversation_id) DO UPDATE SET
+			thread_id = CASE WHEN claim_executions.phase = ? THEN claim_executions.thread_id ELSE excluded.thread_id END,
+			chat_id = CASE WHEN claim_executions.phase = ? THEN claim_executions.chat_id ELSE excluded.chat_id END,
 			phase = CASE WHEN claim_executions.phase = ? THEN claim_executions.phase ELSE excluded.phase END,
 			skip_reserve = 1`
 
@@ -599,8 +638,9 @@ func (s *State) withImmediate(fn func(*sql.Conn) error) error {
 	return nil
 }
 
-// AdoptExistingRoute re-reads topic_routes and writes claim_executions under
-// BEGIN IMMEDIATE so an emergency SetRoute cannot remap after the lookup.
+// AdoptExistingRoute re-reads topic_routes and writes an adopting
+// claim_executions fence under BEGIN IMMEDIATE so an emergency SetRoute
+// cannot remap after the lookup and resume can still reserve.
 func (s *State) AdoptExistingRoute(conversationID string, allowedUserID int64) (int64, error) {
 	if strings.TrimSpace(conversationID) == "" || allowedUserID == 0 {
 		return 0, fmt.Errorf("telegram adopt is not configured")
@@ -621,13 +661,23 @@ func (s *State) AdoptExistingRoute(conversationID string, allowedUserID int64) (
 		if chatID != allowedUserID {
 			return fmt.Errorf("telegram adopt requires the configured telegram chat")
 		}
-		_, err = conn.ExecContext(context.Background(), adoptExecutionSQL, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete)
+		_, err = conn.ExecContext(context.Background(), adoptExistingRouteSQL, conversationID, threadID, chatID, ClaimPhaseAdopting, ClaimPhaseComplete, ClaimPhaseComplete, ClaimPhaseComplete)
 		return err
 	})
 	if err != nil {
 		return 0, err
 	}
 	return threadID, nil
+}
+
+// PersistClaimAdoptReserved advances a pre-reserve adopt fence after the
+// relay reservation exists so resume can complete instead of reserving again.
+func (s *State) PersistClaimAdoptReserved(conversationID string) error {
+	if strings.TrimSpace(conversationID) == "" {
+		return fmt.Errorf("conversation ID is required")
+	}
+	_, err := s.db.ExecContext(context.Background(), `UPDATE claim_executions SET phase = ? WHERE conversation_id = ? AND phase = ?`, ClaimPhaseRoutePersisted, conversationID, ClaimPhaseAdopting)
+	return err
 }
 
 // MarkClaimComplete records a finished local execution.
@@ -669,7 +719,7 @@ func claimProtectsRouteOn(q rowQueryer, conversationID string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return phase == ClaimPhaseCreating || phase == ClaimPhaseTopicCreated || phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
+	return phase == ClaimPhaseCreating || phase == ClaimPhaseTopicCreated || phase == ClaimPhaseAdopting || phase == ClaimPhaseRoutePersisted || phase == ClaimPhaseComplete, nil
 }
 
 // RouteBlocked refuses remapping a claimed conversation or stealing its thread.
