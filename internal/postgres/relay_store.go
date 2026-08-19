@@ -3276,6 +3276,7 @@ WITH objects AS (
 		   to_regclass('relay.mail_telegram_claims') AS telegram_claims_oid,
 		   to_regclass('relay.mail_telegram_participants') AS telegram_participants_oid,
 		   to_regclass('relay.mail_telegram_claim_events') AS telegram_claim_events_oid,
+		   to_regclass('relay.mail_conversation_display_name_idempotency') AS display_name_idempotency_oid,
 		   to_regclass('relay.mail_endpoints_machine') AS endpoints_index_oid,
 		   to_regclass('relay.mail_role_bindings_session') AS role_bindings_index_oid,
 		   to_regclass('relay.mail_deliveries_pending') AS deliveries_index_oid,
@@ -3284,8 +3285,8 @@ WITH objects AS (
            to_regprocedure('jobs.guard_application_mutation()') AS legacy_guard_oid,
            to_regprocedure('relay.guard_mail_mutation()') AS cutover_guard_oid
 ), table_ownership AS (
-    SELECT count(*)=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
-    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+    SELECT count(*)=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END AND bool_and(pg_get_userbyid(relation.relowner)='punaro_owner' AND relation.relkind='r' AND relation.relpersistence='p' AND NOT relation.relrowsecurity AND NOT relation.relforcerowsecurity) AS exact
+    FROM objects JOIN pg_class AS relation ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
 ), expected_columns(table_oid,column_name,type_oid,required) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
         (endpoints_oid,'endpoint','text'::regtype,true),(endpoints_oid,'machine_id','text'::regtype,true),
@@ -3315,21 +3316,24 @@ WITH objects AS (
         (message_idempotency_oid,'message_id','uuid'::regtype,true),(message_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (conversation_idempotency_oid,'machine_id','text'::regtype,true),(conversation_idempotency_oid,'key','text'::regtype,true),(conversation_idempotency_oid,'request_hash','bpchar'::regtype,true),
         (conversation_idempotency_oid,'conversation_id','uuid'::regtype,true),(conversation_idempotency_oid,'created_at','timestamptz'::regtype,true),
+        (display_name_idempotency_oid,'machine_id','text'::regtype,true),(display_name_idempotency_oid,'key','text'::regtype,true),(display_name_idempotency_oid,'request_hash','bpchar'::regtype,true),
+        (display_name_idempotency_oid,'conversation_id','uuid'::regtype,true),(display_name_idempotency_oid,'created_at','timestamptz'::regtype,true),
         (nonces_oid,'machine_id','text'::regtype,true),(nonces_oid,'nonce','text'::regtype,true),(nonces_oid,'expires_at','timestamptz'::regtype,true)
     ) AS expected(table_oid,column_name,type_oid,required)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 50 OR NOT (expected.table_oid=conversations_oid AND expected.column_name='display_name'))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid AND NOT (expected.table_oid=messages_oid AND expected.column_name IN ('from_participant','in_reply_to_message_id','in_reply_to_endpoint','telegram_thread_id'))))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), actual_columns AS (
     SELECT attribute.attrelid,attribute.attname,attribute.atttypid,attribute.attnotnull
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND attribute.attnum>0 AND NOT attribute.attisdropped
 ), columns AS (
     SELECT NOT EXISTS (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
        AND NOT EXISTS (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
-       AND (SELECT count(*)=CASE WHEN $1 >= 51 THEN 3 ELSE 2 END FROM pg_attribute WHERE attrelid=ANY(ARRAY[message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid]) AND attname='request_hash' AND atttypid='bpchar'::regtype AND atttypmod=68)
-       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
+       AND (SELECT count(*)=CASE WHEN $1 >= 53 THEN 4 WHEN $1 >= 51 THEN 3 ELSE 2 END FROM pg_attribute WHERE attrelid=ANY(ARRAY[message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid,display_name_idempotency_oid]) AND attname='request_hash' AND atttypid='bpchar'::regtype AND atttypmod=68)
+       AND NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid]) AND attnum>0 AND NOT attisdropped AND atttypid<>'bpchar'::regtype AND atttypmod<>-1) AS exact
     FROM objects
 ), expected_defaults(table_oid,column_name,expression) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -3342,7 +3346,7 @@ WITH objects AS (
 ), actual_defaults AS (
     SELECT default_value.adrelid,attribute.attname,pg_get_expr(default_value.adbin,default_value.adrelid)
     FROM objects JOIN pg_attrdef AS default_value
-      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON default_value.adrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
     JOIN pg_attribute AS attribute ON attribute.attrelid=default_value.adrelid AND attribute.attnum=default_value.adnum
 ), defaults AS (
     SELECT NOT EXISTS (SELECT * FROM expected_defaults EXCEPT SELECT * FROM actual_defaults)
@@ -3356,15 +3360,17 @@ WITH objects AS (
         (message_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),(conversation_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (nonces_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (telegram_claims_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_participants_oid,'p'::"char",ARRAY[1]::smallint[]),(telegram_claim_events_oid,'p'::"char",ARRAY[1]::smallint[]),
+        (display_name_idempotency_oid,'p'::"char",ARRAY[1,2]::smallint[]),
         (messages_oid,'u'::"char",ARRAY[2,3]::smallint[]),(deliveries_oid,'u'::"char",ARRAY[2,3]::smallint[]),
         (message_idempotency_oid,'u'::"char",ARRAY[4]::smallint[]),(conversation_idempotency_oid,'u'::"char",ARRAY[4]::smallint[])
     ) AS expected(table_oid,constraint_type,column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), actual_keys AS (
     SELECT con.conrelid,con.contype,con.conkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND con.contype IN ('p','u') AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
 ), expected_foreign_keys(table_oid,column_keys,foreign_table_oid,foreign_column_keys) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -3375,16 +3381,18 @@ WITH objects AS (
 		(deliveries_oid,ARRAY[2]::smallint[],messages_oid,ARRAY[1]::smallint[]),(deliveries_oid,ARRAY[3]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),
 		(cursors_oid,ARRAY[1]::smallint[],endpoints_oid,ARRAY[1]::smallint[]),(cursors_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
         (message_idempotency_oid,ARRAY[4]::smallint[],messages_oid,ARRAY[1]::smallint[]),(conversation_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
-        (telegram_claims_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_participants_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_claim_events_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[])
+        (telegram_claims_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_participants_oid,ARRAY[1]::smallint[],conversations_oid,ARRAY[1]::smallint[]),(telegram_claim_events_oid,ARRAY[2]::smallint[],conversations_oid,ARRAY[1]::smallint[]),
+        (display_name_idempotency_oid,ARRAY[4]::smallint[],conversations_oid,ARRAY[1]::smallint[])
     ) AS expected(table_oid,column_keys,foreign_table_oid,foreign_column_keys)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 < 40 OR (NOT (expected.table_oid=deliveries_oid AND expected.column_keys=ARRAY[3]::smallint[])
                          AND NOT (expected.table_oid=cursors_oid AND expected.column_keys=ARRAY[1]::smallint[])))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), actual_foreign_keys AS (
     SELECT con.conrelid,con.conkey,con.confrelid,con.confkey
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[memberships_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON con.conrelid=ANY(ARRAY[memberships_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND con.contype='f' AND con.convalidated AND NOT con.condeferrable AND NOT con.condeferred
      AND con.confupdtype='a' AND con.confdeltype='a' AND con.confmatchtype='s'
 ), expected_check_keys(table_oid,column_keys) AS (
@@ -3455,17 +3463,17 @@ WITH objects AS (
        AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=nonces_oid AND contype='c' AND conkey=ARRAY[2]::smallint[] AND pg_get_expr(conbin,conrelid)='((char_length(nonce) >= 1) AND (char_length(nonce) <= 128) AND (octet_length(nonce) <= 512) AND (nonce !~ ''[[:cntrl:]]''::text))') AS exact
     FROM objects
 ), constraints AS (
-    SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
+    SELECT count(*) FILTER (WHERE con.contype='p')=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND count(*) FILTER (WHERE con.contype='u')=4
-	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 10 END
-	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
+	       AND count(*) FILTER (WHERE con.contype='f')=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 10 END
+	       AND count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 53 THEN 39 WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END
 	       AND NOT EXISTS (SELECT * FROM expected_keys EXCEPT SELECT * FROM actual_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_keys EXCEPT SELECT * FROM expected_keys)
 	       AND NOT EXISTS (SELECT * FROM expected_foreign_keys EXCEPT SELECT * FROM actual_foreign_keys)
 	       AND NOT EXISTS (SELECT * FROM actual_foreign_keys EXCEPT SELECT * FROM expected_foreign_keys)
 	       AND bool_and(check_expressions.exact) AS exact
     FROM objects JOIN pg_constraint AS con
-      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON con.conrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND con.convalidated CROSS JOIN check_expressions
 ), expected_guards(table_oid, trigger_name) AS (
     SELECT expected.* FROM objects, LATERAL (VALUES
@@ -3483,12 +3491,14 @@ WITH objects AS (
         (nonces_oid, 'mail_request_nonces_mutation_guard'),
         (telegram_claims_oid, 'mail_telegram_claims_mutation_guard'),
         (telegram_participants_oid, 'mail_telegram_participants_mutation_guard'),
-        (telegram_claim_events_oid, 'mail_telegram_claim_events_mutation_guard')
+        (telegram_claim_events_oid, 'mail_telegram_claim_events_mutation_guard'),
+        (display_name_idempotency_oid, 'mail_conversation_display_name_idempotency_mutation_guard')
     ) AS expected(table_oid, trigger_name)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), guards AS (
-    SELECT count(*)=CASE WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
+    SELECT count(*)=CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END
        AND bool_and(trg.tgfoid IN (objects.legacy_guard_oid, objects.cutover_guard_oid) AND trg.tgenabled='O' AND NOT trg.tgisinternal
                     AND trg.tgtype=30 AND trg.tgconstraint=0
                     AND NOT trg.tgdeferrable AND NOT trg.tginitdeferred AND trg.tgnargs=0
@@ -3525,15 +3535,17 @@ WITH objects AS (
         (deliveries_oid,'SELECT'),(deliveries_oid,'INSERT'),(cursors_oid,'SELECT'),(cursors_oid,'INSERT'),
         (message_idempotency_oid,'SELECT'),(message_idempotency_oid,'INSERT'),
         (conversation_idempotency_oid,'SELECT'),(conversation_idempotency_oid,'INSERT'),
-        (telegram_claims_oid,'SELECT'),(telegram_claims_oid,'INSERT'),(telegram_participants_oid,'SELECT'),(telegram_participants_oid,'INSERT'),(telegram_claim_events_oid,'SELECT'),(telegram_claim_events_oid,'INSERT')
+        (telegram_claims_oid,'SELECT'),(telegram_claims_oid,'INSERT'),(telegram_participants_oid,'SELECT'),(telegram_participants_oid,'INSERT'),(telegram_claim_events_oid,'SELECT'),(telegram_claim_events_oid,'INSERT'),
+        (display_name_idempotency_oid,'SELECT'),(display_name_idempotency_oid,'INSERT')
     ) AS expected(table_oid,privilege_type)
     WHERE ($1 >= 40 OR (expected.table_oid IS DISTINCT FROM roles_oid AND expected.table_oid IS DISTINCT FROM role_memberships_oid AND expected.table_oid IS DISTINCT FROM role_bindings_oid))
       AND ($1 >= 41 OR NOT (expected.table_oid=memberships_oid AND expected.privilege_type='DELETE'))
       AND ($1 >= 51 OR (expected.table_oid IS DISTINCT FROM telegram_claims_oid AND expected.table_oid IS DISTINCT FROM telegram_participants_oid AND expected.table_oid IS DISTINCT FROM telegram_claim_events_oid))
+      AND ($1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid)
 ), actual_table_acl AS (
     SELECT relation.oid,acl.privilege_type
     FROM objects JOIN pg_class AS relation
-      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
     CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
     WHERE NOT acl.is_grantable
@@ -3558,7 +3570,7 @@ WITH objects AS (
 ), actual_column_acl AS (
     SELECT attribute.attrelid,attribute.attname,acl.privilege_type
     FROM objects JOIN pg_attribute AS attribute
-      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+      ON attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
      AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
     CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
     JOIN pg_roles AS grantee ON grantee.oid=acl.grantee AND grantee.rolname='punaro_app'
@@ -3570,6 +3582,7 @@ WITH objects AS (
 SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND memberships_oid IS NOT NULL
 	AND ($1 < 40 OR (roles_oid IS NOT NULL AND role_memberships_oid IS NOT NULL AND role_bindings_oid IS NOT NULL))
 	AND ($1 < 51 OR (telegram_claims_oid IS NOT NULL AND telegram_participants_oid IS NOT NULL AND telegram_claim_events_oid IS NOT NULL))
+	AND ($1 < 53 OR display_name_idempotency_oid IS NOT NULL)
    AND messages_oid IS NOT NULL AND deliveries_oid IS NOT NULL AND cursors_oid IS NOT NULL
    AND message_idempotency_oid IS NOT NULL AND conversation_idempotency_oid IS NOT NULL AND nonces_oid IS NOT NULL
 	   AND endpoints_index_oid IS NOT NULL AND ($1 < 40 OR role_bindings_index_oid IS NOT NULL) AND deliveries_index_oid IS NOT NULL AND nonces_index_oid IS NOT NULL
@@ -3586,14 +3599,14 @@ SELECT endpoints_oid IS NOT NULL AND conversations_oid IS NOT NULL AND membershi
 	       SELECT 1 FROM pg_class AS relation
 	       CROSS JOIN LATERAL aclexplode(COALESCE(relation.relacl,acldefault('r',relation.relowner))) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+	       WHERE relation.oid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )
 	   AND NOT EXISTS (
 	       SELECT 1 FROM pg_attribute AS attribute
 	       CROSS JOIN LATERAL aclexplode(attribute.attacl) AS acl
 	       LEFT JOIN pg_roles AS grantee ON grantee.oid=acl.grantee
-	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid])
+	       WHERE attribute.attrelid=ANY(ARRAY[endpoints_oid,conversations_oid,memberships_oid,roles_oid,role_memberships_oid,role_bindings_oid,messages_oid,deliveries_oid,cursors_oid,message_idempotency_oid,conversation_idempotency_oid,nonces_oid,telegram_claims_oid,telegram_participants_oid,telegram_claim_events_oid,display_name_idempotency_oid])
 	         AND attribute.attnum>0 AND attribute.attacl IS NOT NULL
 	         AND (acl.grantee=0 OR grantee.rolname IS NULL OR grantee.rolname NOT IN ('punaro_owner','punaro_app') OR (grantee.rolname='punaro_app' AND acl.is_grantable))
 	   )

@@ -126,6 +126,27 @@ func TestPostgresClaimOccupancyLocksConversationBeforeOccupants(t *testing.T) {
 	}
 }
 
+func TestRelayInspectSQLIncludesDisplayNameIdempotencyAfter53(t *testing.T) {
+	body, err := os.ReadFile("relay_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(body)
+	for _, want := range []string{
+		"to_regclass('relay.mail_conversation_display_name_idempotency') AS display_name_idempotency_oid",
+		"CASE WHEN $1 >= 53 THEN 16 WHEN $1 >= 51 THEN 15 WHEN $1 >= 40 THEN 12 ELSE 9 END",
+		"CASE WHEN $1 >= 53 THEN 4 WHEN $1 >= 51 THEN 3 ELSE 2 END",
+		"count(*) FILTER (WHERE con.contype='c')=CASE WHEN $1 >= 53 THEN 39 WHEN $1 >= 51 THEN 37 WHEN $1 >= 50 THEN 23 WHEN $1 >= 40 THEN 22 ELSE 18 END",
+		"(display_name_idempotency_oid, 'mail_conversation_display_name_idempotency_mutation_guard')",
+		"$1 >= 53 OR expected.table_oid IS DISTINCT FROM display_name_idempotency_oid",
+		"$1 < 53 OR display_name_idempotency_oid IS NOT NULL",
+	} {
+		if !strings.Contains(src, want) {
+			t.Fatalf("relay inspect SQL missing display-name idempotency check: %s", want)
+		}
+	}
+}
+
 func TestPostgresOccupancySQLUsesNullableUUIDExclude(t *testing.T) {
 	if postgresNullableUUID("") != nil {
 		t.Fatal("empty exclude must bind NULL, not text")
