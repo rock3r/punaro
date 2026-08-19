@@ -10,6 +10,7 @@ var (
 		"punaro-trusted-attachment",
 		"punaro-bootstrap",
 		"punaro-telegram",
+		"punaro-relay-adopt-prepare",
 		"punaro-adapter",
 		"punaro-memory",
 		"punaro-enroll",

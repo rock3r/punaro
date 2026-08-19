@@ -77,4 +77,5 @@ build punaro-bootstrap ./cmd/punaro-bootstrap
 if [ "$goos" = linux ]; then
 	build punaro ./cmd/punaro
 	build punaro-telegram ./cmd/punaro-telegram
+	build punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 fi

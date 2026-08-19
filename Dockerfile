@@ -18,7 +18,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro ./cmd/punar
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-admin ./cmd/punaro-admin \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-adapter ./cmd/punaro-adapter \
  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-telegram ./cmd/punaro-telegram \
- && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-trusted-attachment ./cmd/punaro-trusted-attachment
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-trusted-attachment ./cmd/punaro-trusted-attachment \
+ && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/punaro-relay-adopt-prepare ./cmd/punaro-relay-adopt-prepare
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:b7bb25d9f7c31d2bdd1982feb4dafcaf137703c7075dbe2febb41c24212b946f
 COPY --from=build /out/punaro /usr/local/bin/punaro
@@ -28,6 +29,7 @@ COPY --from=build /out/punaro-admin /usr/local/bin/punaro-admin
 COPY --from=build /out/punaro-adapter /usr/local/bin/punaro-adapter
 COPY --from=build /out/punaro-telegram /usr/local/bin/punaro-telegram
 COPY --from=build /out/punaro-trusted-attachment /usr/local/bin/punaro-trusted-attachment
+COPY --from=build /out/punaro-relay-adopt-prepare /usr/local/bin/punaro-relay-adopt-prepare
 USER nonroot:nonroot
 EXPOSE 8080 8081
 ENTRYPOINT ["/usr/local/bin/punarod"]
