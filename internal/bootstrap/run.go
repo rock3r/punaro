@@ -161,7 +161,7 @@ func superviseRun(ctx context.Context, request RunRequest) error {
 		}
 		return failCurrent(ctx, request, start, identity, hadPrevious, errChildExited)
 	}
-	requireHealth := hadPrevious && !proven
+	requireHealth := hadPrevious && !proven && identity.Generation >= 1
 	if err := waitHealth(ctx, request, child, identity, requireHealth); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return waitChild(ctx, request, child, identity)
@@ -1084,10 +1084,12 @@ func SeedLocalCheckout(directory, adapterPath string, keys map[string]ed25519.Pu
 			if recErr != nil || recovery.Mode == recoveryMode {
 				return errors.New("bootstrap is recovery-only; use a signed update")
 			}
-			if err := quarantineUnreadablePrevious(directory); err != nil {
-				return err
+			if slot.Generation >= 1 {
+				if err := quarantineUnreadablePrevious(directory); err != nil {
+					return err
+				}
+				return nil
 			}
-			return nil
 		}
 	}
 	info, err := os.Lstat(adapterPath) // #nosec G703 -- operator-selected checkout adapter.

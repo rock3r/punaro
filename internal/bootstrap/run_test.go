@@ -125,7 +125,7 @@ func TestRunExitsWhenSameIdentityRepairReplacesCurrent(t *testing.T) {
 				time.Sleep(30 * time.Millisecond)
 				current := filepath.Join(dir, currentSlot)
 				_ = os.WriteFile(filepath.Join(current, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte("repaired-adapter"), 0o600)
-				writeSlotRecordGeneration(t, current, "v0.1.0", 1, digest, 1)
+				writeSlotRecordGeneration(t, current, "v0.1.0", 1, digest, 2)
 			}()
 			return blockingProcess(context.Background()), nil
 		},
@@ -166,7 +166,7 @@ func TestFailOrRollbackKeepsRecoveryWhenCatalogTimesOut(t *testing.T) {
 		Origin:    "https://127.0.0.1:1/releases",
 		Keys:      map[string]ed25519.PublicKey{"k": make(ed25519.PublicKey, ed25519.PublicKeySize)},
 		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
-	}, startOrDefault(RunRequest{}), slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")}, recoveryUnhealthy)
+	}, startOrDefault(RunRequest{}), slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 1}, recoveryUnhealthy)
 	if !errors.Is(err, ErrRecoveryOnly) {
 		t.Fatalf("timed-out catalog rollback err=%v", err)
 	}
@@ -189,7 +189,7 @@ func TestRollbackIfAllowedAbortsWhenContextCanceled(t *testing.T) {
 		Origin:    origin.URL,
 		Keys:      origin.Keys,
 		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
-	}, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")})
+	}, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter"), Generation: 1})
 	if unlocked || !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled rollback unlocked=%v err=%v", unlocked, err)
 	}
@@ -293,6 +293,50 @@ func TestRunRefusesRecoveryOnly(t *testing.T) {
 	err := Run(context.Background(), RunRequest{Directory: dir, HealthTimeout: time.Millisecond})
 	if err == nil || !strings.Contains(err.Error(), "recovery-only") {
 		t.Fatalf("recovery-only run err=%v", err)
+	}
+}
+
+func TestRunGrandfathersPreSupervisionCurrent(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 0)
+	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, previousSlot), "v0.1.0", 1, payloadDigest("previous-adapter"), 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, _ ChildSpec) (Process, error) {
+				close(started)
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errCh:
+		t.Fatalf("run exited early: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("run did not start")
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("pre-supervision current entered recovery-only")
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.2.0" || status.Previous != "v0.1.0" {
+		t.Fatalf("status=%#v", status)
 	}
 }
 
@@ -433,7 +477,9 @@ func TestRunSkipsCandidateHealthForProvenGeneration(t *testing.T) {
 func TestRunSkipsCandidateHealthForGenerationZeroIdentity(t *testing.T) {
 	dir := privateDir(t)
 	writeAdapterSlot(t, dir, currentSlot, "v0.2.0", 2, "current-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.2.0", 2, payloadDigest("current-adapter"), 0)
 	writeAdapterSlot(t, dir, previousSlot, "v0.1.0", 1, "previous-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, previousSlot), "v0.1.0", 1, payloadDigest("previous-adapter"), 0)
 	if err := rememberHealthyGeneration(dir, slotState{Release: "v0.2.0", Sequence: 2, ManifestSHA256: payloadDigest("current-adapter")}); err != nil {
 		t.Fatal(err)
 	}
@@ -1357,6 +1403,33 @@ func TestRunRejectsReadySymlink(t *testing.T) {
 	}
 }
 
+func TestSeedLocalCheckoutMigratesPreSupervisionSignedCurrent(t *testing.T) {
+	dir := privateDir(t)
+	writeAdapterSlot(t, dir, currentSlot, "v0.1.0", 1, "signed-adapter")
+	writeSlotRecordGeneration(t, filepath.Join(dir, currentSlot), "v0.1.0", 1, payloadDigest("signed-adapter"), 0)
+	adapter := filepath.Join(t.TempDir(), "punaro-adapter")
+	if err := os.WriteFile(adapter, []byte("checkout-adapter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLocalCheckout(dir, adapter, nil); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != localCheckoutRelease {
+		t.Fatalf("status=%#v", status)
+	}
+	installed, err := os.ReadFile(filepath.Join(dir, currentSlot, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH))) // #nosec G304 -- path is under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(installed) != "checkout-adapter" {
+		t.Fatalf("installed=%q", installed)
+	}
+}
+
 func TestSeedLocalCheckoutQuarantinesInvalidCurrentNode(t *testing.T) {
 	dir := privateDir(t)
 	if err := os.WriteFile(filepath.Join(dir, currentSlot), []byte("not-a-slot"), 0o600); err != nil {
@@ -1909,7 +1982,7 @@ func writeAdapterSlot(t *testing.T, directory, slot, release string, sequence in
 	if err := os.WriteFile(filepath.Join(path, artifactName("punaro-adapter", runtime.GOOS, runtime.GOARCH)), []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	writeSlotRecord(t, path, release, sequence, digest)
+	writeSlotRecordGeneration(t, path, release, sequence, digest, 1)
 }
 
 func writeSlotRecord(t *testing.T, slotDir, release string, sequence int64, digest string) {
