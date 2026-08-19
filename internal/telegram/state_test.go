@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -365,6 +366,52 @@ func TestStatePersistClaimRouteReusesExistingConversationThread(t *testing.T) {
 	}
 	if _, found, err := state.Route(55, 1); err != nil || found {
 		t.Fatal("second thread was inserted for the same conversation")
+	}
+}
+
+func TestAdoptExistingRouteDoesNotSplitFromConcurrentSetRoute(t *testing.T) {
+	t.Parallel()
+	for i := 0; i < 40; i++ {
+		state, err := Open(filepath.Join(t.TempDir(), fmt.Sprintf("telegram-%d.db", i)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := state.SetRoute(55, 1, "conversation-a"); err != nil {
+			_ = state.Close()
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, _ = state.AdoptExistingRoute("conversation-a", 55)
+		}()
+		go func() {
+			defer wg.Done()
+			_ = state.SetRoute(55, 1, "conversation-b")
+		}()
+		wg.Wait()
+		owner, found, err := state.Route(55, 1)
+		if err != nil || !found {
+			_ = state.Close()
+			t.Fatalf("iter %d missing route found=%v err=%v", i, found, err)
+		}
+		execution, execFound, err := state.ClaimExecution("conversation-a")
+		if err != nil {
+			_ = state.Close()
+			t.Fatal(err)
+		}
+		if execFound && (execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
+			if owner != "conversation-a" || execution.ThreadID != 1 {
+				_ = state.Close()
+				t.Fatalf("iter %d split mapping owner=%q execution=%#v", i, owner, execution)
+			}
+		}
+		if owner == "conversation-b" && execFound && (execution.Phase == ClaimPhaseRoutePersisted || execution.Phase == ClaimPhaseComplete) {
+			_ = state.Close()
+			t.Fatalf("iter %d claimed conversation-a while thread belongs to conversation-b: %#v", i, execution)
+		}
+		_ = state.Close()
 	}
 }
 

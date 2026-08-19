@@ -255,7 +255,10 @@ const pendingClaimPollLimit = 10
 
 // StartPending inserts reserved rows for relay-pending claims with no local execution.
 func (e ClaimExecutor) StartPending(ctx context.Context) error {
-	after := ""
+	after, err := e.State.pendingClaimCursor()
+	if err != nil {
+		return err
+	}
 	started := 0
 	for {
 		claims, err := e.Relay.PendingTelegramClaims(ctx, pendingClaimPollLimit, after)
@@ -263,7 +266,7 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 			return fmt.Errorf("poll pending telegram claims: %w", err)
 		}
 		if len(claims) == 0 {
-			return nil
+			return e.State.setPendingClaimCursor("")
 		}
 		for _, claim := range claims {
 			after = claim.ConversationID
@@ -283,11 +286,11 @@ func (e ClaimExecutor) StartPending(ctx context.Context) error {
 			_ = e.Execute(ctx, claim.ConversationID)
 			started++
 			if started >= pendingClaimPollLimit {
-				return nil
+				return e.State.setPendingClaimCursor(after)
 			}
 		}
 		if len(claims) < pendingClaimPollLimit {
-			return nil
+			return e.State.setPendingClaimCursor("")
 		}
 	}
 }
@@ -320,8 +323,7 @@ func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversati
 		logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
 		return nil
 	}
-	threadID, err = state.AdoptExistingRoute(conversationID, allowedUserID)
-	if err != nil {
+	if _, err = state.AdoptExistingRoute(conversationID, allowedUserID); err != nil {
 		return err
 	}
 	if claim.Status == "complete" {

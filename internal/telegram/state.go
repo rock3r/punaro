@@ -74,6 +74,7 @@ func Open(database string) (*State, error) {
 		"CREATE TABLE IF NOT EXISTS callback_tokens (token_hash TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, expires_at INTEGER NOT NULL, consumed_at INTEGER)",
 		"CREATE TABLE IF NOT EXISTS claim_executions (conversation_id TEXT PRIMARY KEY, thread_id INTEGER, phase TEXT NOT NULL, display_name TEXT, skip_reserve INTEGER NOT NULL DEFAULT 0)",
 		"CREATE TABLE IF NOT EXISTS telegram_outbound (chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, conversation_id TEXT NOT NULL, punaro_message_id TEXT NOT NULL, from_endpoint TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY (chat_id, message_id))",
+		"CREATE TABLE IF NOT EXISTS gateway_cursors (name TEXT PRIMARY KEY, value TEXT NOT NULL)",
 	} {
 		if _, err := db.ExecContext(context.Background(), statement); err != nil {
 			_ = db.Close()
@@ -464,32 +465,82 @@ const adoptExecutionSQL = `INSERT INTO claim_executions(conversation_id, thread_
 			phase = CASE WHEN claim_executions.phase = ? THEN claim_executions.phase ELSE excluded.phase END,
 			skip_reserve = 1`
 
-// AdoptExistingRoute re-reads topic_routes and writes claim_executions in one
-// transaction so an emergency SetRoute cannot remap the row after the lookup.
+const pendingClaimCursorName = "pending_claims"
+
+func (s *State) pendingClaimCursor() (string, error) {
+	var value string
+	err := s.db.QueryRowContext(context.Background(), `SELECT value FROM gateway_cursors WHERE name = ?`, pendingClaimCursorName).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func (s *State) setPendingClaimCursor(after string) error {
+	if after == "" {
+		_, err := s.db.ExecContext(context.Background(), `DELETE FROM gateway_cursors WHERE name = ?`, pendingClaimCursorName)
+		return err
+	}
+	_, err := s.db.ExecContext(context.Background(), `INSERT INTO gateway_cursors(name, value) VALUES (?, ?)
+		ON CONFLICT(name) DO UPDATE SET value = excluded.value`, pendingClaimCursorName, after)
+	return err
+}
+
+func (s *State) withImmediate(fn func(*sql.Conn) error) error {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+	if err := fn(conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// AdoptExistingRoute re-reads topic_routes and writes claim_executions under
+// BEGIN IMMEDIATE so an emergency SetRoute cannot remap after the lookup.
 func (s *State) AdoptExistingRoute(conversationID string, allowedUserID int64) (int64, error) {
 	if strings.TrimSpace(conversationID) == "" || allowedUserID == 0 {
 		return 0, fmt.Errorf("telegram adopt is not configured")
 	}
-	tx, err := s.db.BeginTx(context.Background(), nil)
+	var threadID int64
+	err := s.withImmediate(func(conn *sql.Conn) error {
+		var chatID int64
+		err := conn.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&chatID, &threadID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("telegram adopt requires an existing topic route")
+		}
+		if err != nil {
+			return err
+		}
+		if threadID <= 0 {
+			return fmt.Errorf("telegram adopt requires an existing topic route")
+		}
+		if chatID != allowedUserID {
+			return fmt.Errorf("telegram adopt requires the configured telegram chat")
+		}
+		_, err = conn.ExecContext(context.Background(), adoptExecutionSQL, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete)
+		return err
+	})
 	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var chatID, threadID int64
-	err = tx.QueryRowContext(context.Background(), `SELECT chat_id, thread_id FROM topic_routes WHERE conversation_id = ?`, conversationID).Scan(&chatID, &threadID)
-	if errors.Is(err, sql.ErrNoRows) || threadID <= 0 {
-		return 0, fmt.Errorf("telegram adopt requires an existing topic route")
-	}
-	if err != nil {
-		return 0, err
-	}
-	if chatID != allowedUserID {
-		return 0, fmt.Errorf("telegram adopt requires the configured telegram chat")
-	}
-	if _, err := tx.ExecContext(context.Background(), adoptExecutionSQL, conversationID, threadID, ClaimPhaseRoutePersisted, ClaimPhaseComplete, ClaimPhaseComplete); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return threadID, nil

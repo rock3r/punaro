@@ -691,6 +691,9 @@ func TestStartPendingBoundsExecuteWorkPerCycle(t *testing.T) {
 	if err := executor.StartPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if len(claims.pendingAfter) < 2 || claims.pendingAfter[0] != "" || claims.pendingAfter[1] != "conversation-10" {
+		t.Fatalf("pending after cursors=%#v", claims.pendingAfter)
+	}
 	later, found, err := state.ClaimExecution("conversation-11")
 	if err != nil || !found || later.Phase != ClaimPhaseComplete {
 		t.Fatalf("next cycle did not start the remaining claim: %#v found=%v err=%v", later, found, err)

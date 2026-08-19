@@ -990,13 +990,14 @@ the configured chat; otherwise it fails closed and requires
 `punaro-telegram adopt` instead of creating a second topic. Reusing a stored
 route requires its `chat_id` to match the configured allowed user.
 `punaro-telegram adopt` re-reads `topic_routes` and writes
-`claim_executions` in one transaction so an emergency `route` remap cannot
-complete against a stale thread. `route` refuses a claimed conversation or a
+`claim_executions` under one SQLite `BEGIN IMMEDIATE` so an emergency
+`route` remap cannot commit between the lookup and the occupancy fence. `route` refuses a claimed conversation or a
 `(chat,thread)` already bound to a claimed conversation. Main-chat ordinary
 text stays unbound. There is no main-chat fallback. Gateway startup and
 `SendDelivery` fail closed when a completed route's `chat_id` is not the
 configured allowed user. One `SyncOnce` starts at most ten new pending
-claims so Bot API retries cannot starve inbound and outbound mail.
+claims so Bot API retries cannot starve inbound and outbound mail; a durable
+pending cursor continues later claims on the next cycle.
 
 Inbound topic text is submitted on `POST /v1/conversations/{id}/telegram-inbound`
 with `from_participant=user-telegram`. A local `telegram_outbound` map, filled
