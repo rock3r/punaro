@@ -1182,6 +1182,18 @@ func postgresNullableUUID(id string) any {
 	return id
 }
 
+func postgresPendingTelegramClaimsSQL() string {
+	return `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
+		FROM relay.mail_telegram_claims AS claim
+		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
+		WHERE claim.status='pending'
+		  AND ($2::uuid IS NULL OR (claim.created_at, claim.conversation_id) > (
+			SELECT cursor.created_at, cursor.conversation_id FROM relay.mail_telegram_claims AS cursor WHERE cursor.conversation_id = $2::uuid
+		  ))
+		ORDER BY claim.created_at ASC, claim.conversation_id ASC
+		LIMIT $1`
+}
+
 func postgresSessionOccupiesOtherExclusiveConversationSQL(namesAvailable, rolesAvailable, claimsAvailable bool) string {
 	query := `SELECT EXISTS (
 		SELECT 1 FROM relay.mail_memberships AS membership
@@ -2856,15 +2868,7 @@ func (d *Database) PendingTelegramClaims(machineID string, now time.Time, limit 
 	if err := postgresEndpointOwnedBy(tx, relay.TelegramGatewayEndpoint, machineID, now); err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(context.Background(), `SELECT claim.conversation_id::text, claim.status, COALESCE(conversation.display_name, ''), claim.created_at, claim.completed_at
-		FROM relay.mail_telegram_claims AS claim
-		JOIN relay.mail_conversations AS conversation ON conversation.id = claim.conversation_id
-		WHERE claim.status='pending'
-		  AND ($2 = '' OR (claim.created_at, claim.conversation_id) > (
-			SELECT cursor.created_at, cursor.conversation_id FROM relay.mail_telegram_claims AS cursor WHERE cursor.conversation_id = $2
-		  ))
-		ORDER BY claim.created_at ASC, claim.conversation_id ASC
-		LIMIT $1`, limit, after)
+	rows, err := tx.QueryContext(context.Background(), postgresPendingTelegramClaimsSQL(), limit, postgresNullableUUID(after)) // #nosec G202 -- query is the fixed postgresPendingTelegramClaimsSQL allowlist.
 	if err != nil {
 		return nil, errors.New("pending telegram claims are unavailable")
 	}

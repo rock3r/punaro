@@ -81,6 +81,17 @@ func TestPostgresExclusiveConversationPredicateRequiresDisplayName(t *testing.T)
 	}
 }
 
+func TestPostgresPendingTelegramClaimsSQLUsesNullableUUIDCursor(t *testing.T) {
+	query := postgresPendingTelegramClaimsSQL()
+	compact := strings.ReplaceAll(query, " ", "")
+	if strings.Contains(query, "$2 = ''") || strings.Contains(compact, "$2=''") {
+		t.Fatalf("pending claims SQL overloads $2 as text: %s", query)
+	}
+	if !strings.Contains(query, "$2::uuid IS NULL") || !strings.Contains(query, "cursor.conversation_id = $2::uuid") {
+		t.Fatalf("pending claims SQL missing nullable uuid cursor: %s", query)
+	}
+}
+
 func TestPostgresOccupancySQLUsesNullableUUIDExclude(t *testing.T) {
 	if postgresNullableUUID("") != nil {
 		t.Fatal("empty exclude must bind NULL, not text")
