@@ -14,6 +14,7 @@ const (
 	startHelpText        = "This bot lets you claim a Punaro topic. Send /list to see unclaimed topics, then tap one to claim it."
 	listEmptyText        = "There are no unclaimed Punaro topics right now."
 	listPromptText       = "Tap a topic to claim it."
+	listAmbiguousText    = "Could not list unclaimed topics. Try again later."
 	callbackFailureText  = "Unable to complete this action."
 	callbackAcceptedText = "Claim accepted."
 	maxButtonTextRunes   = 64
@@ -193,7 +194,8 @@ func (g Gateway) handleList(ctx context.Context) error {
 	for _, topic := range topics {
 		label := truncateRunes(topic.DisplayName, maxButtonTextRunes)
 		if other, exists := labels[label]; exists && other != topic.ID {
-			return fmt.Errorf("telegram unclaimed topic labels are ambiguous")
+			g.logEvent("telegram_command", "cmd=list", "err=ambiguous_labels")
+			return g.sendOperator(ctx, listAmbiguousText, nil)
 		}
 		labels[label] = topic.ID
 	}

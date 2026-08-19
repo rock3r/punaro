@@ -179,11 +179,15 @@ func TestGatewayListFailsClosedOnAmbiguousButtonLabels(t *testing.T) {
 		Now:    func() time.Time { return testCallbackNow },
 		Log:    func(string, ...any) {},
 	}
-	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err == nil {
-		t.Fatal("ambiguous truncated labels were offered as buttons")
+	if err := gateway.Handle(context.Background(), Update{ID: 1, UserID: 55, ChatID: 55, IsCommand: true, Command: "list"}); err != nil {
+		t.Fatalf("ambiguous list must be consumed: %v", err)
 	}
-	if len(notify.messages) != 0 {
-		t.Fatalf("ambiguous list sent keyboard: %#v", notify.messages)
+	if len(notify.messages) != 1 || notify.messages[0].text != listAmbiguousText || notify.messages[0].keyboard != nil {
+		t.Fatalf("ambiguous list notify=%#v", notify.messages)
+	}
+	processed, err := state.Processed(1)
+	if err != nil || !processed {
+		t.Fatalf("ambiguous list processed=%v err=%v", processed, err)
 	}
 }
 

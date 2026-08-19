@@ -77,6 +77,35 @@ func (r *recordingClaimRelay) PendingTelegramClaims(_ context.Context, limit int
 	return rest[:limit], nil
 }
 
+type adoptFenceRelay struct {
+	state        *State
+	claim        relay.TelegramClaim
+	sawExecution bool
+	completes    []string
+}
+
+func (r *adoptFenceRelay) ClaimConversation(_ context.Context, conversationID, endpoint, idempotencyKey string) (relay.TelegramClaim, error) {
+	_, found, err := r.state.ClaimExecution(conversationID)
+	if err != nil {
+		return relay.TelegramClaim{}, err
+	}
+	r.sawExecution = found
+	claim := r.claim
+	if claim.ConversationID == "" {
+		claim.ConversationID = conversationID
+	}
+	return claim, nil
+}
+
+func (r *adoptFenceRelay) CompleteTelegramClaim(_ context.Context, conversationID string) (relay.TelegramClaim, error) {
+	r.completes = append(r.completes, conversationID)
+	return relay.TelegramClaim{ConversationID: conversationID, Status: "complete", DisplayName: r.claim.DisplayName}, nil
+}
+
+func (r *adoptFenceRelay) PendingTelegramClaims(context.Context, int, string) ([]relay.TelegramClaim, error) {
+	return nil, nil
+}
+
 type recordingTopicCreator struct {
 	chatIDs  []int64
 	names    []string
@@ -704,6 +733,30 @@ func TestAdoptPersistsExecutionFromCurrentRouteTransaction(t *testing.T) {
 	}
 	if strings.Contains(fn, "AdoptExecution") {
 		t.Fatal("Adopt must not persist a stale thread id from a prior route lookup")
+	}
+	routeIdx := strings.Index(fn, "AdoptExistingRoute")
+	reserveIdx := strings.Index(fn, "ClaimConversation")
+	if routeIdx < 0 || reserveIdx < 0 || routeIdx > reserveIdx {
+		t.Fatal("Adopt must persist the local route fence before the remote reservation")
+	}
+}
+
+func TestAdoptFencesLocalRouteBeforeRemoteReserve(t *testing.T) {
+	t.Parallel()
+	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = state.Close() })
+	if err := state.SetRoute(55, 795446, "conversation-1"); err != nil {
+		t.Fatal(err)
+	}
+	claims := &adoptFenceRelay{state: state, claim: relay.TelegramClaim{ConversationID: "conversation-1", Status: "pending", DisplayName: "How is it going"}}
+	if err := Adopt(context.Background(), state, claims, "conversation-1", 55, func(string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if !claims.sawExecution {
+		t.Fatal("remote reserve ran before the local adoption fence")
 	}
 }
 

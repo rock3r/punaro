@@ -326,6 +326,9 @@ func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversati
 	if allowedUserID == 0 || chatID != allowedUserID {
 		return fmt.Errorf("telegram adopt requires the configured telegram chat")
 	}
+	if _, err = state.AdoptExistingRoute(conversationID, allowedUserID); err != nil {
+		return err
+	}
 	claim, err := relayClient.ClaimConversation(ctx, conversationID, relay.TelegramGatewayEndpoint, AdoptClaimKey(conversationID))
 	if err != nil {
 		return fmt.Errorf("telegram_reserve_failed")
@@ -338,9 +341,6 @@ func Adopt(ctx context.Context, state *State, relayClient ClaimRelay, conversati
 	} else if found && existing.Phase == ClaimPhaseComplete && claim.Status == "complete" {
 		logClaim(logfn, "telegram_claim_completed", "conversation_id="+conversationID)
 		return nil
-	}
-	if _, err = state.AdoptExistingRoute(conversationID, allowedUserID); err != nil {
-		return err
 	}
 	if claim.Status == "complete" {
 		if err := state.MarkClaimComplete(conversationID); err != nil {

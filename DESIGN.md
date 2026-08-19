@@ -992,14 +992,16 @@ continues only when this gateway already has a recoverable topic route for
 the configured chat; otherwise it fails closed and requires
 `punaro-telegram adopt` instead of creating a second topic. Reusing a stored
 route requires its `chat_id` to match the configured allowed user.
-`punaro-telegram adopt` re-reads `topic_routes` and writes
-`claim_executions` under one SQLite `BEGIN IMMEDIATE` so an emergency
-`route` remap cannot commit between the lookup and the occupancy fence. `route` refuses a conversation that is creating, topic-created, routed, or
+`punaro-telegram adopt` writes the local `claim_executions` fence from
+`topic_routes` under one SQLite `BEGIN IMMEDIATE` before the remote
+reserve, so an emergency `route` remap cannot leave a pending relay claim
+without a protected local route. `route` refuses a conversation that is creating, topic-created, routed, or
 complete, or a `(chat,thread)` already bound to such a conversation. Main-chat
 ordinary text stays unbound. There is no main-chat fallback. Gateway startup
 and `SendDelivery` fail closed when a completed route's `chat_id` is not the
 configured allowed user. `/list` fails closed when two unclaimed rooms share
-the same 64-rune button label. One `SyncOnce` starts at most ten new pending
+the same 64-rune button label: it sends a generic operator error, consumes
+the update, and does not stall later Telegram polling or outbound leasing. One `SyncOnce` starts at most ten new pending
 claims, retries at most ten incomplete local executions, and revalidates at
 most ten completed routes so Bot API retries cannot starve inbound and
 outbound mail; durable cursors continue later rows on the next cycle.
