@@ -5,8 +5,9 @@ implemented or released security boundary. Acceptance requires corresponding
 updates to `DESIGN.md`, tests, release gates, and operator documentation. The
 fixed public origin is now GitHub Releases; see
 [`github-releases.md`](github-releases.md). Catalog/manifest parsers, offline
-signing tooling, and the draft publish workflow exist. Bootstrap, signed
-production keys, fleet rollout, and recovery remain outstanding.
+signing tooling, the draft publish workflow, signed pull, and
+`punaro-bootstrap run` with one-shot catalog-gated rollback exist. Signed
+production keys, enrollment, fleet rollout, and recovery remain outstanding.
 
 Implementation is intentionally incremental. Database schema 44 and the first
 server-side bearer-client lifecycle sub-slice implement authoritative client

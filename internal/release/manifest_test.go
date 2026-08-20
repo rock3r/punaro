@@ -97,6 +97,7 @@ func TestParseReleaseManifestRejectsMalformedAndNonCanonicalDocuments(t *testing
 		"duplicate release":        strings.Replace(valid, `"release": "v0.1.0",`, `"release": "v0.1.0", "release": "v0.2.0",`, 1),
 		"schema 2":                 strings.Replace(valid, `"schema": 1`, `"schema": 2`, 1),
 		"zero sequence":            strings.Replace(valid, `"sequence": 1`, `"sequence": 0`, 1),
+		"local checkout release":   strings.Replace(valid, `"release": "v0.1.0"`, `"release": "v0.0.0-local"`, 1),
 		"noncanonical time":        strings.Replace(valid, "2026-08-16T12:00:00Z", "2026-08-16T12:00:00+00:00", 1),
 		"path with scheme":         strings.Replace(valid, "v0.1.0/punaro-adapter-darwin-arm64", "https://example/punaro-adapter", 1),
 		"path with parent":         strings.Replace(valid, "v0.1.0/punaro-adapter-darwin-arm64", "v0.1.0/../punaro-adapter", 1),

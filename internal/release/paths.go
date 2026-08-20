@@ -23,11 +23,15 @@ const (
 
 	maxPathComponent  = 128
 	latestReleaseName = "latest"
+	// LocalCheckoutRelease is a host-local installer seed, never a signed
+	// catalog entry or automatic rollback target.
+	LocalCheckoutRelease = "v0.0.0-local"
 )
 
 var reservedReleaseNames = map[string]struct{}{
-	latestReleaseName:  {},
-	CatalogReleaseName: {},
+	latestReleaseName:    {},
+	CatalogReleaseName:   {},
+	LocalCheckoutRelease: {},
 }
 
 func reservedReleaseName(name string) bool {

@@ -103,10 +103,12 @@ that mailbox state, run from the reviewed Punaro checkout:
 ```
 
 The machine ID must be unique. The script derives the exclusive endpoint
-namespace `agent/laptop-review/`, builds `punaro-adapter`, creates the local
-`group/punaro-attached` group, writes owner-only local state, installs the
-launchd (macOS) or user-systemd (Linux) service definition, and prints a
-public enrollment JSON record. launchd declares it as a background process;
+namespace `agent/laptop-review/`, builds `punaro-adapter` and
+`punaro-bootstrap`, seeds the current bootstrap slot from that checkout,
+creates the local `group/punaro-attached` group, writes owner-only local
+state, installs the launchd (macOS) or user-systemd (Linux) service
+definition that launches `punaro-bootstrap run`, and prints a public
+enrollment JSON record. launchd declares it as a background process;
 systemd disables terminal input and sends output only to the journal. It does
 not start the adapter yet.
 

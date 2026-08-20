@@ -46,10 +46,11 @@ for expected in \
 	'<key>Label</key>' \
 	'<string>org.punaro.adapter</string>' \
 	'<key>KeepAlive</key>' \
-	'<true/>' \
+	'<key>SuccessfulExit</key>' \
+	'<false/>' \
 	'<key>ProcessType</key>' \
 	'<string>Background</string>' \
-	'<string>exec "$HOME/.local/bin/punaro-adapter"</string>'; do
+	'<string>exec "$HOME/.local/bin/punaro-bootstrap" run --directory "$HOME/.local/state/punaro-bootstrap"</string>'; do
 	if ! grep -Fq "$expected" "$launch_agent"; then
 		printf '%s\n' "adapter LaunchAgent is missing required setting: $expected" >&2
 		exit 1
@@ -95,8 +96,12 @@ if grep -Fqx 'EnvironmentFile=%h/.config/punaro/adapter.env' "$unit"; then
 	exit 1
 fi
 
-if ! grep -Fqx 'ExecStart=%h/.local/bin/punaro-adapter' "$unit"; then
-	printf '%s\n' 'adapter user unit must exec the owner-reviewed adapter binary' >&2
+if ! grep -Fqx 'ExecStart=%h/.local/bin/punaro-bootstrap run --directory %h/.local/state/punaro-bootstrap' "$unit"; then
+	printf '%s\n' 'adapter user unit must exec punaro-bootstrap run' >&2
+	exit 1
+fi
+if ! grep -Fqx 'Restart=on-failure' "$unit"; then
+	printf '%s\n' 'adapter user unit must restart after a supervised child crash' >&2
 	exit 1
 fi
 
@@ -105,8 +110,8 @@ if ! grep -Fqx 'ProtectHome=read-only' "$unit"; then
 	exit 1
 fi
 
-if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox' "$unit"; then
-	printf '%s\n' 'adapter user unit must limit writable state to its journals and mailbox store' >&2
+if ! grep -Fqx 'ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox' "$unit"; then
+	printf '%s\n' 'adapter user unit must limit writable state to its journals, bootstrap slots, and mailbox store' >&2
 	exit 1
 fi
 

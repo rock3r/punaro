@@ -15,17 +15,43 @@ done
 for expected in \
 	'LogonType Interactive' \
 	'ExecutionTimeLimit ([TimeSpan]::Zero)' \
+	'RestartCount = 255' \
+	'RepetitionInterval' \
+	'RepetitionDuration' \
+	'Do not attach it until -Enable' \
+	'hadRepeatTrigger' \
+	'adapterTaskWasDisabled' \
+	"State -eq 'Disabled'" \
+	'Disable-ScheduledTask' \
 	'-WindowStyle Hidden' \
 	'-Hidden' \
 	'SetAccessRuleProtection($true, $false)' \
 	'punaro-trusted-attachment.exe' \
+	'punaro-bootstrap.exe' \
 	'punaro-enroll.exe' \
 	'retired attachment artifact exists at' \
 	'agent-mailbox' \
 	'AgentGuidanceDir' \
 	'AllowLanHttp' \
 	'PUNARO_ADAPTER_TRUSTED_LAN_CIDR' \
-	'Push-Location -LiteralPath $repoDir'; do
+	'Push-Location -LiteralPath $repoDir' \
+	'seed-checkout' \
+	'KeysFile' \
+	'--keys-file' \
+	'Stop-ScheduledTask' \
+	'Get-ScheduledTask' \
+	'could not stop the running Punaro Adapter task' \
+	'Wait-PunaroReplaceableBinary' \
+	'Stop-PunaroOrphanAdapter' \
+	'run.pid is invalid' \
+	'PathType Leaf' \
+	'starting marker' \
+	'could not enumerate processes to recover run.pid' \
+	'run.pid image is unverifiable' \
+	'could not stop a matching Punaro adapter' \
+	'run.pid' \
+	'FileShare]::None' \
+	'adapterTaskRestored'; do
 	grep -Fq -- "$expected" "$installer" || { printf '%s\n' "Windows installer is missing required safety behavior: $expected" >&2; exit 1; }
 done
 
@@ -42,6 +68,10 @@ grep -Fq "foreach (\$name in @('Run-PunaroAdapter.ps1', 'Import-PunaroEnvironmen
 
 if grep -Eq '(^|[^A-Za-z])\.\s*\$config|Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=' "$installer" "$runner"; then
 	printf '%s\n' 'Windows client scripts must not execute configuration or embed Access credentials' >&2
+	exit 1
+fi
+if grep -Eq 'attempt -lt 3|RestartCount = 3|RestartCount = 999' "$installer" "$runner"; then
+	printf '%s\n' 'Windows adapter supervision must not exhaust a 3-attempt restart budget' >&2
 	exit 1
 fi
 

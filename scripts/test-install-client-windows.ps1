@@ -16,7 +16,7 @@ foreach ($path in $paths) {
 }
 
 $installer = [System.IO.File]::ReadAllText((Join-Path $repoDir 'scripts\install-client.ps1'))
-foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
+foreach ($expected in @('LogonType Interactive', 'ExecutionTimeLimit ([TimeSpan]::Zero)', 'RestartCount', 'RepetitionInterval', 'RepetitionDuration', '-WindowStyle Hidden', '-Hidden', 'SetAccessRuleProtection($true, $false)', '-ExecutionPolicy Bypass', 'ForEach-Object { $_.address }', 'punaro-trusted-attachment.exe', 'punaro-memory.exe', 'punaro-enroll.exe', 'agent-mailbox', 'AgentGuidanceDir', 'AllowLanHttp', 'PUNARO_ADAPTER_TRUSTED_LAN_CIDR')) {
     if (-not $installer.Contains($expected)) { throw "Windows installer is missing required behavior: $expected" }
 }
 $allScripts = ($paths | ForEach-Object { [System.IO.File]::ReadAllText($_) }) -join "`n"
@@ -27,8 +27,9 @@ if ($allScripts -match 'Invoke-Expression|PUNARO_CF_ACCESS_CLIENT_SECRET=|\.\s*\
     throw 'Windows client scripts must not execute configuration or embed Access credentials'
 }
 
-$fixture = Join-Path ([System.IO.Path]::GetTempPath()) ("punaro-windows-install-test-" + [Guid]::NewGuid())
 $originalLocalAppData = $env:LOCALAPPDATA
+# Keep the fixture under the real per-user LOCALAPPDATA so seed ancestor walks succeed.
+$fixture = Join-Path $originalLocalAppData ("punaro-windows-install-test-" + [Guid]::NewGuid())
 try {
     [System.IO.Directory]::CreateDirectory($fixture) | Out-Null
     $env:LOCALAPPDATA = Join-Path $fixture 'localappdata'
@@ -41,15 +42,34 @@ try {
     $global:punaroRegisteredTask = $null
     $global:punaroRegisteredSettings = $null
     $global:punaroRegisteredAction = $null
+    $global:punaroRegisteredTriggers = $null
+    $global:punaroExistingTask = $null
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    function Get-ScheduledTask { param([string]$TaskName) return $global:punaroExistingTask }
+    function Disable-ScheduledTask { param([string]$TaskName) $global:punaroDisableTaskCalled = $true }
+    function Start-ScheduledTask { param([string]$TaskName) $global:punaroStartTaskCalled = $true }
+    function Stop-ScheduledTask { param([string]$TaskName) }
     function New-ScheduledTaskAction { param([string]$Execute, [string]$Argument) return [pscustomobject]@{ Execute = $Execute; Argument = $Argument } }
-    function New-ScheduledTaskTrigger { param([switch]$AtLogOn, [string]$User) return [pscustomobject]@{ User = $User } }
+    function New-ScheduledTaskTrigger {
+        param(
+            [switch]$AtLogOn,
+            [string]$User,
+            [switch]$Once,
+            [datetime]$At,
+            [TimeSpan]$RepetitionInterval,
+            [TimeSpan]$RepetitionDuration
+        )
+        return [pscustomobject]@{ User = $User; AtLogOn = [bool]$AtLogOn; Once = [bool]$Once; RepetitionInterval = $RepetitionInterval; RepetitionDuration = $RepetitionDuration }
+    }
     function New-ScheduledTaskPrincipal { param([string]$UserId, [string]$LogonType, [string]$RunLevel) return [pscustomobject]@{ UserId = $UserId } }
-    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$Hidden, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit; Hidden = $Hidden } }
+    function New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$Hidden, [TimeSpan]$ExecutionTimeLimit) return [pscustomobject]@{ ExecutionTimeLimit = $ExecutionTimeLimit; Hidden = $Hidden; RestartCount = 0; RestartInterval = [TimeSpan]::Zero } }
     function Register-ScheduledTask {
         param([string]$TaskName, $Action, $Trigger, $Principal, $Settings, [string]$Description, [switch]$Force)
         $global:punaroRegisteredTask = $TaskName
         $global:punaroRegisteredSettings = $Settings
         $global:punaroRegisteredAction = $Action
+        $global:punaroRegisteredTriggers = @($Trigger)
         return [pscustomobject]@{}
     }
 
@@ -82,6 +102,19 @@ try {
         if (Test-Path -LiteralPath $path) { throw "Windows client installer must not create retired attachment artifact $path" }
     }
     if ($global:punaroRegisteredTask -ne 'Punaro Adapter') { throw 'Windows client installer did not register the expected per-user task' }
+    $global:punaroDisableTaskCalled = $false
+    $global:punaroStartTaskCalled = $false
+    $global:punaroRegisteredTriggers = $null
+    $repeat = [pscustomobject]@{ Repetition = [pscustomobject]@{ Interval = 'PT1M' } }
+    $global:punaroExistingTask = [pscustomobject]@{ State = 'Disabled'; Triggers = @($repeat) }
+    & (Join-Path $repoDir 'scripts\install-client.ps1') -RelayUrl 'https://relay.example.test' -MachineId 'windows-test' -AgentMailboxBin $mailbox -AgentGuidanceDir $project
+    if ($LASTEXITCODE -ne 0) { throw 'Windows client installer failed to reinstall over a disabled task' }
+    if ($global:punaroStartTaskCalled) { throw 'Windows client installer started a deliberately disabled adapter task' }
+    if (-not $global:punaroDisableTaskCalled) { throw 'Windows client installer did not keep a disabled adapter task disabled' }
+    if (@($global:punaroRegisteredTriggers | Where-Object { $_.Once }).Count -ne 0) {
+        throw 'Windows client installer re-armed a disabled adapter task with the repeating trigger'
+    }
+    $global:punaroExistingTask = $null
     if ($global:punaroRegisteredSettings.ExecutionTimeLimit -ne [TimeSpan]::Zero) { throw 'Windows client adapter task must have no execution time limit' }
     if (-not $global:punaroRegisteredSettings.Hidden) { throw 'Windows client adapter task must be hidden from the task scheduler UI' }
     if (-not ([string]$global:punaroRegisteredAction.Argument -match '(^|\s)-ExecutionPolicy\s+Bypass(\s|$)')) { throw 'Windows client adapter task must use only process-scoped ExecutionPolicy Bypass' }

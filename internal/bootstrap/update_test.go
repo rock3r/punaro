@@ -1,10 +1,12 @@
 package bootstrap
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -67,6 +69,35 @@ func TestUpdateInstallsSignedPlatformArtifacts(t *testing.T) {
 	}
 }
 
+func TestUpdateQuarantinesInvalidCurrentNode(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	if err := os.WriteFile(filepath.Join(dir, currentSlot), []byte("not-a-slot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Update(Request{
+		Directory: dir,
+		Origin:    origin.URL,
+		Keys:      origin.Keys,
+		GOOS:      runtime.GOOS,
+		GOARCH:    runtime.GOARCH,
+		Now:       time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release != "v0.1.0" || result.Sequence != 1 {
+		t.Fatalf("result=%#v", result)
+	}
+	status, err := Status(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Current != "v0.1.0" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
 	dir := privateDir(t)
@@ -95,6 +126,52 @@ func TestUpdatePromotesCurrentToPrevious(t *testing.T) {
 	}
 	if string(current) != "second" || string(previous) != "first" {
 		t.Fatalf("current=%q previous=%q", current, previous)
+	}
+}
+
+func TestUpdateSameIdentityQuarantinesCorruptPrevious(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	origin.republish(t, originSpec{payload: "second", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, previousSlot, slotRecord), []byte(`{"schema":1`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeRecoveryOnly(t, dir)
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, previousSlot)); !os.IsNotExist(err) {
+		t.Fatal("same-identity update left a corrupt previous slot")
+	}
+	if recoveryOnly(t, dir) {
+		t.Fatal("same-identity update left recovery-only")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, RunRequest{
+			Directory:     dir,
+			HealthTimeout: 20 * time.Millisecond,
+			Start: func(ctx context.Context, spec ChildSpec) (Process, error) {
+				if err := writeReady(spec.Env); err != nil {
+					return nil, err
+				}
+				return blockingProcess(ctx), nil
+			},
+		})
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-errCh; errors.Is(err, ErrRecoveryOnly) {
+		t.Fatal("quarantined previous still entered recovery-only")
 	}
 }
 
@@ -182,6 +259,34 @@ func TestRollbackSwapsPublishedSlots(t *testing.T) {
 	}
 	if status.Current != "v0.2.0" || status.Previous != "v0.1.0" {
 		t.Fatalf("reupdate status=%#v", status)
+	}
+}
+
+func TestRollbackSucceedsAfterAutoRollbackDirectoryNode(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: "first", goos: runtime.GOOS, goarch: runtime.GOARCH})
+	dir := privateDir(t)
+	req := Request{Directory: dir, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)}
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	origin.republish(t, originSpec{payload: "second", goos: runtime.GOOS, goarch: runtime.GOARCH, release: "v0.2.0", sequence: 2, catalogSequence: 2})
+	if _, err := Update(req); err != nil {
+		t.Fatal(err)
+	}
+	writeNonFileMarker(t, filepath.Join(dir, autoRollbackFile))
+	result, err := Rollback(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Release != "v0.1.0" || result.Sequence != 1 {
+		t.Fatalf("rollback=%#v", result)
+	}
+	info, err := os.Lstat(filepath.Join(dir, autoRollbackFile))
+	if err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("auto-rollback directory survived rollback: info=%v err=%v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, journalFile)); !os.IsNotExist(err) {
+		t.Fatal("rolling-back journal survived after replacing auto-rollback")
 	}
 }
 
@@ -375,6 +480,7 @@ type originSpec struct {
 	sequence        int64
 	catalogSequence int64
 	criticalBlocks  []int64
+	expiresAt       time.Time
 }
 
 type signedOrigin struct {
@@ -421,6 +527,9 @@ func (origin *signedOrigin) republish(t *testing.T, spec originSpec) {
 	if spec.catalogSequence == 0 {
 		spec.catalogSequence = 1
 	}
+	if spec.expiresAt.IsZero() {
+		spec.expiresAt = time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	}
 	build := t.TempDir()
 	name := artifactName("punaro-adapter", spec.goos, spec.goarch)
 	if err := os.WriteFile(filepath.Join(build, name), []byte(spec.payload), 0o600); err != nil {
@@ -431,7 +540,7 @@ func (origin *signedOrigin) republish(t *testing.T, spec originSpec) {
 		Release:                 spec.release,
 		Sequence:                spec.sequence,
 		PublishedAt:             time.Date(2026, 8, 16, 12, 0, 0, 0, time.UTC),
-		ExpiresAt:               time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC),
+		ExpiresAt:               spec.expiresAt,
 		MinimumSafeSequence:     1,
 		CatalogSequence:         spec.catalogSequence,
 		ComposeSHA256:           testCompose,

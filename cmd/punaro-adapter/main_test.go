@@ -612,3 +612,48 @@ func testOfferPayload(t *testing.T) []byte {
 	}
 	return offer
 }
+
+func TestWriteBootstrapReadyIsOptional(t *testing.T) {
+	t.Setenv(bootstrapReadyEnv, "")
+	if err := writeBootstrapReady(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteBootstrapReadyRejectsRelativePath(t *testing.T) {
+	t.Setenv(bootstrapReadyEnv, "relative-health.json")
+	if err := writeBootstrapReady(); err == nil {
+		t.Fatal("relative ready path accepted")
+	}
+}
+
+func TestWriteBootstrapReadyPublishesHealthyRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.json")
+	t.Setenv(bootstrapReadyEnv, path)
+	if err := writeBootstrapReady(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path) // #nosec G304 -- path is under t.TempDir.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != bootstrapReadyBody {
+		t.Fatalf("ready=%q", body)
+	}
+}
+
+func TestWriteBootstrapReadyRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	path := filepath.Join(dir, "health.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(bootstrapReadyEnv, path)
+	if err := writeBootstrapReady(); err == nil {
+		t.Fatal("symlink ready path accepted")
+	}
+}

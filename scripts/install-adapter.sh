@@ -22,6 +22,7 @@ Options:
   --mailbox-state-dir PATH    Local mailbox state directory
   --attached-group ADDRESS    Local group (default: group/punaro-attached)
   --agent-guidance-dir PATH   Add Punaro guidance and skills to this project
+  --keys-file PATH            Persist this release public key set into the bootstrap directory
   --enable                    Start the per-user service after installation
   --help                      Show this help
 
@@ -73,6 +74,7 @@ agent_guidance_dir=
 enable=0
 allow_lan_http=false
 trusted_lan_cidr=
+keys_file=
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -84,6 +86,7 @@ while [ "$#" -gt 0 ]; do
 		--mailbox-state-dir) [ "$#" -ge 2 ] || fail '--mailbox-state-dir requires a value'; mailbox_state_dir=$2; shift 2 ;;
 		--attached-group) [ "$#" -ge 2 ] || fail '--attached-group requires a value'; attached_group=$2; shift 2 ;;
 		--agent-guidance-dir) [ "$#" -ge 2 ] || fail '--agent-guidance-dir requires a value'; agent_guidance_dir=$2; shift 2 ;;
+		--keys-file) [ "$#" -ge 2 ] || fail '--keys-file requires a value'; keys_file=$2; shift 2 ;;
 		--enable) enable=1; shift ;;
 		--help) usage; exit 0 ;;
 		*) fail "unknown option: $1" ;;
@@ -117,10 +120,15 @@ require_safe_value "$mailbox_bin" 'agent-mailbox path'
 require_safe_value "$mailbox_state_dir" 'mailbox state directory'
 require_safe_value "$attached_group" 'attached group'
 if [ -n "$trusted_lan_cidr" ]; then require_safe_value "$trusted_lan_cidr" 'trusted LAN CIDR'; fi
+if [ -n "$keys_file" ]; then
+	require_safe_value "$keys_file" 'release keys file'
+	case "$keys_file" in /*) ;; *) fail 'keys file must be an absolute path' ;; esac
+	[ -f "$keys_file" ] && [ ! -L "$keys_file" ] || fail 'keys file must be a non-symlink regular file'
+fi
 case "$attached_group" in group/*) ;; *) fail 'attached group must be a group/ address' ;; esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
-[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
+[ -f "$repo_dir/go.mod" ] && [ -d "$repo_dir/cmd/punaro-adapter" ] && [ -d "$repo_dir/cmd/punaro-bootstrap" ] && [ -d "$repo_dir/cmd/punaro-keygen" ] || fail 'run this installer from a complete Punaro source checkout'
 command -v go >/dev/null 2>&1 || fail 'Go is required to build the adapter from this checkout'
 if [ "$allow_lan_http" = true ]; then
 	(
@@ -143,14 +151,15 @@ mailbox_bin="$mailbox_bin_dir/$(basename -- "$mailbox_bin")"
 
 config_dir="$HOME/.config/punaro"
 state_dir="$HOME/.local/state/punaro-adapter"
+bootstrap_dir="$HOME/.local/state/punaro-bootstrap"
 bin_dir="$HOME/.local/bin"
 key_file="$config_dir/machine.key"
 enrollment_file="$config_dir/enrollment.json"
 config_file="$config_dir/adapter.env"
 endpoint_prefix="agent/$machine_id/"
 
-mkdir -p "$config_dir" "$state_dir" "$bin_dir"
-chmod 700 "$config_dir" "$state_dir"
+mkdir -p "$config_dir" "$state_dir" "$bootstrap_dir" "$bin_dir"
+chmod 700 "$config_dir" "$state_dir" "$bootstrap_dir"
 
 for retired_path in \
 	"$bin_dir/punaro-attachment" \
@@ -229,12 +238,19 @@ fi
 (
 	cd "$repo_dir"
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-adapter" ./cmd/punaro-adapter
+	go build -trimpath -buildvcs=true -o "$build_dir/punaro-bootstrap" ./cmd/punaro-bootstrap
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-trusted-attachment" ./cmd/punaro-trusted-attachment
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-memory" ./cmd/punaro-memory
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-enroll" ./cmd/punaro-enroll
 	go build -trimpath -buildvcs=true -o "$build_dir/punaro-keygen" ./cmd/punaro-keygen
 )
 install -m 700 "$build_dir/punaro-adapter" "$bin_dir/punaro-adapter"
+install -m 700 "$build_dir/punaro-bootstrap" "$bin_dir/punaro-bootstrap"
+if [ -n "$keys_file" ]; then
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter" --keys-file "$keys_file"
+else
+	"$bin_dir/punaro-bootstrap" seed-checkout --directory "$bootstrap_dir" --adapter "$bin_dir/punaro-adapter"
+fi
 install -m 700 "$build_dir/punaro-trusted-attachment" "$bin_dir/punaro-trusted-attachment"
 install -m 700 "$build_dir/punaro-memory" "$bin_dir/punaro-memory"
 install -m 700 "$build_dir/punaro-enroll" "$bin_dir/punaro-enroll"
@@ -295,7 +311,11 @@ case "$(uname -s)" in
 		mkdir -p "$service_dir"
 		install -m 600 "$repo_dir/deploy/launchd/punaro-adapter.plist" "$service_file"
 		plutil -lint "$service_file" >/dev/null
-if [ "$enable" -eq 1 ]; then
+		service_active=0
+		if launchctl print "gui/$(id -u)/org.punaro.adapter" >/dev/null 2>&1; then
+			service_active=1
+		fi
+		if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
 			launchctl bootout "gui/$(id -u)" "$service_file" >/dev/null 2>&1 || true
 			launchctl bootstrap "gui/$(id -u)" "$service_file"
 		fi
@@ -308,14 +328,27 @@ if [ "$enable" -eq 1 ]; then
 		if [ "$mailbox_state_dir" = "$HOME/.local/state/ai-agent/mailbox" ]; then
 			install -m 600 "$repo_dir/deploy/systemd/user/punaro-adapter.service" "$service_file"
 		else
-			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir|" \
+			sed "s|^ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap %h/.local/state/ai-agent/mailbox$|ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir|" \
 				"$repo_dir/deploy/systemd/user/punaro-adapter.service" >"$service_file"
 			chmod 600 "$service_file"
-			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+			grep -Fqx "ReadWritePaths=%h/.local/state/punaro-adapter %h/.local/state/punaro-bootstrap $mailbox_state_dir" "$service_file" || fail 'could not render the Linux mailbox sandbox path'
+		fi
+		service_active=0
+		if systemctl --user is-active --quiet punaro-adapter.service; then
+			service_active=1
+		fi
+		if command -v systemctl >/dev/null 2>&1; then
+			if ! systemctl --user daemon-reload; then
+				if [ "$enable" -eq 1 ] || [ "$service_active" -eq 1 ]; then
+					fail 'could not reload the Linux user manager'
+				fi
+			fi
 		fi
 		if [ "$enable" -eq 1 ]; then
-			systemctl --user daemon-reload
-			systemctl --user enable --now punaro-adapter.service
+			systemctl --user enable punaro-adapter.service
+			systemctl --user restart punaro-adapter.service
+		elif [ "$service_active" -eq 1 ]; then
+			systemctl --user restart punaro-adapter.service
 		fi
 		service_hint='systemctl --user status punaro-adapter.service'
 		;;
