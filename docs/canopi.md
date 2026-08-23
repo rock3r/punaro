@@ -146,6 +146,8 @@ move semantics, flushes the directory, and recovers the backup on startup if an
 interrupted replacement left the target absent. A kernel-held lifetime lock per
 state path rejects overlapping collector writers and is released by `Close` or
 process exit. Windows canonicalizes case aliases before deriving the lock path.
+It resolves the existing state file or its parent by handle, collapsing extended
+device paths, short names, case variants, and directory aliases to one identity.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:
@@ -230,6 +232,8 @@ serialized enqueue reclaims crash-left `.event-*.tmp` files while holding the
 cross-process kernel lock, keeping temporary storage bounded across restarts.
 Enqueue, drain, and supervisor locks are tied to open file handles; the kernel
 releases them on process exit, and wall-clock jumps cannot reclaim a live holder.
+Queued files are inspected and decoded through the 64 KiB stream limit, so a
+corrupt oversized spool entry is removed without an unbounded allocation.
 
 Run the durable worker as a continuously supervised companion using the same
 environment (for example with `Restart=always`/`KeepAlive` in the host service

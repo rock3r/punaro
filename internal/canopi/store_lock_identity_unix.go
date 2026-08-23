@@ -4,6 +4,6 @@ package canopi
 
 import "path/filepath"
 
-func canonicalStateLockIdentity(path string) string {
-	return filepath.Clean(path)
+func canonicalStateLockIdentity(path string) (string, error) {
+	return filepath.Clean(path), nil
 }

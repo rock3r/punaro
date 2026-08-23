@@ -138,6 +138,40 @@ func TestWindowsSpoolSyncFlushesPublishedDirectoryEntry(t *testing.T) {
 	}
 }
 
+func TestSpoolQueuedEventReadsAreBoundedBeforeAllocation(t *testing.T) {
+	payload, err := os.ReadFile("spool.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(payload)
+	if !strings.Contains(source, "io.LimitReader") || strings.Contains(source, "os.ReadFile(path)") {
+		t.Fatal("queued event read is not bounded before allocation")
+	}
+
+	directory := t.TempDir()
+	path := filepath.Join(directory, "oversized.json")
+	if err := os.WriteFile(path, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, maxSpoolEventBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	spool := Spool{Directory: directory, MaxEvents: 1}
+	delivered := false
+	if err := spool.Drain(context.Background(), func(context.Context, protocol.Event) error {
+		delivered = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered {
+		t.Fatal("oversized queued event was delivered")
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized queued event was not removed: %v", err)
+	}
+}
+
 func TestSpoolRecoversDrainLockLeftByCrashedWorker(t *testing.T) {
 	directory := t.TempDir()
 	spool := Spool{Directory: directory, MaxEvents: 1}

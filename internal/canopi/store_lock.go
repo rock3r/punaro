@@ -10,7 +10,10 @@ import (
 )
 
 func acquireStateStoreLock(statePath string) (func() error, error) {
-	path := stateStoreLockPath(statePath)
+	path, err := stateStoreLockPath(statePath)
+	if err != nil {
+		return nil, err
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600) // #nosec G304 -- path is derived inside the protected state directory.
 	if err != nil {
 		return nil, err
@@ -52,8 +55,11 @@ func acquireStateStoreLock(statePath string) (func() error, error) {
 	}, nil
 }
 
-func stateStoreLockPath(statePath string) string {
-	identity := canonicalStateLockIdentity(statePath)
+func stateStoreLockPath(statePath string) (string, error) {
+	identity, err := canonicalStateLockIdentity(statePath)
+	if err != nil {
+		return "", err
+	}
 	digest := sha256.Sum256([]byte(identity))
-	return filepath.Join(filepath.Dir(identity), ".canopi-lock-"+hex.EncodeToString(digest[:8]))
+	return filepath.Join(filepath.Dir(identity), ".canopi-lock-"+hex.EncodeToString(digest[:8])), nil
 }

@@ -271,12 +271,18 @@ func drawAgentTile(canvas *image.RGBA, fonts renderFonts, bounds image.Rectangle
 	drawBoldText(canvas, fonts.title, textX, bounds.Min.Y+24, foreground, title)
 	stateText := strings.ToUpper(strings.ReplaceAll(string(event.State), "_", " "))
 	drawBoldText(canvas, fonts.state, textX, bounds.Min.Y+44, foreground, stateText)
-	drawText(canvas, fonts.meta, textX, bounds.Max.Y-7, foreground, fitText(fonts.meta, event.Machine.Label, maxTitleWidth))
+	machineWidth := machineLabelAvailableWidth(bounds, textX, timeWidth)
+	drawText(canvas, fonts.meta, textX, bounds.Max.Y-7, foreground, fitText(fonts.meta, event.Machine.Label, machineWidth))
 	drawText(canvas, fonts.meta, bounds.Max.X-10-timeWidth, bounds.Max.Y-7, foreground, timeText)
 }
 
 func titleAvailableWidth(bounds image.Rectangle, textX int) int {
 	return bounds.Max.X - 10 - textX
+}
+
+func machineLabelAvailableWidth(bounds image.Rectangle, textX, timeWidth int) int {
+	const metadataGap = 8
+	return bounds.Max.X - 10 - timeWidth - metadataGap - textX
 }
 
 func drawOverflowTile(canvas *image.RGBA, fonts renderFonts, bounds image.Rectangle, counts OverflowCounts) {

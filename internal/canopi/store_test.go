@@ -305,8 +305,11 @@ func TestWindowsStateLockIdentityContractIsCaseInsensitive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(payload), "strings.ToLower") {
-		t.Fatal("Windows state lock identity does not canonicalize path case")
+	source := string(payload)
+	for _, required := range []string{"strings.ToLower", "GetFinalPathNameByHandle"} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("Windows state lock identity is missing %q", required)
+		}
 	}
 }
 

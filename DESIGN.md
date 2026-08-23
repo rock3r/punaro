@@ -1799,7 +1799,8 @@ publishes with `MoveFileEx` replacement plus write-through semantics, flushes
 the directory again, and restores the backup at startup if the target is absent.
 A kernel-held lifetime lock keyed by the state path excludes overlapping
 collector writers and is released by orderly close or process exit. Windows
-canonicalizes case aliases before deriving that lock key.
+derives that lock key from the final path of an open state or parent-directory
+handle, collapsing case, extended-device, short-name, and directory aliases.
 Snapshot and image ETags change only with state revision or rendered response
 content. Snapshot responses use a weak revision validator because their
 generation timestamp changes without a semantic state change; rendered PNGs
@@ -1838,6 +1839,8 @@ when a detached kick or worker crashes during a quiet session.
 On Windows, each hard-link publication and acknowledgement removal is followed
 by a directory `FlushFileBuffers`, matching the Unix directory-sync durability
 contract before the provider hook is told enqueueing succeeded.
+Queued event reads stat the opened file and remain stream-limited to 64 KiB, so
+corrupt oversized entries cannot turn the event-count bound into unbounded memory.
 
 Structurally valid event batches continue across per-event admission failures
 and return ordered per-event status records with HTTP 207 when mixed; only a
@@ -1853,8 +1856,10 @@ fixed-panel grids have one or two columns and one through six rows; other shapes
 are rejected before they can overlap typography or icons. The last slot becomes
 an omitted-tail per-state count when overflowing. Its output is an exact
 800x480 two-color PNG. Custom header titles are fitted into the pixels reserved
-before the right-aligned lifecycle totals. The panel thresholds each decoded RGB565 scanline and
-packs it MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
+before the right-aligned lifecycle totals. Each tile similarly fits its machine
+label only into the pixels preceding the right-aligned relative time plus a
+fixed gap. The panel thresholds each decoded RGB565 scanline and packs it
+MSB-first for the Seeed_GFX one-bit sprite; it performs a full e-paper
 refresh only after a changed ETag, bounded PNG download, successful decode, and
 exact dimension validation. The RTC-retained validator is versioned so a
 firmware update that changes image interpretation forces one corrective redraw.

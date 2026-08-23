@@ -294,11 +294,26 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 		}
 		hadFailure := false
 		for _, path := range files {
-			payload, err := os.ReadFile(path) // #nosec G304 -- eventFiles returns entries from the configured private spool.
+			file, err := os.Open(path) // #nosec G304 -- eventFiles returns entries from the configured private spool.
 			if err != nil {
 				return err
 			}
-			event, err := protocol.DecodeEvent(strings.NewReader(string(payload)), maxSpoolEventBytes)
+			info, err := file.Stat()
+			if err != nil {
+				_ = file.Close()
+				return err
+			}
+			if !info.Mode().IsRegular() || info.Size() > maxSpoolEventBytes {
+				_ = file.Close()
+				_ = os.Remove(path)
+				continue
+			}
+			event, decodeErr := protocol.DecodeEvent(io.LimitReader(file, maxSpoolEventBytes+1), maxSpoolEventBytes)
+			closeErr := file.Close()
+			if closeErr != nil {
+				return closeErr
+			}
+			err = decodeErr
 			if err != nil {
 				_ = os.Remove(path)
 				continue

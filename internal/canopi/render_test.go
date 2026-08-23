@@ -120,6 +120,13 @@ func TestTileTitleUsesTheFullTopRow(t *testing.T) {
 	}
 }
 
+func TestMachineLabelWidthReservesRelativeTimeAndGap(t *testing.T) {
+	bounds := image.Rect(5, 40, 398, 109)
+	if got, want := machineLabelAvailableWidth(bounds, 89, 42), 249; got != want {
+		t.Fatalf("machineLabelAvailableWidth() = %d, want %d", got, want)
+	}
+}
+
 func TestRenderRejectsUnusableGridShapes(t *testing.T) {
 	for _, grid := range []GridConfig{{Columns: 3, Rows: 1}, {Columns: 1, Rows: 7}, {Columns: 48, Rows: 1}} {
 		config := DefaultRenderConfig()
