@@ -1770,16 +1770,18 @@ them. Punaro message content is never interpreted as Canopi control data.
 The MVP collector uses a separate bearer-authenticated HTTP listener, a bounded
 durable state snapshot, and at-least-once event IDs. Duplicate IDs are harmless.
 For one card, `activity_at` and then `event_id` fence delayed/out-of-order
-updates. Admission rejects new identities at a configured live-record ceiling
-and rejects activity timestamps beyond configured future clock skew. A failed
+updates. Admission durably expires stale records before rejecting new identities
+at a configured live-record ceiling, and rejects activity timestamps beyond
+configured future clock skew. A failed
 state-file write never mutates the acknowledged in-memory revision, record, or
 dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
 expiry archives/hides abandoned work and never converts it to success; done
 retention is independent. Snapshot and image ETags change only with state
 revision or the configured relative-time bucket.
 
-Prompts, transcripts, assistant messages, tool inputs, and tool outputs are not
-part of the protocol and are rejected from metadata. A provider adapter may use
+Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
+outputs are not part of the protocol. Metadata is default-deny: the schema and
+Go validator expose only `hook` and `simulated`. A provider adapter may use
 final text locally for deterministic waiting/done classification but does not
 forward it. Claude retry IDs use a secret-keyed HMAC, never an unkeyed content
 digest. Adapter delivery is detached, bounded, and incapable of blocking or
@@ -1801,7 +1803,10 @@ dimension validation.
 Canopi's first listener is loopback by default. A concrete private/link-local
 listener requires explicit LAN opt-in; wildcard and public binds fail closed.
 This shared-token LAN MVP is not yet Punaro device-authenticated and must not be
-mounted on the public Punaro origin.
+mounted on the public Punaro origin. Its bearer token must be a protected,
+current-user-owned regular file (or equivalent current-user-only Windows ACL),
+opened without following symlinks and rejected if its identity changes during
+open.
 
 ## Required adversarial acceptance tests
 

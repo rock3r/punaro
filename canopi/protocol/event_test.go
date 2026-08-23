@@ -35,13 +35,22 @@ func TestEventValidationAcceptsTransportNeutralEvent(t *testing.T) {
 	}
 }
 
-func TestEventValidationRejectsSensitiveMetadata(t *testing.T) {
-	for _, key := range []string{"prompt", "transcript", "tool_output", "last_assistant_message"} {
+func TestEventValidationAllowsOnlyPrivacySafeMetadata(t *testing.T) {
+	for _, key := range []string{"prompt", "transcript", "tool_output", "last_assistant_message", "toolInput", "body", "api_key", "systemPrompt"} {
 		t.Run(key, func(t *testing.T) {
 			event := validEvent()
 			event.Metadata[key] = "must stay local"
-			if err := event.Validate(); err == nil || !strings.Contains(err.Error(), "sensitive") {
-				t.Fatalf("Validate() error = %v, want sensitive metadata rejection", err)
+			if err := event.Validate(); err == nil || !strings.Contains(err.Error(), "metadata key") {
+				t.Fatalf("Validate() error = %v, want metadata allowlist rejection", err)
+			}
+		})
+	}
+	for _, key := range []string{"hook", "simulated"} {
+		t.Run("allow_"+key, func(t *testing.T) {
+			event := validEvent()
+			event.Metadata = map[string]any{key: true}
+			if err := event.Validate(); err != nil {
+				t.Fatalf("Validate() rejected allowed metadata key %q: %v", key, err)
 			}
 		})
 	}

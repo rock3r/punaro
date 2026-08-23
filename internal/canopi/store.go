@@ -171,11 +171,15 @@ func (s *Store) Apply(event protocol.Event) (ApplyResult, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if event.ActivityAt.After(s.now().Add(s.config.MaxFutureSkew)) {
+	now := s.now()
+	if event.ActivityAt.After(now.Add(s.config.MaxFutureSkew)) {
 		return ApplyResult{}, ErrFutureActivity
 	}
 	if _, duplicate := s.seen[event.EventID]; duplicate {
 		return ApplyResult{Duplicate: true}, nil
+	}
+	if err := s.expireLocked(now); err != nil {
+		return ApplyResult{}, err
 	}
 	existing, exists := s.records[event.Key()]
 	if !exists && len(s.records) >= s.config.MaxLiveRecords {
@@ -203,6 +207,32 @@ func (s *Store) Apply(event protocol.Event) (ApplyResult, error) {
 	s.seenOrder = nextSeenOrder
 	s.revision = nextRevision
 	return result, nil
+}
+
+func (s *Store) expireLocked(now time.Time) error {
+	nextRecords := cloneRecords(s.records)
+	changed := false
+	for key, event := range s.records {
+		age := now.Sub(event.ActivityAt)
+		expired := event.State == protocol.StateDone && age > s.config.DoneRetention
+		if event.State != protocol.StateDone && age > s.config.WorkingTTL {
+			expired = true
+		}
+		if expired {
+			delete(nextRecords, key)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	nextRevision := s.revision + 1
+	if err := s.persist(persistedState(nextRevision, nextRecords, s.seenOrder)); err != nil {
+		return err
+	}
+	s.records = nextRecords
+	s.revision = nextRevision
+	return nil
 }
 
 // Revision returns the monotonic revision of visible current state.

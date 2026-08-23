@@ -157,11 +157,19 @@ func parseConfig(args []string) (serverConfig, error) {
 }
 
 func loadToken(path string) (string, error) {
-	file, err := os.Open(path) // #nosec G304 -- parseConfig resolves the operator-selected token path to an absolute path.
+	before, err := os.Lstat(path)
+	if err != nil || !privateTokenFile(path, before) {
+		return "", errors.New("token file must be a private current-user-owned regular file")
+	}
+	file, err := openTokenFile(path)
 	if err != nil {
-		return "", err
+		return "", errors.New("token file must be a private current-user-owned regular file")
 	}
 	defer func() { _ = file.Close() }()
+	after, err := file.Stat()
+	if err != nil || !os.SameFile(before, after) || !privateTokenFile(path, after) {
+		return "", errors.New("token file changed while opening")
+	}
 	payload, err := io.ReadAll(io.LimitReader(file, 4097))
 	if err != nil || len(payload) > 4096 {
 		return "", errors.New("invalid token file")

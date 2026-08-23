@@ -54,8 +54,9 @@ reports counts from the omitted tail, not global totals.
 
 ## Privacy and failure behavior
 
-The wire event never requires prompts, transcripts, assistant messages, tool
-inputs, or tool outputs. The Go validator rejects those metadata fields. The
+The wire event never requires prompts, transcripts, assistant messages,
+credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
+and Go validator accept only the privacy-safe `hook` and `simulated` keys. The
 Claude adapter briefly inspects the provider payload locally to classify an
 unambiguous final question and to create a keyed HMAC retry identifier; neither
 the source text nor an unkeyed source digest is transmitted. Only task title,
@@ -75,7 +76,9 @@ provider-visible output.
 All collector routes require the same bearer token. Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. A non-loopback listener must be a
 concrete private/link-local IP and requires `--allow-lan`; wildcard and public
-binds are rejected.
+binds are rejected. The token path must name a current-user-owned regular file
+with owner-only access (or an equivalent protected current-user ACL on Windows);
+symlinks and files replaced during open are rejected.
 
 ## Run the vertical slice
 
@@ -102,7 +105,9 @@ listener with that concrete private IP. Useful configuration flags are
 `--title`. New agent identities are rejected at the configured live-record
 ceiling, while updates to known identities remain admissible. Activity times
 beyond the configured future-clock-skew window are rejected before they can
-fence later correct updates or evade expiry.
+fence later correct updates or evade expiry. Expired records are durably purged
+before capacity admission, so an offline panel cannot leave the store stuck at
+its ceiling.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

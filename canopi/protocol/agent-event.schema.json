@@ -47,25 +47,16 @@
     "task": { "$ref": "#/$defs/task" },
     "metadata": {
       "type": "object",
-      "description": "Provider-specific primitive metadata. Prompt, transcript, message, tool input and tool output fields are forbidden.",
-      "propertyNames": {
-        "not": {
-          "enum": [
-            "content",
-            "last_assistant_message",
-            "message",
-            "prompt",
-            "tool_input",
-            "tool_output",
-            "tool_response",
-            "transcript",
-            "transcript_path"
-          ]
+      "description": "Privacy-safe provider metadata. Only explicitly listed keys are accepted; prompts, transcripts, messages, credentials and tool data have no protocol representation.",
+      "properties": {
+        "hook": {
+          "type": ["string", "number", "integer", "boolean", "null"]
+        },
+        "simulated": {
+          "type": ["string", "number", "integer", "boolean", "null"]
         }
       },
-      "additionalProperties": {
-        "type": ["string", "number", "integer", "boolean", "null"]
-      },
+      "additionalProperties": false,
       "default": {}
     }
   },

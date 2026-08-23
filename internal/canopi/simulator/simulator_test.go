@@ -10,7 +10,8 @@ import (
 )
 
 func TestEventsModelRealisticMultiMachineOverflow(t *testing.T) {
-	events := Events(time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC), 0)
+	now := time.Now().UTC().Truncate(time.Second)
+	events := Events(now, 0)
 	if len(events) != 19 {
 		t.Fatalf("len(Events) = %d, want 19", len(events))
 	}
@@ -39,7 +40,7 @@ func TestEventsModelRealisticMultiMachineOverflow(t *testing.T) {
 	for _, event := range events {
 		_, _ = store.Apply(event)
 	}
-	if got := store.Snapshot(time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)).Totals.Waiting; got != 3 {
+	if got := store.Snapshot(now).Totals.Waiting; got != 3 {
 		t.Fatalf("waiting agents surviving default TTL = %d, want 3", got)
 	}
 	page, err := canopi.Paginate(events, canopi.GridConfig{Columns: 2, Rows: 6})

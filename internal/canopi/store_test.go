@@ -22,6 +22,7 @@ func event(id, agent string, state protocol.State, activity time.Time) protocol.
 func TestSnapshotSortsAllRecordsByStateThenRecentActivity(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(Config{WorkingTTL: time.Hour, DoneRetention: 2 * time.Hour})
+	store.now = func() time.Time { return now }
 	inputs := []protocol.Event{
 		event("working-new", "working-new", protocol.StateWorking, now.Add(-time.Minute)),
 		event("done-old", "done-old", protocol.StateDone, now.Add(-20*time.Minute)),
@@ -49,6 +50,7 @@ func TestSnapshotSortsAllRecordsByStateThenRecentActivity(t *testing.T) {
 func TestApplyIsIdempotentAndRejectsOutOfOrderUpdates(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(DefaultConfig())
+	store.now = func() time.Time { return now }
 	newer := event("event-2", "agent", protocol.StateDone, now)
 	if result, err := store.Apply(newer); err != nil || !result.Applied {
 		t.Fatalf("first Apply() = %+v, %v", result, err)
@@ -72,6 +74,7 @@ func TestApplyIsIdempotentAndRejectsOutOfOrderUpdates(t *testing.T) {
 func TestApplyUsesEventIDAsEqualTimestampTieBreaker(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(DefaultConfig())
+	store.now = func() time.Time { return now }
 	_, _ = store.Apply(event("event-b", "agent", protocol.StateDone, now))
 	result, err := store.Apply(event("event-a", "agent", protocol.StateWorking, now))
 	if err != nil || !result.Stale {
@@ -86,6 +89,7 @@ func TestApplyUsesEventIDAsEqualTimestampTieBreaker(t *testing.T) {
 func TestSnapshotExpiresNonTerminalAndRetainsDoneIndependently(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(Config{WorkingTTL: 30 * time.Minute, DoneRetention: 2 * time.Hour})
+	store.now = func() time.Time { return now }
 	_, _ = store.Apply(event("working", "working", protocol.StateWorking, now.Add(-31*time.Minute)))
 	_, _ = store.Apply(event("waiting", "waiting", protocol.StateWaitingForUser, now.Add(-29*time.Minute)))
 	_, _ = store.Apply(event("done-keep", "done-keep", protocol.StateDone, now.Add(-119*time.Minute)))
@@ -119,6 +123,7 @@ func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 func TestApplyPersistenceFailureDoesNotAcknowledgeOrMutate(t *testing.T) {
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
 	store := NewStore(DefaultConfig())
+	store.now = func() time.Time { return now }
 	persistCalls := 0
 	store.persist = func(persistedStore) error {
 		persistCalls++
@@ -158,6 +163,24 @@ func TestApplyBoundsLiveRecordsButAllowsExistingAgentUpdates(t *testing.T) {
 	}
 	if result, err := store.Apply(event("event-a-done", "agent-a", protocol.StateDone, now.Add(time.Second))); err != nil || !result.Applied {
 		t.Fatalf("existing agent update = %+v, %v", result, err)
+	}
+}
+
+func TestApplyExpiresStaleRecordsBeforeCapacityAdmission(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.MaxLiveRecords = 1
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	if result, err := store.Apply(event("expired", "expired-agent", protocol.StateWorking, now.Add(-config.WorkingTTL-time.Second))); err != nil || !result.Applied {
+		t.Fatalf("Apply(expired record) = %+v, %v", result, err)
+	}
+	if result, err := store.Apply(event("replacement", "replacement-agent", protocol.StateWorking, now)); err != nil || !result.Applied {
+		t.Fatalf("Apply(replacement) = %+v, %v", result, err)
+	}
+	agents := store.Snapshot(now).Agents
+	if len(agents) != 1 || agents[0].AgentInstanceID != "replacement-agent" {
+		t.Fatalf("Agents = %#v, want only replacement-agent", agents)
 	}
 }
 

@@ -5,9 +5,10 @@ coding-agent dashboard. Producers may deliver these events over direct HTTP,
 Punaro, a local spool, or another transport without changing provider mapping.
 
 The JSON Schema is the wire contract. The Go types and strict validator in
-`event.go` implement the same version-1 model and additionally reject sensitive
-metadata keys case-insensitively. Prompt text, transcripts, assistant messages,
-tool inputs and tool outputs are never required and are rejected from metadata.
+`event.go` implement the same version-1 model. Metadata is default-deny: only
+the privacy-safe `hook` and `simulated` keys are accepted by both definitions.
+Prompt text, transcripts, assistant messages, credentials, tool inputs, tool
+outputs, and unrecognized provider fields have no wire representation.
 
 Card identity is `(source, machine.id, agent_instance_id)`. `event_id` is the
 at-least-once idempotency key; `activity_at`, then `event_id`, orders updates for

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -83,16 +82,9 @@ type Event struct {
 
 var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
-var sensitiveMetadataKeys = map[string]struct{}{
-	"content":                {},
-	"last_assistant_message": {},
-	"message":                {},
-	"prompt":                 {},
-	"tool_input":             {},
-	"tool_output":            {},
-	"tool_response":          {},
-	"transcript":             {},
-	"transcript_path":        {},
+var allowedMetadataKeys = map[string]struct{}{
+	"hook":      {},
+	"simulated": {},
 }
 
 // Key returns the stable identity used to track an agent across events.
@@ -161,9 +153,8 @@ func (e Event) Validate() error {
 		return errors.New("task.working_directory exceeds 1000 characters")
 	}
 	for key, value := range e.Metadata {
-		normalized := strings.ToLower(strings.ReplaceAll(key, "-", "_"))
-		if _, forbidden := sensitiveMetadataKeys[normalized]; forbidden {
-			return fmt.Errorf("sensitive metadata key %q is not allowed", key)
+		if _, allowed := allowedMetadataKeys[key]; !allowed {
+			return fmt.Errorf("metadata key %q is not allowed", key)
 		}
 		switch value.(type) {
 		case nil, string, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
