@@ -53,8 +53,10 @@ if grep -Fq 'gh release upload catalog dist/punaro-catalog.json' "$repo_dir/.git
 	printf '%s\n' 'unsigned workflow still mutates the live catalog' >&2
 	exit 1
 fi
-if ! grep -Fq -- '--previous-catalog' "$repo_dir/.github/workflows/release.yml"; then
-	printf '%s\n' 'release workflow does not retain eligible live catalog releases' >&2
+if ! grep -Fq -- '--previous-catalog' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq -- '--minimum-safe-sequence' "$repo_dir/.github/workflows/release.yml" ||
+	! grep -Fq -- '--critical-block' "$repo_dir/.github/workflows/release.yml"; then
+	printf '%s\n' 'release workflow cannot maintain retained live catalog releases' >&2
 	exit 1
 fi
 if grep -Eq 'inputs\.draft|DRAFT:' "$repo_dir/.github/workflows/release.yml" ||

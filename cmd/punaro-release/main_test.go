@@ -31,6 +31,7 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 		"--published-at", "2026-08-16T12:00:00Z",
 		"--expires-at", "2026-08-23T12:00:00Z",
 		"--minimum-bootstrap-release", "v0.1.0",
+		"--critical-block", "9",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -77,8 +78,9 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := punarorelease.ParseCatalog(catalog); err != nil {
-		t.Fatal(err)
+	parsedCatalog, err := punarorelease.ParseCatalog(catalog)
+	if err != nil || len(parsedCatalog.CriticalBlocks) != 1 || parsedCatalog.CriticalBlocks[0] != 9 {
+		t.Fatalf("critical blocks=%v err=%v", parsedCatalog.CriticalBlocks, err)
 	}
 	info, err := os.Stat(privatePath)
 	if err != nil {
@@ -86,6 +88,16 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("private key permissions=%v", info.Mode())
+	}
+}
+
+func TestReleaseToolBoundsCriticalBlockInputs(t *testing.T) {
+	args := []string{"assemble"}
+	for sequence := 1; sequence <= maximumReleaseCriticalBlocks+1; sequence++ {
+		args = append(args, "--critical-block", "1")
+	}
+	if err := run(args); err == nil {
+		t.Fatal("release assembly accepted too many critical blocks")
 	}
 }
 

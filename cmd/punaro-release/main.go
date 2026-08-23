@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/rock3r/punaro/internal/operator"
@@ -23,6 +24,8 @@ import (
 )
 
 var publicationNow = func() time.Time { return time.Now().UTC() }
+
+const maximumReleaseCriticalBlocks = 32
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -100,6 +103,18 @@ func runAssemble(args []string) error {
 	minSafe := flags.Int64("minimum-safe-sequence", 0, "lowest sequence still safe for automatic updates")
 	minBootstrap := flags.String("minimum-bootstrap-release", "", "oldest bootstrap that may install this release")
 	previousCatalogFile := flags.String("previous-catalog", "", "verified live catalog whose eligible releases must be retained")
+	criticalBlocks := []int64{}
+	flags.Func("critical-block", "release sequence to block; repeat at most 32 times", func(value string) error {
+		if len(criticalBlocks) >= maximumReleaseCriticalBlocks {
+			return errors.New("too many critical blocks")
+		}
+		sequence, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || sequence < 1 {
+			return errors.New("critical block must be a positive integer")
+		}
+		criticalBlocks = append(criticalBlocks, sequence)
+		return nil
+	})
 	if err := flags.Parse(args); err != nil {
 		return errors.New("release assembly is invalid")
 	}
@@ -152,6 +167,7 @@ func runAssemble(args []string) error {
 		MinimumRecoveryProtocol: 1,
 		MinimumBootstrapRelease: bootstrapRelease,
 		PreviousCatalog:         previousCatalog,
+		CriticalBlocks:          criticalBlocks,
 	})
 	return err
 }

@@ -15,6 +15,16 @@ on:
         description: Monotonic catalog sequence
         required: true
         type: string
+      minimum_safe_sequence:
+        description: Optional higher safety floor (retires all lower release sequences)
+        required: false
+        default: ''
+        type: string
+      critical_blocks:
+        description: Optional comma-separated release sequences to block
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: punaro-github-release
@@ -144,6 +154,8 @@ jobs:
           INPUT_RELEASE: ${{ inputs.release }}
           INPUT_SEQUENCE: ${{ inputs.sequence }}
           INPUT_CATALOG_SEQUENCE: ${{ inputs.catalog_sequence }}
+          INPUT_MINIMUM_SAFE_SEQUENCE: ${{ inputs.minimum_safe_sequence }}
+          INPUT_CRITICAL_BLOCKS: ${{ inputs.critical_blocks }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
@@ -164,20 +176,61 @@ jobs:
             printf '%s\n' 'sequences must be at least 1' >&2
             exit 2
           fi
+          minimum_safe_sequence=$INPUT_MINIMUM_SAFE_SEQUENCE
+          if [ -n "$minimum_safe_sequence" ]; then
+            case "$minimum_safe_sequence" in
+              *[!0-9]*) printf '%s\n' 'minimum safe sequence must be a positive integer' >&2; exit 2 ;;
+            esac
+            if [ "$minimum_safe_sequence" -lt 1 ] || [ "$minimum_safe_sequence" -gt "$sequence" ]; then
+              printf '%s\n' 'minimum safe sequence must be between 1 and the release sequence' >&2
+              exit 2
+            fi
+          fi
+          critical_blocks=$INPUT_CRITICAL_BLOCKS
+          if [ -n "$critical_blocks" ]; then
+            IFS=, read -r -a blocks <<<"$critical_blocks"
+            if [ "${#blocks[@]}" -gt 32 ]; then
+              printf '%s\n' 'at most 32 critical blocks are allowed' >&2
+              exit 2
+            fi
+            for block in "${blocks[@]}"; do
+              case "$block" in
+                ''|*[!0-9]*) printf '%s\n' 'critical blocks must be comma-separated positive integers' >&2; exit 2 ;;
+              esac
+              if [ "$block" -lt 1 ] || [ "$block" -gt "$sequence" ]; then
+                printf '%s\n' 'critical block exceeds the release sequence' >&2
+                exit 2
+              fi
+            done
+          fi
           {
             printf 'release=%s\n' "$release"
             printf 'sequence=%s\n' "$sequence"
             printf 'catalog_sequence=%s\n' "$catalog_sequence"
+            printf 'minimum_safe_sequence=%s\n' "$minimum_safe_sequence"
+            printf 'critical_blocks=%s\n' "$critical_blocks"
           } >>"$GITHUB_OUTPUT"
       - name: Assemble unsigned catalog and manifest
         env:
           RELEASE: ${{ steps.identity.outputs.release }}
           SEQUENCE: ${{ steps.identity.outputs.sequence }}
           CATALOG_SEQUENCE: ${{ steps.identity.outputs.catalog_sequence }}
+          MINIMUM_SAFE_SEQUENCE: ${{ steps.identity.outputs.minimum_safe_sequence }}
+          CRITICAL_BLOCKS: ${{ steps.identity.outputs.critical_blocks }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
           previous_args=()
+          policy_args=()
+          if [ -n "$MINIMUM_SAFE_SEQUENCE" ]; then
+            policy_args+=(--minimum-safe-sequence "$MINIMUM_SAFE_SEQUENCE")
+          fi
+          if [ -n "$CRITICAL_BLOCKS" ]; then
+            IFS=, read -r -a blocks <<<"$CRITICAL_BLOCKS"
+            for block in "${blocks[@]}"; do
+              policy_args+=(--critical-block "$block")
+            done
+          fi
           if catalog_state=$(gh release view catalog --json isDraft 2>/dev/null) &&
              [ "$(printf '%s\n' "$catalog_state" | jq -er .isDraft)" = false ]; then
             previous_dir="$RUNNER_TEMP/previous-catalog"
@@ -191,6 +244,7 @@ jobs:
             --sequence "$SEQUENCE" \
             --catalog-sequence "$CATALOG_SEQUENCE" \
             --image "${{ needs.image.outputs.image }}" \
+            "${policy_args[@]}" \
             "${previous_args[@]}"
           go run ./cmd/punaro-release validate --dir dist
           if grep -Eq 'https?://' dist/punaro-release.json dist/punaro-catalog.json; then

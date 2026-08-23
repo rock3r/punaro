@@ -93,6 +93,13 @@ Only the offline-signature publisher can make those stable assets visible.
      -f sequence=1 \
      -f catalog_sequence=1
    ```
+
+   Later dispatches may set `minimum_safe_sequence` to retire every lower
+   sequence, and `critical_blocks` to a comma-separated list of individual
+   unsafe sequences. The workflow validates both before assembly. Use the
+   safety floor only when every older rollback is intentionally retired; use a
+   critical block to revoke one release while keeping older safe rollback
+   entries.
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.
 4. Generate the offline key once, on an air-gapped or owner-only machine, and
@@ -179,7 +186,8 @@ go run ./cmd/punaro-release validate --dir ./dist
 For every release after the first, pass the verified live catalog with
 `--previous-catalog ./punaro-catalog.json`. The assembler retains its eligible
 rollback entries and safety floor; releases leave the replacement only through
-an explicit higher `--minimum-safe-sequence` or critical block. The GitHub
+an explicit higher `--minimum-safe-sequence` or repeatable `--critical-block
+SEQUENCE`. The GitHub
 workflow downloads the live catalog and supplies this argument automatically,
 while the offline publisher verifies the signed replacement against the
 independently verified live pair before mutation.
