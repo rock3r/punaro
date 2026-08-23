@@ -65,8 +65,16 @@ func SkillSetDigestContext(ctx context.Context, root string) (string, error) {
 	if !trustedDirectory(root) {
 		return "", errors.New("skill root is unsafe")
 	}
-	top, err := os.ReadDir(root)
-	if err != nil || len(top) != 3 {
+	directory, err := os.Open(root) // #nosec G304,G703 -- validated explicit local skill root.
+	if err != nil {
+		return "", errors.New("skill set is invalid")
+	}
+	defer func() { _ = directory.Close() }()
+	top, readErr := directory.ReadDir(4)
+	if ctx.Err() != nil {
+		return "", errors.New("skill set inspection canceled")
+	}
+	if readErr != nil && !errors.Is(readErr, io.EOF) || len(top) != 3 {
 		return "", errors.New("skill set is invalid")
 	}
 	expected := map[string]bool{"punaro-attachment": false, "punaro-mailbox": false, "punaro-reply": false}

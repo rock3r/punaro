@@ -55,3 +55,15 @@ func TestSkillSetDigestRejectsUnexpectedAndLinkedEntries(t *testing.T) {
 		t.Fatal("linked skill entry accepted")
 	}
 }
+
+func TestSkillSetDigestRejectsFourthRootEntry(t *testing.T) {
+	root := t.TempDir()
+	for _, skill := range []string{"punaro-attachment", "punaro-mailbox", "punaro-reply", "unexpected"} {
+		if err := os.Mkdir(filepath.Join(root, skill), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := SkillSetDigestContext(t.Context(), root); err == nil {
+		t.Fatal("fourth skill root entry accepted")
+	}
+}
