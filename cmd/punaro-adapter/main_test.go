@@ -308,7 +308,7 @@ func TestAdapterDoctorEmitsStrictHealthyReport(t *testing.T) {
 	adapterDoctorBootstrapProbe = func(context.Context, string) (punarodiagnostic.Report, error) {
 		return healthyAdapterBootstrapReport(t), nil
 	}
-	adapterDoctorPluginProbe = func(string) pluginDoctorResult {
+	adapterDoctorPluginProbe = func(context.Context, string) pluginDoctorResult {
 		return pluginDoctorResult{Portable: true, Codex: true, Claude: true, Launcher: true, Version: "v0.1.0-alpha.1", SkillDigest: "sha256:" + strings.Repeat("a", 64)}
 	}
 	var stdout, stderr bytes.Buffer
@@ -539,13 +539,25 @@ func TestPluginDoctorValidatesAllAdaptersLauncherAndExactSkillTree(t *testing.T)
 	oldRelease, oldDigest := adapterBuildRelease, adapterExpectedSkillSetDigest
 	adapterBuildRelease, adapterExpectedSkillSetDigest = "v0.1.0-alpha.1", digest
 	t.Cleanup(func() { adapterBuildRelease, adapterExpectedSkillSetDigest = oldRelease, oldDigest })
-	result := inspectAdapterPlugin(root)
+	result := inspectAdapterPlugin(t.Context(), root)
 	if !result.Portable || !result.Codex || !result.Claude || !result.Launcher || result.Version != "v0.1.0-alpha.1" || result.SkillDigest != "sha256:"+digest {
 		t.Fatalf("plugin=%#v", result)
 	}
 	adapterExpectedSkillSetDigest = strings.Repeat("f", 64)
-	if tampered := inspectAdapterPlugin(root); tampered.SkillDigest != "" {
+	if tampered := inspectAdapterPlugin(t.Context(), root); tampered.SkillDigest != "" {
 		t.Fatalf("skill drift passed: %#v", tampered)
+	}
+}
+
+func TestPluginDoctorHonorsCanceledContext(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if result := inspectAdapterPlugin(ctx, root); result != (pluginDoctorResult{}) {
+		t.Fatalf("canceled plugin inspection returned data: %#v", result)
 	}
 }
 
@@ -554,7 +566,7 @@ func TestPluginDoctorRejectsDuplicateIdentityFields(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"name":"punaro","version":"0.1.0","version":"9.9.9"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := readPluginIdentity(path); ok {
+	if _, ok := readPluginIdentity(t.Context(), path); ok {
 		t.Fatal("duplicate plugin version accepted")
 	}
 }

@@ -1,10 +1,19 @@
 package plugindiagnostic
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestSkillSetDigestContextHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := SkillSetDigestContext(ctx, filepath.Join(t.TempDir(), "skills")); err == nil {
+		t.Fatal("canceled skill digest inspection continued")
+	}
+}
 
 func TestRepositoryPluginHasOneVersionAndDeterministicSkillDigest(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))

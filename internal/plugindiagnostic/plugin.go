@@ -4,6 +4,7 @@ package plugindiagnostic
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -52,6 +53,15 @@ func Version(root string) (string, error) {
 
 // SkillSetDigest hashes the exact sorted path and bytes of the three skills.
 func SkillSetDigest(root string) (string, error) {
+	return SkillSetDigestContext(context.Background(), root)
+}
+
+// SkillSetDigestContext hashes the skill set while honoring a diagnostic
+// deadline between directory entries and bounded file reads.
+func SkillSetDigestContext(ctx context.Context, root string) (string, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return "", errors.New("skill set inspection canceled")
+	}
 	if !trustedDirectory(root) {
 		return "", errors.New("skill root is unsafe")
 	}
@@ -69,6 +79,9 @@ func SkillSetDigest(root string) (string, error) {
 	var files []string
 	total := int64(0)
 	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil || entry.Type()&os.ModeSymlink != 0 {
 			return errors.New("unsafe skill entry")
 		}
@@ -92,11 +105,14 @@ func SkillSetDigest(root string) (string, error) {
 	sort.Strings(files)
 	hash := sha256.New()
 	for _, path := range files {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		relative, err := filepath.Rel(root, path)
 		if err != nil || strings.HasPrefix(relative, "..") {
 			return "", errors.New("skill set is invalid")
 		}
-		body, err := readFile(path, maximumSkillBytes)
+		body, err := readFileContext(ctx, path, maximumSkillBytes)
 		if err != nil {
 			return "", errors.New("skill set is invalid")
 		}
@@ -117,6 +133,13 @@ func trustedDirectory(path string) bool {
 }
 
 func readFile(path string, maximum int64) ([]byte, error) {
+	return readFileContext(context.Background(), path, maximum)
+}
+
+func readFileContext(ctx context.Context, path string, maximum int64) ([]byte, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errors.New("plugin file unavailable")
+	}
 	info, err := os.Lstat(path) // #nosec G703 -- fixed child of validated plugin root.
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > maximum {
 		return nil, errors.New("plugin file unavailable")
@@ -126,11 +149,23 @@ func readFile(path string, maximum int64) ([]byte, error) {
 		return nil, errors.New("plugin file unavailable")
 	}
 	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	body, err := io.ReadAll(io.LimitReader(pluginContextReader{ctx: ctx, reader: file}, maximum+1))
 	if err != nil || len(body) == 0 || int64(len(body)) > maximum {
 		return nil, errors.New("plugin file unavailable")
 	}
 	return body, nil
+}
+
+type pluginContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader pluginContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 func decodeUniqueObject(body []byte) (map[string]json.RawMessage, error) {

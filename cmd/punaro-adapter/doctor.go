@@ -195,7 +195,7 @@ func runAdapterDoctor(args []string, stdout, stderr io.Writer) int {
 		)
 	}
 
-	plugin := adapterDoctorPluginProbe(*pluginRoot)
+	plugin := adapterDoctorPluginProbe(ctx, *pluginRoot)
 	checks = append(checks,
 		boolDoctorCheck(plugin.Portable, "portable_plugin_registration", "repair_plugin_registration"),
 		boolDoctorCheck(plugin.Codex, "codex_plugin_registration", "repair_codex_plugin_registration"),

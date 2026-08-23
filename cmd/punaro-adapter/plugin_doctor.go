@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,17 +20,17 @@ const maximumPluginManifestBytes = 64 << 10
 // exact three skill trees. Development builds intentionally fail parity.
 var adapterExpectedSkillSetDigest string
 
-func inspectAdapterPlugin(root string) pluginDoctorResult {
-	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+func inspectAdapterPlugin(ctx context.Context, root string) pluginDoctorResult {
+	if ctx == nil || ctx.Err() != nil || root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return pluginDoctorResult{}
 	}
 	info, err := os.Lstat(root) // #nosec G703 -- explicit local plugin root.
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return pluginDoctorResult{}
 	}
-	portableVersion, portableOK := readPluginIdentity(filepath.Join(root, "plugin.json"))
-	codexVersion, codexOK := readPluginIdentity(filepath.Join(root, ".codex-plugin", "plugin.json"))
-	claudeVersion, claudeOK := readPluginIdentity(filepath.Join(root, ".claude-plugin", "plugin.json"))
+	portableVersion, portableOK := readPluginIdentity(ctx, filepath.Join(root, "plugin.json"))
+	codexVersion, codexOK := readPluginIdentity(ctx, filepath.Join(root, ".codex-plugin", "plugin.json"))
+	claudeVersion, claudeOK := readPluginIdentity(ctx, filepath.Join(root, ".claude-plugin", "plugin.json"))
 	result := pluginDoctorResult{Portable: portableOK, Codex: codexOK, Claude: claudeOK}
 	if portableOK && codexOK && claudeOK && portableVersion == codexVersion && portableVersion == claudeVersion && "v"+portableVersion == adapterBuildRelease {
 		result.Version = "v" + portableVersion
@@ -40,15 +41,15 @@ func inspectAdapterPlugin(root string) pluginDoctorResult {
 	}
 	launcherInfo, launcherErr := os.Lstat(filepath.Join(root, "scripts", launcher)) // #nosec G703 -- fixed plugin child.
 	result.Launcher = launcherErr == nil && launcherInfo.Mode().IsRegular() && launcherInfo.Mode()&os.ModeSymlink == 0 && (runtime.GOOS == "windows" || launcherInfo.Mode().Perm()&0o111 != 0)
-	digest, digestErr := plugindiagnostic.SkillSetDigest(filepath.Join(root, "skills"))
+	digest, digestErr := plugindiagnostic.SkillSetDigestContext(ctx, filepath.Join(root, "skills"))
 	if digestErr == nil && adapterExpectedSkillSetDigest != "" && digest == adapterExpectedSkillSetDigest {
 		result.SkillDigest = "sha256:" + digest
 	}
 	return result
 }
 
-func readPluginIdentity(path string) (string, bool) {
-	body, err := readPluginFile(path, maximumPluginManifestBytes)
+func readPluginIdentity(ctx context.Context, path string) (string, bool) {
+	body, err := readPluginFile(ctx, path, maximumPluginManifestBytes)
 	if err != nil {
 		return "", false
 	}
@@ -94,7 +95,10 @@ func decodeUniqueTopLevel(body []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
-func readPluginFile(path string, maximum int) ([]byte, error) {
+func readPluginFile(ctx context.Context, path string, maximum int) ([]byte, error) {
+	if ctx == nil || ctx.Err() != nil {
+		return nil, errors.New("plugin file unavailable")
+	}
 	info, err := os.Lstat(path) // #nosec G703 -- fixed plugin child.
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 1 || info.Size() > int64(maximum) {
 		return nil, errors.New("plugin file unavailable")
@@ -104,9 +108,21 @@ func readPluginFile(path string, maximum int) ([]byte, error) {
 		return nil, errors.New("plugin file unavailable")
 	}
 	defer func() { _ = file.Close() }()
-	body, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	body, err := io.ReadAll(io.LimitReader(pluginDoctorContextReader{ctx: ctx, reader: file}, int64(maximum)+1))
 	if err != nil || len(body) == 0 || len(body) > maximum {
 		return nil, errors.New("plugin file unavailable")
 	}
 	return body, nil
+}
+
+type pluginDoctorContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader pluginDoctorContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
