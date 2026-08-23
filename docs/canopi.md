@@ -7,6 +7,22 @@ MVP remains independently deployable: the protocol, provider mapper, collector,
 renderer, simulator, and panel firmware do not depend on Punaro mailboxes or
 message types.
 
+## Visual direction
+
+The selected concept establishes the monochrome hierarchy, card treatments,
+status symbols, density, and typography direction:
+
+![Selected Canopi monochrome UI concept](assets/canopi-selected-ui.png)
+
+The MVP recreates that direction with deterministic layout, embedded fonts,
+one-bit-safe drawing, and live lifecycle data. It does not display or embed the
+mock-up in the generated panel image:
+
+![Deterministic 800x480 Canopi implementation](../artifacts/canopi-implementation.png)
+
+See the [visual implementation QA](../design-qa.md) for the normalized
+pixel-for-pixel comparison and remaining P3 observation.
+
 ## Architecture and boundaries
 
 ```text

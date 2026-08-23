@@ -13,6 +13,8 @@ adapter, simulator, and XIAO e-paper firmware path. Canopi is independently
 deployable and its event protocol does not depend on Punaro transport. See the
 [Canopi guide](docs/canopi.md).
 
+![Canopi MVP e-paper dashboard](artifacts/canopi-implementation.png)
+
 The current alpha is not a remote MCP server and never shares a local agent
 mailbox database over the network. A local adapter on each machine communicates
 with its own mailbox implementation and with the central Punaro relay. The

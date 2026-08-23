@@ -10,6 +10,20 @@ Viewport: exact panel framebuffer, 800 x 480
 
 State: simulator tick with 3 waiting, 4 done, 12 working, default 2 x 6 grid and corrected +8 overflow
 
+## Visual evidence
+
+### Selected concept
+
+![Selected Canopi monochrome UI concept](docs/assets/canopi-selected-ui.png)
+
+### Deterministic implementation
+
+![Deterministic 800x480 Canopi implementation](artifacts/canopi-implementation.png)
+
+### Normalized side-by-side comparison
+
+![Selected concept and deterministic implementation at matched dimensions](artifacts/canopi-comparison-final.png)
+
 ## Normalization
 
 The source is 1619 x 971 RGB (aspect ratio 1.667). It was downsampled to
