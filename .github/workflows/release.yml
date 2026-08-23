@@ -15,11 +15,6 @@ on:
         description: Monotonic catalog sequence
         required: true
         type: string
-      draft:
-        description: Create a draft GitHub Release
-        required: true
-        type: boolean
-        default: true
 
 concurrency:
   group: punaro-github-release
@@ -196,7 +191,6 @@ jobs:
         env:
           RELEASE: ${{ steps.identity.outputs.release }}
           GH_TOKEN: ${{ github.token }}
-          DRAFT: ${{ inputs.draft }}
         run: |
           set -eu
           notes=$(mktemp)
@@ -211,8 +205,5 @@ jobs:
             printf '%s\n' "release $RELEASE already exists" >&2
             exit 2
           fi
-          set -- --title "Punaro $RELEASE" --notes-file "$notes"
-          if [ "$DRAFT" = true ]; then
-            set -- --draft "$@"
-          fi
-          gh release create "$RELEASE" --target "$GITHUB_SHA" "$@" dist/*
+          gh release create "$RELEASE" --target "$GITHUB_SHA" --draft \
+            --title "Punaro $RELEASE" --notes-file "$notes" dist/*

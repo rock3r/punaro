@@ -391,7 +391,7 @@ func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|client|relay|mail|backup|restore|update|version")
+		_, _ = fmt.Fprintln(stderr, "usage: punaro init|up|status|doctor|doctor-profile|client|relay|mail|backup|restore|update|version")
 		return 2
 	}
 	switch args[0] {
@@ -403,6 +403,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runStatus(args[1:], stdout, stderr, false)
 	case "doctor":
 		return runStatus(args[1:], stdout, stderr, true)
+	case "doctor-profile":
+		return runDoctorProfile(args[1:], stdout, stderr)
 	case "client":
 		if len(args) > 1 && (args[1] == "invite" || args[1] == "add") {
 			return runClientAdd(args[2:], stdout, stderr)
@@ -636,6 +638,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	directory := flags.String("directory", "", "absolute installation directory")
 	machineID := flags.String("machine-id", "", "stable server machine identity")
 	gatewayColocated := flags.Bool("gateway-co-located", false, "require a local punaro-telegram system service")
+	relayProfile := flags.String("relay-profile", "", "absolute protected server relay diagnostic profile")
 	timeout := flags.Duration("timeout", 20*time.Second, "total diagnostic deadline")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *directory == "" || validServerMachineID(*machineID) == "" || *timeout < time.Second || *timeout > 30*time.Second {
 		return 2
@@ -651,7 +654,7 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	report, err := diagnoseServer(ctx, installation, *machineID, *gatewayColocated)
+	report, err := diagnoseServer(ctx, installation, *machineID, *gatewayColocated, strings.TrimSpace(*relayProfile))
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "punaro doctor failed: diagnostic report unavailable")
 		return 2
@@ -660,6 +663,29 @@ func runServerDoctor(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	return punarodiagnostic.ExitCode(report)
+}
+
+func runDoctorProfile(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "write" {
+		_, _ = fmt.Fprintln(stderr, "usage: punaro doctor-profile write --out FILE --relay-url URL --machine-id ID --private-key-file FILE --access-token-file FILE")
+		return 2
+	}
+	flags := flag.NewFlagSet("doctor-profile write", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	output := flags.String("out", "", "absolute protected profile output")
+	relayURL := flags.String("relay-url", "", "fixed relay origin")
+	machineID := flags.String("machine-id", "", "enrolled relay diagnostic machine identity")
+	privateKeyFile := flags.String("private-key-file", "", "absolute protected Ed25519 private-key file")
+	accessTokenFile := flags.String("access-token-file", "", "absolute protected Cloudflare Access service-token file")
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 {
+		return 2
+	}
+	if err := writeServerDoctorProfile(strings.TrimSpace(*output), strings.TrimSpace(*relayURL), strings.TrimSpace(*machineID), strings.TrimSpace(*privateKeyFile), strings.TrimSpace(*accessTokenFile)); err != nil {
+		_, _ = fmt.Fprintln(stderr, "punaro doctor-profile write failed")
+		return 1
+	}
+	_, _ = fmt.Fprintln(stdout, "server doctor profile written")
+	return 0
 }
 
 func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Check {
@@ -680,14 +706,14 @@ func unavailableServerDoctorChecks(gatewayColocated bool) []punarodiagnostic.Che
 	return checks
 }
 
-func diagnoseServer(ctx context.Context, installation operator.Installation, machineID string, gatewayColocated bool) (punarodiagnostic.Report, error) {
+func diagnoseServer(ctx context.Context, installation operator.Installation, machineID string, gatewayColocated bool, relayProfile string) (punarodiagnostic.Report, error) {
 	identity := punarodiagnostic.Identity{Platform: runtime.GOOS + "-" + runtime.GOARCH}
 	if _, digest, ok := strings.Cut(installation.Image, "@"); ok {
 		identity.ArtifactDigest = digest
 	}
 	checks := serverPathChecks(operator.CheckPaths(installation))
 	checks = append(checks, punarodiagnostic.Pass("installation_configuration"), punarodiagnostic.Pass("image_digest_binding"))
-	extended := serverDoctorInspect(ctx, installation, machineID, gatewayColocated)
+	extended := serverDoctorInspect(ctx, installation, machineID, gatewayColocated, relayProfile)
 	identity.MachineID = extended.MachineID
 	identity.Release = extended.Release
 	identity.ReleaseSequence = extended.ReleaseSequence

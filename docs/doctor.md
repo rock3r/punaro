@@ -35,9 +35,17 @@ hash their state tree before and after the MCP initialize/tools-only exchange.
 Server on the Punaro host:
 
 ```sh
+punaro doctor-profile write \
+  --out /absolute/private/server-doctor.env \
+  --relay-url https://punaro.example \
+  --machine-id server-doctor \
+  --private-key-file /absolute/private/server-doctor.key \
+  --access-token-file /absolute/private/server-doctor-access.env
+
 punaro doctor \
   --directory /absolute/private/installation \
   --machine-id punaro-lxc \
+  --relay-profile /absolute/private/server-doctor.env \
   --timeout 20s
 ```
 
@@ -47,6 +55,27 @@ its local-service checks are optional in the server report and its own
 `punaro-telegram doctor` report is authoritative. Add `--gateway-co-located`
 only when this server host is explicitly expected to own and run the local
 `punaro-telegram` system service.
+
+An Internet/proxy installation also needs `--relay-profile` so the five edge
+checks probe the real public route, origin, Access admission, enrolled relay
+identity, and protocol. The profile writer refuses replacement, creates mode
+`0600` on Unix, validates every referenced credential before writing, and
+prints no credential value. Its relay machine must already be enrolled for the
+read-only doctor handshake. The referenced private-key file contains exactly
+one unpadded base64url Ed25519 private key. The protected Access file contains
+exactly these two lines (with the actual values supplied by the operator):
+
+```text
+PUNARO_CF_ACCESS_CLIENT_ID=VALUE
+PUNARO_CF_ACCESS_CLIENT_SECRET=VALUE
+```
+
+All three files must be absolute, regular, non-symlinked, non-empty, bounded,
+and owner-only on Unix. The generated profile contains only the fixed HTTPS
+origin, machine ID, and those two absolute credential-file paths; credential
+contents never enter argv, the profile, the report, or logs. A trusted-LAN
+installation with no public URL passes the edge checks from its declared local
+topology and omits `--relay-profile`.
 
 Client adapter on macOS, Linux, or Windows (pass the installed plugin root so
 plugin and skill parity are checked):

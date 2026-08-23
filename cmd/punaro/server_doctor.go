@@ -19,6 +19,7 @@ import (
 
 	"github.com/rock3r/punaro/internal/adapter"
 	punarobackup "github.com/rock3r/punaro/internal/backup"
+	"github.com/rock3r/punaro/internal/clienttransport"
 	"github.com/rock3r/punaro/internal/listener"
 	"github.com/rock3r/punaro/internal/operator"
 	punaropostgres "github.com/rock3r/punaro/internal/postgres"
@@ -33,7 +34,7 @@ const (
 	serverDoctorBackupFresh    = 24 * time.Hour
 )
 
-func inspectServerDoctorState(parent context.Context, installation operator.Installation, machineID string, gatewayColocated bool) serverDoctorState {
+func inspectServerDoctorState(parent context.Context, installation operator.Installation, machineID string, gatewayColocated bool, relayProfile string) serverDoctorState {
 	ctx, cancel := context.WithTimeout(parent, serverDoctorTimeout)
 	defer cancel()
 
@@ -50,7 +51,7 @@ func inspectServerDoctorState(parent context.Context, installation operator.Inst
 	state.HealthPrivate = known(true, listener.IsLoopback(installation.HealthListenAddr))
 	state.AdminPrivate = state.DatabasePrivate
 	state.BlobPrivate = known(true, serverBlobTopologyPrivate(installation))
-	state.TunnelRoute, state.TunnelOrigin, state.AccessAdmission, state.RelayEnrollment, state.RelayProtocol = inspectServerRelay(ctx, installation)
+	state.TunnelRoute, state.TunnelOrigin, state.AccessAdmission, state.RelayEnrollment, state.RelayProtocol = inspectServerRelay(ctx, installation, relayProfile)
 	if gatewayColocated {
 		state.GatewayInstalled, state.GatewayEnabled, state.GatewayRunning, state.GatewayExecutable, state.GatewayExitStatus, state.GatewayRestartState, state.GatewayRelease = inspectGatewayService(ctx, serverBuildRelease)
 	}
@@ -146,12 +147,12 @@ func serverBlobTopologyPrivate(installation operator.Installation) bool {
 	return strings.HasPrefix(cleanBlob, cleanData)
 }
 
-func inspectServerRelay(parent context.Context, installation operator.Installation) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
+func inspectServerRelay(parent context.Context, installation operator.Installation, relayProfile string) (knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool, knownDoctorBool) {
 	if installation.Ingress.PublicURL == "" && installation.Ingress.Mode == "lan" {
 		passed := known(true, true)
 		return passed, passed, passed, passed, passed
 	}
-	profile, err := loadServerDoctorProfile(strings.TrimSpace(os.Getenv("PUNARO_SERVER_DOCTOR_PROFILE_FILE")))
+	profile, err := loadServerDoctorProfile(relayProfile)
 	if err != nil {
 		return knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}, knownDoctorBool{}
 	}
@@ -175,6 +176,10 @@ func loadServerDoctorProfile(path string) (serverDoctorProfile, error) {
 	if err != nil {
 		return serverDoctorProfile{}, errors.New("server doctor profile unavailable")
 	}
+	return parseServerDoctorProfile(body)
+}
+
+func parseServerDoctorProfile(body []byte) (serverDoctorProfile, error) {
 	values := map[string]string{}
 	allowed := map[string]bool{"PUNARO_SERVER_DOCTOR_RELAY_URL": true, "PUNARO_SERVER_DOCTOR_MACHINE_ID": true, "PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE": true, "PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE": true}
 	for _, line := range strings.Split(strings.TrimSpace(string(body)), "\n") {
@@ -183,6 +188,9 @@ func loadServerDoctorProfile(path string) (serverDoctorProfile, error) {
 			return serverDoctorProfile{}, errors.New("server doctor profile invalid")
 		}
 		values[key] = value
+	}
+	if len(values) != len(allowed) {
+		return serverDoctorProfile{}, errors.New("server doctor profile invalid")
 	}
 	keyBody, err := readProtectedServerDoctorFile(values["PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE"], 4<<10)
 	if err != nil {
@@ -211,7 +219,52 @@ func loadServerDoctorProfile(path string) (serverDoctorProfile, error) {
 	if profile.RelayURL == "" || validServerMachineID(profile.MachineID) == "" || profile.AccessToken.ClientID == "" || profile.AccessToken.ClientSecret == "" {
 		return serverDoctorProfile{}, errors.New("server doctor profile invalid")
 	}
+	if _, err := clienttransport.ValidateOrigin(profile.RelayURL, clienttransport.Policy{}); err != nil {
+		return serverDoctorProfile{}, errors.New("server doctor profile invalid")
+	}
 	return profile, nil
+}
+
+func writeServerDoctorProfile(path, relayURL, machineID, privateKeyFile, accessTokenFile string) error {
+	for _, value := range []string{relayURL, machineID, privateKeyFile, accessTokenFile} {
+		if value == "" || strings.ContainsAny(value, "\r\n\x00") {
+			return errors.New("server doctor profile invalid")
+		}
+	}
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("server doctor profile path invalid")
+	}
+	body := []byte(
+		"PUNARO_SERVER_DOCTOR_RELAY_URL=" + relayURL + "\n" +
+			"PUNARO_SERVER_DOCTOR_MACHINE_ID=" + machineID + "\n" +
+			"PUNARO_SERVER_DOCTOR_PRIVATE_KEY_FILE=" + privateKeyFile + "\n" +
+			"PUNARO_SERVER_DOCTOR_ACCESS_TOKEN_FILE=" + accessTokenFile + "\n",
+	)
+	if _, err := parseServerDoctorProfile(body); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304,G703 -- explicit operator-owned output; O_EXCL refuses replacement and symlinks.
+	if err != nil {
+		return errors.New("server doctor profile create failed")
+	}
+	complete := false
+	defer func() {
+		_ = file.Close()
+		if !complete {
+			_ = os.Remove(path) // #nosec G703 -- removes only the exact O_EXCL file created above after an incomplete write.
+		}
+	}()
+	if _, err := file.Write(body); err != nil {
+		return errors.New("server doctor profile write failed")
+	}
+	if err := file.Sync(); err != nil {
+		return errors.New("server doctor profile write failed")
+	}
+	if err := file.Close(); err != nil {
+		return errors.New("server doctor profile write failed")
+	}
+	complete = true
+	return nil
 }
 
 func readProtectedServerDoctorFile(path string, maximum int64) ([]byte, error) {

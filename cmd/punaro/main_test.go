@@ -457,7 +457,7 @@ func preserveDependencies(t *testing.T) {
 		return punaropostgres.SchemaState{Classification: punaropostgres.Compatible, Version: 5}, nil
 	}
 	maintenanceActive = func(context.Context, string) (bool, error) { return false, nil }
-	serverDoctorInspect = func(context.Context, operator.Installation, string, bool) serverDoctorState {
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState {
 		return healthyServerDoctorState()
 	}
 }
@@ -851,9 +851,12 @@ func TestDoctorFailsForConfigurationDriftAndRoleMismatch(t *testing.T) {
 func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 	preserveDependencies(t)
 	directory := testInstallation(t)
-	serverDoctorInspect = func(_ context.Context, _ operator.Installation, machineID string, gatewayColocated bool) serverDoctorState {
+	serverDoctorInspect = func(_ context.Context, _ operator.Installation, machineID string, gatewayColocated bool, relayProfile string) serverDoctorState {
 		if machineID != "punaro-lxc" || gatewayColocated {
 			t.Fatalf("doctor inputs machine=%q gateway_colocated=%t", machineID, gatewayColocated)
+		}
+		if relayProfile != "/run/punaro/server-doctor.env" {
+			t.Fatalf("relay profile=%q", relayProfile)
 		}
 		return healthyServerDoctorState()
 	}
@@ -862,7 +865,7 @@ func TestDoctorEmitsStrictContentFreeServerReport(t *testing.T) {
 	}
 	probe = func(context.Context, string) error { return nil }
 	var stdout, stderr bytes.Buffer
-	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc"}, &stdout, &stderr); code != 0 {
+	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--relay-profile", "/run/punaro/server-doctor.env"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	report, err := punarodiagnostic.Decode(bytes.NewReader(stdout.Bytes()))
@@ -931,7 +934,7 @@ func TestDoctorClassifiesEveryExtendedServerDependency(t *testing.T) {
 	state.GatewayExitStatus.Known = false
 	state.GatewayRestartState.OK = false
 	state.GatewayRelease.OK = false
-	serverDoctorInspect = func(context.Context, operator.Installation, string, bool) serverDoctorState { return state }
+	serverDoctorInspect = func(context.Context, operator.Installation, string, bool, string) serverDoctorState { return state }
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"doctor", "--directory", directory, "--machine-id", "punaro-lxc", "--gateway-co-located"}, &stdout, &stderr); code != 1 {
@@ -997,6 +1000,44 @@ func TestServerDoctorProfileLoadsOnlyProtectedLeastPrivilegeInputs(t *testing.T)
 		if _, err := loadServerDoctorProfile(profilePath); err == nil || strings.Contains(err.Error(), "doctor-secret") || strings.Contains(err.Error(), accessPath) {
 			t.Fatalf("unsafe profile error=%q", err)
 		}
+	}
+}
+
+func TestServerDoctorProfileWriterCreatesProtectedReusableProfile(t *testing.T) {
+	root := t.TempDir()
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(root, 0o700); err != nil { // #nosec G302 -- directory must be owner-only executable.
+			t.Fatal(err)
+		}
+	}
+	privateKey := ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+	keyPath := filepath.Join(root, "doctor.key")
+	accessPath := filepath.Join(root, "access.env")
+	profilePath := filepath.Join(root, "doctor.env")
+	if err := os.WriteFile(keyPath, []byte(base64.RawURLEncoding.EncodeToString(privateKey)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(accessPath, []byte("PUNARO_CF_ACCESS_CLIENT_ID=doctor-id\nPUNARO_CF_ACCESS_CLIENT_SECRET=doctor-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"doctor-profile", "write", "--out", profilePath, "--relay-url", "https://punaro.example", "--machine-id", "server-doctor", "--private-key-file", keyPath, "--access-token-file", accessPath}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "doctor-secret") || strings.Contains(stdout.String()+stderr.String(), "doctor-id") {
+		t.Fatalf("profile writer leaked credentials: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	info, err := os.Stat(profilePath)
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		t.Fatalf("profile mode=%v err=%v", info.Mode(), err)
+	}
+	profile, err := loadServerDoctorProfile(profilePath)
+	if err != nil || profile.RelayURL != "https://punaro.example" || profile.MachineID != "server-doctor" {
+		t.Fatalf("written profile=%#v err=%v", profile, err)
+	}
+	if code := run(args, io.Discard, io.Discard); code != 1 {
+		t.Fatalf("existing profile overwrite code=%d", code)
 	}
 }
 

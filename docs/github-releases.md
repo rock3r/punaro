@@ -83,8 +83,7 @@ Only the offline-signature publisher can make those stable assets visible.
    gh workflow run release.yml --repo rock3r/punaro --ref main \
      -f release=v0.1.0-alpha.1 \
      -f sequence=1 \
-     -f catalog_sequence=1 \
-     -f draft=true
+     -f catalog_sequence=1
    ```
 3. Wait for the draft release to appear. The live `catalog` prerelease is not
    touched by the unsigned workflow.

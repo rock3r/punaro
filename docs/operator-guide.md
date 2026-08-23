@@ -528,7 +528,12 @@ requires recovery. It waits up to 30 seconds for readiness and then runs the
 same checks as doctor. Raw `docker compose up` and `punarod` never migrate.
 
 Use `punaro status --directory ...` for a non-mutating report and `punaro doctor
---directory ... --machine-id punaro-lxc` for a failing health gate. Add
+--directory ... --machine-id punaro-lxc --relay-profile
+/absolute/private/server-doctor.env` for an Internet/proxy failing health gate.
+Provision that owner-only profile with `punaro doctor-profile write`; it stores
+only the fixed origin, enrolled diagnostic machine ID, and absolute references
+to separately protected Ed25519 and Cloudflare Access credential files. The
+exact formats and trusted-LAN omission are in [doctor.md](doctor.md). Add
 `--gateway-co-located` only when this host is explicitly responsible for the
 local `punaro-telegram` system service; otherwise collect its separate doctor
 report. Reports contain only capability and
