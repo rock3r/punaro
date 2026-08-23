@@ -617,8 +617,7 @@ func inspectAdapterService(ctx context.Context, _ adapterConfig) serviceDoctorRe
 	}
 	if info, statErr := os.Lstat(installedPath); statErr == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 { // #nosec G703 -- fixed installer-owned path selected only by the local platform.
 		result.Installed = true
-		// #nosec G304,G703 -- fixed installer-owned path selected only by the local platform.
-		if body, readErr := os.ReadFile(installedPath); readErr == nil && len(body) <= 64<<10 {
+		if body, readErr := readAdapterServiceFile(ctx, installedPath, 64<<10); readErr == nil {
 			result.Executable = adapterServiceFileBound(runtime.GOOS, string(body))
 		}
 	}
@@ -628,6 +627,38 @@ func inspectAdapterService(ctx context.Context, _ adapterConfig) serviceDoctorRe
 		result.Executable = ok && adapterWindowsTaskBound(task)
 	}
 	return result
+}
+
+func readAdapterServiceFile(ctx context.Context, path string, maximum int) ([]byte, error) {
+	if ctx == nil || ctx.Err() != nil || maximum < 1 {
+		return nil, errors.New("adapter service file unavailable")
+	}
+	info, err := os.Lstat(path) // #nosec G703 -- fixed installer-owned path selected only by the local platform.
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > int64(maximum) {
+		return nil, errors.New("adapter service file unavailable")
+	}
+	file, err := os.Open(path) // #nosec G304,G703 -- validated fixed installer-owned file.
+	if err != nil {
+		return nil, errors.New("adapter service file unavailable")
+	}
+	defer func() { _ = file.Close() }()
+	body, err := io.ReadAll(io.LimitReader(adapterServiceContextReader{ctx: ctx, reader: file}, int64(maximum)+1))
+	if err != nil || len(body) > maximum {
+		return nil, errors.New("adapter service file unavailable")
+	}
+	return body, nil
+}
+
+type adapterServiceContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader adapterServiceContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 func inspectAdapterServiceManager(ctx context.Context, goos string) (bool, bool, bool, bool) {
