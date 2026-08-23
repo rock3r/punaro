@@ -128,12 +128,19 @@ Only the offline-signature publisher can make those stable assets visible.
      --keys-file /absolute/private/punaro-release.pub
    ```
 
-   The publisher makes the immutable versioned prerelease available first.
+   The publisher rejects a catalog outside its signed lifetime and requires a
+   candidate sequence strictly above the verified live catalog before changing
+   either release. It makes the immutable versioned prerelease available first.
    Initial live-catalog publication stays draft until both signed assets are
    uploaded. On replacement, the publisher first downloads and verifies the
    existing pair, retains it until the new pair is remotely re-downloaded and
    verified, and restores the previous pair (with bounded retries) after any
-   partial upload, signal, or verification failure. The unsigned build
+   partial upload, signal, or verification failure. If that happens after the
+   versioned prerelease is visible, rerunning the helper is safe: it accepts
+   only that exact retryable prerelease and rechecks all signed bytes before
+   advancing the catalog. A first or previously interrupted draft catalog is
+   returned to draft state after any failed exposure or remote verification,
+   so bootstrap never relies on that unverified pair. The unsigned build
    workflow never touches the live catalog. Pass the public key set to
    `punaro-bootstrap update --keys-file`. Do not embed a production key until
    the first official signed release exists.

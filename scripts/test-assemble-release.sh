@@ -56,6 +56,11 @@ if ! "$repo_dir/scripts/publish-signed-release.sh" --help >/dev/null ||
 	! grep -Fq 'gh release edit "$release"' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'restore_previous_catalog' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'catalog_restore_required=true' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'catalog_redraft_required=true' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'redraft_catalog' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'publication-check --catalog "$catalog"' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq -- '--previous-catalog "$previous_catalog"' "$repo_dir/scripts/publish-signed-release.sh" ||
+	! grep -Fq 'release_is_prerelease' "$repo_dir/scripts/publish-signed-release.sh" ||
 	! grep -Fq 'gh release create catalog --repo "$repository" --draft' "$repo_dir/scripts/publish-signed-release.sh"; then
 	printf '%s\n' 'verified offline release publication step is unavailable' >&2
 	exit 1

@@ -60,14 +60,24 @@ done
 	go run ./cmd/punaro-release verify --keys-file "$keys_file" --document "$catalog" --signature "$catalog_signature"
 ) || fail 'signed release documents are invalid'
 
+(
+	cd "$repo_dir"
+	go run ./cmd/punaro-release publication-check --catalog "$catalog"
+) || fail 'signed release catalog is not currently publishable'
+
 command -v gh >/dev/null 2>&1 || fail 'gh is required'
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
-draft_state=$(gh release view "$release" --repo "$repository" --json tagName,isDraft)
+draft_state=$(gh release view "$release" --repo "$repository" --json tagName,isDraft,isPrerelease)
 [ "$(printf '%s\n' "$draft_state" | jq -er .tagName)" = "$release" ] || fail 'draft release identity is invalid'
-[ "$(printf '%s\n' "$draft_state" | jq -er .isDraft)" = true ] || fail 'release is not a draft'
+release_is_draft=$(printf '%s\n' "$draft_state" | jq -er 'if .isDraft == true then "true" elif .isDraft == false then "false" else error("invalid draft state") end')
+release_is_prerelease=$(printf '%s\n' "$draft_state" | jq -er 'if .isPrerelease == true then "true" elif .isPrerelease == false then "false" else error("invalid prerelease state") end')
+if [ "$release_is_draft" = false ] && [ "$release_is_prerelease" = false ]; then
+	fail 'release is neither a draft nor a retryable prerelease'
+fi
 
 download_dir=$(mktemp -d "${TMPDIR:-/tmp}/punaro-release-publish.XXXXXXXX")
 catalog_restore_required=false
+catalog_redraft_required=false
 previous_catalog=
 previous_catalog_signature=
 restore_previous_catalog() {
@@ -80,12 +90,27 @@ restore_previous_catalog() {
 	done
 	return 1
 }
+redraft_catalog() {
+	attempt=1
+	while [ "$attempt" -le 3 ]; do
+		if gh release edit catalog --repo "$repository" --draft=true --prerelease; then
+			return 0
+		fi
+		attempt=$((attempt + 1))
+	done
+	return 1
+}
 cleanup() {
 	status=$?
 	trap - EXIT HUP INT TERM
 	if [ "$catalog_restore_required" = true ]; then
 		if ! restore_previous_catalog; then
 			printf '%s\n' 'failed to restore the previously verified live catalog' >&2
+		fi
+		status=2
+	elif [ "$catalog_redraft_required" = true ]; then
+		if ! redraft_catalog; then
+			printf '%s\n' 'failed to return the unverified catalog to draft state' >&2
 		fi
 		status=2
 	fi
@@ -118,10 +143,24 @@ if catalog_state=$(gh release view catalog --repo "$repository" --json isDraft 2
 	fi
 fi
 
+if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-release publication-check --catalog "$catalog" --previous-catalog "$previous_catalog"
+	) || fail 'signed release catalog is no longer publishable'
+else
+	(
+		cd "$repo_dir"
+		go run ./cmd/punaro-release publication-check --catalog "$catalog"
+	) || fail 'signed release catalog is no longer publishable'
+fi
+
 # Make the immutable release usable first. The live catalog is changed only
 # after those versioned bytes and their signature are publicly available.
 gh release upload "$release" "$manifest_signature" "$catalog_signature" --repo "$repository" --clobber
-gh release edit "$release" --repo "$repository" --draft=false --prerelease
+if [ "$release_is_draft" = true ]; then
+	gh release edit "$release" --repo "$repository" --draft=false --prerelease
+fi
 
 if [ "$catalog_exists" = true ] && [ "$catalog_draft" = false ]; then
 	# GitHub replaces each asset separately. Keep the previously verified pair
@@ -133,6 +172,7 @@ elif [ "$catalog_exists" = true ]; then
 	# A prior interrupted first publication remains invisible as a draft. Finish
 	# both assets before exposing it.
 	gh release upload catalog "$catalog" "$catalog_signature" --repo "$repository" --clobber
+	catalog_redraft_required=true
 	gh release edit catalog --repo "$repository" --draft=false --prerelease
 else
 	# Initial publication is assembled as a draft so a partial asset upload is
@@ -141,6 +181,7 @@ else
 		--title 'Punaro release catalog' \
 		--notes 'Signed short-lived Punaro release catalog. Bootstrap verifies the detached signature.' \
 		"$catalog" "$catalog_signature"
+	catalog_redraft_required=true
 	gh release edit catalog --repo "$repository" --draft=false --prerelease
 fi
 
@@ -159,5 +200,6 @@ cmp -s "$catalog_signature" "$verification_dir/punaro-catalog.sig" || fail 'publ
 ) || fail 'published signature verification failed'
 
 catalog_restore_required=false
+catalog_redraft_required=false
 
 printf '%s\n' "published signed prerelease $release and catalog sequence from verified bytes"

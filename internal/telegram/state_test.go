@@ -153,6 +153,25 @@ func TestGatewayHealthClearsTerminalFailuresAfterSuccessfulRecovery(t *testing.T
 	}
 }
 
+func TestInspectGatewayStateRejectsFutureHealthTimestamps(t *testing.T) {
+	t.Parallel()
+	database := filepath.Join(t.TempDir(), "telegram.db")
+	state, err := Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := testCallbackNow
+	if err := state.RecordGatewayCycle(GatewayCycleRecord{At: now.Add(time.Minute), Offset: 9, PollOK: true, RelayOK: true, TelegramOK: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectGatewayState(database, now); err == nil {
+		t.Fatal("future gateway health timestamps were classified as fresh")
+	}
+}
+
 func TestStateIssuesHashedTTLCallbackTokens(t *testing.T) {
 	t.Parallel()
 	state, err := Open(filepath.Join(t.TempDir(), "telegram.db"))

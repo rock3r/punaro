@@ -273,15 +273,17 @@ func InspectGatewayState(database string, now time.Time) (GatewayStateSnapshot, 
 	snapshot.HasRelay = relayAt.Valid
 	snapshot.HasTelegram = telegramAt.Valid
 	snapshot.LastFailure = GatewayFailureClass(lastFailure)
+	now = now.UTC()
+	for _, value := range []sql.NullInt64{cycle, success, poll, relayAt, telegramAt, progress} {
+		if value.Valid && time.UnixMilli(value.Int64).After(now) {
+			return GatewayStateSnapshot{}, fmt.Errorf("gateway state unavailable")
+		}
+	}
 	age := func(value sql.NullInt64) time.Duration {
 		if !value.Valid {
 			return 0
 		}
-		delta := now.UTC().Sub(time.UnixMilli(value.Int64))
-		if delta < 0 {
-			return 0
-		}
-		return delta
+		return now.Sub(time.UnixMilli(value.Int64))
 	}
 	snapshot.LastCycleAge = age(cycle)
 	snapshot.LastSuccessAge = age(success)

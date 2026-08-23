@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/rock3r/punaro/internal/operator"
 	punarorelease "github.com/rock3r/punaro/internal/release"
@@ -34,6 +35,12 @@ func TestReleaseToolAssemblesSignsAndVerifiesExactBytes(t *testing.T) {
 	}
 	if err := run([]string{"validate", "--dir", artifacts}); err != nil {
 		t.Fatal(err)
+	}
+	originalNow := publicationNow
+	publicationNow = func() time.Time { return time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC) }
+	t.Cleanup(func() { publicationNow = originalNow })
+	if err := run([]string{"publication-check", "--catalog", filepath.Join(artifacts, punarorelease.CatalogFile)}); err != nil {
+		t.Fatalf("fresh assembled catalog failed publication check: %v", err)
 	}
 	if err := run([]string{"validate", "--dir", artifacts, "--release", "v9.9.9"}); err == nil {
 		t.Fatal("unexpected release identity was accepted")
@@ -92,6 +99,41 @@ func TestBuildFactsBindsPluginSkillsGeneratedComposeAndMigrations(t *testing.T) 
 	}
 	if _, err := buildFacts([]string{"--release", "v0.1.0", "--plugin-root", root}); err == nil {
 		t.Fatal("release not matching all plugin manifests was accepted")
+	}
+}
+
+func TestPublicationCatalogMustBeFreshAndAdvance(t *testing.T) {
+	now := time.Date(2026, 8, 23, 16, 0, 0, 0, time.UTC)
+	candidate := punarorelease.Catalog{
+		Sequence:    5,
+		PublishedAt: now.Add(-time.Hour).Format(time.RFC3339),
+		ExpiresAt:   now.Add(time.Hour).Format(time.RFC3339),
+	}
+	previous := candidate
+	previous.Sequence = 4
+	if err := validatePublicationCatalog(candidate, &previous, now); err != nil {
+		t.Fatalf("fresh advancing catalog rejected: %v", err)
+	}
+	if err := validatePublicationCatalog(candidate, nil, now); err != nil {
+		t.Fatalf("fresh initial catalog rejected: %v", err)
+	}
+
+	expired := candidate
+	expired.ExpiresAt = now.Format(time.RFC3339)
+	if err := validatePublicationCatalog(expired, &previous, now); err == nil {
+		t.Fatal("expired catalog accepted for publication")
+	}
+	future := candidate
+	future.PublishedAt = now.Add(time.Minute).Format(time.RFC3339)
+	if err := validatePublicationCatalog(future, &previous, now); err == nil {
+		t.Fatal("not-yet-valid catalog accepted for publication")
+	}
+	for _, sequence := range []int64{4, 3} {
+		downgrade := candidate
+		downgrade.Sequence = sequence
+		if err := validatePublicationCatalog(downgrade, &previous, now); err == nil {
+			t.Fatalf("catalog sequence %d accepted after %d", sequence, previous.Sequence)
+		}
 	}
 }
 

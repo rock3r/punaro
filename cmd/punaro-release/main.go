@@ -24,6 +24,8 @@ import (
 
 const productionPostgresMajor = 18
 
+var publicationNow = func() time.Time { return time.Now().UTC() }
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
@@ -33,7 +35,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: punaro-release assemble|build-facts|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|publication-check|keygen|sign|verify")
 	}
 	switch args[0] {
 	case "assemble":
@@ -46,6 +48,8 @@ func run(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(facts)
 	case "validate":
 		return runValidate(args[1:])
+	case "publication-check":
+		return runPublicationCheck(args[1:])
 	case "keygen":
 		return runKeygen(args[1:])
 	case "sign":
@@ -53,7 +57,7 @@ func run(args []string) error {
 	case "verify":
 		return runVerify(args[1:])
 	default:
-		return errors.New("usage: punaro-release assemble|build-facts|validate|keygen|sign|verify")
+		return errors.New("usage: punaro-release assemble|build-facts|validate|publication-check|keygen|sign|verify")
 	}
 }
 
@@ -168,6 +172,47 @@ func runValidate(args []string) error {
 	sum := sha256.Sum256(manifestBody)
 	if !catalog.Allows(manifest.Release, manifest.Sequence, hex.EncodeToString(sum[:])) {
 		return errors.New("catalog does not allow the assembled manifest")
+	}
+	return nil
+}
+
+func runPublicationCheck(args []string) error {
+	flags := flag.NewFlagSet("punaro-release publication-check", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	catalogFile := flags.String("catalog", "", "candidate signed catalog document")
+	previousFile := flags.String("previous-catalog", "", "optional verified live catalog document")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *catalogFile == "" {
+		return errors.New("release publication check is invalid")
+	}
+	candidateBody, err := os.ReadFile(*catalogFile) // #nosec G304 -- explicit operator-supplied catalog path.
+	if err != nil || len(candidateBody) > punarorelease.MaximumManifestBytes {
+		return errors.New("release publication check is invalid")
+	}
+	candidate, err := punarorelease.ParseCatalog(candidateBody)
+	if err != nil {
+		return errors.New("release publication check is invalid")
+	}
+	var previous *punarorelease.Catalog
+	if *previousFile != "" {
+		previousBody, readErr := os.ReadFile(*previousFile) // #nosec G304 -- explicit verified live catalog path.
+		if readErr != nil || len(previousBody) > punarorelease.MaximumManifestBytes {
+			return errors.New("release publication check is invalid")
+		}
+		parsed, parseErr := punarorelease.ParseCatalog(previousBody)
+		if parseErr != nil {
+			return errors.New("release publication check is invalid")
+		}
+		previous = &parsed
+	}
+	return validatePublicationCatalog(candidate, previous, publicationNow())
+}
+
+func validatePublicationCatalog(candidate punarorelease.Catalog, previous *punarorelease.Catalog, now time.Time) error {
+	if !candidate.Fresh(now) {
+		return errors.New("candidate release catalog is not currently fresh")
+	}
+	if previous != nil && candidate.Sequence <= previous.Sequence {
+		return errors.New("candidate release catalog sequence does not advance the live catalog")
 	}
 	return nil
 }
