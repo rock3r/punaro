@@ -15,10 +15,14 @@ import (
 	"time"
 
 	punarodiagnostic "github.com/rock3r/punaro/internal/diagnostic"
+	"github.com/rock3r/punaro/internal/incrementalfs"
 	punarorelease "github.com/rock3r/punaro/internal/release"
 )
 
-const maximumDoctorSlotEntries = 128
+const (
+	maximumDoctorSlotEntries = 128
+	maximumDoctorStateBytes  = 64 << 10
+)
 
 const minimumDoctorFreeBytes uint64 = 512 << 20
 
@@ -82,7 +86,7 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	keys := request.Keys
 	if len(keys) == 0 {
 		var err error
-		keys, err = loadDirectoryKeys(request.Directory)
+		keys, err = doctorLoadDirectoryKeys(ctx, request.Directory)
 		if err != nil || len(keys) == 0 {
 			checks = append(checks, punarodiagnostic.Fail("release_keys", "install_release_keys"))
 		} else {
@@ -92,9 +96,9 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 		checks = append(checks, punarodiagnostic.Pass("release_keys"))
 	}
 
-	accepted, acceptedErr := loadAccepted(request.Directory)
-	current, currentErr := readOptionalSlot(filepath.Join(request.Directory, currentSlot))
-	previous, previousErr := readOptionalSlot(filepath.Join(request.Directory, previousSlot))
+	accepted, acceptedErr := doctorLoadAccepted(ctx, request.Directory)
+	current, currentErr := doctorReadOptionalSlot(ctx, filepath.Join(request.Directory, currentSlot))
+	previous, previousErr := doctorReadOptionalSlot(ctx, filepath.Join(request.Directory, previousSlot))
 	if currentErr != nil || current.Release == "" {
 		checks = append(checks, punarodiagnostic.Fail("current_slot", "reinstall_signed_release"))
 	} else {
@@ -117,13 +121,13 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 		identity.CatalogSequence = accepted.CatalogSequence
 	}
 
-	journal, journalErr := readJournal(request.Directory)
+	journal, journalErr := doctorReadJournal(ctx, request.Directory)
 	if journalErr != nil || journal.Phase != "" {
 		checks = append(checks, punarodiagnostic.Fail("journal_state", "resume_or_recover_bootstrap"))
 	} else {
 		checks = append(checks, punarodiagnostic.Pass("journal_state"))
 	}
-	recovery, recoveryErr := loadRecovery(request.Directory)
+	recovery, recoveryErr := doctorLoadRecovery(ctx, request.Directory)
 	if recoveryErr != nil || recovery.Mode == recoveryMode {
 		checks = append(checks, punarodiagnostic.Fail("recovery_state", "recover_bootstrap"))
 	} else {
@@ -163,6 +167,78 @@ func Doctor(ctx context.Context, request DoctorRequest) (punarodiagnostic.Report
 	runningChecks := doctorRunningState(ctx, request, current, currentAdapterDigest)
 	checks = append(checks, runningChecks...)
 	return punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, identity, checks)
+}
+
+func doctorReadOptionalState(ctx context.Context, path string, maximum int64) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	info, err := os.Lstat(path) // #nosec G703 -- caller supplies a fixed bootstrap state child.
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() < 0 || info.Size() > maximum {
+		return nil, false, errors.New("bootstrap doctor state is invalid")
+	}
+	body, err := incrementalfs.ReadFile(ctx, path, maximum)
+	if err != nil {
+		return nil, false, errors.New("bootstrap doctor state is invalid")
+	}
+	return body, true, nil
+}
+
+func doctorLoadDirectoryKeys(ctx context.Context, directory string) (map[string]ed25519.PublicKey, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, directoryKeysFile), punarorelease.MaximumEnvelopeBytes)
+	if err != nil || !exists {
+		return nil, err
+	}
+	keys, err := punarorelease.ParsePublicKeys(body)
+	if err != nil || len(keys) == 0 {
+		return nil, errors.New("bootstrap keys file is invalid")
+	}
+	return keys, nil
+}
+
+func doctorLoadAccepted(ctx context.Context, directory string) (acceptedState, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, acceptedFile), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return acceptedState{}, err
+	}
+	return parseAccepted(body)
+}
+
+func doctorReadOptionalSlot(ctx context.Context, directory string) (slotState, error) {
+	if err := ctx.Err(); err != nil {
+		return slotState{}, err
+	}
+	_, err := os.Lstat(directory) // #nosec G703 -- slot is a fixed bootstrap child.
+	if errors.Is(err, os.ErrNotExist) {
+		return slotState{}, nil
+	}
+	if err != nil || requireRealDir(directory) != nil {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, slotRecord), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return slotState{}, errors.New("bootstrap slot is invalid")
+	}
+	return parseSlot(body)
+}
+
+func doctorReadJournal(ctx context.Context, directory string) (journal, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, journalFile), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return journal{}, err
+	}
+	return parseJournal(body)
+}
+
+func doctorLoadRecovery(ctx context.Context, directory string) (recoveryState, error) {
+	body, exists, err := doctorReadOptionalState(ctx, filepath.Join(directory, recoveryFile), maximumDoctorStateBytes)
+	if err != nil || !exists {
+		return recoveryState{}, err
+	}
+	return parseRecovery(body)
 }
 
 func unavailableBootstrapStateChecks() []punarodiagnostic.Check {

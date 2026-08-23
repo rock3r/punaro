@@ -1016,6 +1016,10 @@ func loadRecovery(directory string) (recoveryState, error) {
 	if err != nil {
 		return recoveryState{}, errors.New("bootstrap recovery state is invalid")
 	}
+	return parseRecovery(body)
+}
+
+func parseRecovery(body []byte) (recoveryState, error) {
 	if err := rejectDuplicateJSONFields(body); err != nil {
 		return recoveryState{}, errors.New("bootstrap recovery state is invalid")
 	}

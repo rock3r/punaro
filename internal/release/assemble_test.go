@@ -113,6 +113,13 @@ func TestAssembleRejectsCriticallyBlockedCurrentRelease(t *testing.T) {
 	}
 }
 
+func TestAssembleRejectsFutureCriticalBlock(t *testing.T) {
+	request := policyAssembleRequest(t, "v0.1.0-alpha.2", 2, 2, 1, nil, []int64{100})
+	if _, err := Assemble(request); err == nil {
+		t.Fatal("assembly accepted a future critical block")
+	}
+}
+
 func TestAssembleCapsMergedBlocksAndPrunesRetiredBlocks(t *testing.T) {
 	priorBlocks := make([]int64, maxCatalogCriticalBlocks)
 	for index := range priorBlocks {

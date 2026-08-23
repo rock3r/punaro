@@ -109,6 +109,13 @@ func TestParseCatalogRejectsCriticallyBlockedCurrentRelease(t *testing.T) {
 	}
 }
 
+func TestParseCatalogRejectsFutureCriticalBlock(t *testing.T) {
+	body := strings.Replace(validCatalogJSON(), `"critical_blocks": []`, `"critical_blocks": [100]`, 1)
+	if _, err := ParseCatalog([]byte(body)); err == nil {
+		t.Fatal("catalog accepted a future critical block")
+	}
+}
+
 func TestParseCatalogRejectsTooManyCriticalBlocks(t *testing.T) {
 	blocks := make([]string, maxCatalogCriticalBlocks+1)
 	for index := range blocks {

@@ -297,11 +297,12 @@ func telegramServiceCommand(ctx context.Context, executable string, arguments ..
 	command := exec.CommandContext(ctx, executable, arguments...) // #nosec G204 -- fixed read-only service inspection.
 	command.Stdin = nil
 	command.Stderr = io.Discard
-	output, err := command.Output()
-	if err != nil || len(output) > 64<<10 {
+	output := boundedTelegramOutput{maximum: 64 << 10}
+	command.Stdout = &output
+	if err := command.Run(); err != nil || output.overflow {
 		return "", false
 	}
-	return string(output), true
+	return output.buffer.String(), true
 }
 
 func telegramServiceFileBound(goos, body string) bool {

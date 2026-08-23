@@ -109,11 +109,30 @@ func TestDoctorCancellationProducesExplicitPartialFailureWithoutMutation(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Healthy || doctorCheckStatus(report, "catalog_reachability") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "current_artifact_integrity") != punarodiagnostic.StatusUnavailable {
+	if report.Healthy || doctorCheckStatus(report, "catalog_reachability") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "current_slot") != punarodiagnostic.StatusFail || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
 		t.Fatalf("report=%#v", report)
 	}
 	if after := bootstrapTreeDigest(t, directory); after != before {
 		t.Fatal("cancelled doctor mutated bootstrap state")
+	}
+}
+
+func TestDoctorRejectsOversizedAcceptedStateWithoutReadingIt(t *testing.T) {
+	origin := newSignedOrigin(t, originSpec{payload: testArtifact, goos: runtime.GOOS, goarch: runtime.GOARCH})
+	directory := privateDir(t)
+	now := time.Date(2026, 8, 20, 0, 0, 0, 0, time.UTC)
+	if _, err := Update(Request{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, acceptedFile), []byte(strings.Repeat("x", maximumDoctorStateBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := Doctor(t.Context(), DoctorRequest{Directory: directory, Origin: origin.URL, Keys: origin.Keys, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, Now: now, FreeBytes: func(string) (uint64, error) { return 1 << 40, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Healthy || doctorCheckStatus(report, "accepted_state") != punarodiagnostic.StatusFail {
+		t.Fatalf("report=%#v", report)
 	}
 }
 

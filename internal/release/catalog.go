@@ -90,7 +90,7 @@ func (catalog Catalog) validate() error {
 	}
 	seenBlock := map[int64]struct{}{}
 	for _, sequence := range catalog.CriticalBlocks {
-		if sequence < 1 || sequence == currentSequence {
+		if sequence < 1 || sequence >= currentSequence {
 			return errors.New("invalid critical block")
 		}
 		if _, exists := seenBlock[sequence]; exists {

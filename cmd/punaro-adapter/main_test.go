@@ -614,6 +614,14 @@ func TestInspectAdapterBootstrapReleaseExecutesInstalledIdentity(t *testing.T) {
 	}
 }
 
+func TestAdapterDoctorCommandOutputIsBounded(t *testing.T) {
+	output := boundedDoctorOutput{maximum: 64 << 10}
+	oversized := strings.Repeat("x", output.maximum+1)
+	if written, err := output.Write([]byte(oversized)); err != nil || written != len(oversized) || output.buffer.Len() != output.maximum || !output.overflow {
+		t.Fatalf("length=%d overflow=%v written=%d err=%v", output.buffer.Len(), output.overflow, written, err)
+	}
+}
+
 func healthyAdapterBootstrapReport(t *testing.T) punarodiagnostic.Report {
 	t.Helper()
 	report, err := punarodiagnostic.New(punarodiagnostic.ComponentBootstrap, punarodiagnostic.Identity{
