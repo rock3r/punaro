@@ -89,7 +89,9 @@ Missing configuration, malformed provider input, spool or process-launch
 failure, token-file failure, network failure, and collector rejection all leave
 the coding agent unblocked and produce no provider-visible output.
 
-All collector routes require the same bearer token. Bodies, batches, headers,
+All collector routes require the same bearer token. The protected token file
+contains one visible-ASCII token line (with an optional final LF or CRLF).
+Bodies, batches, headers,
 dedupe memory, and grid capacity are bounded. Loopback may use HTTP. A
 non-loopback listener must be a concrete private/link-local IP, requires
 `--allow-lan`, and requires a TLS certificate and private key; wildcard,
@@ -163,8 +165,8 @@ whose ancestors traverse symlinks cannot acquire separate writer locks.
 The predictable state-lock file itself is created exclusively and opened without
 following links; an unsafe pre-existing entry is removed, directory-synced, and
 recreated with current-user-only protection. Cross-process repair is serialized
-by the parent-directory kernel lock on Unix and a case-normalized named kernel
-mutex on Windows before the entry is rechecked and unlinked.
+by the parent-directory kernel lock on Unix and a handle-canonicalized named
+kernel mutex on Windows before the entry is rechecked and unlinked.
 Signal-driven shutdown waits for `http.Server.Shutdown` to finish draining active
 handlers before `Store.Close` releases that lifetime lock, fencing rolling restarts
 until every acknowledged write from the old collector has completed. The drain
@@ -264,8 +266,8 @@ The fixed enqueue, drain, and supervisor lock names use create-exclusive and
 no-follow opens with the same ownership and privacy validation. Unsafe entries
 left from a previously shared directory are removed, directory-synced, and
 replaced instead of permanently blocking the adapter. Repair is serialized by
-the parent-directory kernel lock on Unix and a case-normalized named kernel mutex
-on Windows, so concurrent hooks cannot unlink each other's replacement locks.
+the parent-directory kernel lock on Unix and a handle-canonicalized named kernel
+mutex on Windows, so concurrent hooks cannot unlink each other's replacement locks.
 The configured spool capacity includes a fixed contention reserve (one sixteenth,
 at least one and at most 256 slots). Normal and contention lanes therefore remain
 jointly bounded while concurrent hooks can publish without waiting past their

@@ -19,7 +19,11 @@ import (
 func withSpoolRepairLock(ctx context.Context, path string, repair func() error) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(path))))
+	identity, err := canonicalWindowsSpoolRepairIdentity(path)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte(identity))
 	name, err := windows.UTF16PtrFromString("Local\\CanopiSpoolRepair-" + hex.EncodeToString(digest[:]))
 	if err != nil {
 		return err
@@ -52,6 +56,36 @@ func withSpoolRepairLock(ctx context.Context, path string, repair func() error) 
 	}
 	defer func() { _ = windows.ReleaseMutex(mutex) }()
 	return repair()
+}
+
+func canonicalWindowsSpoolRepairIdentity(path string) (string, error) {
+	parent, err := finalWindowsSpoolPath(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	return strings.ToLower(filepath.Join(parent, filepath.Base(path))), nil
+}
+
+func finalWindowsSpoolPath(path string) (string, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	const maxFinalPathCharacters = 32_768
+	buffer := make([]uint16, maxFinalPathCharacters)
+	length, err := windows.GetFinalPathNameByHandle(handle, &buffer[0], maxFinalPathCharacters, 0)
+	if err != nil {
+		return "", err
+	}
+	if length >= maxFinalPathCharacters {
+		return "", errors.New("canonical Windows spool path exceeds limit")
+	}
+	return windows.UTF16ToString(buffer[:length]), nil
 }
 
 func tryLockSpoolFile(file *os.File) (bool, error) {

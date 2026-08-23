@@ -99,10 +99,16 @@ func (s Spool) enqueueLocked(ctx context.Context, event protocol.Event, payload 
 		return nil
 	}
 	if err != nil && occupied {
-		if err := s.removeQueuedSpoolFile(target); err != nil {
+		if err := s.removeInvalidQueuedSpoolFile(ctx, target); err != nil {
 			return err
 		}
-		occupied = false
+		match, occupied, err = queuedSpoolEventMatches(target, event.EventID)
+		if err == nil && match {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	} else if err != nil {
 		return err
 	}
@@ -169,10 +175,16 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 		return nil
 	}
 	if err != nil && occupied {
-		if removeErr := s.removeQueuedSpoolFile(s.eventPath(event.EventID)); removeErr != nil {
+		if removeErr := s.removeInvalidQueuedSpoolFile(ctx, s.eventPath(event.EventID)); removeErr != nil {
 			return removeErr
 		}
-		occupied = false
+		match, occupied, err = queuedSpoolEventMatches(s.eventPath(event.EventID), event.EventID)
+		if err == nil && match {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	} else if err != nil {
 		return err
 	}
@@ -191,32 +203,55 @@ func (s Spool) enqueueContention(ctx context.Context, event protocol.Event, payl
 		}
 		slot := (start + offset) % slots
 		path := filepath.Join(s.Directory, fmt.Sprintf(".contention-%06d.json", slot))
-		match, occupied, err := queuedSpoolEventMatches(path, event.EventID)
+		matched, created, occupied, err := s.publishIntoContentionSlot(ctx, path, event.EventID, payload)
 		if err != nil {
-			if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
-				return removeErr
-			}
-			occupied = false
+			return err
 		}
-		if match {
+		if matched || created {
 			return nil
 		}
 		if occupied {
 			continue
 		}
-		created, err := s.publishContentionEvent(path, payload)
-		if err != nil {
-			return err
-		}
-		if created {
-			return nil
-		}
-		match, _, err = queuedSpoolEventMatches(path, event.EventID)
+		match, _, err := queuedSpoolEventMatches(path, event.EventID)
 		if err == nil && match {
 			return nil
 		}
 	}
 	return ErrSpoolFull
+}
+
+func (s Spool) publishIntoContentionSlot(ctx context.Context, path, eventID string, payload []byte) (matched, created, occupied bool, err error) {
+	err = withSpoolRepairLock(ctx, path, func() error {
+		var inspectErr error
+		matched, occupied, inspectErr = queuedSpoolEventMatches(path, eventID)
+		if inspectErr != nil {
+			before, statErr := os.Lstat(path)
+			switch {
+			case errors.Is(statErr, os.ErrNotExist):
+				occupied = false
+			case statErr != nil:
+				return statErr
+			default:
+				removed, removeErr := removeSpoolFileIfSame(path, before)
+				if removeErr != nil {
+					return removeErr
+				}
+				if removed {
+					if syncErr := syncDirectory(s.Directory); syncErr != nil {
+						return syncErr
+					}
+				}
+				occupied = !removed
+			}
+		}
+		if matched || occupied {
+			return nil
+		}
+		created, inspectErr = s.publishContentionEvent(path, payload)
+		return inspectErr
+	})
+	return matched, created, occupied, err
 }
 
 func (s Spool) contentionEventExists(ctx context.Context, eventID string) (bool, error) {
@@ -225,12 +260,29 @@ func (s Spool) contentionEventExists(ctx context.Context, eventID string) (bool,
 			return false, err
 		}
 		path := filepath.Join(s.Directory, fmt.Sprintf(".contention-%06d.json", slot))
-		match, _, err := queuedSpoolEventMatches(path, eventID)
-		if err != nil {
-			if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
-				return false, removeErr
+		match := false
+		err := withSpoolRepairLock(ctx, path, func() error {
+			var occupied bool
+			var inspectErr error
+			match, occupied, inspectErr = queuedSpoolEventMatches(path, eventID)
+			if inspectErr == nil || !occupied {
+				return inspectErr
 			}
-			continue
+			before, statErr := os.Lstat(path)
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			}
+			if statErr != nil {
+				return statErr
+			}
+			removed, removeErr := removeSpoolFileIfSame(path, before)
+			if removeErr != nil || !removed {
+				return removeErr
+			}
+			return syncDirectory(s.Directory)
+		})
+		if err != nil {
+			return false, err
 		}
 		if match {
 			return true, nil
@@ -607,14 +659,14 @@ func (s Spool) drainLocked(ctx context.Context, deliver func(context.Context, pr
 		for _, path := range files {
 			payload, err := readPrivateSpoolFile(path, maxSpoolEventBytes)
 			if err != nil {
-				if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+				if removeErr := s.removeInvalidQueuedSpoolFile(ctx, path); removeErr != nil {
 					return removeErr
 				}
 				continue
 			}
 			event, err := protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
 			if err != nil {
-				if removeErr := s.removeQueuedSpoolFile(path); removeErr != nil {
+				if removeErr := s.removeInvalidQueuedSpoolFile(ctx, path); removeErr != nil {
 					return removeErr
 				}
 				continue
@@ -677,11 +729,28 @@ func readPrivateSpoolFile(path string, maxBytes int64) ([]byte, error) {
 	return payload, nil
 }
 
-func (s Spool) removeQueuedSpoolFile(path string) error {
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return syncDirectory(s.Directory)
+func (s Spool) removeInvalidQueuedSpoolFile(ctx context.Context, path string) error {
+	return withSpoolRepairLock(ctx, path, func() error {
+		before, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		payload, readErr := readPrivateSpoolFile(path, maxSpoolEventBytes)
+		if readErr == nil {
+			_, readErr = protocol.DecodeEvent(bytes.NewReader(payload), maxSpoolEventBytes)
+		}
+		if readErr == nil {
+			return nil
+		}
+		removed, err := removeSpoolFileIfSame(path, before)
+		if err != nil || !removed {
+			return err
+		}
+		return syncDirectory(s.Directory)
+	})
 }
 
 func acquireSpoolLock(ctx context.Context, path string) (func(), error) {

@@ -1,6 +1,7 @@
 package canopiadapter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -180,7 +181,7 @@ func TestWindowsSpoolLocksUseExclusiveNoReparseOpens(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(payload)
-	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "strings.ToLower"} {
+	for _, required := range []string{"CREATE_NEW", "OPEN_EXISTING", "FILE_FLAG_OPEN_REPARSE_POINT", "FILE_ATTRIBUTE_REPARSE_POINT", "CreateMutex", "WaitForSingleObject", "LockOSThread", "GetFinalPathNameByHandle", "strings.ToLower"} {
 		if !strings.Contains(source, required) {
 			t.Fatalf("Windows spool lock open is missing %q", required)
 		}
@@ -385,6 +386,116 @@ func TestEnqueueUsesDurableContentionLaneBeforeProviderDeadline(t *testing.T) {
 	}
 	if delivered != "event-via-contention-lane" {
 		t.Fatalf("contention delivery = %q", delivered)
+	}
+}
+
+func TestConcurrentFallbacksDoNotRemoveARepairedContentionSlot(t *testing.T) {
+	for iteration := 0; iteration < 25; iteration++ {
+		directory := t.TempDir()
+		spool := Spool{Directory: directory, MaxEvents: 1}
+		if err := spool.ensureDirectory(); err != nil {
+			t.Fatal(err)
+		}
+		slot := filepath.Join(directory, ".contention-000000.json")
+		if err := os.WriteFile(slot, []byte("corrupt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		events := []protocol.Event{spoolEvent("contender-a"), spoolEvent("contender-b")}
+		payloads := make([][]byte, len(events))
+		for index, event := range events {
+			payload, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payloads[index] = payload
+		}
+		start := make(chan struct{})
+		results := make(chan struct {
+			id  string
+			err error
+		}, len(events))
+		for index, event := range events {
+			go func(event protocol.Event, payload []byte) {
+				<-start
+				results <- struct {
+					id  string
+					err error
+				}{event.EventID, spool.enqueueContention(context.Background(), event, payload)}
+			}(event, payloads[index])
+		}
+		close(start)
+		succeeded := ""
+		for range events {
+			result := <-results
+			if result.err == nil {
+				if succeeded != "" {
+					t.Fatalf("iteration %d: both fallback publications reported success", iteration)
+				}
+				succeeded = result.id
+				continue
+			}
+			if !errors.Is(result.err, ErrSpoolFull) {
+				t.Fatalf("iteration %d: fallback error = %v", iteration, result.err)
+			}
+		}
+		if succeeded == "" {
+			t.Fatalf("iteration %d: no fallback publication succeeded", iteration)
+		}
+		if got, err := spool.Pending(); err != nil || got != 1 {
+			t.Fatalf("iteration %d: Pending() = %d, %v; want 1", iteration, got, err)
+		}
+		delivered := ""
+		if err := spool.Drain(context.Background(), func(_ context.Context, event protocol.Event) error {
+			delivered = event.EventID
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if delivered != succeeded {
+			t.Fatalf("iteration %d: delivered %q, successful publisher was %q", iteration, delivered, succeeded)
+		}
+	}
+}
+
+func TestInvalidCleanupRechecksBeforeRemovingAValidReplacement(t *testing.T) {
+	directory := t.TempDir()
+	spool := Spool{Directory: directory, MaxEvents: 1}
+	if err := spool.ensureDirectory(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, ".contention-000000.json")
+	if err := os.WriteFile(path, []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stalePayload, err := readPrivateSpoolFile(path, maxSpoolEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := protocol.DecodeEvent(bytes.NewReader(stalePayload), maxSpoolEventBytes); err == nil {
+		t.Fatal("corrupt fixture unexpectedly decoded")
+	}
+	// The stale drainer observation happened before the replacement below.
+	replacement := spoolEvent("replacement-event")
+	payload, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, created, occupied, err := spool.publishIntoContentionSlot(context.Background(), path, replacement.EventID, payload)
+	if err != nil || matched || !created || occupied {
+		t.Fatalf("publish replacement = matched %v, created %v, occupied %v, err %v", matched, created, occupied, err)
+	}
+	if err := spool.removeInvalidQueuedSpoolFile(context.Background(), path); err != nil {
+		t.Fatal(err)
+	}
+	delivered := ""
+	if err := spool.Drain(context.Background(), func(_ context.Context, event protocol.Event) error {
+		delivered = event.EventID
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != replacement.EventID {
+		t.Fatalf("delivered replacement = %q, want %q", delivered, replacement.EventID)
 	}
 }
 

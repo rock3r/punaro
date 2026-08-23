@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // ReadPrivateFile returns bounded bytes from an absolute, clean, current-user
@@ -42,9 +41,22 @@ func ReadPrivateFile(path string, maxBytes int64) ([]byte, error) {
 // ReadToken returns one bounded bearer token from a protected file.
 func ReadToken(path string) (string, error) {
 	payload, err := ReadPrivateFile(path, 4096)
-	token := strings.TrimSpace(string(payload))
-	if err != nil || len(token) < 16 {
+	if err != nil {
 		return "", errors.New("invalid token file")
 	}
+	if len(payload) >= 2 && payload[len(payload)-2] == '\r' && payload[len(payload)-1] == '\n' {
+		payload = payload[:len(payload)-2]
+	} else if len(payload) >= 1 && payload[len(payload)-1] == '\n' {
+		payload = payload[:len(payload)-1]
+	}
+	if len(payload) < 16 {
+		return "", errors.New("invalid token file")
+	}
+	for _, value := range payload {
+		if value < 0x21 || value > 0x7e {
+			return "", errors.New("invalid token file")
+		}
+	}
+	token := string(payload)
 	return token, nil
 }

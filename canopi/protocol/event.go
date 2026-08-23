@@ -219,6 +219,9 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 	if !utf8.Valid(payload) {
 		return Event{}, errors.New("event must be valid UTF-8 JSON")
 	}
+	if !validJSONUnicodeEscapes(payload) {
+		return Event{}, errors.New("event must use valid Unicode scalar escapes")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
@@ -234,6 +237,66 @@ func DecodeEvent(reader io.Reader, maxBytes int64) (Event, error) {
 		return Event{}, err
 	}
 	return event, nil
+}
+
+func validJSONUnicodeEscapes(payload []byte) bool {
+	for index := 0; index < len(payload); index++ {
+		if payload[index] != '"' {
+			continue
+		}
+		for index++; index < len(payload) && payload[index] != '"'; index++ {
+			if payload[index] != '\\' {
+				continue
+			}
+			index++
+			if index >= len(payload) {
+				return true // The JSON decoder reports the incomplete escape.
+			}
+			if payload[index] != 'u' {
+				continue
+			}
+			value, ok := decodeHexQuad(payload, index+1)
+			if !ok {
+				return true // The JSON decoder reports the malformed escape.
+			}
+			index += 4
+			switch {
+			case value >= 0xd800 && value <= 0xdbff:
+				if index+6 >= len(payload) || payload[index+1] != '\\' || payload[index+2] != 'u' {
+					return false
+				}
+				low, ok := decodeHexQuad(payload, index+3)
+				if !ok || low < 0xdc00 || low > 0xdfff {
+					return false
+				}
+				index += 6
+			case value >= 0xdc00 && value <= 0xdfff:
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func decodeHexQuad(payload []byte, start int) (uint16, bool) {
+	if start+4 > len(payload) {
+		return 0, false
+	}
+	var value uint16
+	for _, digit := range payload[start : start+4] {
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value += uint16(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value += uint16(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value += uint16(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
 }
 
 func bounded(name, value string, minLength, maxLength int) error {

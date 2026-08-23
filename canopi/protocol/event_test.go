@@ -90,6 +90,37 @@ func TestDecodeEventRejectsInvalidUTF8BeforeJSONNormalization(t *testing.T) {
 	}
 }
 
+func TestDecodeEventRejectsUnpairedSurrogateEscapesBeforeJSONNormalization(t *testing.T) {
+	event := validEvent()
+	payload, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, escaped := range map[string]string{
+		"high": `\ud800`,
+		"low":  `\udc00`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			malformed := bytes.Replace(payload, []byte(event.EventID), []byte(escaped), 1)
+			if _, err := DecodeEvent(bytes.NewReader(malformed), int64(len(malformed))); err == nil {
+				t.Fatal("DecodeEvent() accepted an unpaired surrogate escape")
+			}
+		})
+	}
+	validPair := bytes.Replace(payload, []byte(event.EventID), []byte(`\ud83d\ude00`), 1)
+	decoded, err := DecodeEvent(bytes.NewReader(validPair), int64(len(validPair)))
+	if err != nil {
+		t.Fatalf("DecodeEvent() rejected a paired surrogate escape: %v", err)
+	}
+	if decoded.EventID != "😀" {
+		t.Fatalf("decoded paired surrogate = %q", decoded.EventID)
+	}
+	escapedBackslash := bytes.Replace(payload, []byte(event.EventID), []byte(`\\ud800`), 1)
+	if _, err := DecodeEvent(bytes.NewReader(escapedBackslash), int64(len(escapedBackslash))); err != nil {
+		t.Fatalf("DecodeEvent() rejected a literal backslash sequence: %v", err)
+	}
+}
+
 func TestDecodeEventPreservesLargeIntegerMetadataExactly(t *testing.T) {
 	event := validEvent()
 	event.Metadata = nil

@@ -58,6 +58,24 @@ func TestReadTokenRejectsInvalidLength(t *testing.T) {
 	}
 }
 
+func TestReadTokenRejectsHeaderUnsafeOrMultilineValues(t *testing.T) {
+	for name, token := range map[string]string{
+		"two lines":       "0123456789abcdef\n0123456789abcdef",
+		"embedded return": "0123456789abcdef\r0123456789abcdef",
+		"space":           "01234567 89abcdef",
+		"control":         "0123456789abcdef\x7f",
+		"non ASCII":       "0123456789abcdeé",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "token")
+			if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			assertTokenRejected(t, path)
+		})
+	}
+}
+
 func assertTokenRejected(t *testing.T, path string) {
 	t.Helper()
 	if _, err := ReadToken(path); err == nil {
