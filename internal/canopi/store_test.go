@@ -100,6 +100,25 @@ func TestSnapshotExpiresNonTerminalAndRetainsDoneIndependently(t *testing.T) {
 	}
 }
 
+func TestSnapshotRetainsExpiredRecordWhenPersistenceFails(t *testing.T) {
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	config := DefaultConfig()
+	config.WorkingTTL = 30 * time.Minute
+	store := NewStore(config)
+	store.now = func() time.Time { return now }
+	if _, err := store.Apply(event("working", "agent", protocol.StateWorking, now)); err != nil {
+		t.Fatal(err)
+	}
+	store.persist = func(persistedStore) error { return errors.New("simulated persistence failure") }
+	snapshot := store.Snapshot(now.Add(31 * time.Minute))
+	if len(snapshot.Agents) != 1 || snapshot.Agents[0].AgentInstanceID != "agent" {
+		t.Fatalf("Snapshot() hid undurably expired record: %#v", snapshot.Agents)
+	}
+	if snapshot.Revision != 1 || store.Revision() != 1 {
+		t.Fatalf("expiry failure revision = %d/%d, want 1/1", snapshot.Revision, store.Revision())
+	}
+}
+
 func TestPersistentStoreSurvivesRestartAndKeepsDedupe(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)

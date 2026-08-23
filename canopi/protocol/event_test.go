@@ -45,14 +45,21 @@ func TestEventValidationAllowsOnlyPrivacySafeMetadata(t *testing.T) {
 			}
 		})
 	}
-	for _, key := range []string{"hook", "simulated", "agent_type"} {
+	for key, value := range map[string]any{"hook": "PermissionRequest", "simulated": true, "agent_type": "Explore"} {
 		t.Run("allow_"+key, func(t *testing.T) {
 			event := validEvent()
-			event.Metadata = map[string]any{key: true}
+			event.Metadata = map[string]any{key: value}
 			if err := event.Validate(); err != nil {
 				t.Fatalf("Validate() rejected allowed metadata key %q: %v", key, err)
 			}
 		})
+	}
+	for _, value := range []any{true, 1, 1.5} {
+		event := validEvent()
+		event.Metadata = map[string]any{"agent_type": value}
+		if err := event.Validate(); err == nil {
+			t.Fatalf("Validate() accepted agent_type value %#v outside the wire schema", value)
+		}
 	}
 }
 

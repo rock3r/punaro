@@ -267,6 +267,14 @@ func (s *Store) Snapshot(now time.Time) Snapshot {
 		if err := s.persist(persistedState(nextRevision, nextRecords, s.seenOrder)); err == nil {
 			s.records = nextRecords
 			s.revision = nextRevision
+		} else {
+			// Expiry is committed transactionally. If durable state cannot be
+			// updated, keep the acknowledged records visible so the unchanged
+			// revision cannot address two different snapshots or render images.
+			agents = agents[:0]
+			for _, event := range s.records {
+				agents = append(agents, event)
+			}
 		}
 	}
 	SortEvents(agents)

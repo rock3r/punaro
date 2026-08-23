@@ -157,13 +157,26 @@ func (e Event) Validate() error {
 		if _, allowed := allowedMetadataKeys[key]; !allowed {
 			return fmt.Errorf("metadata key %q is not allowed", key)
 		}
-		switch value.(type) {
-		case nil, string, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
-		default:
+		if key == "agent_type" {
+			if _, valid := value.(string); value != nil && !valid {
+				return errors.New("metadata agent_type must be a string or null")
+			}
+			continue
+		}
+		if !isPrimitiveMetadata(value) {
 			return fmt.Errorf("metadata %q must contain a primitive value", key)
 		}
 	}
 	return nil
+}
+
+func isPrimitiveMetadata(value any) bool {
+	switch value.(type) {
+	case nil, string, float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, bool:
+		return true
+	default:
+		return false
+	}
 }
 
 // DecodeEvent strictly decodes one bounded event and rejects unknown fields.

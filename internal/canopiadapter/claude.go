@@ -78,6 +78,8 @@ func MapClaudeHook(raw []byte, config AdapterConfig, now time.Time) (protocol.Ev
 	_, _ = digest.Write([]byte(config.MachineID))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write(raw)
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(now.UTC().Format(time.RFC3339Nano)))
 	event := protocol.Event{
 		SpecVersion:           protocol.SpecVersion,
 		EventID:               "claude_code:" + hex.EncodeToString(digest.Sum(nil)),

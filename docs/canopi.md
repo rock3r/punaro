@@ -59,17 +59,19 @@ counts from the omitted tail, not global totals.
 The wire event never requires prompts, transcripts, assistant messages,
 credentials, tool inputs, or tool outputs. Metadata is default-deny; the schema
 and Go validator accept only the privacy-safe `hook`, `simulated`, and
-`agent_type` keys. The Claude adapter does not inspect assistant text to infer
-lifecycle state. It creates a fixed-length retry identifier from a keyed HMAC
-over the machine identity and provider payload; neither the source text nor an
-unkeyed source digest is transmitted. Only task title,
+`agent_type` keys, with the same per-key types as the published JSON Schema.
+The Claude adapter does not inspect assistant text to infer lifecycle state. It
+creates a fixed-length invocation identifier from a keyed HMAC over machine
+identity, provider payload, and local invocation time; neither the source text
+nor an unkeyed source digest is transmitted. Only task title,
 optional repository, stable IDs, state, timestamps, and primitive allowlisted
 metadata leave the machine.
 
 The hook-facing Claude process performs no network I/O. It normalizes the event,
 durably enqueues only that privacy-safe event, starts a detached delivery child,
 and returns. One cross-process worker drains the bounded 4,096-event spool and
-retries with the same event ID until the collector acknowledges it. Individual
+retries the queued event with its original ID until the collector acknowledges
+it. Separate identical provider invocations receive distinct IDs. Individual
 HTTP attempts are bounded, and a rejected event remains queued without starving
 independent events behind it. A crashed worker leaves its events queued and a
 stale worker lock is recoverable. The short-lived enqueue lock is heartbeated
@@ -115,7 +117,8 @@ future-clock-skew window are rejected before they can fence later correct
 updates or evade expiry. Expired records are durably purged using the real
 current time before capacity admission and reads, independently of the
 relative-time render bucket. An offline panel therefore cannot leave the store
-stuck at its ceiling.
+stuck at its ceiling. Expiry is transactional: if its state-file update fails,
+the acknowledged record remains visible under the unchanged revision.
 
 In another terminal, generate the selected 3 waiting / 4 done / 12 working
 overflow state:

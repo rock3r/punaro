@@ -48,7 +48,7 @@ func TestMapClaudeHookIgnoresTaskCompletedWithoutTaskIdentity(t *testing.T) {
 	}
 }
 
-func TestMapClaudeHookEventIDIsStableForProviderRetry(t *testing.T) {
+func TestMapClaudeHookEventIDDistinguishesSeparateIdenticalInvocations(t *testing.T) {
 	raw := []byte(`{"session_id":"session-1","cwd":"/src/punaro","hook_event_name":"PostToolUse","tool_name":"Bash","tool_use_id":"toolu_1","tool_response":{"output":"private"}}`)
 	config := AdapterConfig{MachineID: "studio-m2", TaskTitle: "Punaro / tests", EventIDKey: []byte("test-secret")}
 	first, _, err := MapClaudeHook(raw, config, time.Unix(1, 0))
@@ -59,8 +59,8 @@ func TestMapClaudeHookEventIDIsStableForProviderRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.EventID != second.EventID {
-		t.Fatalf("event ids differ across retry: %q != %q", first.EventID, second.EventID)
+	if first.EventID == second.EventID {
+		t.Fatalf("separate identical invocations collapsed to event ID %q", first.EventID)
 	}
 }
 

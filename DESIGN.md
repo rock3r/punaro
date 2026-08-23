@@ -1776,18 +1776,22 @@ configured future clock skew. A failed
 state-file write never mutates the acknowledged in-memory revision, record, or
 dedupe set, so an exact retry still attempts persistence. Non-terminal TTL
 expiry archives/hides abandoned work and never converts it to success; done
-retention is independent. Snapshot and image ETags change only with state
-revision or rendered response content. TTL checks always use the real clock;
-only relative-time rendering and its image cache key use the configured bucket.
+retention is independent. Expiry commits transactionally; a failed state-file
+write leaves the acknowledged record visible under the unchanged revision.
+Snapshot and image ETags change only with state revision or rendered response
+content. TTL checks always use the real clock; only relative-time rendering and
+its image cache key use the configured bucket.
 
 Prompts, transcripts, assistant messages, credentials, tool inputs, and tool
 outputs are not part of the protocol. Metadata is default-deny: the schema and
-Go validator expose only `hook`, `simulated`, and `agent_type`. Only explicit,
-trusted hook fields drive lifecycle state; assistant text is neither inspected
-for classification nor forwarded. Claude retry IDs use a fixed-length,
-secret-keyed HMAC over machine identity and provider payload, never an unkeyed
-content digest. Adapter delivery is detached, bounded, and incapable of
-blocking or controlling the coding agent.
+Go validator expose only `hook`, `simulated`, and `agent_type`, with matching
+per-key types. Only explicit, trusted hook fields drive lifecycle state;
+assistant text is neither inspected for classification nor forwarded. Claude
+invocation IDs use a fixed-length, secret-keyed HMAC over machine identity,
+provider payload, and local invocation time, never an unkeyed content digest.
+The queued normalized event retains that ID across delivery retries. Adapter
+delivery is detached, bounded, and incapable of blocking or controlling the
+coding agent.
 
 The Claude adapter durably writes each normalized privacy-safe event to a
 bounded owner-only spool before launching a detached delivery process. One
